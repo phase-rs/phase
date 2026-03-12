@@ -23,7 +23,10 @@ fn run_combat(
         .act(GameAction::DeclareAttackers { attacks })
         .expect("DeclareAttackers should succeed");
     // Engine may auto-skip DeclareBlockers if defending player has no valid blockers
-    if matches!(runner.state().waiting_for, WaitingFor::DeclareBlockers { .. }) {
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareBlockers { .. }
+    ) {
         runner
             .act(GameAction::DeclareBlockers {
                 assignments: blocker_assignments,

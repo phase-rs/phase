@@ -149,6 +149,19 @@ pub fn choose_action(
         }
     }
 
+    if let WaitingFor::SearchChoice { cards, count, .. } = &state.waiting_for {
+        // Pick the highest-value card(s) from search results
+        let mut scored: Vec<_> = cards
+            .iter()
+            .map(|&id| (id, evaluate_card_value(state, id)))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let chosen: Vec<_> = scored.iter().take(*count).map(|(id, _)| *id).collect();
+        if !chosen.is_empty() {
+            return Some(GameAction::SelectCards { cards: chosen });
+        }
+    }
+
     // Combat decisions: delegate to specialized combat AI
     if let WaitingFor::DeclareAttackers { .. } = &state.waiting_for {
         let attacks = choose_attackers_with_targets(state, ai_player);

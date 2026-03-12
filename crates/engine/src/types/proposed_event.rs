@@ -90,12 +90,7 @@ pub enum ProposedEvent {
 
 impl ProposedEvent {
     /// Construct a `ZoneChange` with default `enter_tapped: false` and empty `applied` set.
-    pub fn zone_change(
-        object_id: ObjectId,
-        from: Zone,
-        to: Zone,
-        cause: Option<ObjectId>,
-    ) -> Self {
+    pub fn zone_change(object_id: ObjectId, from: Zone, to: Zone, cause: Option<ObjectId>) -> Self {
         Self::ZoneChange {
             object_id,
             from,

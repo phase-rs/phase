@@ -203,7 +203,10 @@ mod tests {
         let filtered = filter_state_for_player(&state, PlayerId(0));
 
         let obj = filtered.objects.get(&revealed_id).unwrap();
-        assert_ne!(obj.name, "Hidden Card", "Revealed card should not be hidden");
+        assert_ne!(
+            obj.name, "Hidden Card",
+            "Revealed card should not be hidden"
+        );
         assert!(!obj.face_down, "Revealed card should not be face_down");
     }
 

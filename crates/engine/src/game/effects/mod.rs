@@ -28,6 +28,7 @@ pub mod pump;
 pub mod reveal_hand;
 pub mod sacrifice;
 pub mod scry;
+pub mod search_library;
 pub mod shuffle;
 pub mod surveil;
 pub mod tap_untap;
@@ -79,6 +80,7 @@ pub fn resolve_effect(
         Effect::Mana { .. } => mana::resolve(state, ability, events),
         Effect::Discard { .. } => discard::resolve(state, ability, events),
         Effect::Shuffle { .. } => shuffle::resolve(state, ability, events),
+        Effect::SearchLibrary { .. } => search_library::resolve(state, ability, events),
         Effect::RevealHand { .. } => reveal_hand::resolve(state, ability, events),
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
@@ -132,6 +134,7 @@ pub fn is_known_effect(api_type: &str) -> bool {
             | "Mana"
             | "Discard"
             | "Shuffle"
+            | "SearchLibrary"
             | "RevealHand"
     )
 }
@@ -167,6 +170,7 @@ pub fn resolve_ability_chain(
                 | WaitingFor::DigChoice { .. }
                 | WaitingFor::SurveilChoice { .. }
                 | WaitingFor::RevealChoice { .. }
+                | WaitingFor::SearchChoice { .. }
         ) {
             let mut sub_clone = sub.as_ref().clone();
             if sub_clone.targets.is_empty() && !ability.targets.is_empty() {
@@ -239,12 +243,13 @@ mod tests {
             "Mana",
             "Discard",
             "Shuffle",
+            "SearchLibrary",
             "RevealHand",
         ];
         for name in &expected {
             assert!(is_known_effect(name), "missing: {}", name);
         }
-        assert_eq!(expected.len(), 40);
+        assert_eq!(expected.len(), 41);
     }
 
     #[test]

@@ -84,11 +84,22 @@ pub fn get_legal_actions(state: &GameState) -> Vec<GameAction> {
             }
             actions
         }
-        WaitingFor::RevealChoice { cards, .. } => {
-            cards
-                .iter()
-                .map(|&card| GameAction::SelectCards { cards: vec![card] })
-                .collect()
+        WaitingFor::RevealChoice { cards, .. } => cards
+            .iter()
+            .map(|&card| GameAction::SelectCards { cards: vec![card] })
+            .collect(),
+        WaitingFor::SearchChoice { cards, count, .. } => {
+            if *count == 1 {
+                cards
+                    .iter()
+                    .map(|&card| GameAction::SelectCards { cards: vec![card] })
+                    .collect()
+            } else {
+                // For multi-card search, just pick the first N for now
+                vec![GameAction::SelectCards {
+                    cards: cards.iter().take(*count).copied().collect(),
+                }]
+            }
         }
         WaitingFor::TriggerTargetSelection { legal_targets, .. } => legal_targets
             .iter()

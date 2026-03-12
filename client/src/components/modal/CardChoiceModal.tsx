@@ -13,6 +13,7 @@ type ScryChoice = Extract<WaitingFor, { type: "ScryChoice" }>;
 type DigChoice = Extract<WaitingFor, { type: "DigChoice" }>;
 type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
 type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
+type SearchChoice = Extract<WaitingFor, { type: "SearchChoice" }>;
 
 /**
  * Generic card choice modal for Scry, Dig, and Surveil.
@@ -40,6 +41,9 @@ export function CardChoiceModal() {
     case "RevealChoice":
       if (waitingFor.data.player !== playerId) return null;
       return <RevealModal data={waitingFor.data} />;
+    case "SearchChoice":
+      if (waitingFor.data.player !== playerId) return null;
+      return <SearchModal data={waitingFor.data} />;
     default:
       return null;
   }
@@ -361,6 +365,90 @@ function RevealModal({ data }: { data: RevealChoice["data"] }) {
       <ConfirmButton
         onClick={handleConfirm}
         disabled={selected === null}
+      />
+    </ChoiceOverlay>
+  );
+}
+
+// ── Search Modal ─────────────────────────────────────────────────────────────
+
+function SearchModal({ data }: { data: SearchChoice["data"] }) {
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const inspectObject = useUiStore((s) => s.inspectObject);
+  const [selectedSet, setSelectedSet] = useState<Set<ObjectId>>(new Set());
+
+  const toggleSelect = useCallback(
+    (id: ObjectId) => {
+      setSelectedSet((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) {
+          next.delete(id);
+        } else if (next.size < data.count) {
+          next.add(id);
+        }
+        return next;
+      });
+    },
+    [data.count],
+  );
+
+  const handleConfirm = useCallback(() => {
+    if (selectedSet.size === data.count) {
+      dispatch({
+        type: "SelectCards",
+        data: { cards: Array.from(selectedSet) },
+      });
+    }
+  }, [dispatch, selectedSet, data.count]);
+
+  if (!objects) return null;
+
+  return (
+    <ChoiceOverlay
+      title="Search Library"
+      subtitle={`Choose ${data.count} card${data.count > 1 ? "s" : ""}`}
+    >
+      <div className="mb-6 flex w-full max-w-5xl items-center justify-center gap-3 overflow-x-auto sm:mb-10">
+        {data.cards.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          const isSelected = selectedSet.has(id);
+          return (
+            <motion.button
+              key={id}
+              className={`relative shrink-0 rounded-lg transition ${
+                isSelected
+                  ? "z-10 ring-2 ring-emerald-400/80"
+                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+              }`}
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6 }}
+              onClick={() => toggleSelect(id)}
+              onMouseEnter={() => inspectObject(id)}
+              onMouseLeave={() => inspectObject(null)}
+            >
+              <CardImage
+                cardName={obj.name}
+                size="normal"
+                className="h-[clamp(160px,28vh,224px)] w-[clamp(114px,20vh,160px)]"
+              />
+              {isSelected && (
+                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
+                  <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
+                    Choose
+                  </span>
+                </div>
+              )}
+            </motion.button>
+          );
+        })}
+      </div>
+      <ConfirmButton
+        onClick={handleConfirm}
+        disabled={selectedSet.size !== data.count}
       />
     </ChoiceOverlay>
   );

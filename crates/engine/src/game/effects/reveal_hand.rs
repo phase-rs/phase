@@ -1,4 +1,6 @@
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 
@@ -94,8 +96,20 @@ mod tests {
     #[test]
     fn reveal_hand_sets_reveal_choice_with_opponent_hand() {
         let mut state = GameState::new_two_player(42);
-        let card1 = create_object(&mut state, CardId(1), PlayerId(1), "Bolt".to_string(), Zone::Hand);
-        let card2 = create_object(&mut state, CardId(2), PlayerId(1), "Bear".to_string(), Zone::Hand);
+        let card1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bolt".to_string(),
+            Zone::Hand,
+        );
+        let card2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Hand,
+        );
 
         let ability = make_reveal_ability(PlayerId(0), PlayerId(1));
         let mut events = Vec::new();
@@ -115,7 +129,13 @@ mod tests {
     #[test]
     fn reveal_hand_marks_cards_as_revealed() {
         let mut state = GameState::new_two_player(42);
-        let card1 = create_object(&mut state, CardId(1), PlayerId(1), "Bolt".to_string(), Zone::Hand);
+        let card1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bolt".to_string(),
+            Zone::Hand,
+        );
 
         let ability = make_reveal_ability(PlayerId(0), PlayerId(1));
         let mut events = Vec::new();
@@ -127,13 +147,21 @@ mod tests {
     #[test]
     fn reveal_hand_emits_cards_revealed_event() {
         let mut state = GameState::new_two_player(42);
-        create_object(&mut state, CardId(1), PlayerId(1), "Bolt".to_string(), Zone::Hand);
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bolt".to_string(),
+            Zone::Hand,
+        );
 
         let ability = make_reveal_ability(PlayerId(0), PlayerId(1));
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert!(events.iter().any(|e| matches!(e, GameEvent::CardsRevealed { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::CardsRevealed { .. })));
     }
 
     #[test]

@@ -478,6 +478,50 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 WaitingFor::Priority { player: p }
             }
         }
+        // SearchChoice: player selects card(s) from filtered library search.
+        // Selected cards become targets for the pending_continuation (ChangeZone + Shuffle).
+        (
+            WaitingFor::SearchChoice {
+                player,
+                cards: legal_cards,
+                count,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            let p = *player;
+            let legal = legal_cards.clone();
+            let expected_count = *count;
+
+            // Validate selection count
+            if chosen.len() != expected_count {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must select exactly {} card(s), got {}",
+                    expected_count,
+                    chosen.len()
+                )));
+            }
+
+            // Validate all chosen cards are in legal set
+            for card_id in &chosen {
+                if !legal.contains(card_id) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected card not in search results".to_string(),
+                    ));
+                }
+            }
+
+            // Run the pending continuation with chosen cards as targets
+            if let Some(mut cont) = state.pending_continuation.take() {
+                cont.targets = chosen
+                    .iter()
+                    .map(|&id| crate::types::ability::TargetRef::Object(id))
+                    .collect();
+                let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
+                state.waiting_for.clone()
+            } else {
+                WaitingFor::Priority { player: p }
+            }
+        }
         (WaitingFor::Priority { player }, GameAction::PlayFaceDown { card_id }) => {
             if state.priority_player != *player {
                 return Err(EngineError::NotYourPriority);
@@ -732,8 +776,12 @@ fn handle_play_land(
         .ok_or_else(|| EngineError::InvalidAction("Card not found in hand".to_string()))?;
 
     // Route through the replacement pipeline (handles ETB replacements like shock lands)
-    let proposed =
-        crate::types::proposed_event::ProposedEvent::zone_change(object_id, Zone::Hand, Zone::Battlefield, None);
+    let proposed = crate::types::proposed_event::ProposedEvent::zone_change(
+        object_id,
+        Zone::Hand,
+        Zone::Battlefield,
+        None,
+    );
 
     match super::replacement::replace_event(state, proposed, events) {
         super::replacement::ReplacementResult::Execute(event) => {
@@ -2859,17 +2907,26 @@ mod tests {
 
         let mut state = setup_game_at_main_phase();
         let obj_id = create_object(
-            &mut state, CardId(1), PlayerId(0),
-            "Selesnya Guildgate".to_string(), Zone::Hand,
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Selesnya Guildgate".to_string(),
+            Zone::Hand,
         );
         let obj = state.objects.get_mut(&obj_id).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
         obj.replacement_definitions.push(ReplacementDefinition {
             execute: Some(Box::new(AbilityDefinition {
                 kind: AbilityKind::Spell,
-                effect: Effect::Tap { target: TargetFilter::SelfRef },
-                cost: None, sub_ability: None, duration: None,
-                description: None, target_prompt: None, sorcery_speed: false,
+                effect: Effect::Tap {
+                    target: TargetFilter::SelfRef,
+                },
+                cost: None,
+                sub_ability: None,
+                duration: None,
+                description: None,
+                target_prompt: None,
+                sorcery_speed: false,
             })),
             valid_card: Some(TargetFilter::SelfRef),
             description: Some("Selesnya Guildgate enters the battlefield tapped.".into()),
@@ -2878,7 +2935,10 @@ mod tests {
 
         let _result = apply(&mut state, GameAction::PlayLand { card_id: CardId(1) }).unwrap();
         assert!(state.battlefield.contains(&obj_id));
-        assert!(state.objects[&obj_id].tapped, "ETB-tapped land must enter tapped");
+        assert!(
+            state.objects[&obj_id].tapped,
+            "ETB-tapped land must enter tapped"
+        );
     }
 }
 

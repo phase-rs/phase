@@ -34,6 +34,7 @@ pub fn acting_player(waiting_for: &WaitingFor) -> Option<PlayerId> {
         | WaitingFor::DigChoice { player, .. }
         | WaitingFor::SurveilChoice { player, .. }
         | WaitingFor::RevealChoice { player, .. }
+        | WaitingFor::SearchChoice { player, .. }
         | WaitingFor::TriggerTargetSelection { player, .. }
         | WaitingFor::BetweenGamesSideboard { player, .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { player, .. } => Some(*player),

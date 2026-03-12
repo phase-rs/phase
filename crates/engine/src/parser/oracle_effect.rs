@@ -2,11 +2,14 @@ use std::str::FromStr;
 
 use super::oracle_static::parse_continuous_modifications;
 use super::oracle_target::parse_target;
-use super::oracle_util::{parse_mana_production, parse_number, strip_reminder_text};
+use super::oracle_util::{
+    contains_possessive, parse_mana_production, parse_number, starts_with_possessive,
+    strip_reminder_text,
+};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ControllerRef, CountValue, DamageAmount, Duration, Effect,
-    GainLifePlayer, LifeAmount, ManaProduction, PtValue, StaticDefinition, TargetFilter,
-    TypeFilter,
+    FilterProp, GainLifePlayer, LifeAmount, ManaProduction, PtValue, StaticDefinition,
+    TargetFilter, TypeFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -256,12 +259,8 @@ fn parse_imperative_effect(text: &str) -> Effect {
     }
 
     // --- Search library ---
-    if lower.starts_with("search your library") || lower.starts_with("search their library") {
-        return Effect::ChangeZone {
-            origin: Some(Zone::Library),
-            destination: Zone::Hand,
-            target: TargetFilter::Any,
-        };
+    if starts_with_possessive(&lower, "search", "library") {
+        return parse_search_library(text, &lower);
     }
 
     // --- Look at top N / Dig ---
@@ -301,7 +300,18 @@ fn parse_imperative_effect(text: &str) -> Effect {
     }
 
     // --- Shuffle ---
-    if lower.starts_with("shuffle ") && lower.contains("library") {
+    if lower.starts_with("shuffle") && lower.contains("library") {
+        if lower == "shuffle your library" {
+            return Effect::Shuffle {
+                target: TargetFilter::Controller,
+            };
+        }
+        if lower == "shuffle their library" {
+            return Effect::Shuffle {
+                target: TargetFilter::Player,
+            };
+        }
+        // Compound shuffle patterns ("shuffle X into library") — not yet handled
         return Effect::Unimplemented {
             name: "shuffle".to_string(),
             description: Some(text.to_string()),
@@ -803,6 +813,30 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
         })
         .collect();
 
+    // For SearchLibrary: inject ChangeZone sub_ability for the destination,
+    // parsed from the original search sentence text.
+    if !defs.is_empty() && matches!(defs[0].effect, Effect::SearchLibrary { .. }) {
+        let search_text = &sentences[0];
+        let lower = search_text.to_lowercase();
+        let destination = parse_search_destination(&lower);
+        let change_zone = AbilityDefinition {
+            kind,
+            effect: Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination,
+                target: TargetFilter::Any,
+            },
+            cost: None,
+            sub_ability: None,
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
+        };
+        // Insert ChangeZone as second element (between search and shuffle)
+        defs.insert(1, change_zone);
+    }
+
     // Chain: last has no sub_ability, each earlier one chains to next
     if defs.len() > 1 {
         let last = defs.pop().unwrap();
@@ -836,6 +870,182 @@ fn split_effect_sentences(text: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(String::from)
         .collect()
+}
+
+// --- Search library parser ---
+
+/// Parse "search your library for X" Oracle text into Effect::SearchLibrary.
+///
+/// Extracts the card filter from the "for a/an <type> card" clause,
+/// detects reveal, and identifies the destination from "put it into/onto" text.
+/// The destination and shuffle are handled by `parse_effect_chain`'s sentence
+/// splitting — ", then shuffle" becomes a chained sub_ability automatically.
+fn parse_search_library(_text: &str, lower: &str) -> Effect {
+    // Extract what we're searching for: "for a <type> card" or "for a card"
+    let filter = if let Some(for_idx) = lower.find("for a ") {
+        let after_for = &lower[for_idx + 6..]; // skip "for a "
+        parse_search_filter(after_for)
+    } else if let Some(for_idx) = lower.find("for an ") {
+        let after_for = &lower[for_idx + 7..]; // skip "for an "
+        parse_search_filter(after_for)
+    } else {
+        TargetFilter::Any
+    };
+
+    let reveal = lower.contains("reveal");
+    let count = if lower.contains("up to two") {
+        2
+    } else if lower.contains("up to three") {
+        3
+    } else {
+        1
+    };
+
+    Effect::SearchLibrary {
+        filter,
+        count,
+        reveal,
+    }
+}
+
+/// Parse the card type filter from search text like "basic land card, ..."
+/// or "creature card with ..." into a TargetFilter.
+fn parse_search_filter(text: &str) -> TargetFilter {
+    // Find the end of the type description (before comma, period, or "and put")
+    let type_end = text
+        .find(',')
+        .or_else(|| text.find('.'))
+        .or_else(|| text.find(" and put"))
+        .or_else(|| text.find(" and shuffle"))
+        .unwrap_or(text.len());
+    let type_text = text[..type_end].trim();
+
+    // Strip trailing "card" or "cards"
+    let type_text = type_text
+        .strip_suffix(" cards")
+        .or_else(|| type_text.strip_suffix(" card"))
+        .unwrap_or(type_text)
+        .trim();
+
+    // Check for "a card" / "card" alone (Demonic Tutor pattern)
+    if type_text == "card" || type_text.is_empty() {
+        return TargetFilter::Any;
+    }
+
+    // Check for "basic land" pattern
+    let is_basic = type_text.contains("basic");
+    let clean = type_text.replace("basic ", "");
+
+    // Map type name to TypeFilter
+    let card_type = match clean.trim() {
+        "land" => Some(TypeFilter::Land),
+        "creature" => Some(TypeFilter::Creature),
+        "artifact" => Some(TypeFilter::Artifact),
+        "enchantment" => Some(TypeFilter::Enchantment),
+        "instant" => Some(TypeFilter::Instant),
+        "sorcery" => Some(TypeFilter::Sorcery),
+        "planeswalker" => Some(TypeFilter::Planeswalker),
+        "instant or sorcery" => {
+            let mut properties = vec![];
+            if is_basic {
+                properties.push(FilterProp::HasSupertype {
+                    value: "Basic".to_string(),
+                });
+            }
+            return TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed {
+                        card_type: Some(TypeFilter::Instant),
+                        subtype: None,
+                        controller: None,
+                        properties: properties.clone(),
+                    },
+                    TargetFilter::Typed {
+                        card_type: Some(TypeFilter::Sorcery),
+                        subtype: None,
+                        controller: None,
+                        properties,
+                    },
+                ],
+            };
+        }
+        other => {
+            // Could be a subtype search: "forest card", "plains card", "equipment card"
+            let land_subtypes = ["plains", "island", "swamp", "mountain", "forest"];
+            if land_subtypes.contains(&other) {
+                let mut properties = vec![];
+                if is_basic {
+                    properties.push(FilterProp::HasSupertype {
+                        value: "Basic".to_string(),
+                    });
+                }
+                return TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Land),
+                    subtype: Some(capitalize(other)),
+                    controller: None,
+                    properties,
+                };
+            }
+            if other == "equipment" {
+                return TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Artifact),
+                    subtype: Some("Equipment".to_string()),
+                    controller: None,
+                    properties: vec![],
+                };
+            }
+            if other == "aura" {
+                return TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Enchantment),
+                    subtype: Some("Aura".to_string()),
+                    controller: None,
+                    properties: vec![],
+                };
+            }
+            // Fallback: treat as Any
+            return TargetFilter::Any;
+        }
+    };
+
+    let mut properties = vec![];
+    if is_basic {
+        properties.push(FilterProp::HasSupertype {
+            value: "Basic".to_string(),
+        });
+    }
+
+    TargetFilter::Typed {
+        card_type,
+        subtype: None,
+        controller: None,
+        properties,
+    }
+}
+
+/// Parse the destination zone from search Oracle text.
+/// Looks for "put it into your hand", "put it onto the battlefield", etc.
+fn parse_search_destination(lower: &str) -> Zone {
+    if lower.contains("onto the battlefield") {
+        Zone::Battlefield
+    } else if contains_possessive(lower, "into", "hand") {
+        Zone::Hand
+    } else if contains_possessive(lower, "on top of", "library") {
+        Zone::Library
+    } else if contains_possessive(lower, "into", "graveyard") {
+        Zone::Graveyard
+    } else {
+        // Default destination for tutors is hand
+        Zone::Hand
+    }
+}
+
+/// Capitalize the first letter of a string (for subtype names).
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+    }
 }
 
 // --- Helper parsers ---
@@ -1494,13 +1704,13 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
 }
 
 fn infer_origin_zone(lower: &str) -> Option<Zone> {
-    if lower.contains("from your graveyard") || lower.contains("from a graveyard") {
+    if contains_possessive(lower, "from", "graveyard") || lower.contains("from a graveyard") {
         Some(Zone::Graveyard)
     } else if lower.contains("from exile") {
         Some(Zone::Exile)
-    } else if lower.contains("from your hand") {
+    } else if contains_possessive(lower, "from", "hand") {
         Some(Zone::Hand)
-    } else if lower.contains("from your library") {
+    } else if contains_possessive(lower, "from", "library") {
         Some(Zone::Library)
     } else {
         None
@@ -2439,8 +2649,163 @@ mod tests {
         let e = parse_effect("Shuffle your library");
         assert!(matches!(
             e,
-            Effect::Unimplemented { ref name, .. } if name == "shuffle"
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            }
         ));
+    }
+
+    #[test]
+    fn effect_shuffle_their_library() {
+        let e = parse_effect("Shuffle their library");
+        assert!(matches!(
+            e,
+            Effect::Shuffle {
+                target: TargetFilter::Player,
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_search_basic_land_to_hand() {
+        let e = parse_effect(
+            "Search your library for a basic land card, reveal it, put it into your hand",
+        );
+        match e {
+            Effect::SearchLibrary {
+                filter,
+                count,
+                reveal,
+            } => {
+                assert_eq!(count, 1);
+                assert!(reveal);
+                match filter {
+                    TargetFilter::Typed {
+                        card_type,
+                        properties,
+                        ..
+                    } => {
+                        assert_eq!(card_type, Some(TypeFilter::Land));
+                        assert!(properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::HasSupertype { value } if value == "Basic"
+                        )));
+                    }
+                    other => panic!("Expected Typed filter, got {:?}", other),
+                }
+            }
+            other => panic!("Expected SearchLibrary, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_search_creature_to_hand() {
+        let e = parse_effect(
+            "Search your library for a creature card, reveal it, put it into your hand",
+        );
+        match e {
+            Effect::SearchLibrary {
+                filter,
+                count,
+                reveal,
+            } => {
+                assert_eq!(count, 1);
+                assert!(reveal);
+                assert!(matches!(
+                    filter,
+                    TargetFilter::Typed {
+                        card_type: Some(TypeFilter::Creature),
+                        ..
+                    }
+                ));
+            }
+            other => panic!("Expected SearchLibrary, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_search_any_card_to_hand() {
+        let e = parse_effect("Search your library for a card, put it into your hand");
+        match e {
+            Effect::SearchLibrary { filter, count, .. } => {
+                assert_eq!(count, 1);
+                assert!(matches!(filter, TargetFilter::Any));
+            }
+            other => panic!("Expected SearchLibrary, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_search_land_to_battlefield() {
+        let e = parse_effect(
+            "Search your library for a basic land card, put it onto the battlefield tapped",
+        );
+        assert!(matches!(e, Effect::SearchLibrary { .. }));
+    }
+
+    #[test]
+    fn search_ability_chain_has_changezone_and_shuffle() {
+        // Full Oracle text for a tutor like Worldly Tutor / Rampant Growth
+        let def = parse_effect_chain(
+            "Search your library for a creature card, reveal it, put it into your hand, then shuffle your library",
+            AbilityKind::Spell,
+        );
+        // First effect: SearchLibrary
+        assert!(
+            matches!(def.effect, Effect::SearchLibrary { .. }),
+            "Expected SearchLibrary, got {:?}",
+            def.effect
+        );
+
+        // Second in chain: ChangeZone to Hand
+        let sub1 = def
+            .sub_ability
+            .as_ref()
+            .expect("Should have sub_ability (ChangeZone)");
+        assert!(
+            matches!(
+                sub1.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Hand,
+                    ..
+                }
+            ),
+            "Expected ChangeZone to Hand, got {:?}",
+            sub1.effect
+        );
+
+        // Third in chain: Shuffle
+        let sub2 = sub1
+            .sub_ability
+            .as_ref()
+            .expect("Should have sub_ability (Shuffle)");
+        assert!(
+            matches!(sub2.effect, Effect::Shuffle { .. }),
+            "Expected Shuffle, got {:?}",
+            sub2.effect
+        );
+    }
+
+    #[test]
+    fn search_ability_chain_battlefield_destination() {
+        let def = parse_effect_chain(
+            "Search your library for a basic land card, put it onto the battlefield tapped, then shuffle your library",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(def.effect, Effect::SearchLibrary { .. }));
+
+        let sub1 = def.sub_ability.as_ref().expect("ChangeZone sub");
+        assert!(
+            matches!(
+                sub1.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Battlefield,
+                    ..
+                }
+            ),
+            "Expected ChangeZone to Battlefield, got {:?}",
+            sub1.effect
+        );
     }
 
     #[test]

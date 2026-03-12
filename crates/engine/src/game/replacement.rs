@@ -1333,9 +1333,12 @@ fn evaluate_replacement_condition(
                 o.zone == Zone::Battlefield
                     && o.controller == controller
                     && o.id != source_id
-                    && subtypes
-                        .iter()
-                        .any(|st| o.card_types.subtypes.iter().any(|s| s.eq_ignore_ascii_case(st)))
+                    && subtypes.iter().any(|st| {
+                        o.card_types
+                            .subtypes
+                            .iter()
+                            .any(|s| s.eq_ignore_ascii_case(st))
+                    })
             });
             // If the "unless" is satisfied (they DO control one), skip the replacement
             !controls_any
@@ -1398,9 +1401,7 @@ pub fn find_applicable_replacements(
                         let matches = event
                             .affected_object_id()
                             .map(|oid| {
-                                super::filter::matches_target_filter(
-                                    state, oid, filter, obj.id,
-                                )
+                                super::filter::matches_target_filter(state, oid, filter, obj.id)
                             })
                             .unwrap_or(false);
                         if !matches {

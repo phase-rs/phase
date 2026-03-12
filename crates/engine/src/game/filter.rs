@@ -219,6 +219,13 @@ fn matches_filter_prop(
         FilterProp::PowerLE { value } => obj.power.unwrap_or(0) <= *value,
         FilterProp::PowerGE { value } => obj.power.unwrap_or(0) >= *value,
         FilterProp::Multicolored => obj.color.len() > 1,
+        FilterProp::HasSupertype { value } => {
+            let st: Result<crate::types::card_type::Supertype, _> = value.parse();
+            match st {
+                Ok(supertype) => obj.card_types.supertypes.contains(&supertype),
+                Err(_) => true, // Unknown supertype — permissive
+            }
+        }
         FilterProp::Other { .. } => true, // Permissive fallback for unrecognized properties
     }
 }
@@ -579,6 +586,47 @@ mod tests {
             properties: vec![FilterProp::Tapped],
         };
         assert!(matches_target_filter(&state, id, &filter, id));
+    }
+
+    #[test]
+    fn has_supertype_basic_matches_basic_land() {
+        let mut state = setup();
+        let id = add_creature(&mut state, PlayerId(0), "Plains");
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .supertypes
+            .push(crate::types::card_type::Supertype::Basic);
+        state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Land];
+
+        let filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Land),
+            subtype: None,
+            controller: None,
+            properties: vec![FilterProp::HasSupertype {
+                value: "Basic".to_string(),
+            }],
+        };
+        assert!(matches_target_filter(&state, id, &filter, id));
+    }
+
+    #[test]
+    fn has_supertype_basic_rejects_nonbasic_land() {
+        let mut state = setup();
+        let id = add_creature(&mut state, PlayerId(0), "Stomping Ground");
+        state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Land];
+
+        let filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Land),
+            subtype: None,
+            controller: None,
+            properties: vec![FilterProp::HasSupertype {
+                value: "Basic".to_string(),
+            }],
+        };
+        assert!(!matches_target_filter(&state, id, &filter, id));
     }
 
     #[test]

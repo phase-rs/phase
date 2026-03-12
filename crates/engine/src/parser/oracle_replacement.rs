@@ -189,7 +189,8 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
 /// Parse check land pattern: "enters tapped unless you control a [LandType] or a [LandType]"
 /// Returns Mandatory ReplacementDefinition with an UnlessControlsSubtype condition.
 fn parse_check_land(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
-    if !norm_lower.contains("enters tapped") && !norm_lower.contains("enters the battlefield tapped")
+    if !norm_lower.contains("enters tapped")
+        && !norm_lower.contains("enters the battlefield tapped")
     {
         return None;
     }

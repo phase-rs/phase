@@ -148,6 +148,38 @@ pub fn parse_mana_symbols(text: &str) -> Option<(ManaCost, &str)> {
     Some((cost, &text[pos..]))
 }
 
+/// Possessive variants used in MTG Oracle text ("your library", "their hand", etc.).
+const POSSESSIVES: &[&str] = &["your", "their", "its owner's", "that player's"];
+
+/// Check if `text` contains `"{prefix} {possessive} {suffix}"` for any possessive variant.
+///
+/// Useful for matching zone references like "into your hand" / "into their hand" without
+/// enumerating every possessive form at each call site.
+pub fn contains_possessive(text: &str, prefix: &str, suffix: &str) -> bool {
+    POSSESSIVES.iter().any(|p| {
+        let mut needle = String::with_capacity(prefix.len() + p.len() + suffix.len() + 2);
+        needle.push_str(prefix);
+        needle.push(' ');
+        needle.push_str(p);
+        needle.push(' ');
+        needle.push_str(suffix);
+        text.contains(&needle)
+    })
+}
+
+/// Like `contains_possessive`, but checks if `text` starts with the phrase.
+pub fn starts_with_possessive(text: &str, prefix: &str, suffix: &str) -> bool {
+    POSSESSIVES.iter().any(|p| {
+        let mut needle = String::with_capacity(prefix.len() + p.len() + suffix.len() + 2);
+        needle.push_str(prefix);
+        needle.push(' ');
+        needle.push_str(p);
+        needle.push(' ');
+        needle.push_str(suffix);
+        text.starts_with(&needle)
+    })
+}
+
 /// Parse mana production symbols like `{G}` into Vec<ManaColor>.
 pub fn parse_mana_production(text: &str) -> Option<(Vec<ManaColor>, &str)> {
     let text = text.trim_start();
@@ -285,5 +317,37 @@ mod tests {
     fn parse_mana_production_multi() {
         let (colors, _) = parse_mana_production("{W}{W}").unwrap();
         assert_eq!(colors, vec![ManaColor::White, ManaColor::White]);
+    }
+
+    #[test]
+    fn contains_possessive_matches_all_variants() {
+        assert!(contains_possessive("into your hand", "into", "hand"));
+        assert!(contains_possessive("into their hand", "into", "hand"));
+        assert!(contains_possessive("into its owner's hand", "into", "hand"));
+        assert!(contains_possessive(
+            "into that player's hand",
+            "into",
+            "hand"
+        ));
+        assert!(!contains_possessive("into a hand", "into", "hand"));
+    }
+
+    #[test]
+    fn starts_with_possessive_checks_prefix() {
+        assert!(starts_with_possessive(
+            "search your library for a card",
+            "search",
+            "library"
+        ));
+        assert!(starts_with_possessive(
+            "search their library for a card",
+            "search",
+            "library"
+        ));
+        assert!(!starts_with_possessive(
+            "then search your library",
+            "search",
+            "library"
+        ));
     }
 }

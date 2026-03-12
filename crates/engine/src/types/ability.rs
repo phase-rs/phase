@@ -328,6 +328,10 @@ pub enum FilterProp {
     },
     /// Matches multicolored objects (2+ colors).
     Multicolored,
+    /// Matches objects with a specific supertype (Basic, Legendary, Snow).
+    HasSupertype {
+        value: String,
+    },
     Other {
         value: String,
     },
@@ -690,6 +694,18 @@ pub enum Effect {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
     },
+    /// Search a player's library for card(s) matching a filter.
+    /// The destination is handled by the sub_ability chain (ChangeZone + Shuffle).
+    SearchLibrary {
+        /// What cards can be found.
+        filter: TargetFilter,
+        /// How many cards to find (usually 1).
+        #[serde(default = "default_one")]
+        count: u32,
+        /// Whether to reveal the found card(s) to all players.
+        #[serde(default)]
+        reveal: bool,
+    },
     RevealHand {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
@@ -792,6 +808,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Mana { .. } => "Mana",
         Effect::Discard { .. } => "Discard",
         Effect::Shuffle { .. } => "Shuffle",
+        Effect::SearchLibrary { .. } => "SearchLibrary",
         Effect::RevealHand { .. } => "RevealHand",
         Effect::Unimplemented { name, .. } => name,
     }
@@ -847,6 +864,7 @@ pub enum EffectKind {
     Mana,
     Discard,
     Shuffle,
+    SearchLibrary,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
     Equip,
@@ -899,6 +917,7 @@ impl From<&Effect> for EffectKind {
             Effect::Mana { .. } => EffectKind::Mana,
             Effect::Discard { .. } => EffectKind::Discard,
             Effect::Shuffle { .. } => EffectKind::Shuffle,
+            Effect::SearchLibrary { .. } => EffectKind::SearchLibrary,
             Effect::RevealHand { .. } => EffectKind::Reveal,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,
         }

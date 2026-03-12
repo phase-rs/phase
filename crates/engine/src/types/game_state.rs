@@ -132,6 +132,14 @@ pub enum WaitingFor {
         #[serde(default = "super::ability::default_target_filter_any")]
         filter: TargetFilter,
     },
+    /// Player is choosing card(s) from a filtered library search.
+    SearchChoice {
+        player: PlayerId,
+        /// Object IDs of legal choices (pre-filtered from library).
+        cards: Vec<ObjectId>,
+        /// How many cards to select.
+        count: usize,
+    },
     TriggerTargetSelection {
         player: PlayerId,
         legal_targets: Vec<TargetRef>,
