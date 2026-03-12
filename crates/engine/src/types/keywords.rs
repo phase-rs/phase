@@ -381,11 +381,13 @@ impl FromStr for Keyword {
             }
         }
 
-        // Simple (unit) keywords -- case-insensitive match
-        match name_lower.as_str() {
+        // Simple (unit) keywords -- case-insensitive, space-normalized match
+        // Stripping spaces lets PascalCase ("FirstStrike") and Oracle text ("first strike") both match.
+        let name_nospace = name_lower.replace(' ', "");
+        match name_nospace.as_str() {
             "flying" => Ok(Keyword::Flying),
-            "first strike" => Ok(Keyword::FirstStrike),
-            "double strike" => Ok(Keyword::DoubleStrike),
+            "firststrike" => Ok(Keyword::FirstStrike),
+            "doublestrike" => Ok(Keyword::DoubleStrike),
             "trample" => Ok(Keyword::Trample),
             "deathtouch" => Ok(Keyword::Deathtouch),
             "lifelink" => Ok(Keyword::Lifelink),
@@ -417,12 +419,12 @@ impl FromStr for Keyword {
             "flanking" => Ok(Keyword::Flanking),
             "changeling" => Ok(Keyword::Changeling),
             "phasing" => Ok(Keyword::Phasing),
-            "battlecry" | "battle cry" => Ok(Keyword::Battlecry),
+            "battlecry" => Ok(Keyword::Battlecry),
             "decayed" => Ok(Keyword::Decayed),
             "unleash" => Ok(Keyword::Unleash),
             "riot" => Ok(Keyword::Riot),
-            "living weapon" => Ok(Keyword::LivingWeapon),
-            "totem armor" => Ok(Keyword::TotemArmor),
+            "livingweapon" => Ok(Keyword::LivingWeapon),
+            "totemarmor" => Ok(Keyword::TotemArmor),
             "evolve" => Ok(Keyword::Evolve),
             "extort" => Ok(Keyword::Extort),
             "exploit" => Ok(Keyword::Exploit),
@@ -443,7 +445,7 @@ impl FromStr for Keyword {
             "provoke" => Ok(Keyword::Provoke),
             "rebound" => Ok(Keyword::Rebound),
             "retrace" => Ok(Keyword::Retrace),
-            "split second" => Ok(Keyword::SplitSecond),
+            "splitsecond" => Ok(Keyword::SplitSecond),
             "storm" => Ok(Keyword::Storm),
             "suspend" => Ok(Keyword::Suspend),
             "gift" => Ok(Keyword::Gift),
@@ -451,13 +453,13 @@ impl FromStr for Keyword {
             "daybound" => Ok(Keyword::Daybound),
             "nightbound" => Ok(Keyword::Nightbound),
             "enlist" => Ok(Keyword::Enlist),
-            "read ahead" => Ok(Keyword::ReadAhead),
+            "readahead" => Ok(Keyword::ReadAhead),
             "compleated" => Ok(Keyword::Compleated),
             "conspire" => Ok(Keyword::Conspire),
             "demonstrate" => Ok(Keyword::Demonstrate),
             "dethrone" => Ok(Keyword::Dethrone),
-            "double team" => Ok(Keyword::DoubleTeam),
-            "living metal" => Ok(Keyword::LivingMetal),
+            "doubleteam" => Ok(Keyword::DoubleTeam),
+            "livingmetal" => Ok(Keyword::LivingMetal),
             _ => Ok(Keyword::Unknown(s.to_string())),
         }
     }
