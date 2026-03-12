@@ -22,11 +22,14 @@ fn run_combat(
     runner
         .act(GameAction::DeclareAttackers { attacks })
         .expect("DeclareAttackers should succeed");
-    runner
-        .act(GameAction::DeclareBlockers {
-            assignments: blocker_assignments,
-        })
-        .expect("DeclareBlockers should succeed");
+    // Engine may auto-skip DeclareBlockers if defending player has no valid blockers
+    if matches!(runner.state().waiting_for, WaitingFor::DeclareBlockers { .. }) {
+        runner
+            .act(GameAction::DeclareBlockers {
+                assignments: blocker_assignments,
+            })
+            .expect("DeclareBlockers should succeed");
+    }
 }
 
 /// CR 702.2c + CR 702.19b: Deathtouch + trample assigns lethal (1) to each blocker, tramples rest

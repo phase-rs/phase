@@ -31,12 +31,14 @@ fn run_combat(
         .act(GameAction::DeclareAttackers { attacks })
         .expect("DeclareAttackers should succeed");
 
-    // Declare blockers
-    runner
-        .act(GameAction::DeclareBlockers {
-            assignments: blocker_assignments,
-        })
-        .expect("DeclareBlockers should succeed");
+    // Declare blockers (engine may auto-skip if defending player has no valid blockers)
+    if matches!(runner.state().waiting_for, WaitingFor::DeclareBlockers { .. }) {
+        runner
+            .act(GameAction::DeclareBlockers {
+                assignments: blocker_assignments,
+            })
+            .expect("DeclareBlockers should succeed");
+    }
 }
 
 /// CR 510.1: Unblocked attacker deals combat damage to defending player
