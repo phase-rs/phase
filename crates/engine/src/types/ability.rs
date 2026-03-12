@@ -301,6 +301,8 @@ pub enum FilterProp {
     EquippedBy,
     /// Matches any object that is NOT the trigger source (for "another creature" triggers).
     Another,
+    /// Matches objects with a specific color (for "white creature", "red spell", etc.).
+    HasColor { color: String },
     Other { value: String },
 }
 

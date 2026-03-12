@@ -717,6 +717,22 @@ fn target_filter_matches_object(
                             return false;
                         }
                     }
+                    FilterProp::HasColor { color } => {
+                        use crate::types::mana::ManaColor;
+                        let mana_color = match color.as_str() {
+                            "White" => Some(ManaColor::White),
+                            "Blue" => Some(ManaColor::Blue),
+                            "Black" => Some(ManaColor::Black),
+                            "Red" => Some(ManaColor::Red),
+                            "Green" => Some(ManaColor::Green),
+                            _ => None,
+                        };
+                        if let Some(mc) = mana_color {
+                            if !obj.color.contains(&mc) {
+                                return false;
+                            }
+                        }
+                    }
                     _ => {
                         // Other filter props: pass through for now
                     }

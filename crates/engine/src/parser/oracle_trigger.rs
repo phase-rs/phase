@@ -32,10 +32,13 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     // Extract intervening-if condition from effect text
     let (effect_without_if, if_condition) = extract_if_condition(&effect_clean);
 
+    // Strip constraint sentences so they don't leak into effect parsing as sub-abilities
+    let effect_final = strip_constraint_sentences(&effect_without_if);
+
     // Parse the effect
-    let execute = if !effect_without_if.is_empty() {
+    let execute = if !effect_final.is_empty() {
         Some(Box::new(parse_effect_chain(
-            &effect_without_if,
+            &effect_final,
             AbilityKind::Spell,
         )))
     } else {
@@ -68,6 +71,31 @@ fn parse_trigger_constraint(lower: &str) -> Option<TriggerConstraint> {
         return Some(TriggerConstraint::OnlyDuringYourTurn);
     }
     None
+}
+
+/// Strip constraint sentences from effect text so they don't produce spurious sub-abilities.
+/// The constraint itself is already extracted by `parse_trigger_constraint` from the full text.
+fn strip_constraint_sentences(text: &str) -> String {
+    let patterns = [
+        "this ability triggers only once each turn.",
+        "this ability triggers only once each turn",
+        "triggers only once each turn.",
+        "triggers only once each turn",
+        "this ability triggers only once.",
+        "this ability triggers only once",
+        "this ability triggers only during your turn.",
+        "this ability triggers only during your turn",
+    ];
+    let mut result = text.to_string();
+    for pattern in &patterns {
+        result = result.replace(pattern, "");
+    }
+    let result = result.trim().to_string();
+    if result.ends_with('.') {
+        result[..result.len() - 1].trim().to_string()
+    } else {
+        result
+    }
 }
 
 /// Extract an "if you've gained N or more life this turn" condition from effect text.
@@ -429,21 +457,37 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     None
 }
 
-/// Parse counter-placement triggers: "a +1/+1 counter is put on ~",
-/// "one or more counters are put on ~"
+/// Parse counter-placement triggers from Oracle text.
+/// Handles all patterns: passive ("a counter is put on ~"), active ("you put counters on ~"),
+/// and with arbitrary subjects ("counters are put on another creature you control").
 fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
-    // "one or more counters are put on ~" / "a counter is put on ~"
-    if lower.contains("counter is put on ~")
-        || lower.contains("counters are put on ~")
-        || lower.contains("counter is placed on ~")
-    {
-        let mut def = make_base();
-        def.mode = TriggerMode::CounterAdded;
-        def.valid_card = Some(TargetFilter::SelfRef);
-        return Some((TriggerMode::CounterAdded, def));
+    // Must mention both a counter and a placement verb
+    if !lower.contains("counter") {
+        return None;
+    }
+    if !lower.contains("put") && !lower.contains("placed") {
+        return None;
     }
 
-    None
+    // Find "counter(s) ... on SUBJECT" — locate " on " after the counter mention
+    let counter_pos = lower.find("counter")?;
+    let after_counter = &lower[counter_pos..];
+    let on_offset = after_counter.find(" on ")?;
+    let subject_start = counter_pos + on_offset + " on ".len();
+    let subject_text = lower[subject_start..].trim();
+
+    let mut def = make_base();
+    def.mode = TriggerMode::CounterAdded;
+
+    // Parse the subject after "on "
+    if subject_text.starts_with('~') {
+        def.valid_card = Some(TargetFilter::SelfRef);
+    } else {
+        let (filter, _) = parse_single_subject(subject_text);
+        def.valid_card = Some(filter);
+    }
+
+    Some((TriggerMode::CounterAdded, def))
 }
 
 #[cfg(test)]
@@ -745,6 +789,105 @@ mod tests {
         assert_eq!(
             cond,
             Some(TriggerCondition::LifeGainedThisTurn { minimum: 3 })
+        );
+    }
+
+    // --- Counter placement with "you put" pattern ---
+
+    #[test]
+    fn trigger_you_put_counters_on_self() {
+        let def = parse_trigger_line(
+            "Whenever you put one or more +1/+1 counters on this creature, draw a card. This ability triggers only once each turn.",
+            "Exemplar of Light",
+        );
+        assert_eq!(def.mode, TriggerMode::CounterAdded);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.constraint,
+            Some(crate::types::ability::TriggerConstraint::OncePerTurn)
+        );
+        // Constraint sentence should NOT leak as a sub-ability
+        if let Some(ref exec) = def.execute {
+            assert!(
+                !matches!(exec.effect, crate::types::ability::Effect::Unimplemented { .. }),
+                "Effect should be Draw, not Unimplemented"
+            );
+            assert!(exec.sub_ability.is_none(), "No spurious sub-ability from constraint text");
+        }
+    }
+
+    #[test]
+    fn trigger_counters_put_on_another_creature_you_control() {
+        use crate::types::ability::{ControllerRef, TypeFilter};
+        let def = parse_trigger_line(
+            "Whenever one or more +1/+1 counters are put on another creature you control, put a +1/+1 counter on this creature.",
+            "Enduring Scalelord",
+        );
+        assert_eq!(def.mode, TriggerMode::CounterAdded);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed {
+                card_type: Some(TypeFilter::Creature),
+                subtype: None,
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::Another],
+            })
+        );
+    }
+
+    #[test]
+    fn trigger_you_put_counters_on_creature_you_control() {
+        use crate::types::ability::{ControllerRef, TypeFilter};
+        let def = parse_trigger_line(
+            "Whenever you put one or more +1/+1 counters on a creature you control, draw a card.",
+            "The Powerful Dragon",
+        );
+        assert_eq!(def.mode, TriggerMode::CounterAdded);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed {
+                card_type: Some(TypeFilter::Creature),
+                subtype: None,
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            })
+        );
+    }
+
+    #[test]
+    fn strip_constraint_does_not_affect_effect() {
+        let result = strip_constraint_sentences(
+            "draw a card. this ability triggers only once each turn.",
+        );
+        assert_eq!(result, "draw a card");
+    }
+
+    #[test]
+    fn strip_constraint_preserves_plain_effect() {
+        let result = strip_constraint_sentences("put a +1/+1 counter on ~");
+        assert_eq!(result, "put a +1/+1 counter on ~");
+    }
+
+    // --- Color-filtered trigger subjects ---
+
+    #[test]
+    fn trigger_white_creature_you_control_attacks() {
+        use crate::types::ability::TypeFilter;
+        let def = parse_trigger_line(
+            "Whenever a white creature you control attacks, you gain 1 life.",
+            "Linden, the Steadfast Queen",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed {
+                card_type: Some(TypeFilter::Creature),
+                subtype: None,
+                controller: Some(crate::types::ability::ControllerRef::You),
+                properties: vec![FilterProp::HasColor {
+                    color: "White".to_string()
+                }],
+            })
         );
     }
 }

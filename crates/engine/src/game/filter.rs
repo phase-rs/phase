@@ -201,6 +201,21 @@ fn matches_filter_prop(
         FilterProp::EnchantedBy => source_attached_to == Some(object_id),
         FilterProp::EquippedBy => source_attached_to == Some(object_id),
         FilterProp::Another => object_id != _source_id,
+        FilterProp::HasColor { color } => {
+            use crate::types::mana::ManaColor;
+            let mana_color = match color.as_str() {
+                "White" => Some(ManaColor::White),
+                "Blue" => Some(ManaColor::Blue),
+                "Black" => Some(ManaColor::Black),
+                "Red" => Some(ManaColor::Red),
+                "Green" => Some(ManaColor::Green),
+                _ => None,
+            };
+            match mana_color {
+                Some(mc) => obj.color.contains(&mc),
+                None => true, // Unknown color — permissive
+            }
+        }
         FilterProp::Other { .. } => true, // Permissive fallback for unrecognized properties
     }
 }

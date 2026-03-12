@@ -116,6 +116,13 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     let offset = lower.len() - lower_trimmed.len();
     pos += offset;
 
+    // Handle color prefix: "white creature", "red spell", etc.
+    let color_prop = parse_color_prefix(&lower[pos..]);
+    if let Some((ref prop, color_len)) = color_prop {
+        properties.push(prop.clone());
+        pos += color_len;
+    }
+
     // Handle "non" prefix
     let (negated_type, non_prefix) = parse_non_prefix(&lower[pos..]);
     if non_prefix > 0 {
@@ -236,6 +243,29 @@ fn parse_controller_suffix(text: &str) -> Option<ControllerRef> {
     } else {
         None
     }
+}
+
+/// Parse a color adjective prefix: "white ", "blue ", "black ", "red ", "green ".
+/// Returns (FilterProp::HasColor, bytes consumed including trailing space).
+fn parse_color_prefix(text: &str) -> Option<(FilterProp, usize)> {
+    let colors = [
+        ("white ", "White"),
+        ("blue ", "Blue"),
+        ("black ", "Black"),
+        ("red ", "Red"),
+        ("green ", "Green"),
+    ];
+    for (prefix, color_name) in &colors {
+        if text.starts_with(prefix) {
+            return Some((
+                FilterProp::HasColor {
+                    color: color_name.to_string(),
+                },
+                prefix.len(),
+            ));
+        }
+    }
+    None
 }
 
 fn typed(
@@ -421,5 +451,37 @@ mod tests {
         let (f, rest) = parse_target("~ to its owner's hand");
         assert_eq!(f, TargetFilter::SelfRef);
         assert!(rest.contains("to its owner"));
+    }
+
+    #[test]
+    fn white_creature_you_control() {
+        let (f, _) = parse_type_phrase("white creature you control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed {
+                card_type: Some(TypeFilter::Creature),
+                subtype: None,
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::HasColor {
+                    color: "White".to_string()
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn red_spell() {
+        let (f, _) = parse_type_phrase("red spell");
+        assert_eq!(
+            f,
+            TargetFilter::Typed {
+                card_type: Some(TypeFilter::Any),
+                subtype: None,
+                controller: None,
+                properties: vec![FilterProp::HasColor {
+                    color: "Red".to_string()
+                }],
+            }
+        );
     }
 }
