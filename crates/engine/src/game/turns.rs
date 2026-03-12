@@ -69,6 +69,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // Reset per-turn counters
     state.lands_played_this_turn = 0;
     state.spells_cast_this_turn = 0;
+    state.triggers_fired_this_turn.clear();
     for player in &mut state.players {
         player.has_drawn_this_turn = false;
         player.lands_played_this_turn = 0;

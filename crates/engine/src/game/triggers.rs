@@ -55,9 +55,14 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 )
             };
 
-            for trig_def in &trigger_defs {
+            for (trig_idx, trig_def) in trigger_defs.iter().enumerate() {
                 if let Some(matcher) = registry.get(&trig_def.mode) {
                     if matcher(event, trig_def, obj_id, state) {
+                        // Check trigger constraints before firing
+                        if !check_trigger_constraint(state, trig_def, obj_id, trig_idx, controller)
+                        {
+                            continue;
+                        }
                         // Build the ResolvedAbility from the trigger definition
                         let ability = build_triggered_ability(trig_def, obj_id, controller);
                         pending.push(PendingTrigger {
@@ -67,6 +72,8 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             ability,
                             timestamp,
                         });
+                        // Record that this trigger fired (for once-per-turn/game tracking)
+                        record_trigger_fired(state, trig_def, obj_id, trig_idx);
                     }
                 }
             }
@@ -117,6 +124,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             valid_target: None,
                             valid_source: None,
                             description: Some("Prowess".to_string()),
+                            constraint: None,
                         };
                         pending.push(PendingTrigger {
                             source_id: obj_id,
@@ -199,6 +207,59 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 },
             };
             stack::push_to_stack(state, entry, &mut events_out);
+        }
+    }
+}
+
+/// Check whether a trigger's constraint allows it to fire.
+fn check_trigger_constraint(
+    state: &GameState,
+    trig_def: &TriggerDefinition,
+    obj_id: ObjectId,
+    trig_idx: usize,
+    controller: PlayerId,
+) -> bool {
+    use crate::types::ability::TriggerConstraint;
+
+    let constraint = match &trig_def.constraint {
+        Some(c) => c,
+        None => return true, // No constraint — always fires
+    };
+
+    let key = (obj_id, trig_idx);
+
+    match constraint {
+        TriggerConstraint::OncePerTurn => !state.triggers_fired_this_turn.contains(&key),
+        TriggerConstraint::OncePerGame => !state.triggers_fired_this_game.contains(&key),
+        TriggerConstraint::OnlyDuringYourTurn => state.active_player == controller,
+    }
+}
+
+/// Record that a constrained trigger has fired.
+fn record_trigger_fired(
+    state: &mut GameState,
+    trig_def: &TriggerDefinition,
+    obj_id: ObjectId,
+    trig_idx: usize,
+) {
+    use crate::types::ability::TriggerConstraint;
+
+    let constraint = match &trig_def.constraint {
+        Some(c) => c,
+        None => return, // No constraint — nothing to track
+    };
+
+    let key = (obj_id, trig_idx);
+
+    match constraint {
+        TriggerConstraint::OncePerTurn => {
+            state.triggers_fired_this_turn.insert(key);
+        }
+        TriggerConstraint::OncePerGame => {
+            state.triggers_fired_this_game.insert(key);
+        }
+        TriggerConstraint::OnlyDuringYourTurn => {
+            // No tracking needed — checked at fire time via active_player
         }
     }
 }
@@ -620,6 +681,11 @@ fn target_filter_matches_object(
                     }
                     FilterProp::WithKeyword { value } => {
                         if !obj.keywords.iter().any(|k| format!("{:?}", k) == *value) {
+                            return false;
+                        }
+                    }
+                    FilterProp::Another => {
+                        if object_id == source_id {
                             return false;
                         }
                     }
@@ -1417,6 +1483,7 @@ pub mod tests {
             valid_target: None,
             valid_source: None,
             description: None,
+            constraint: None,
         }
     }
 
@@ -1548,6 +1615,7 @@ pub mod tests {
                 valid_target: None,
                 valid_source: None,
                 description: None,
+                constraint: None,
             });
         }
 
@@ -1586,6 +1654,7 @@ pub mod tests {
                 valid_target: None,
                 valid_source: None,
                 description: None,
+                constraint: None,
             });
         }
 
@@ -1834,6 +1903,7 @@ pub mod tests {
                 valid_target: None,
                 valid_source: None,
                 description: None,
+                constraint: None,
             });
         }
 
@@ -1903,6 +1973,7 @@ pub mod tests {
                 valid_target: None,
                 valid_source: None,
                 description: None,
+                constraint: None,
             });
         }
 
@@ -1941,6 +2012,7 @@ pub mod tests {
                 valid_target: None,
                 valid_source: None,
                 description: None,
+                constraint: None,
             });
         }
 
@@ -2003,6 +2075,7 @@ pub mod tests {
                 valid_target: None,
                 valid_source: None,
                 description: None,
+                constraint: None,
             });
         }
 
@@ -2423,6 +2496,7 @@ pub mod tests {
             valid_target: None,
             valid_source: None,
             description: None,
+            constraint: None,
         };
 
         let ability = build_triggered_ability(&trig_def, ObjectId(1), PlayerId(0));
@@ -2599,6 +2673,7 @@ pub mod tests {
                 valid_target: None,
                 valid_source: None,
                 description: None,
+                constraint: None,
             });
         }
 
@@ -2689,6 +2764,7 @@ pub mod tests {
                 valid_target: None,
                 valid_source: None,
                 description: None,
+                constraint: None,
             });
         }
 
@@ -2770,6 +2846,7 @@ pub mod tests {
                 valid_target: None,
                 valid_source: None,
                 description: None,
+                constraint: None,
             });
         }
 
@@ -2820,6 +2897,7 @@ pub mod tests {
                 valid_target: None,
                 valid_source: None,
                 description: None,
+                constraint: None,
             });
         }
 
@@ -2876,6 +2954,7 @@ pub mod tests {
                 valid_target: None,
                 valid_source: None,
                 description: None,
+                constraint: None,
             });
         }
 

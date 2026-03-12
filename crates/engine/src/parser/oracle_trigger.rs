@@ -1,6 +1,9 @@
 use super::oracle_effect::parse_effect_chain;
+use super::oracle_target::parse_type_phrase;
 use super::oracle_util::strip_reminder_text;
-use crate::types::ability::{AbilityKind, TargetFilter, TriggerDefinition};
+use crate::types::ability::{
+    AbilityKind, FilterProp, TargetFilter, TriggerConstraint, TriggerDefinition,
+};
 use crate::types::phase::Phase;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -39,7 +42,27 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     let (_, mut def) = parse_trigger_condition(&condition_text);
     def.execute = execute;
     def.optional = optional;
+
+    // Check for constraint phrases in the full text
+    def.constraint = parse_trigger_constraint(&lower);
+
     def
+}
+
+/// Parse trigger constraint from the full trigger text.
+fn parse_trigger_constraint(lower: &str) -> Option<TriggerConstraint> {
+    if lower.contains("this ability triggers only once each turn")
+        || lower.contains("triggers only once each turn")
+    {
+        return Some(TriggerConstraint::OncePerTurn);
+    }
+    if lower.contains("this ability triggers only once") {
+        return Some(TriggerConstraint::OncePerGame);
+    }
+    if lower.contains("only during your turn") {
+        return Some(TriggerConstraint::OnlyDuringYourTurn);
+    }
+    None
 }
 
 fn normalize_self_refs(text: &str, card_name: &str) -> String {
@@ -81,100 +104,36 @@ fn make_base() -> TriggerDefinition {
         valid_target: None,
         valid_source: None,
         description: None,
+        constraint: None,
     }
 }
 
 fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerDefinition) {
     let lower = condition.to_lowercase();
 
-    // --- "When ~ enters [the battlefield]" ---
-    if lower.contains("~ enters") {
-        let mut def = make_base();
-        def.mode = TriggerMode::ChangesZone;
-        def.destination = Some(Zone::Battlefield);
-        def.valid_card = Some(TargetFilter::SelfRef);
-        return (TriggerMode::ChangesZone, def);
-    }
-
-    // --- "When ~ dies" ---
-    if lower.contains("~ dies") {
-        let mut def = make_base();
-        def.mode = TriggerMode::ChangesZone;
-        def.origin = Some(Zone::Battlefield);
-        def.destination = Some(Zone::Graveyard);
-        def.valid_card = Some(TargetFilter::SelfRef);
-        return (TriggerMode::ChangesZone, def);
-    }
-
-    // --- "Whenever ~ deals combat damage to a player/opponent" ---
-    if lower.contains("~ deals combat damage") {
-        let mut def = make_base();
-        def.mode = TriggerMode::DamageDone;
-        def.combat_damage = true;
-        def.valid_source = Some(TargetFilter::SelfRef);
-        return (TriggerMode::DamageDone, def);
-    }
-
-    // --- "Whenever ~ deals damage" ---
-    if lower.contains("~ deals damage") {
-        let mut def = make_base();
-        def.mode = TriggerMode::DamageDone;
-        def.valid_source = Some(TargetFilter::SelfRef);
-        return (TriggerMode::DamageDone, def);
-    }
-
-    // --- "Whenever ~ attacks" ---
-    if lower.contains("~ attacks") {
-        let mut def = make_base();
-        def.mode = TriggerMode::Attacks;
-        def.valid_card = Some(TargetFilter::SelfRef);
-        return (TriggerMode::Attacks, def);
-    }
-
-    // --- "Whenever a creature enters" ---
-    if lower.contains("a creature enters") || lower.contains("a creature you control enters") {
-        let mut def = make_base();
-        def.mode = TriggerMode::ChangesZone;
-        def.destination = Some(Zone::Battlefield);
-        return (TriggerMode::ChangesZone, def);
-    }
-
-    // --- "Whenever you cast a spell" ---
-    if lower.contains("you cast a") || lower.contains("you cast an") {
-        let mut def = make_base();
-        def.mode = TriggerMode::SpellCast;
-        return (TriggerMode::SpellCast, def);
-    }
-
-    // --- "Whenever you gain life" ---
-    if lower.contains("you gain life") {
-        let mut def = make_base();
-        def.mode = TriggerMode::LifeGained;
-        return (TriggerMode::LifeGained, def);
-    }
-
-    // --- "Whenever you draw a card" ---
-    if lower.contains("you draw a card") {
-        let mut def = make_base();
-        def.mode = TriggerMode::Drawn;
-        return (TriggerMode::Drawn, def);
-    }
-
     // --- Phase triggers: "At the beginning of..." ---
-    if let Some(stripped) = lower.strip_prefix("at the beginning of") {
-        let phase_text = stripped.trim();
-        let mut def = make_base();
-        def.mode = TriggerMode::Phase;
-        if phase_text.contains("upkeep") {
-            def.phase = Some(Phase::Upkeep);
-        } else if phase_text.contains("end step") {
-            def.phase = Some(Phase::End);
-        } else if phase_text.contains("combat") {
-            def.phase = Some(Phase::BeginCombat);
-        } else if phase_text.contains("draw step") {
-            def.phase = Some(Phase::Draw);
-        }
-        return (TriggerMode::Phase, def);
+    if let Some(result) = try_parse_phase_trigger(&lower) {
+        return result;
+    }
+
+    // --- Player triggers: "you gain life", "you cast a spell", "you draw a card" ---
+    if let Some(result) = try_parse_player_trigger(&lower) {
+        return result;
+    }
+
+    // --- Subject + event decomposition ---
+    // Strip leading "when"/"whenever"
+    let after_keyword = lower
+        .strip_prefix("whenever ")
+        .or_else(|| lower.strip_prefix("when "))
+        .unwrap_or(&lower);
+
+    // Parse the subject ("~", "another creature you control", "a creature", etc.)
+    let (subject, rest) = parse_trigger_subject(after_keyword);
+
+    // Parse event verb from the remaining text
+    if let Some(result) = try_parse_event(&subject, rest, &lower) {
+        return result;
     }
 
     // --- Fallback ---
@@ -183,6 +142,194 @@ fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerDefinition) 
     def.mode = mode.clone();
     def.description = Some(condition.to_string());
     (mode, def)
+}
+
+// ---------------------------------------------------------------------------
+// Subject parsing: extracts the trigger subject filter and remaining text
+// ---------------------------------------------------------------------------
+
+/// Parse a trigger subject from the beginning of the condition text (after when/whenever).
+/// Returns (TargetFilter for valid_card, remaining text after subject).
+fn parse_trigger_subject(text: &str) -> (TargetFilter, &str) {
+    // Self-reference: "~"
+    if let Some(rest) = text.strip_prefix("~ ") {
+        return (TargetFilter::SelfRef, rest);
+    }
+    if text == "~" {
+        return (TargetFilter::SelfRef, "");
+    }
+
+    // "another <type phrase>" — compose with FilterProp::Another
+    if let Some(after_another) = text.strip_prefix("another ") {
+        let (filter, rest) = parse_type_phrase(after_another);
+        let with_another = add_another_prop(filter);
+        return (with_another, rest);
+    }
+
+    // "a "/"an " + type phrase (general subject)
+    let after_article = text
+        .strip_prefix("a ")
+        .or_else(|| text.strip_prefix("an "));
+    if let Some(after) = after_article {
+        let (filter, rest) = parse_type_phrase(after);
+        return (filter, rest);
+    }
+
+    // Fallback: no subject parsed, return Any
+    (TargetFilter::Any, text)
+}
+
+/// Add FilterProp::Another to a TargetFilter. If it's already Typed, append to properties.
+/// Otherwise, wrap in a Typed filter with just Another.
+fn add_another_prop(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed {
+            card_type,
+            subtype,
+            controller,
+            mut properties,
+        } => {
+            properties.push(FilterProp::Another);
+            TargetFilter::Typed {
+                card_type,
+                subtype,
+                controller,
+                properties,
+            }
+        }
+        _ => TargetFilter::Typed {
+            card_type: None,
+            subtype: None,
+            controller: None,
+            properties: vec![FilterProp::Another],
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Event verb parsing: matches the event after the subject
+// ---------------------------------------------------------------------------
+
+/// Try to parse an event verb and build a TriggerDefinition from subject + event.
+fn try_parse_event(
+    subject: &TargetFilter,
+    rest: &str,
+    full_lower: &str,
+) -> Option<(TriggerMode, TriggerDefinition)> {
+    let rest = rest.trim_start();
+
+    // "enters [the battlefield]"
+    if rest.starts_with("enters") {
+        let mut def = make_base();
+        def.mode = TriggerMode::ChangesZone;
+        def.destination = Some(Zone::Battlefield);
+        def.valid_card = Some(subject.clone());
+        return Some((TriggerMode::ChangesZone, def));
+    }
+
+    // "dies"
+    if rest.starts_with("dies") {
+        let mut def = make_base();
+        def.mode = TriggerMode::ChangesZone;
+        def.origin = Some(Zone::Battlefield);
+        def.destination = Some(Zone::Graveyard);
+        def.valid_card = Some(subject.clone());
+        return Some((TriggerMode::ChangesZone, def));
+    }
+
+    // "deals combat damage"
+    if rest.starts_with("deals combat damage") {
+        let mut def = make_base();
+        def.mode = TriggerMode::DamageDone;
+        def.combat_damage = true;
+        def.valid_source = Some(subject.clone());
+        return Some((TriggerMode::DamageDone, def));
+    }
+
+    // "deals damage" (non-combat)
+    if rest.starts_with("deals damage") {
+        let mut def = make_base();
+        def.mode = TriggerMode::DamageDone;
+        def.valid_source = Some(subject.clone());
+        return Some((TriggerMode::DamageDone, def));
+    }
+
+    // "attacks"
+    if rest.starts_with("attacks") {
+        let mut def = make_base();
+        def.mode = TriggerMode::Attacks;
+        def.valid_card = Some(subject.clone());
+        return Some((TriggerMode::Attacks, def));
+    }
+
+    // Counter-related events: "a +1/+1 counter is put on ~" / "one or more counters are put on ~"
+    if let Some(result) = try_parse_counter_trigger(full_lower) {
+        return Some(result);
+    }
+
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Category parsers
+// ---------------------------------------------------------------------------
+
+/// Parse phase triggers: "At the beginning of your upkeep/end step/combat/draw step"
+fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    let stripped = lower.strip_prefix("at the beginning of")?;
+    let phase_text = stripped.trim();
+    let mut def = make_base();
+    def.mode = TriggerMode::Phase;
+    if phase_text.contains("upkeep") {
+        def.phase = Some(Phase::Upkeep);
+    } else if phase_text.contains("end step") {
+        def.phase = Some(Phase::End);
+    } else if phase_text.contains("combat") {
+        def.phase = Some(Phase::BeginCombat);
+    } else if phase_text.contains("draw step") {
+        def.phase = Some(Phase::Draw);
+    }
+    Some((TriggerMode::Phase, def))
+}
+
+/// Parse player-centric triggers: "you gain life", "you cast a/an ...", "you draw a card"
+fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    if lower.contains("you gain life") {
+        let mut def = make_base();
+        def.mode = TriggerMode::LifeGained;
+        return Some((TriggerMode::LifeGained, def));
+    }
+
+    if lower.contains("you cast a") || lower.contains("you cast an") {
+        let mut def = make_base();
+        def.mode = TriggerMode::SpellCast;
+        return Some((TriggerMode::SpellCast, def));
+    }
+
+    if lower.contains("you draw a card") {
+        let mut def = make_base();
+        def.mode = TriggerMode::Drawn;
+        return Some((TriggerMode::Drawn, def));
+    }
+
+    None
+}
+
+/// Parse counter-placement triggers: "a +1/+1 counter is put on ~",
+/// "one or more counters are put on ~"
+fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    // "one or more counters are put on ~" / "a counter is put on ~"
+    if lower.contains("counter is put on ~")
+        || lower.contains("counters are put on ~")
+        || lower.contains("counter is placed on ~")
+    {
+        let mut def = make_base();
+        def.mode = TriggerMode::CounterAdded;
+        def.valid_card = Some(TargetFilter::SelfRef);
+        return Some((TriggerMode::CounterAdded, def));
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -248,5 +395,118 @@ mod tests {
             "Goblin Guide",
         );
         assert_eq!(def.mode, TriggerMode::Attacks);
+    }
+
+    // --- Subject decomposition tests ---
+
+    #[test]
+    fn trigger_another_creature_you_control_enters() {
+        let def = parse_trigger_line(
+            "Whenever another creature you control enters, put a +1/+1 counter on Hinterland Sanctifier.",
+            "Hinterland Sanctifier",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed {
+                card_type: Some(crate::types::ability::TypeFilter::Creature),
+                subtype: None,
+                controller: Some(crate::types::ability::ControllerRef::You),
+                properties: vec![FilterProp::Another],
+            })
+        );
+    }
+
+    #[test]
+    fn trigger_another_creature_enters_no_controller() {
+        let def = parse_trigger_line(
+            "Whenever another creature enters, draw a card.",
+            "Some Card",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        match &def.valid_card {
+            Some(TargetFilter::Typed { properties, .. }) => {
+                assert!(properties.contains(&FilterProp::Another));
+            }
+            other => panic!("Expected Typed filter with Another, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trigger_a_creature_enters() {
+        let def = parse_trigger_line(
+            "Whenever a creature enters, you gain 1 life.",
+            "Soul Warden",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed {
+                card_type: Some(crate::types::ability::TypeFilter::Creature),
+                subtype: None,
+                controller: None,
+                properties: vec![],
+            })
+        );
+    }
+
+    #[test]
+    fn trigger_counter_put_on_self() {
+        let def = parse_trigger_line(
+            "Whenever a +1/+1 counter is put on ~, draw a card.",
+            "Fathom Mage",
+        );
+        assert_eq!(def.mode, TriggerMode::CounterAdded);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_one_or_more_counters_on_self() {
+        let def = parse_trigger_line(
+            "Whenever one or more counters are put on ~, you gain 1 life.",
+            "Some Card",
+        );
+        assert_eq!(def.mode, TriggerMode::CounterAdded);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    // --- Constraint parsing tests ---
+
+    #[test]
+    fn trigger_once_each_turn_constraint() {
+        let def = parse_trigger_line(
+            "Whenever you gain life, put a +1/+1 counter on Exemplar of Light. This ability triggers only once each turn.",
+            "Exemplar of Light",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeGained);
+        assert_eq!(
+            def.constraint,
+            Some(crate::types::ability::TriggerConstraint::OncePerTurn)
+        );
+    }
+
+    #[test]
+    fn trigger_no_constraint_by_default() {
+        let def = parse_trigger_line(
+            "Whenever you gain life, put a +1/+1 counter on this creature.",
+            "Ajani's Pridemate",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeGained);
+        assert_eq!(def.constraint, None);
+    }
+
+    #[test]
+    fn trigger_only_during_your_turn() {
+        let def = parse_trigger_line(
+            "Whenever a creature enters, draw a card. This ability triggers only during your turn.",
+            "Some Card",
+        );
+        assert_eq!(
+            def.constraint,
+            Some(crate::types::ability::TriggerConstraint::OnlyDuringYourTurn)
+        );
     }
 }

@@ -102,7 +102,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
 
 /// Parse a type phrase like "creature", "nonland permanent", "artifact or enchantment",
 /// "creature you control", "creature an opponent controls".
-fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
+pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     let lower = text.to_lowercase();
     let mut pos = 0;
     let mut properties = Vec::new();

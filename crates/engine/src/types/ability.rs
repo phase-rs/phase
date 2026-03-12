@@ -299,6 +299,8 @@ pub enum FilterProp {
     Owned { controller: ControllerRef },
     EnchantedBy,
     EquippedBy,
+    /// Matches any object that is NOT the trigger source (for "another creature" triggers).
+    Another,
     Other { value: String },
 }
 
@@ -785,6 +787,18 @@ pub struct AbilityDefinition {
     pub sorcery_speed: bool,
 }
 
+/// Rate-limiting constraint for triggered abilities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum TriggerConstraint {
+    /// "This ability triggers only once each turn."
+    OncePerTurn,
+    /// "This ability triggers only once."
+    OncePerGame,
+    /// "This ability triggers only during your turn."
+    OnlyDuringYourTurn,
+}
+
 /// Trigger definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TriggerDefinition {
@@ -813,6 +827,8 @@ pub struct TriggerDefinition {
     pub valid_source: Option<TargetFilter>,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
+    pub constraint: Option<TriggerConstraint>,
 }
 
 /// Static ability definition with typed fields. Zero params HashMap.
@@ -1074,6 +1090,7 @@ mod tests {
             valid_target: None,
             valid_source: None,
             description: Some("When ~ dies, draw a card.".to_string()),
+            constraint: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: TriggerDefinition = serde_json::from_str(&json).unwrap();

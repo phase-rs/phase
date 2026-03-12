@@ -2628,6 +2628,7 @@ mod trigger_target_tests {
                 valid_target: None,
                 valid_source: None,
                 description: None,
+                constraint: None,
             },
             ability,
             timestamp: 1,
@@ -2696,6 +2697,7 @@ mod trigger_target_tests {
                 valid_target: None,
                 valid_source: None,
                 description: None,
+                constraint: None,
             },
             ability: crate::types::ability::ResolvedAbility::new(
                 Effect::ChangeZone {
@@ -2963,6 +2965,7 @@ mod phase_trigger_regression_tests {
                 valid_target: None,
                 valid_source: None,
                 description: None,
+                constraint: None,
             });
         }
 

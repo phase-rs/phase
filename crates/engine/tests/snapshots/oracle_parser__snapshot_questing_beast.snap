@@ -1,6 +1,5 @@
 ---
 source: crates/engine/tests/oracle_parser.rs
-assertion_line: 67
 expression: result
 ---
 {
@@ -45,7 +44,8 @@ expression: result
       "valid_source": {
         "type": "SelfRef"
       },
-      "description": null
+      "description": null,
+      "constraint": null
     }
   ],
   "statics": [

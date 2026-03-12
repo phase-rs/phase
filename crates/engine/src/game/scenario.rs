@@ -412,6 +412,7 @@ impl<'a> CardBuilder<'a> {
             valid_target: None,
             valid_source: None,
             description: None,
+            constraint: None,
         });
         self
     }

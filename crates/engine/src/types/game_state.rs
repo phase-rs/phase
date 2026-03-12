@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -213,6 +213,12 @@ pub struct GameState {
     pub commander_damage: Vec<CommanderDamageEntry>,
     #[serde(default)]
     pub priority_passes: BTreeSet<PlayerId>,
+
+    // Trigger constraint tracking: (object_id, trigger_index) pairs that have fired
+    #[serde(default)]
+    pub triggers_fired_this_turn: HashSet<(ObjectId, usize)>,
+    #[serde(default)]
+    pub triggers_fired_this_game: HashSet<(ObjectId, usize)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -267,6 +273,8 @@ impl GameState {
             eliminated_players: Vec::new(),
             commander_damage: Vec::new(),
             priority_passes: BTreeSet::new(),
+            triggers_fired_this_turn: HashSet::new(),
+            triggers_fired_this_game: HashSet::new(),
         }
     }
 
@@ -603,6 +611,7 @@ mod tests {
                 valid_target: None,
                 valid_source: None,
                 description: None,
+                constraint: None,
             },
             ability: ResolvedAbility::new(
                 Effect::Draw { count: 1 },
@@ -645,6 +654,7 @@ mod tests {
                 valid_target: None,
                 valid_source: None,
                 description: None,
+                constraint: None,
             },
             ability: ResolvedAbility::new(
                 Effect::Draw { count: 1 },

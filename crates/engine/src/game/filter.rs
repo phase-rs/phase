@@ -200,6 +200,7 @@ fn matches_filter_prop(
         },
         FilterProp::EnchantedBy => source_attached_to == Some(object_id),
         FilterProp::EquippedBy => source_attached_to == Some(object_id),
+        FilterProp::Another => object_id != _source_id,
         FilterProp::Other { .. } => true, // Permissive fallback for unrecognized properties
     }
 }

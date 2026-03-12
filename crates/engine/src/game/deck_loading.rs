@@ -512,6 +512,7 @@ mod tests {
             valid_target: None,
             valid_source: None,
             description: None,
+            constraint: None,
         }];
 
         let obj_id = create_object_from_card_face(&mut state, &face, PlayerId(0));
