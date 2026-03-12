@@ -95,7 +95,7 @@ fn evaluate_standard(
         if unknown_cards.contains(name) {
             continue;
         }
-        match db.legality_status(name, LegalityFormat::Standard) {
+        match db.legality_status(resolve_card_name(db, name), LegalityFormat::Standard) {
             Some(status) if status.is_legal() => {}
             Some(status) => {
                 illegal_cards.insert(format!("{name} ({})", status_label(status)));
@@ -230,7 +230,7 @@ fn evaluate_commander(
         if unknown_cards.contains(name) {
             continue;
         }
-        match db.legality_status(name, LegalityFormat::Commander) {
+        match db.legality_status(resolve_card_name(db, name), LegalityFormat::Commander) {
             Some(status) if status.is_legal() => {}
             Some(status) => {
                 illegal_cards.insert(format!("{name} ({})", status_label(status)));
@@ -291,11 +291,31 @@ fn collect_unknown_cards(
 ) -> BTreeSet<String> {
     let mut unknown = BTreeSet::new();
     for name in all_deck_cards(request) {
-        if db.get_face_by_name(name).is_none() {
+        if !card_is_known(db, name) {
             unknown.insert(name.to_string());
         }
     }
     unknown
+}
+
+/// Returns true if the card is in the database, handling DFC names like "Front // Back"
+/// by also trying just the front face name.
+fn card_is_known(db: &CardDatabase, name: &str) -> bool {
+    db.get_face_by_name(resolve_card_name(db, name)).is_some()
+}
+
+/// Resolves a card name to the key used in the database. For DFC names like "Front // Back",
+/// returns the front face name if that's how it's indexed.
+fn resolve_card_name<'a>(db: &CardDatabase, name: &'a str) -> &'a str {
+    if db.get_face_by_name(name).is_some() {
+        return name;
+    }
+    if let Some(front) = name.split(" // ").next() {
+        if db.get_face_by_name(front).is_some() {
+            return front;
+        }
+    }
+    name
 }
 
 fn all_deck_cards(request: &DeckCompatibilityRequest) -> impl Iterator<Item = &str> {

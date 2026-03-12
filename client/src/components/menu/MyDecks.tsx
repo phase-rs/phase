@@ -405,11 +405,14 @@ export function MyDecks({
                 </div>
                 {compatibility && (
                   <div className="mt-2 flex flex-wrap gap-1">
-                    <StatusBadge label="STD" active={compatibility.standard.compatible} />
-                    <StatusBadge label="CMD" active={compatibility.commander.compatible} />
-                    <StatusBadge label="BO3" active={compatibility.bo3_ready} />
+                    {compatibility.standard.compatible && <StatusBadge label="STD" active />}
+                    {compatibility.commander.compatible && <StatusBadge label="CMD" active />}
+                    {compatibility.bo3_ready && <StatusBadge label="BO3" active />}
                     {compatibility.unknown_cards.length > 0 && (
-                      <span className="rounded bg-amber-500/80 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-black">
+                      <span
+                        className="rounded bg-amber-500/80 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-black"
+                        title={`Unknown cards:\n${compatibility.unknown_cards.join("\n")}`}
+                      >
                         Unknown {compatibility.unknown_cards.length}
                       </span>
                     )}
