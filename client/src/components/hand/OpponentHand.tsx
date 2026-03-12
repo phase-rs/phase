@@ -1,9 +1,10 @@
 import { motion, AnimatePresence } from "framer-motion";
 
-import { CardImage } from "../card/CardImage.tsx";
+import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import type { ObjectId } from "../../adapter/types.ts";
 
 interface OpponentHandProps {
   showCards?: boolean;
@@ -21,7 +22,7 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
   const opponentId = focusedOpponent ?? opponents[0] ?? (myId === 0 ? 1 : 0);
   const opponent = gameState?.players[opponentId];
   const objects = useGameStore((s) => s.gameState?.objects);
-  const inspectObject = useUiStore((s) => s.inspectObject);
+  const revealedCards = useGameStore((s) => s.gameState?.revealed_cards);
 
   if (!opponent) return null;
 
@@ -42,7 +43,8 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
       <AnimatePresence>
         {opponent.hand.map((id, i) => {
           const obj = objects ? objects[id] : null;
-          const showFace = showCards || (obj && !obj.face_down);
+          const isRevealed = revealedCards?.includes(id) ?? false;
+          const showFace = showCards || isRevealed;
           // Negate rotation so fan opens toward opponent (top of screen)
           const rotation = -((i - center) * 6);
 
@@ -59,27 +61,10 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
               transition={{ delay: i * 0.03, duration: 0.25 }}
               style={{ marginLeft: i > 0 ? "-16px" : undefined, zIndex: i }}
             >
-              {showFace && obj ? (
-                <div
-                  style={{ transform: "scale(0.6) rotate(180deg)", transformOrigin: "center center", width: "calc(var(--card-w) * 0.6)", height: "calc(var(--card-h) * 0.6)" }}
-                  onMouseEnter={() => inspectObject(id)}
-                  onMouseLeave={() => inspectObject(null)}
-                >
-                  <CardImage cardName={obj.name} size="small" />
-                </div>
-              ) : (
-                <img
-                  src="/card-back.png"
-                  alt="Card back"
-                  className="rounded-lg border border-gray-600 shadow-md object-cover"
-                  style={{
-                    width: "calc(var(--card-w) * 0.6)",
-                    height: "calc(var(--card-h) * 0.6)",
-                    transform: "rotate(180deg)",
-                  }}
-                  draggable={false}
-                />
-              )}
+              <OpponentCardThumbnail
+                cardId={id}
+                cardName={showFace && obj ? obj.name : null}
+              />
             </motion.div>
           );
         })}
@@ -90,5 +75,41 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
         </span>
       )}
     </div>
+  );
+}
+
+const cardStyle = {
+  width: "calc(var(--card-w) * 0.6)",
+  height: "calc(var(--card-h) * 0.6)",
+  transform: "rotate(180deg)",
+} as const;
+
+/** Renders a single opponent hand card — face or back, same sizing either way. */
+function OpponentCardThumbnail({ cardId, cardName }: { cardId: ObjectId; cardName: string | null }) {
+  const { src } = useCardImage(cardName ?? "", { size: "small" });
+  const inspectObject = useUiStore((s) => s.inspectObject);
+
+  if (cardName && src) {
+    return (
+      <img
+        src={src}
+        alt={cardName}
+        className="rounded-lg border border-gray-600 shadow-md object-cover"
+        style={cardStyle}
+        onMouseEnter={() => inspectObject(cardId)}
+        onMouseLeave={() => inspectObject(null)}
+        draggable={false}
+      />
+    );
+  }
+
+  return (
+    <img
+      src="/card-back.png"
+      alt="Card back"
+      className="rounded-lg border border-gray-600 shadow-md object-cover"
+      style={cardStyle}
+      draggable={false}
+    />
   );
 }

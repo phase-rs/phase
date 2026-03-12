@@ -18,6 +18,8 @@ export function OpponentHud({ opponentName }: OpponentHudProps) {
   const setFocusedOpponent = useUiStore((s) => s.setFocusedOpponent);
   const gameState = useGameStore((s) => s.gameState);
 
+  const teamBased = gameState?.format_config?.team_based ?? false;
+
   const allOpponents = useMemo(() => {
     if (!gameState) return [];
     const seatOrder = gameState.seat_order ?? gameState.players.map((p) => p.id);
@@ -56,6 +58,7 @@ export function OpponentHud({ opponentName }: OpponentHudProps) {
           playerId={opId}
           isFocused={focusedId === opId}
           isEliminated={eliminated.includes(opId)}
+          isTeammate={teamBased && isTeammate(playerId, opId)}
           showMana={focusedId === opId}
           onClick={() => setFocusedOpponent(opId)}
         />
@@ -64,15 +67,21 @@ export function OpponentHud({ opponentName }: OpponentHudProps) {
   );
 }
 
+/** 2HG team pairing: players 0+1 are team A, 2+3 are team B. */
+function isTeammate(a: PlayerId, b: PlayerId): boolean {
+  return Math.floor(a / 2) === Math.floor(b / 2);
+}
+
 interface OpponentTabProps {
   playerId: PlayerId;
   isFocused: boolean;
   isEliminated: boolean;
+  isTeammate: boolean;
   showMana: boolean;
   onClick: () => void;
 }
 
-function OpponentTab({ playerId, isFocused, isEliminated, showMana, onClick }: OpponentTabProps) {
+function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, showMana, onClick }: OpponentTabProps) {
   const gameState = useGameStore((s) => s.gameState);
   const isTheirTurn = gameState?.active_player === playerId;
   const player = gameState?.players[playerId];
@@ -95,11 +104,17 @@ function OpponentTab({ playerId, isFocused, isEliminated, showMana, onClick }: O
 
   const handCount = player.hand.length;
 
+  const label = ally ? "Ally" : `Opp ${playerId + 1}`;
+
   const borderClass = isTheirTurn
     ? "border-red-400 bg-black/60 ring-1 ring-red-400/40 shadow-[0_0_10px_rgba(248,113,113,0.3)]"
-    : isFocused
-      ? "border-amber-400 bg-gray-800/90 ring-1 ring-amber-400/30"
-      : "border-gray-600 bg-gray-900/80 hover:border-gray-400 hover:bg-gray-800/80";
+    : ally
+      ? isFocused
+        ? "border-emerald-400 bg-gray-800/90 ring-1 ring-emerald-400/30"
+        : "border-emerald-600 bg-gray-900/80 hover:border-emerald-400 hover:bg-gray-800/80"
+      : isFocused
+        ? "border-amber-400 bg-gray-800/90 ring-1 ring-amber-400/30"
+        : "border-gray-600 bg-gray-900/80 hover:border-gray-400 hover:bg-gray-800/80";
 
   return (
     <button
@@ -111,8 +126,8 @@ function OpponentTab({ playerId, isFocused, isEliminated, showMana, onClick }: O
       {/* Name + turn indicator */}
       <div className="flex items-center gap-1">
         {isTheirTurn && <span className="h-1.5 w-1.5 rounded-full bg-red-400 animate-pulse" />}
-        <span className={`text-xs font-medium ${isTheirTurn ? "text-red-300" : isFocused ? "text-amber-300" : "text-gray-400"}`}>
-          Opp {playerId + 1}
+        <span className={`text-xs font-medium ${isTheirTurn ? "text-red-300" : ally ? "text-emerald-300" : isFocused ? "text-amber-300" : "text-gray-400"}`}>
+          {label}
         </span>
       </div>
 

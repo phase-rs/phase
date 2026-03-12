@@ -610,19 +610,24 @@ pub fn get_valid_blocker_ids(state: &GameState) -> Vec<ObjectId> {
 /// Return all valid attack targets for the active player: opposing players and their planeswalkers.
 pub fn get_valid_attack_targets(state: &GameState) -> Vec<AttackTarget> {
     let active = state.active_player;
+    let allies = players::teammates(state, active);
     let mut targets = Vec::new();
 
-    // All non-eliminated opponents
+    // All non-eliminated opponents (excluding teammates)
     for player in &state.players {
-        if player.id != active && !state.eliminated_players.contains(&player.id) {
+        if player.id != active
+            && !state.eliminated_players.contains(&player.id)
+            && !allies.contains(&player.id)
+        {
             targets.push(AttackTarget::Player(player.id));
         }
     }
 
-    // All planeswalkers controlled by opponents
+    // All planeswalkers controlled by opponents (excluding teammates')
     for &id in &state.battlefield {
         if let Some(obj) = state.objects.get(&id) {
             if obj.controller != active
+                && !allies.contains(&obj.controller)
                 && obj
                     .card_types
                     .core_types

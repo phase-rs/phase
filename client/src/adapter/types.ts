@@ -388,6 +388,7 @@ export interface GameState {
     current_sideboard: DeckPoolEntry[];
   }>;
   sideboard_submitted?: PlayerId[];
+  revealed_cards?: ObjectId[];
 }
 
 // ── Adapter Interface ────────────────────────────────────────────────────

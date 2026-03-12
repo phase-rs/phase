@@ -33,9 +33,11 @@ export function AttackTargetPicker({
   const gameState = useGameStore((s) => s.gameState);
   const myId = usePlayerId();
 
+  const teamBased = gameState?.format_config?.team_based ?? false;
+
   function getTargetLabel(target: AttackTarget): string {
     if (target.type === "Player") {
-      return getPlayerLabel(target.data, myId);
+      return getPlayerLabel(target.data, myId, teamBased);
     }
     // Planeswalker: show name from game objects
     const obj = gameState?.objects[target.data];
@@ -100,7 +102,7 @@ export function AttackTargetPicker({
                 onClick={() => handleAttackAll(target)}
                 className={gameButtonClass({ tone: "red", size: "md" })}
               >
-                Attack {getTargetLabel(target)} ({selectedAttackers.length} creatures)
+                Attack {getTargetLabel(target)} with {selectedAttackers.length} {selectedAttackers.length === 1 ? "creature" : "creatures"}
               </button>
             ))}
           </div>
@@ -163,7 +165,8 @@ function attackTargetsEqual(a: AttackTarget, b: AttackTarget): boolean {
 }
 
 /** Human-readable label for a player. */
-function getPlayerLabel(playerId: PlayerId, myId: PlayerId): string {
+function getPlayerLabel(playerId: PlayerId, myId: PlayerId, teamBased: boolean): string {
   if (playerId === myId) return "You";
+  if (teamBased && Math.floor(playerId / 2) === Math.floor(myId / 2)) return "Ally";
   return `Player ${playerId + 1}`;
 }
