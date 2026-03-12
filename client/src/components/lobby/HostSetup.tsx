@@ -77,6 +77,7 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
 
   const isP2P = connectionMode === "p2p";
   const maxPlayers = isP2P ? 2 : formatConfig.max_players;
+  const accentTone = isP2P ? "cyan" : "emerald";
 
   const handleFormatSelect = (format: GameFormat) => {
     const defaults = FORMAT_DEFAULTS[format];
@@ -132,7 +133,14 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
 
   return (
     <div className="relative z-10 flex w-full max-w-md flex-col items-center gap-6 px-4">
-      <h2 className="text-2xl font-bold tracking-tight text-white">Host Game</h2>
+      <h2 className={`text-2xl font-bold tracking-tight ${isP2P ? "text-cyan-200" : "text-white"}`}>
+        {isP2P ? "Host P2P Game" : "Host Game"}
+      </h2>
+      {isP2P && (
+        <p className="text-center text-xs text-cyan-300/90">
+          Dedicated server unavailable. Hosting with direct peer-to-peer connection.
+        </p>
+      )}
 
       <div className="flex w-full flex-col gap-4">
         {/* Display name */}
@@ -172,6 +180,11 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
               );
             })}
           </div>
+          {isP2P && (
+            <p className="mt-1.5 text-xs text-cyan-300/80">
+              P2P currently supports 2-player Standard.
+            </p>
+          )}
         </div>
 
         {/* Format-specific settings */}
@@ -296,16 +309,18 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
           </div>
         )}
 
-        {/* List in lobby */}
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={isPublic}
-            onChange={(e) => setIsPublic(e.target.checked)}
-            className="accent-emerald-500"
-          />
-          <span className="text-sm text-gray-300">List in lobby</span>
-        </label>
+        {/* List in lobby (server mode only) */}
+        {!isP2P && (
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={isPublic}
+              onChange={(e) => setIsPublic(e.target.checked)}
+              className="accent-emerald-500"
+            />
+            <span className="text-sm text-gray-300">List in lobby</span>
+          </label>
+        )}
 
         {/* Password toggle and input */}
         <div>
@@ -317,7 +332,7 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
                 setShowPassword(e.target.checked);
                 if (!e.target.checked) setPassword("");
               }}
-              className="accent-emerald-500"
+              className={isP2P ? "accent-cyan-500" : "accent-emerald-500"}
             />
             <span className="text-sm text-gray-300">Set password</span>
           </label>
@@ -345,7 +360,7 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
                 onClick={() => setTimerSeconds(opt.value)}
                 className={`flex-1 rounded px-3 py-1 text-xs font-medium capitalize transition-colors ${
                   timerSeconds === opt.value
-                    ? "bg-emerald-600 text-white"
+                    ? (isP2P ? "bg-cyan-600 text-white" : "bg-emerald-600 text-white")
                     : "text-gray-400 hover:text-gray-200"
                 }`}
               >
@@ -366,9 +381,9 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
         </button>
         <button
           onClick={handleHost}
-          className={menuButtonClass({ tone: "emerald", size: "md" })}
+          className={menuButtonClass({ tone: accentTone, size: "md" })}
         >
-          Host Game
+          {isP2P ? "Host P2P Game" : "Host Game"}
         </button>
       </div>
     </div>

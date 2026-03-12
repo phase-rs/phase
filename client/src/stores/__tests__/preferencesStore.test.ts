@@ -14,6 +14,8 @@ describe("preferencesStore", () => {
         boardBackground: "auto-wubrg",
         vfxQuality: "full",
         animationSpeed: "normal",
+        combatPacing: "normal",
+        masterVolume: 100,
         sfxVolume: 70,
         musicVolume: 40,
         sfxMuted: false,
@@ -73,6 +75,10 @@ describe("preferencesStore", () => {
     expect(usePreferencesStore.getState().animationSpeed).toBe("normal");
   });
 
+  it("has correct default combatPacing", () => {
+    expect(usePreferencesStore.getState().combatPacing).toBe("normal");
+  });
+
   it("setVfxQuality updates the value", () => {
     act(() => {
       usePreferencesStore.getState().setVfxQuality("minimal");
@@ -87,6 +93,14 @@ describe("preferencesStore", () => {
     });
 
     expect(usePreferencesStore.getState().animationSpeed).toBe("fast");
+  });
+
+  it("setCombatPacing updates the value", () => {
+    act(() => {
+      usePreferencesStore.getState().setCombatPacing("cinematic");
+    });
+
+    expect(usePreferencesStore.getState().combatPacing).toBe("cinematic");
   });
 
   it("existing preferences are unchanged after setting animation prefs", () => {
@@ -120,11 +134,20 @@ describe("preferencesStore", () => {
   it("has correct audio defaults", () => {
     const state = usePreferencesStore.getState();
 
+    expect(state.masterVolume).toBe(100);
     expect(state.sfxVolume).toBe(70);
     expect(state.musicVolume).toBe(40);
     expect(state.sfxMuted).toBe(false);
     expect(state.musicMuted).toBe(false);
     expect(state.masterMuted).toBe(false);
+  });
+
+  it("setMasterVolume updates master volume", () => {
+    act(() => {
+      usePreferencesStore.getState().setMasterVolume(65);
+    });
+
+    expect(usePreferencesStore.getState().masterVolume).toBe(65);
   });
 
   it("setSfxVolume updates sfx volume", () => {

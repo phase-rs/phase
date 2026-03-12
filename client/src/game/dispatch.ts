@@ -78,7 +78,8 @@ async function processAction(action: GameAction): Promise<void> {
   }
 
   // 5. Normalize events into animation steps
-  const steps = normalizeEvents(events);
+  const combatPacing = usePreferencesStore.getState().combatPacing;
+  const steps = normalizeEvents(events, { combatPacing });
 
   // 6. Play animations (unless instant)
   const speed = usePreferencesStore.getState().animationSpeed;

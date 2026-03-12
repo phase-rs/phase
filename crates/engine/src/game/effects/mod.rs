@@ -1,6 +1,6 @@
 use crate::types::ability::{Effect, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, WaitingFor};
 
 pub mod animate;
 pub mod attach;
@@ -152,6 +152,23 @@ pub fn resolve_ability_chain(
     // This allows sub-abilities like "its controller gains life" to access the object
     // targeted by the parent (e.g. the exiled creature in Swords to Plowshares).
     if let Some(ref sub) = ability.sub_ability {
+        // If resolve_effect just entered a player-choice state (Scry/Dig/Surveil),
+        // save the sub-ability as a continuation to execute after the player responds,
+        // rather than immediately processing it (which would bypass the UI).
+        if matches!(
+            state.waiting_for,
+            WaitingFor::ScryChoice { .. }
+                | WaitingFor::DigChoice { .. }
+                | WaitingFor::SurveilChoice { .. }
+        ) {
+            let mut sub_clone = sub.as_ref().clone();
+            if sub_clone.targets.is_empty() && !ability.targets.is_empty() {
+                sub_clone.targets = ability.targets.clone();
+            }
+            state.pending_continuation = Some(Box::new(sub_clone));
+            return Ok(());
+        }
+
         if sub.targets.is_empty() && !ability.targets.is_empty() {
             let mut sub_with_targets = sub.as_ref().clone();
             sub_with_targets.targets = ability.targets.clone();

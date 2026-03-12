@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { GameEvent } from "../../adapter/types";
 import { normalizeEvents } from "../eventNormalizer";
+import { EVENT_DURATIONS } from "../types";
 
 describe("normalizeEvents", () => {
   it("returns empty array for empty events", () => {
@@ -134,7 +135,21 @@ describe("normalizeEvents", () => {
     const steps = normalizeEvents(events);
     expect(steps).toHaveLength(1);
     expect(steps[0].effects[0].event.type).toBe("BlockersDeclared");
-    expect(steps[0].duration).toBe(300);
+    expect(steps[0].duration).toBe(EVENT_DURATIONS.BlockersDeclared);
+  });
+
+  it("combat pacing scales combat-only step durations", () => {
+    const events: GameEvent[] = [
+      { type: "BlockersDeclared", data: { assignments: [[3, 1]] } },
+      { type: "DamageDealt", data: { source_id: 1, target: { Player: 0 }, amount: 3 } },
+      { type: "SpellCast", data: { card_id: 9, controller: 0 } },
+    ];
+
+    const steps = normalizeEvents(events, { combatPacing: "cinematic" });
+    expect(steps).toHaveLength(3);
+    expect(steps[0].duration).toBeGreaterThan(EVENT_DURATIONS.BlockersDeclared);
+    expect(steps[1].duration).toBeGreaterThan(EVENT_DURATIONS.DamageDealt);
+    expect(steps[2].duration).toBe(EVENT_DURATIONS.SpellCast);
   });
 
   it("step duration equals max of effect durations", () => {

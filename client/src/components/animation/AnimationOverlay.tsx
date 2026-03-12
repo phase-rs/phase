@@ -228,6 +228,30 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           break;
         }
 
+        case "BlockersDeclared": {
+          if (vfxQuality === "minimal") break;
+
+          for (const [blockerId, attackerId] of event.data.assignments) {
+            const blockerPos = getObjectPosition(blockerId);
+            const attackerPos = getObjectPosition(attackerId);
+            if (!blockerPos || !attackerPos) continue;
+
+            particleRef.current?.projectile(
+              blockerPos.x,
+              blockerPos.y,
+              attackerPos.x,
+              attackerPos.y,
+              260,
+            );
+
+            particleRef.current?.blockClash(
+              (blockerPos.x + attackerPos.x) / 2,
+              (blockerPos.y + attackerPos.y) / 2,
+            );
+          }
+          break;
+        }
+
         case "TurnStarted":
           // Handled directly in dispatch.ts via uiStore.flashTurnBanner
           break;

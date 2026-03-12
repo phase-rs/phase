@@ -31,16 +31,7 @@ class AudioManager {
     this.musicGain = this.ctx.createGain();
     this.musicGain.connect(this.ctx.destination);
 
-    const prefs = usePreferencesStore.getState();
-    if (prefs.masterMuted) {
-      this.sfxGain.gain.value = 0;
-      this.musicGain.gain.value = 0;
-    } else {
-      this.sfxGain.gain.value = prefs.sfxMuted ? 0 : prefs.sfxVolume / 100;
-      this.musicGain.gain.value = prefs.musicMuted
-        ? 0
-        : prefs.musicVolume / 100;
-    }
+    this.applySavedGains();
     this.isWarmedUp = true;
   }
 
@@ -62,7 +53,7 @@ class AudioManager {
     if (!buffer) return;
 
     const prefs = usePreferencesStore.getState();
-    if (prefs.sfxMuted || prefs.masterMuted) return;
+    if (this.computeEffectiveSfxGain(prefs) <= 0) return;
 
     const source = this.ctx.createBufferSource();
     source.buffer = buffer;
@@ -148,7 +139,6 @@ class AudioManager {
   updateVolumes(): void {
     if (!this.sfxGain || !this.musicGain || !this.ctx) return;
 
-    const prefs = usePreferencesStore.getState();
     const now = this.ctx.currentTime;
 
     this.sfxGain.gain.cancelScheduledValues(now);
@@ -157,15 +147,7 @@ class AudioManager {
     this.musicGain.gain.cancelScheduledValues(now);
     this.musicGain.gain.setValueAtTime(this.musicGain.gain.value, now);
 
-    if (prefs.masterMuted) {
-      this.sfxGain.gain.value = 0;
-      this.musicGain.gain.value = 0;
-    } else {
-      this.sfxGain.gain.value = prefs.sfxMuted ? 0 : prefs.sfxVolume / 100;
-      this.musicGain.gain.value = prefs.musicMuted
-        ? 0
-        : prefs.musicVolume / 100;
-    }
+    this.applySavedGains();
   }
 
   /** Stop music, close AudioContext. */
@@ -220,8 +202,7 @@ class AudioManager {
 
     const now = this.ctx.currentTime;
     const prefs = usePreferencesStore.getState();
-    const targetVolume =
-      prefs.masterMuted || prefs.musicMuted ? 0 : prefs.musicVolume / 100;
+    const targetVolume = this.computeEffectiveMusicGain(prefs);
 
     // Fade out current
     this.musicGain.gain.cancelScheduledValues(now);
@@ -256,6 +237,27 @@ class AudioManager {
       return 0;
     }
     return next;
+  }
+
+  private computeEffectiveSfxGain(
+    prefs: ReturnType<typeof usePreferencesStore.getState>,
+  ): number {
+    if (prefs.masterMuted || prefs.sfxMuted) return 0;
+    return (prefs.masterVolume / 100) * (prefs.sfxVolume / 100);
+  }
+
+  private computeEffectiveMusicGain(
+    prefs: ReturnType<typeof usePreferencesStore.getState>,
+  ): number {
+    if (prefs.masterMuted || prefs.musicMuted) return 0;
+    return (prefs.masterVolume / 100) * (prefs.musicVolume / 100);
+  }
+
+  private applySavedGains(): void {
+    if (!this.sfxGain || !this.musicGain) return;
+    const prefs = usePreferencesStore.getState();
+    this.sfxGain.gain.value = this.computeEffectiveSfxGain(prefs);
+    this.musicGain.gain.value = this.computeEffectiveMusicGain(prefs);
   }
 }
 

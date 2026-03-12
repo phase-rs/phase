@@ -6,6 +6,8 @@ import { PreferencesModal } from "../settings/PreferencesModal";
 
 interface ScreenChromeProps {
   onBack?: () => void;
+  settingsOpen?: boolean;
+  onSettingsOpenChange?: (open: boolean) => void;
 }
 
 function BackIcon() {
@@ -43,8 +45,21 @@ function SettingsIcon() {
   );
 }
 
-export function ScreenChrome({ onBack }: ScreenChromeProps) {
-  const [showSettings, setShowSettings] = useState(false);
+export function ScreenChrome({
+  onBack,
+  settingsOpen,
+  onSettingsOpenChange,
+}: ScreenChromeProps) {
+  const [internalShowSettings, setInternalShowSettings] = useState(false);
+  const isSettingsControlled = settingsOpen !== undefined;
+  const showSettings = isSettingsControlled ? settingsOpen : internalShowSettings;
+
+  const setShowSettings = (open: boolean) => {
+    if (!isSettingsControlled) {
+      setInternalShowSettings(open);
+    }
+    onSettingsOpenChange?.(open);
+  };
 
   return (
     <>

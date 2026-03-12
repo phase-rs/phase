@@ -276,6 +276,41 @@ pub fn handle_cast_spell(
     )
 }
 
+/// Returns true if the spell has at least one legal target (or requires no targets).
+/// Used by phase-ai's legal_actions to avoid including uncastable spells in the action set.
+pub fn spell_has_legal_targets(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+) -> bool {
+    // Aura spells target via the Enchant keyword rather than the effect's target field.
+    let is_aura = obj.card_types.subtypes.iter().any(|s| s == "Aura");
+    if is_aura {
+        let enchant_filter = obj.keywords.iter().find_map(|k| {
+            if let crate::types::keywords::Keyword::Enchant(filter) = k {
+                Some(filter.clone())
+            } else {
+                None
+            }
+        });
+        return enchant_filter.map_or(false, |filter| {
+            !targeting::find_legal_targets_typed(state, &filter, player, obj.id).is_empty()
+        });
+    }
+
+    let ability_def = match obj.abilities.first() {
+        Some(a) => a,
+        None => return true, // Vanilla permanent needs no targets
+    };
+
+    if !has_targeting_requirement(ability_def) {
+        return true;
+    }
+
+    let valid_tgts = get_valid_tgts_string(ability_def);
+    !targeting::find_legal_targets(state, &valid_tgts, player, obj.id).is_empty()
+}
+
 /// Check if an ability definition has a targeting requirement.
 fn has_targeting_requirement(def: &AbilityDefinition) -> bool {
     use crate::types::ability::TargetFilter;

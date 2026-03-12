@@ -7,6 +7,7 @@ import { LobbyView } from "../components/lobby/LobbyView";
 import { WaitingScreen } from "../components/lobby/WaitingScreen";
 import { DeckGallery } from "../components/menu/DeckGallery";
 import { MenuParticles } from "../components/menu/MenuParticles";
+import { ServerOfflineDialog } from "../components/multiplayer/ServerOfflineDialog";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX, listSavedDeckNames } from "../constants/storage";
 import { STARTER_DECKS } from "../data/starterDecks";
 import { parseRoomCode } from "../network/connection";
@@ -49,9 +50,17 @@ export function MultiplayerPage() {
   const [hostGameCode, setHostGameCode] = useState<string | null>(null);
   const [hostIsPublic, setHostIsPublic] = useState(true);
   const [connectionMode, setConnectionMode] = useState<ConnectionMode>("server");
+  const [showSettings, setShowSettings] = useState(false);
+  const [showServerOfflineDialog, setShowServerOfflineDialog] = useState(false);
   const hostWsRef = useRef<WebSocket | null>(null);
 
   const serverAddress = useMultiplayerStore((s) => s.serverAddress);
+
+  const fallbackToP2PMode = useCallback(() => {
+    setConnectionMode("p2p");
+    setView("lobby");
+    setShowServerOfflineDialog(true);
+  }, []);
 
   useEffect(() => {
     const names = listSavedDeckNames();
@@ -142,10 +151,12 @@ export function MultiplayerPage() {
       };
 
       ws.onerror = () => {
-        console.error("Failed to connect to server");
+        ws.close();
+        hostWsRef.current = null;
+        fallbackToP2PMode();
       };
     },
-    [activeDeckName, serverAddress, navigate],
+    [activeDeckName, serverAddress, navigate, fallbackToP2PMode],
   );
 
   const handleHostP2P = useCallback(() => {
@@ -209,10 +220,23 @@ export function MultiplayerPage() {
     }
   };
 
+  const handleServerOffline = useCallback(() => {
+    fallbackToP2PMode();
+  }, [fallbackToP2PMode]);
+
+  const handleOpenSettings = useCallback(() => {
+    setShowServerOfflineDialog(false);
+    setShowSettings(true);
+  }, []);
+
   return (
     <div className="relative flex min-h-screen flex-col items-center justify-center">
       <MenuParticles />
-      <ScreenChrome onBack={handleBack} />
+      <ScreenChrome
+        onBack={handleBack}
+        settingsOpen={showSettings}
+        onSettingsOpenChange={setShowSettings}
+      />
 
       {view === "deck-select" && (
         <div className="relative z-10 flex w-full justify-center py-8">
@@ -234,6 +258,8 @@ export function MultiplayerPage() {
           onJoinGame={handleJoinWithPassword}
           activeDeckName={activeDeckName}
           onChangeDeck={() => setView("deck-select")}
+          connectionMode={connectionMode}
+          onServerOffline={handleServerOffline}
         />
       )}
 
@@ -252,6 +278,13 @@ export function MultiplayerPage() {
           onCancel={handleCancelHost}
         />
       )}
+
+      <ServerOfflineDialog
+        isOpen={showServerOfflineDialog}
+        serverAddress={serverAddress}
+        onOpenSettings={handleOpenSettings}
+        onClose={() => setShowServerOfflineDialog(false)}
+      />
     </div>
   );
 }

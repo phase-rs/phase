@@ -334,7 +334,13 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             for &card_id in &bottom_cards {
                 player_state.library.push(card_id);
             }
-            WaitingFor::Priority { player: p }
+            // Execute any continuation saved when this choice interrupted an ability chain
+            if let Some(cont) = state.pending_continuation.take() {
+                let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
+                state.waiting_for.clone()
+            } else {
+                WaitingFor::Priority { player: p }
+            }
         }
         // Dig: player selects keep_count cards for hand, rest go to graveyard
         (
@@ -368,7 +374,12 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             for &obj_id in &to_graveyard {
                 zones::move_to_zone(state, obj_id, Zone::Graveyard, &mut events);
             }
-            WaitingFor::Priority { player: p }
+            if let Some(cont) = state.pending_continuation.take() {
+                let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
+                state.waiting_for.clone()
+            } else {
+                WaitingFor::Priority { player: p }
+            }
         }
         // Surveil: player selects cards to put in GRAVEYARD, rest stay on top
         (
@@ -386,7 +397,12 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 }
             }
             // Cards not in to_graveyard stay on top of library (already there)
-            WaitingFor::Priority { player: p }
+            if let Some(cont) = state.pending_continuation.take() {
+                let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
+                state.waiting_for.clone()
+            } else {
+                WaitingFor::Priority { player: p }
+            }
         }
         (WaitingFor::Priority { player }, GameAction::PlayFaceDown { card_id }) => {
             if state.priority_player != *player {

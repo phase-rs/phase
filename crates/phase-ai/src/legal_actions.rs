@@ -1,3 +1,4 @@
+use engine::game::casting::spell_has_legal_targets;
 use engine::game::combat::AttackTarget;
 use engine::game::game_object::GameObject;
 use engine::game::mana_payment;
@@ -115,7 +116,9 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
     // Castable spells from hand
     for &obj_id in &p.hand {
         if let Some(obj) = state.objects.get(&obj_id) {
-            if can_cast(state, obj, player, is_main_phase, stack_empty, is_active) {
+            if can_cast(state, obj, player, is_main_phase, stack_empty, is_active)
+                && spell_has_legal_targets(state, obj, player)
+            {
                 actions.push(GameAction::CastSpell {
                     card_id: obj.card_id,
                     targets: Vec::new(),

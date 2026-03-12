@@ -1,6 +1,11 @@
 import type { GameEvent } from "../adapter/types";
 import type { AnimationStep, StepEffect } from "./types";
-import { DEFAULT_DURATION, EVENT_DURATIONS } from "./types";
+import {
+  COMBAT_PACING_MULTIPLIERS,
+  DEFAULT_DURATION,
+  EVENT_DURATIONS,
+  type CombatPacing,
+} from "./types";
 
 // ---------------------------------------------------------------------------
 // Step classification sets
@@ -38,6 +43,10 @@ const MERGE_TYPES = new Set(["ZoneChanged", "LifeChanged"]);
 // ---------------------------------------------------------------------------
 
 type GroupingStrategy = (effect: StepEffect, lastStep: AnimationStep) => boolean;
+
+interface NormalizeEventsOptions {
+  combatPacing?: CombatPacing;
+}
 
 /** Group consecutive events of the same type (e.g. multiple creatures dying). */
 function sameTypeGrouping(effect: StepEffect, lastStep: AnimationStep): boolean {
@@ -79,8 +88,16 @@ const GROUPING_STRATEGIES: Map<string, GroupingStrategy> = new Map([
 // Step construction helpers
 // ---------------------------------------------------------------------------
 
-function toEffect(event: GameEvent): StepEffect {
-  return { event, duration: EVENT_DURATIONS[event.type] ?? DEFAULT_DURATION };
+const COMBAT_PACED_EVENT_TYPES = new Set(["BlockersDeclared", "DamageDealt"]);
+
+function toEffect(event: GameEvent, combatPacing: CombatPacing): StepEffect {
+  const baseDuration = EVENT_DURATIONS[event.type] ?? DEFAULT_DURATION;
+  if (!COMBAT_PACED_EVENT_TYPES.has(event.type)) {
+    return { event, duration: baseDuration };
+  }
+
+  const pacedDuration = Math.round(baseDuration * COMBAT_PACING_MULTIPLIERS[combatPacing]);
+  return { event, duration: pacedDuration };
 }
 
 function stepDuration(effects: StepEffect[]): number {
@@ -91,13 +108,17 @@ function stepDuration(effects: StepEffect[]): number {
 // Main normalizer
 // ---------------------------------------------------------------------------
 
-export function normalizeEvents(events: GameEvent[]): AnimationStep[] {
+export function normalizeEvents(
+  events: GameEvent[],
+  options?: NormalizeEventsOptions,
+): AnimationStep[] {
+  const combatPacing = options?.combatPacing ?? "normal";
   const steps: AnimationStep[] = [];
 
   for (const event of events) {
     if (NON_VISUAL_EVENTS.has(event.type)) continue;
 
-    const effect = toEffect(event);
+    const effect = toEffect(event, combatPacing);
 
     if (OWN_STEP_TYPES.has(event.type)) {
       steps.push({ effects: [effect], duration: effect.duration });

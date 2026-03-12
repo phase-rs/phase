@@ -221,6 +221,12 @@ pub struct GameState {
     pub triggers_fired_this_turn: HashSet<(ObjectId, usize)>,
     #[serde(default)]
     pub triggers_fired_this_game: HashSet<(ObjectId, usize)>,
+
+    // Pending ability continuation after a player choice (Scry/Dig/Surveil).
+    // When resolve_ability_chain pauses mid-chain for a choice state, the remaining
+    // sub-ability is stored here and executed after the player responds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_continuation: Option<Box<crate::types::ability::ResolvedAbility>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -277,6 +283,7 @@ impl GameState {
             priority_passes: BTreeSet::new(),
             triggers_fired_this_turn: HashSet::new(),
             triggers_fired_this_game: HashSet::new(),
+            pending_continuation: None,
         }
     }
 

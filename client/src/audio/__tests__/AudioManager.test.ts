@@ -81,6 +81,7 @@ describe("AudioManager", () => {
     // Reset preferences to defaults
     act(() => {
       usePreferencesStore.setState({
+        masterVolume: 100,
         sfxVolume: 70,
         musicVolume: 40,
         sfxMuted: false,
@@ -286,6 +287,26 @@ describe("AudioManager", () => {
 
     expect(sfxGain.gain.value).toBe(0.5);
     expect(musicGain.gain.value).toBe(0.8);
+  });
+
+  it("updateVolumes applies masterVolume as a global multiplier", () => {
+    audioManager.warmUp();
+
+    act(() => {
+      usePreferencesStore.setState({
+        masterVolume: 50,
+        sfxVolume: 50,
+        musicVolume: 80,
+      });
+    });
+
+    audioManager.updateVolumes();
+
+    const sfxGain = mockCreateGain.mock.results[0].value;
+    const musicGain = mockCreateGain.mock.results[1].value;
+
+    expect(sfxGain.gain.value).toBe(0.25);
+    expect(musicGain.gain.value).toBe(0.4);
   });
 
   it("updateVolumes sets gains to 0 when masterMuted", () => {

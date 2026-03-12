@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import type { Phase } from "../adapter/types";
-import type { AnimationSpeed, VfxQuality } from "../animation/types";
+import type { AnimationSpeed, CombatPacing, VfxQuality } from "../animation/types";
 
 export type CardSizePreference = "small" | "medium" | "large";
 export type HudLayout = "inline" | "floating";
@@ -20,7 +20,9 @@ interface PreferencesState {
   boardBackground: BoardBackground;
   vfxQuality: VfxQuality;
   animationSpeed: AnimationSpeed;
+  combatPacing: CombatPacing;
   phaseStops: Phase[];
+  masterVolume: number;
   sfxVolume: number;
   musicVolume: number;
   sfxMuted: boolean;
@@ -37,7 +39,9 @@ interface PreferencesActions {
   setBoardBackground: (bg: BoardBackground) => void;
   setVfxQuality: (quality: VfxQuality) => void;
   setAnimationSpeed: (speed: AnimationSpeed) => void;
+  setCombatPacing: (pacing: CombatPacing) => void;
   setPhaseStops: (stops: Phase[]) => void;
+  setMasterVolume: (vol: number) => void;
   setSfxVolume: (vol: number) => void;
   setMusicVolume: (vol: number) => void;
   setSfxMuted: (muted: boolean) => void;
@@ -56,7 +60,9 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       boardBackground: "auto-wubrg",
       vfxQuality: "full",
       animationSpeed: "normal",
+      combatPacing: "normal",
       phaseStops: [],
+      masterVolume: 100,
       sfxVolume: 70,
       musicVolume: 40,
       sfxMuted: false,
@@ -71,7 +77,9 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setBoardBackground: (bg) => set({ boardBackground: bg }),
       setVfxQuality: (quality) => set({ vfxQuality: quality }),
       setAnimationSpeed: (speed) => set({ animationSpeed: speed }),
+      setCombatPacing: (pacing) => set({ combatPacing: pacing }),
       setPhaseStops: (stops) => set({ phaseStops: stops }),
+      setMasterVolume: (vol) => set({ masterVolume: vol }),
       setSfxVolume: (vol) => set({ sfxVolume: vol }),
       setMusicVolume: (vol) => set({ musicVolume: vol }),
       setSfxMuted: (muted) => set({ sfxMuted: muted }),

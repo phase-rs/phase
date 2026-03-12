@@ -14,6 +14,7 @@ interface LobbyViewProps {
   activeDeckName: string | null;
   onChangeDeck: () => void;
   connectionMode?: "server" | "p2p";
+  onServerOffline?: () => void;
 }
 
 const FORMAT_FILTERS: { value: GameFormat | null; label: string }[] = [
@@ -31,6 +32,7 @@ export function LobbyView({
   activeDeckName,
   onChangeDeck,
   connectionMode,
+  onServerOffline,
 }: LobbyViewProps) {
   const isServer = connectionMode !== "p2p";
   const isP2P = connectionMode === "p2p";
@@ -47,11 +49,23 @@ export function LobbyView({
     // P2P mode doesn't need server lobby connection
     if (isP2P) return;
 
+    let connected = false;
+    let isCleaningUp = false;
+    let notifiedOffline = false;
+    const notifyServerOffline = () => {
+      if (connected || isCleaningUp || notifiedOffline) {
+        return;
+      }
+      notifiedOffline = true;
+      onServerOffline?.();
+    };
+
     // Connect to server lobby for game list subscription
     const ws = new WebSocket(serverAddress);
     wsRef.current = ws;
 
     ws.onopen = () => {
+      connected = true;
       ws.send(JSON.stringify({ type: "SubscribeLobby" }));
     };
 
@@ -89,17 +103,22 @@ export function LobbyView({
     };
 
     ws.onerror = () => {
-      // Connection failed — games list stays empty
+      notifyServerOffline();
+    };
+
+    ws.onclose = () => {
+      notifyServerOffline();
     };
 
     return () => {
+      isCleaningUp = true;
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "UnsubscribeLobby" }));
       }
       ws.close();
       wsRef.current = null;
     };
-  }, [serverAddress, isP2P]);
+  }, [serverAddress, isP2P, onServerOffline]);
 
   const handleJoinFromList = useCallback(
     (code: string) => {
