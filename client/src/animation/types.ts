@@ -1,3 +1,5 @@
+import type { GameEvent } from "../adapter/types";
+
 export type VfxQuality = "full" | "reduced" | "minimal";
 
 export type AnimationSpeed = "slow" | "normal" | "fast" | "instant";
@@ -10,8 +12,7 @@ export const SPEED_MULTIPLIERS: Record<AnimationSpeed, number> = {
 };
 
 export interface StepEffect {
-  type: string;
-  data: unknown;
+  event: GameEvent;
   duration: number;
 }
 
@@ -24,7 +25,7 @@ export type PositionSnapshot = Map<number, DOMRect>;
 
 export const EVENT_DURATIONS: Record<string, number> = {
   ZoneChanged: 400,
-  DamageDealt: 300,
+  DamageDealt: 600,
   LifeChanged: 300,
   SpellCast: 500,
   CreatureDestroyed: 400,
@@ -33,7 +34,6 @@ export const EVENT_DURATIONS: Record<string, number> = {
   CounterRemoved: 200,
   PermanentTapped: 200,
   PermanentUntapped: 200,
-  AttackersDeclared: 300,
   BlockersDeclared: 300,
 };
 

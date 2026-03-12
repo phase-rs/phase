@@ -11,7 +11,7 @@ import { useGameDispatch } from "../useGameDispatch";
 vi.mock("../../animation/eventNormalizer", () => ({
   normalizeEvents: vi.fn((events: GameEvent[]) =>
     events.length > 0
-      ? [{ effects: [{ type: "DamageDealt", data: {}, duration: 100 }], duration: 100 }]
+      ? [{ effects: [{ event: { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 3 } }, duration: 100 }], duration: 100 }]
       : [],
   ),
 }));

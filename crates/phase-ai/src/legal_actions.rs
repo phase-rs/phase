@@ -189,17 +189,6 @@ impl AvailableMana {
         self.white + self.blue + self.black + self.red + self.green + self.colorless
     }
 
-    fn count(&self, color: ManaType) -> usize {
-        match color {
-            ManaType::White => self.white,
-            ManaType::Blue => self.blue,
-            ManaType::Black => self.black,
-            ManaType::Red => self.red,
-            ManaType::Green => self.green,
-            ManaType::Colorless => self.colorless,
-        }
-    }
-
     fn spend_color(&mut self, color: ManaType) -> bool {
         let slot = match color {
             ManaType::White => &mut self.white,

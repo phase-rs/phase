@@ -209,9 +209,9 @@ describe("AudioManager", () => {
     mockCreateGain.mockClear();
 
     audioManager.playSfxForStep([
-      { type: "CreatureDestroyed", data: null, duration: 400 },
-      { type: "CreatureDestroyed", data: null, duration: 400 },
-      { type: "CreatureDestroyed", data: null, duration: 400 },
+      { event: { type: "CreatureDestroyed", data: { object_id: 1 } }, duration: 400 },
+      { event: { type: "CreatureDestroyed", data: { object_id: 2 } }, duration: 400 },
+      { event: { type: "CreatureDestroyed", data: { object_id: 3 } }, duration: 400 },
     ]);
 
     // Single consolidated sound, not 3 separate ones
@@ -228,8 +228,8 @@ describe("AudioManager", () => {
     mockCreateBufferSource.mockClear();
 
     audioManager.playSfxForStep([
-      { type: "DamageDealt", data: null, duration: 300 },
-      { type: "LifeChanged", data: null, duration: 300 },
+      { event: { type: "DamageDealt", data: { source_id: 1, target: { Player: 0 }, amount: 3 } }, duration: 600 },
+      { event: { type: "LifeChanged", data: { player_id: 0, amount: -3 } }, duration: 600 },
     ]);
 
     // Two different SFX types -> two sounds

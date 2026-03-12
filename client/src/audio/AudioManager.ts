@@ -86,7 +86,7 @@ class AudioManager {
   playSfxForStep(effects: StepEffect[]): void {
     const typeCounts = new Map<string, number>();
     for (const effect of effects) {
-      typeCounts.set(effect.type, (typeCounts.get(effect.type) ?? 0) + 1);
+      typeCounts.set(effect.event.type, (typeCounts.get(effect.event.type) ?? 0) + 1);
     }
 
     for (const [type, count] of typeCounts) {

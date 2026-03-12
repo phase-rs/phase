@@ -24,6 +24,14 @@ describe("normalizeEvents", () => {
     expect(normalizeEvents(events)).toEqual([]);
   });
 
+  it("AttackersDeclared is non-visual and produces no steps", () => {
+    const events: GameEvent[] = [
+      { type: "AttackersDeclared", data: { attacker_ids: [1, 2], defending_player: 1 } },
+    ];
+
+    expect(normalizeEvents(events)).toEqual([]);
+  });
+
   it("SpellCast always starts a new step", () => {
     const events: GameEvent[] = [
       { type: "SpellCast", data: { card_id: 1, controller: 0 } },
@@ -31,21 +39,45 @@ describe("normalizeEvents", () => {
 
     const steps = normalizeEvents(events);
     expect(steps).toHaveLength(1);
-    expect(steps[0].effects[0].type).toBe("SpellCast");
+    expect(steps[0].effects[0].event.type).toBe("SpellCast");
     expect(steps[0].duration).toBe(500);
   });
 
-  it("consecutive DamageDealt events group into one step", () => {
+  it("DamageDealt: attacker and its blockers fight simultaneously (engagement grouping)", () => {
+    // Attacker 1 hits blocker 2; blocker 2 hits attacker 1 back
     const events: GameEvent[] = [
       { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 3 } },
-      { type: "DamageDealt", data: { source_id: 1, target: { Object: 3 }, amount: 2 } },
-      { type: "DamageDealt", data: { source_id: 4, target: { Player: 0 }, amount: 5 } },
+      { type: "DamageDealt", data: { source_id: 2, target: { Object: 1 }, amount: 2 } },
     ];
 
     const steps = normalizeEvents(events);
     expect(steps).toHaveLength(1);
-    expect(steps[0].effects).toHaveLength(3);
-    expect(steps[0].duration).toBe(300);
+    expect(steps[0].effects).toHaveLength(2);
+  });
+
+  it("DamageDealt: each attacker's engagement is a separate step", () => {
+    // Attacker 1 hits blocker 2; unrelated attacker 4 hits player
+    const events: GameEvent[] = [
+      { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 3 } },
+      { type: "DamageDealt", data: { source_id: 4, target: { Player: 0 }, amount: 5 } },
+    ];
+
+    const steps = normalizeEvents(events);
+    expect(steps).toHaveLength(2);
+    expect(steps[0].effects[0].event.type).toBe("DamageDealt");
+    expect(steps[1].effects[0].event.type).toBe("DamageDealt");
+  });
+
+  it("DamageDealt: attacker hitting multiple blockers groups into one engagement", () => {
+    // Attacker 1 deals damage to blockers 2 and 3 (trample / multi-block)
+    const events: GameEvent[] = [
+      { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 2 } },
+      { type: "DamageDealt", data: { source_id: 1, target: { Object: 3 }, amount: 1 } },
+    ];
+
+    const steps = normalizeEvents(events);
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects).toHaveLength(2);
   });
 
   it("consecutive CreatureDestroyed events group into one step (board wipe)", () => {
@@ -91,30 +123,7 @@ describe("normalizeEvents", () => {
 
     const steps = normalizeEvents(events);
     expect(steps).toHaveLength(1);
-    expect(steps[0].effects[0].type).toBe("TurnStarted");
-  });
-
-  it("AttackersDeclared creates one step per attacker for staggered animation", () => {
-    const events: GameEvent[] = [
-      { type: "AttackersDeclared", data: { attacker_ids: [1, 2], defending_player: 1 } },
-    ];
-
-    const steps = normalizeEvents(events);
-    expect(steps).toHaveLength(2);
-    expect(steps[0].effects[0].type).toBe("AttackersDeclared");
-    expect(steps[0].effects[0].data).toEqual({ attacker_ids: [1], defending_player: 1 });
-    expect(steps[1].effects[0].data).toEqual({ attacker_ids: [2], defending_player: 1 });
-    expect(steps[0].duration).toBe(300);
-  });
-
-  it("AttackersDeclared with single attacker creates one step", () => {
-    const events: GameEvent[] = [
-      { type: "AttackersDeclared", data: { attacker_ids: [5], defending_player: 0 } },
-    ];
-
-    const steps = normalizeEvents(events);
-    expect(steps).toHaveLength(1);
-    expect(steps[0].effects[0].data).toEqual({ attacker_ids: [5], defending_player: 0 });
+    expect(steps[0].effects[0].event.type).toBe("TurnStarted");
   });
 
   it("BlockersDeclared gets its own step", () => {
@@ -124,7 +133,7 @@ describe("normalizeEvents", () => {
 
     const steps = normalizeEvents(events);
     expect(steps).toHaveLength(1);
-    expect(steps[0].effects[0].type).toBe("BlockersDeclared");
+    expect(steps[0].effects[0].event.type).toBe("BlockersDeclared");
     expect(steps[0].duration).toBe(300);
   });
 
@@ -156,6 +165,7 @@ describe("normalizeEvents", () => {
       { type: "SpellCast", data: { card_id: 1, controller: 0 } },
       { type: "ZoneChanged", data: { object_id: 1, from: "Hand", to: "Stack" } },
       { type: "PriorityPassed", data: { player_id: 1 } },
+      // Attacker 1 hits blockers 2 and 3 (same engagement)
       { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 3 } },
       { type: "DamageDealt", data: { source_id: 1, target: { Object: 3 }, amount: 2 } },
       { type: "LifeChanged", data: { player_id: 1, amount: -5 } },
@@ -165,7 +175,7 @@ describe("normalizeEvents", () => {
 
     const steps = normalizeEvents(events);
     // Step 1: SpellCast + ZoneChanged
-    // Step 2: DamageDealt x2 + LifeChanged
+    // Step 2: DamageDealt x2 (same engagement) + LifeChanged
     // Step 3: CreatureDestroyed x2
     expect(steps).toHaveLength(3);
     expect(steps[0].effects).toHaveLength(2);

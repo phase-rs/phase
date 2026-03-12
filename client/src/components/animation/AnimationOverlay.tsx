@@ -108,25 +108,21 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
 
   const processEffect = useCallback(
     (effect: StepEffect) => {
-      const data = effect.data as Record<string, unknown>;
+      const { event } = effect;
 
-      switch (effect.type) {
+      switch (event.type) {
         case "DamageDealt": {
-          const target = data.target as
-            | { Object: number }
-            | { Player: number }
-            | undefined;
-          const amount = (data.amount as number) ?? 0;
+          const { source_id, target, amount } = event.data;
           let pos = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
           let isPlayerTarget = false;
 
-          if (target && "Object" in target) {
+          if ("Object" in target) {
             const objPos = getObjectPosition(target.Object);
             if (objPos) pos = objPos;
             if (vfxQuality !== "minimal") {
               particleRef.current?.damageFlash(pos.x, pos.y, amount);
             }
-          } else if (target && "Player" in target) {
+          } else if ("Player" in target) {
             isPlayerTarget = true;
             pos = getPlayerHudPosition(target.Player);
             if (vfxQuality !== "minimal") {
@@ -134,48 +130,43 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             }
           }
 
-          // Floating number
+          // Fire attack burst + projectile from source creature toward target
+          if (vfxQuality !== "minimal") {
+            const sourcePos = getObjectPosition(source_id);
+            if (sourcePos) {
+              particleRef.current?.attackBurst(sourcePos.x, sourcePos.y);
+              particleRef.current?.projectile(sourcePos.x, sourcePos.y, pos.x, pos.y, 250);
+            }
+          }
+
           const id = ++floatIdCounter;
           setActiveFloats((prev) => [
             ...prev,
             { id, value: -amount, position: pos, color: "#ef4444" },
           ]);
 
-          // Screen shake (full quality only)
           if (vfxQuality === "full" && containerRef.current) {
-            const intensity =
-              amount >= 7 ? "heavy" : amount >= 4 ? "medium" : "light";
+            const intensity = amount >= 7 ? "heavy" : amount >= 4 ? "medium" : "light";
             applyScreenShake(containerRef.current, intensity, speedMultiplier);
           }
 
-          // Damage vignette for player damage
           if (isPlayerTarget) {
             setActiveVignette({ damageAmount: amount });
-            setTimeout(
-              () => setActiveVignette(null),
-              500 * speedMultiplier,
-            );
+            setTimeout(() => setActiveVignette(null), 500 * speedMultiplier);
           }
           break;
         }
 
         case "LifeChanged": {
-          const amount = (data.amount as number) ?? 0;
-          const playerId = (data.player_id as number) ?? 0;
-          const { x, y } = getPlayerHudPosition(playerId);
+          const { player_id, amount } = event.data;
+          const { x, y } = getPlayerHudPosition(player_id);
 
           const id = ++floatIdCounter;
           setActiveFloats((prev) => [
             ...prev,
-            {
-              id,
-              value: amount,
-              position: { x, y },
-              color: amount > 0 ? "#22c55e" : "#ef4444",
-            },
+            { id, value: amount, position: { x, y }, color: amount > 0 ? "#22c55e" : "#ef4444" },
           ]);
 
-          // Heal particle effect for life gain
           if (amount > 0 && vfxQuality !== "minimal") {
             particleRef.current?.healEffect(x, y, amount);
           }
@@ -184,106 +175,54 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
 
         case "CreatureDestroyed":
         case "PermanentSacrificed": {
-          const objectId = data.object_id as number | undefined;
-          if (objectId != null) {
-            // Explosion particle effect
-            const pos = getObjectPosition(objectId);
-            if (pos && vfxQuality !== "minimal") {
-              const gameState = useGameStore.getState().gameState;
-              const colors = gameState?.objects[objectId]?.color ?? [];
-              const explosionColor = colors.length > 0 ? hexToRgb(getCardColors(colors)[0]) : undefined;
-              particleRef.current?.explosion(pos.x, pos.y, explosionColor);
-            }
+          const { object_id } = event.data;
+          const pos = getObjectPosition(object_id);
+          if (pos && vfxQuality !== "minimal") {
+            const gameState = useGameStore.getState().gameState;
+            const colors = gameState?.objects[object_id]?.color ?? [];
+            const explosionColor = colors.length > 0 ? hexToRgb(getCardColors(colors)[0]) : undefined;
+            particleRef.current?.explosion(pos.x, pos.y, explosionColor);
+          }
 
-            // Death shatter (full/reduced quality) or death clone (minimal)
-            const snapshotRect = currentSnapshot.get(objectId);
-            const registryRect = getPosition(objectId);
-            const rect = snapshotRect ?? registryRect;
-            if (rect) {
-              const gameState = useGameStore.getState().gameState;
-              const cardName = gameState?.objects[objectId]?.name ?? "Unknown";
+          const snapshotRect = currentSnapshot.get(object_id);
+          const registryRect = getPosition(object_id);
+          const rect = snapshotRect ?? registryRect;
+          if (rect) {
+            const gameState = useGameStore.getState().gameState;
+            const cardName = gameState?.objects[object_id]?.name ?? "Unknown";
 
-              if (vfxQuality !== "minimal" && effect.type === "CreatureDestroyed") {
-                // Fetch art_crop image for shatter effect
-                const shatterId = ++shatterIdCounter;
-                fetchCardImageUrl(cardName, 0, "art_crop")
-                  .then((url) => {
-                    setActiveShatters((prev) => [
-                      ...prev,
-                      {
-                        id: shatterId,
-                        position: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-                        imageUrl: url,
-                      },
-                    ]);
-                  })
-                  .catch(() => {
-                    // Fallback to death clone if image fetch fails
-                    setActiveDeathClones((prev) => [
-                      ...prev,
-                      { id: objectId, position: rect, cardName },
-                    ]);
-                  });
-              } else {
-                setActiveDeathClones((prev) => [
-                  ...prev,
-                  { id: objectId, position: rect, cardName },
-                ]);
-              }
+            if (vfxQuality !== "minimal" && event.type === "CreatureDestroyed") {
+              const shatterId = ++shatterIdCounter;
+              fetchCardImageUrl(cardName, 0, "art_crop")
+                .then((url) => {
+                  setActiveShatters((prev) => [
+                    ...prev,
+                    { id: shatterId, position: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, imageUrl: url },
+                  ]);
+                })
+                .catch(() => {
+                  setActiveDeathClones((prev) => [...prev, { id: object_id, position: rect, cardName }]);
+                });
+            } else {
+              setActiveDeathClones((prev) => [...prev, { id: object_id, position: rect, cardName }]);
             }
           }
           break;
         }
 
         case "SpellCast": {
-          const cardId = data.card_id as number | undefined;
-          if (cardId != null) {
-            const pos = getObjectPosition(cardId);
-            if (pos) {
-              // Spell impact with WUBRG color
-              const gameState = useGameStore.getState().gameState;
-              const colors = gameState?.objects[cardId]?.color ?? [];
-              const burstColor = getCardColors(colors)[0] ?? "#06b6d4";
-              if (vfxQuality !== "minimal") {
-                particleRef.current?.spellImpact(pos.x, pos.y, hexToRgb(burstColor));
-              }
-
-              // Cast arc animation (hand -> stack)
-              if (vfxQuality !== "minimal") {
-                const cardName = gameState?.objects[cardId]?.name ?? "";
-                // Stack position is roughly right-center
-                const stackPos = { x: window.innerWidth * 0.75, y: window.innerHeight * 0.4 };
-                const id = ++castArcIdCounter;
-                setActiveCastArcs((prev) => [
-                  ...prev,
-                  { id, from: pos, to: stackPos, cardName, mode: "cast" },
-                ]);
-              }
-            }
-          }
-          break;
-        }
-
-        case "AttackersDeclared": {
-          if (vfxQuality !== "minimal") {
-            const attackerIds = (data.attacker_ids as number[]) ?? [];
-            const defendingPlayer = data.defending_player as number | undefined;
-            const defenderPos = defendingPlayer != null
-              ? getPlayerHudPosition(defendingPlayer)
-              : null;
-            for (const attackerId of attackerIds) {
-              const pos = getObjectPosition(attackerId);
-              if (pos) {
-                particleRef.current?.attackBurst(pos.x, pos.y);
-                // Fire projectile toward the defending player's HUD
-                if (defenderPos) {
-                  particleRef.current?.projectile(
-                    pos.x, pos.y,
-                    defenderPos.x, defenderPos.y,
-                    250,
-                  );
-                }
-              }
+          const { card_id } = event.data;
+          const pos = getObjectPosition(card_id);
+          if (pos) {
+            const gameState = useGameStore.getState().gameState;
+            const colors = gameState?.objects[card_id]?.color ?? [];
+            const burstColor = getCardColors(colors)[0] ?? "#06b6d4";
+            if (vfxQuality !== "minimal") {
+              particleRef.current?.spellImpact(pos.x, pos.y, hexToRgb(burstColor));
+              const cardName = gameState?.objects[card_id]?.name ?? "";
+              const stackPos = { x: window.innerWidth * 0.75, y: window.innerHeight * 0.4 };
+              const id = ++castArcIdCounter;
+              setActiveCastArcs((prev) => [...prev, { id, from: pos, to: stackPos, cardName, mode: "cast" }]);
             }
           }
           break;
@@ -294,76 +233,51 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           break;
 
         case "ZoneChanged": {
-          const toZone = data.to as string | undefined;
-          const fromZone = data.from as string | undefined;
+          const { object_id, from: fromZone, to: toZone } = event.data;
           if (toZone === "Battlefield") {
-            const objectId = data.object_id as number | undefined;
-            if (objectId != null) {
-              const pos = getObjectPosition(objectId);
-              if (pos) {
-                const gameState = useGameStore.getState().gameState;
-                const colors = gameState?.objects[objectId]?.color ?? [];
-                const id = ++revealIdCounter;
-                setActiveReveals((prev) => [
-                  ...prev,
-                  { id, position: pos, colors: getCardColors(colors) },
-                ]);
+            const pos = getObjectPosition(object_id);
+            if (pos) {
+              const gameState = useGameStore.getState().gameState;
+              const colors = gameState?.objects[object_id]?.color ?? [];
+              const id = ++revealIdCounter;
+              setActiveReveals((prev) => [...prev, { id, position: pos, colors: getCardColors(colors) }]);
 
-                // Summon burst particle effect
-                if (vfxQuality !== "minimal") {
-                  const summonColor = colors.length > 0 ? hexToRgb(getCardColors(colors)[0]) : undefined;
-                  particleRef.current?.summonBurst(pos.x, pos.y, summonColor);
-                }
+              if (vfxQuality !== "minimal") {
+                const summonColor = colors.length > 0 ? hexToRgb(getCardColors(colors)[0]) : undefined;
+                particleRef.current?.summonBurst(pos.x, pos.y, summonColor);
 
-                // Resolve-permanent arc (stack -> battlefield)
-                if (fromZone === "Stack" && vfxQuality !== "minimal") {
-                  const cardName = gameState?.objects[objectId]?.name ?? "";
+                if (fromZone === "Stack") {
+                  const cardName = gameState?.objects[object_id]?.name ?? "";
                   const stackPos = { x: window.innerWidth * 0.75, y: window.innerHeight * 0.4 };
                   const arcId = ++castArcIdCounter;
-                  setActiveCastArcs((prev) => [
-                    ...prev,
-                    { id: arcId, from: stackPos, to: pos, cardName, mode: "resolve-permanent" },
-                  ]);
+                  setActiveCastArcs((prev) => [...prev, { id: arcId, from: stackPos, to: pos, cardName, mode: "resolve-permanent" }]);
                 }
               }
             }
           } else if (fromZone === "Stack" && toZone === "Graveyard") {
-            // Non-permanent spell resolved (instant/sorcery -> graveyard)
             if (vfxQuality !== "minimal") {
-              const objectId = data.object_id as number | undefined;
-              if (objectId != null) {
-                const gameState = useGameStore.getState().gameState;
-                const cardName = gameState?.objects[objectId]?.name ?? "";
-                const stackPos = { x: window.innerWidth * 0.75, y: window.innerHeight * 0.4 };
-                const arcId = ++castArcIdCounter;
-                setActiveCastArcs((prev) => [
-                  ...prev,
-                  { id: arcId, from: stackPos, to: stackPos, cardName, mode: "resolve-spell" },
-                ]);
-              }
+              const gameState = useGameStore.getState().gameState;
+              const cardName = gameState?.objects[object_id]?.name ?? "";
+              const stackPos = { x: window.innerWidth * 0.75, y: window.innerHeight * 0.4 };
+              const arcId = ++castArcIdCounter;
+              setActiveCastArcs((prev) => [...prev, { id: arcId, from: stackPos, to: stackPos, cardName, mode: "resolve-spell" }]);
             }
           }
           break;
         }
 
         case "TokenCreated": {
-          const objectId = data.object_id as number | undefined;
-          if (objectId != null) {
-            const pos = getObjectPosition(objectId);
-            if (pos) {
-              const gameState = useGameStore.getState().gameState;
-              const colors = gameState?.objects[objectId]?.color ?? [];
-              const id = ++revealIdCounter;
-              setActiveReveals((prev) => [
-                ...prev,
-                { id, position: pos, colors: getCardColors(colors) },
-              ]);
+          const { object_id } = event.data;
+          const pos = getObjectPosition(object_id);
+          if (pos) {
+            const gameState = useGameStore.getState().gameState;
+            const colors = gameState?.objects[object_id]?.color ?? [];
+            const id = ++revealIdCounter;
+            setActiveReveals((prev) => [...prev, { id, position: pos, colors: getCardColors(colors) }]);
 
-              // Summon burst for tokens
-              if (vfxQuality !== "minimal") {
-                const tokenColor = colors.length > 0 ? hexToRgb(getCardColors(colors)[0]) : undefined;
-                particleRef.current?.summonBurst(pos.x, pos.y, tokenColor);
-              }
+            if (vfxQuality !== "minimal") {
+              const tokenColor = colors.length > 0 ? hexToRgb(getCardColors(colors)[0]) : undefined;
+              particleRef.current?.summonBurst(pos.x, pos.y, tokenColor);
             }
           }
           break;
