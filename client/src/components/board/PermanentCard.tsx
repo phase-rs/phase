@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -61,8 +61,10 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   });
   const isActivatable = activatableAction !== null;
 
-  const exileLinks = useGameStore((s) =>
-    s.gameState?.exile_links?.filter((l) => l.source_id === objectId) ?? [],
+  const allExileLinks = useGameStore((s) => s.gameState?.exile_links);
+  const exileLinks = useMemo(
+    () => allExileLinks?.filter((l) => l.source_id === objectId) ?? [],
+    [allExileLinks, objectId],
   );
 
   // Check if this specific permanent was tapped in the most recent undoable action
