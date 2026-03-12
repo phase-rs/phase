@@ -5,7 +5,8 @@ use super::oracle_target::parse_target;
 use super::oracle_util::{parse_mana_production, parse_number, strip_reminder_text};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ControllerRef, CountValue, DamageAmount, Duration, Effect,
-    ManaProduction, PtValue, StaticDefinition, TargetFilter, TypeFilter,
+    GainLifePlayer, LifeAmount, ManaProduction, PtValue, StaticDefinition, TargetFilter,
+    TypeFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -83,6 +84,12 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
     if let Some(clause) = try_parse_subject_restriction_clause(text) {
         return clause;
     }
+    // "Its controller gains life equal to its power/toughness" — subject must be preserved
+    // because the life recipient is not the caster but the targeted permanent's controller.
+    if let Some(clause) = try_parse_targeted_controller_gain_life(text) {
+        return clause;
+    }
+
     if let Some(stripped) = strip_subject_clause(text) {
         return parse_effect_clause(&stripped);
     }
@@ -154,7 +161,10 @@ fn parse_imperative_effect(text: &str) -> Effect {
         };
         if !after_gain.is_empty() {
             let amount = parse_number(after_gain).map(|(n, _)| n as i32).unwrap_or(1);
-            return Effect::GainLife { amount };
+            return Effect::GainLife {
+                amount: LifeAmount::Fixed(amount),
+                player: GainLifePlayer::Controller,
+            };
         }
     }
 
@@ -1068,6 +1078,33 @@ fn extract_pump_modifiers(
     Some((power?, toughness?))
 }
 
+/// Detect "its controller gains life equal to its power" and similar patterns where
+/// the targeted permanent's controller gains life based on the permanent's stats.
+fn try_parse_targeted_controller_gain_life(text: &str) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    if !lower.starts_with("its controller ") {
+        return None;
+    }
+    if !lower.contains("gain") || !lower.contains("life") {
+        return None;
+    }
+    let amount = if lower.contains("equal to its power") || lower.contains("its power") {
+        LifeAmount::TargetPower
+    } else {
+        // Try to parse a fixed amount: "its controller gains 3 life"
+        let after = &lower["its controller ".len()..];
+        let after = after
+            .strip_prefix("gains ")
+            .or_else(|| after.strip_prefix("gain "))
+            .unwrap_or(after);
+        LifeAmount::Fixed(parse_number(after).map(|(n, _)| n as i32).unwrap_or(1))
+    };
+    Some(parsed_clause(Effect::GainLife {
+        amount,
+        player: GainLifePlayer::TargetedController,
+    }))
+}
+
 fn strip_subject_clause(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
     if !starts_with_subject_prefix(&lower) {
@@ -1258,16 +1295,45 @@ fn parse_signed_pt_component(text: &str) -> Option<PtValue> {
 
 fn try_parse_put_counter(lower: &str, _text: &str) -> Option<Effect> {
     // "put N {type} counter(s) on {target}"
-    let after_put = &lower[4..].trim();
+    let after_put = lower[4..].trim();
     let (count, rest) = parse_number(after_put)?;
-    // Next word is counter type
+    // Next word is counter type (e.g. "+1/+1", "loyalty", "charge")
     let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-    let counter_type = rest[..type_end].to_string();
+    let raw_type = &rest[..type_end];
+    let counter_type = normalize_counter_type(raw_type);
+
+    // Skip "counter" or "counters" keyword, then parse target after "on"
+    let after_type = rest[type_end..].trim_start();
+    let after_counter_word = after_type
+        .strip_prefix("counters")
+        .or_else(|| after_type.strip_prefix("counter"))
+        .map(|s| s.trim_start())
+        .unwrap_or(after_type);
+
+    let target = if let Some(target_text) = after_counter_word.strip_prefix("on ") {
+        if target_text.starts_with("this ") || target_text == "it" || target_text.starts_with("it ") || target_text.starts_with("itself") {
+            TargetFilter::SelfRef
+        } else {
+            parse_target(target_text).0
+        }
+    } else {
+        TargetFilter::SelfRef
+    };
+
     Some(Effect::PutCounter {
         counter_type,
         count: count as i32,
-        target: TargetFilter::Any,
+        target,
     })
+}
+
+/// Normalize oracle-text counter type strings to canonical engine names.
+fn normalize_counter_type(raw: &str) -> String {
+    match raw {
+        "+1/+1" => "P1P1".to_string(),
+        "-1/-1" => "M1M1".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
@@ -2174,7 +2240,7 @@ mod tests {
     #[test]
     fn effect_gain_life() {
         let e = parse_effect("You gain 3 life");
-        assert!(matches!(e, Effect::GainLife { amount: 3 }));
+        assert!(matches!(e, Effect::GainLife { amount: LifeAmount::Fixed(3), .. }));
     }
 
     #[test]
@@ -2221,12 +2287,28 @@ mod tests {
     #[test]
     fn effect_chain_revitalize() {
         let def = parse_effect_chain("You gain 3 life. Draw a card.", AbilityKind::Spell);
-        assert!(matches!(def.effect, Effect::GainLife { amount: 3 }));
+        assert!(matches!(def.effect, Effect::GainLife { amount: LifeAmount::Fixed(3), .. }));
         assert!(def.sub_ability.is_some());
         assert!(matches!(
             def.sub_ability.unwrap().effect,
             Effect::Draw { count: 1 }
         ));
+    }
+
+    #[test]
+    fn effect_its_controller_gains_life_equal_to_power() {
+        // Swords to Plowshares: "Its controller gains life equal to its power."
+        let e = parse_effect("Its controller gains life equal to its power");
+        assert!(
+            matches!(
+                e,
+                Effect::GainLife {
+                    amount: LifeAmount::TargetPower,
+                    player: GainLifePlayer::TargetedController
+                }
+            ),
+            "Expected TargetPower + TargetedController, got {e:?}"
+        );
     }
 
     #[test]
@@ -3006,5 +3088,85 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn put_counter_this_creature_is_self_ref() {
+        // "Whenever you gain life, put a +1/+1 counter on this creature." (Ajani's Pridemate)
+        let e = parse_effect("put a +1/+1 counter on this creature");
+        assert!(matches!(
+            e,
+            Effect::PutCounter {
+                counter_type: ref ct,
+                count: 1,
+                target: TargetFilter::SelfRef,
+            } if ct == "P1P1"
+        ));
+    }
+
+    #[test]
+    fn put_counter_on_it_is_self_ref() {
+        let e = parse_effect("put a +1/+1 counter on it");
+        assert!(matches!(
+            e,
+            Effect::PutCounter {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn put_counter_on_itself_is_self_ref() {
+        let e = parse_effect("put a +1/+1 counter on itself");
+        assert!(matches!(
+            e,
+            Effect::PutCounter {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn put_counter_on_target_creature_is_typed() {
+        let e = parse_effect("put a +1/+1 counter on target creature");
+        assert!(matches!(
+            e,
+            Effect::PutCounter {
+                target: TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn put_counter_normalizes_plus1plus1_type() {
+        let e = parse_effect("put a +1/+1 counter on this creature");
+        let Effect::PutCounter { counter_type, .. } = e else {
+            panic!("Expected PutCounter");
+        };
+        assert_eq!(counter_type, "P1P1");
+    }
+
+    #[test]
+    fn put_counter_normalizes_minus1minus1_type() {
+        let e = parse_effect("put a -1/-1 counter on this creature");
+        let Effect::PutCounter { counter_type, .. } = e else {
+            panic!("Expected PutCounter");
+        };
+        assert_eq!(counter_type, "M1M1");
+    }
+
+    #[test]
+    fn put_counter_generic_type_passthrough() {
+        let e = parse_effect("put a charge counter on this permanent");
+        let Effect::PutCounter { counter_type, .. } = e else {
+            panic!("Expected PutCounter");
+        };
+        assert_eq!(counter_type, "charge");
     }
 }

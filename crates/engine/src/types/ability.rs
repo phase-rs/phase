@@ -25,6 +25,27 @@ pub enum DamageAmount {
     Variable(String),
 }
 
+/// Who gains life from a GainLife effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GainLifePlayer {
+    /// The ability's controller (default).
+    #[default]
+    Controller,
+    /// The controller of the targeted permanent.
+    TargetedController,
+}
+
+/// How much life is gained — a fixed amount or derived from the targeted permanent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", content = "value")]
+pub enum LifeAmount {
+    /// Gain a specific number of life.
+    Fixed(i32),
+    /// Gain life equal to the targeted permanent's power.
+    TargetPower,
+}
+
 /// Power/toughness value -- either a fixed integer or a variable reference (e.g. "*", "X").
 ///
 /// Custom Deserialize: accepts both the tagged format `{"type":"Fixed","value":2}` (new)
@@ -115,7 +136,10 @@ impl<'de> serde::Deserialize<'de> for CountValue {
 }
 
 /// Mana production descriptor for `Effect::Mana`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+///
+/// Custom Deserialize: accepts both the tagged format `{"type":"Fixed","colors":["White"]}` (new)
+/// and a plain array of `ManaColor` like `["White","Green"]` (legacy, pre-ManaProduction refactor).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum ManaProduction {
     /// Produce an explicit fixed sequence of colored mana symbols (e.g. `{W}{U}`).
@@ -147,6 +171,82 @@ pub enum ManaProduction {
         #[serde(default = "default_count_value_one")]
         count: CountValue,
     },
+}
+
+impl<'de> serde::Deserialize<'de> for ManaProduction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match &value {
+            serde_json::Value::Array(_) => {
+                // Legacy format: plain Vec<ManaColor> like ["White", "Green"]
+                let colors: Vec<ManaColor> =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(ManaProduction::Fixed { colors })
+            }
+            serde_json::Value::Object(_) => {
+                // New tagged format: {"type": "Fixed", "colors": [...]}
+                #[derive(serde::Deserialize)]
+                #[serde(tag = "type")]
+                enum ManaProductionHelper {
+                    Fixed {
+                        #[serde(default)]
+                        colors: Vec<ManaColor>,
+                    },
+                    Colorless {
+                        #[serde(default = "default_count_value_one")]
+                        count: CountValue,
+                    },
+                    AnyOneColor {
+                        #[serde(default = "default_count_value_one")]
+                        count: CountValue,
+                        #[serde(default = "default_all_mana_colors")]
+                        color_options: Vec<ManaColor>,
+                    },
+                    AnyCombination {
+                        #[serde(default = "default_count_value_one")]
+                        count: CountValue,
+                        #[serde(default = "default_all_mana_colors")]
+                        color_options: Vec<ManaColor>,
+                    },
+                    ChosenColor {
+                        #[serde(default = "default_count_value_one")]
+                        count: CountValue,
+                    },
+                }
+                let helper: ManaProductionHelper =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(match helper {
+                    ManaProductionHelper::Fixed { colors } => ManaProduction::Fixed { colors },
+                    ManaProductionHelper::Colorless { count } => {
+                        ManaProduction::Colorless { count }
+                    }
+                    ManaProductionHelper::AnyOneColor {
+                        count,
+                        color_options,
+                    } => ManaProduction::AnyOneColor {
+                        count,
+                        color_options,
+                    },
+                    ManaProductionHelper::AnyCombination {
+                        count,
+                        color_options,
+                    } => ManaProduction::AnyCombination {
+                        count,
+                        color_options,
+                    },
+                    ManaProductionHelper::ChosenColor { count } => {
+                        ManaProduction::ChosenColor { count }
+                    }
+                })
+            }
+            _ => Err(serde::de::Error::custom(
+                "expected array or object for ManaProduction",
+            )),
+        }
+    }
 }
 
 /// Duration for temporary effects.
@@ -372,7 +472,10 @@ pub enum Effect {
         count: CountValue,
     },
     GainLife {
-        amount: i32,
+        amount: LifeAmount,
+        /// Who gains the life.
+        #[serde(default)]
+        player: GainLifePlayer,
     },
     LoseLife {
         amount: i32,
@@ -1008,7 +1111,7 @@ mod tests {
             event: ReplacementEvent::DamageDone,
             execute: Some(Box::new(AbilityDefinition {
                 kind: AbilityKind::Spell,
-                effect: Effect::GainLife { amount: 1 },
+                effect: Effect::GainLife { amount: LifeAmount::Fixed(1), player: GainLifePlayer::Controller },
                 cost: None,
                 sub_ability: None,
                 duration: None,
@@ -1202,6 +1305,21 @@ mod tests {
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();
         assert_eq!(effect, deserialized);
+    }
+
+    #[test]
+    fn effect_mana_legacy_vec_deserializes_as_fixed() {
+        // Legacy format stored produced as Vec<ManaColor> e.g. `["White","Green"]`
+        let legacy_json = r#"{"type":"Mana","produced":["White","Green"]}"#;
+        let deserialized: Effect = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(
+            deserialized,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::White, ManaColor::Green],
+                }
+            }
+        );
     }
 
     #[test]

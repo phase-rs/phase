@@ -96,7 +96,7 @@ phase-server    — Axum WebSocket server for multiplayer
 - **`game/engine.rs`** — Main `apply(state, action) -> ActionResult` function. Pure reducer pattern: takes game state + action, returns events + new waiting_for state.
 - **`game/`** — Game logic modules: `turns`, `priority`, `stack`, `combat`, `combat_damage`, `sba` (state-based actions), `targeting`, `mana_payment`, `mulligan`, `layers` (MTG Rule 613), `triggers`, `replacement`, `static_abilities`, `keywords`, `zones`, `casting`.
 - **`game/effects/`** — Effect handlers: `draw`, `deal_damage`, `destroy`, `pump`, `token`, `counter`, `counters`, `sacrifice`, `discard`, `change_zone`, `life`, `tap_untap`.
-- **`parser/`** — Ability text parser for SVar/SubAbility chain resolution (card file parser behind `forge-compat` feature gate).
+- **`parser/`** — Oracle text parser: converts MTGJSON Oracle text into typed `AbilityDefinition` structs. See `docs/parser-instructions.md` for architecture and contribution guide.
 - **`database/`** — Card database with three loading paths:
   - `CardDatabase::load_json(mtgjson_path, abilities_dir)` — MTGJSON + typed ability JSON
   - `CardDatabase::load(root)` — Forge `.txt` files (requires `forge-compat`)
@@ -105,7 +105,6 @@ phase-server    — Axum WebSocket server for multiplayer
 ### Card Data Format (`data/`)
 
 - **`mtgjson/`** — MTGJSON atomic card data
-- **`abilities/`** — 30K+ individual card JSON files with typed ability definitions (schema: `abilities`, `triggers`, `statics`, `replacements`, `faces`)
 - **`cardsfolder/`** — Forge `.txt` card files (sparse-checked out via `gen-card-data.sh`)
 - **`card-data.json`** → symlinked to `client/public/card-data.json` for runtime use
 
@@ -153,6 +152,10 @@ State is filtered per-player (`filter_state_for_player`) to hide opponent's hand
 - `PORT` — phase-server listen port (default `9374`)
 - `PHASE_DATA_DIR` — Card data root for phase-server (default `"data"`)
 - `PHASE_CARDS_PATH` — Override card data directory for binaries (`coverage-report`, `card-data-export`)
+
+## Documentation (`docs/`)
+
+- **`docs/parser-instructions.md`** — Oracle parser architecture and contribution guide: how to add new effect types, when to intercept before subject stripping, enum patterns, and common pitfalls.
 
 ## Conventions
 

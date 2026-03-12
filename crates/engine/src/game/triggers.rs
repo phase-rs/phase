@@ -264,7 +264,10 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
         | Effect::Attach { target, .. }
         | Effect::Fight { target, .. }
         | Effect::Bounce { target, .. }
-        | Effect::CopySpell { target, .. } => {
+        | Effect::CopySpell { target, .. }
+        | Effect::AddCounter { target, .. }
+        | Effect::RemoveCounter { target, .. }
+        | Effect::PutCounter { target, .. } => {
             if matches!(
                 target,
                 TargetFilter::None | TargetFilter::SelfRef | TargetFilter::Controller
@@ -1385,7 +1388,7 @@ pub mod tests {
     use crate::game::filter::matches_target_filter;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityKind, ControllerRef, TargetFilter, TriggerDefinition, TypeFilter,
+        AbilityKind, ControllerRef, GainLifePlayer, LifeAmount, TargetFilter, TriggerDefinition, TypeFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
@@ -2396,7 +2399,7 @@ pub mod tests {
                 cost: None,
                 sub_ability: Some(Box::new(AbilityDefinition {
                     kind: AbilityKind::Database,
-                    effect: Effect::GainLife { amount: 3 },
+                    effect: Effect::GainLife { amount: LifeAmount::Fixed(3), player: GainLifePlayer::Controller },
                     cost: None,
                     sub_ability: None,
                     duration: None,

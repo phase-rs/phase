@@ -148,9 +148,17 @@ pub fn resolve_ability_chain(
         let _ = resolve_effect(state, ability, events);
     }
 
-    // Follow typed sub_ability chain
+    // Follow typed sub_ability chain, propagating parent targets when sub has none.
+    // This allows sub-abilities like "its controller gains life" to access the object
+    // targeted by the parent (e.g. the exiled creature in Swords to Plowshares).
     if let Some(ref sub) = ability.sub_ability {
-        resolve_ability_chain(state, sub, events, depth + 1)?;
+        if sub.targets.is_empty() && !ability.targets.is_empty() {
+            let mut sub_with_targets = sub.as_ref().clone();
+            sub_with_targets.targets = ability.targets.clone();
+            resolve_ability_chain(state, &sub_with_targets, events, depth + 1)?;
+        } else {
+            resolve_ability_chain(state, sub, events, depth + 1)?;
+        }
     }
 
     Ok(())

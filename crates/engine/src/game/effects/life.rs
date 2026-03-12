@@ -1,25 +1,58 @@
 use std::collections::HashSet;
 
 use crate::game::replacement::{self, ReplacementResult};
-use crate::types::ability::{effect_variant_name, Effect, EffectError, ResolvedAbility, TargetRef};
+use crate::types::ability::{
+    effect_variant_name, Effect, EffectError, GainLifePlayer, LifeAmount, ResolvedAbility,
+    TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 
-/// Gain life for the controller.
+/// Gain life for the controller (or targeted creature's controller when player = TargetedController).
 pub fn resolve_gain(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let amount: i32 = match &ability.effect {
-        Effect::GainLife { amount } => *amount,
+    let (amount, player_kind) = match &ability.effect {
+        Effect::GainLife { amount, player } => (amount, player),
         _ => return Err(EffectError::MissingParam("GainLife amount".to_string())),
     };
 
+    // Resolve the target object (if any) for TargetedController / TargetPower.
+    let target_obj = ability.targets.iter().find_map(|t| {
+        if let TargetRef::Object(id) = t {
+            state.objects.get(id)
+        } else {
+            None
+        }
+    });
+
+    let player_id: PlayerId = match player_kind {
+        GainLifePlayer::TargetedController => target_obj
+            .map(|o| o.controller)
+            .unwrap_or(ability.controller),
+        GainLifePlayer::Controller => ability.controller,
+    };
+
+    let final_amount = match amount {
+        LifeAmount::Fixed(n) => *n,
+        LifeAmount::TargetPower => target_obj.and_then(|o| o.power).unwrap_or(0),
+    };
+
+    if final_amount <= 0 {
+        events.push(GameEvent::EffectResolved {
+            api_type: effect_variant_name(&ability.effect).to_string(),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
     let proposed = ProposedEvent::LifeGain {
-        player_id: ability.controller,
-        amount: amount as u32,
+        player_id,
+        amount: final_amount as u32,
         applied: HashSet::new(),
     };
 
@@ -152,7 +185,7 @@ mod tests {
     fn gain_life_increases_controller_life() {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
-            Effect::GainLife { amount: 5 },
+            Effect::GainLife { amount: LifeAmount::Fixed(5), player: GainLifePlayer::Controller },
             vec![],
             ObjectId(100),
             PlayerId(0),
@@ -184,7 +217,7 @@ mod tests {
     fn gain_life_emits_positive_life_changed() {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
-            Effect::GainLife { amount: 4 },
+            Effect::GainLife { amount: LifeAmount::Fixed(4), player: GainLifePlayer::Controller },
             vec![],
             ObjectId(100),
             PlayerId(0),

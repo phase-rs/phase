@@ -2901,7 +2901,7 @@ mod exile_return_tests {
 mod phase_trigger_regression_tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, TriggerDefinition};
+    use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, GainLifePlayer, LifeAmount, TriggerDefinition};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
@@ -2945,7 +2945,7 @@ mod phase_trigger_regression_tests {
                 phase: Some(Phase::BeginCombat),
                 execute: Some(Box::new(AbilityDefinition {
                     kind: AbilityKind::Activated,
-                    effect: Effect::GainLife { amount: 1 },
+                    effect: Effect::GainLife { amount: LifeAmount::Fixed(1), player: GainLifePlayer::Controller },
                     cost: None,
                     sub_ability: None,
                     target_prompt: None,

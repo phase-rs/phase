@@ -10,10 +10,11 @@ use crate::types::game_state::GameState;
 use crate::types::proposed_event::ProposedEvent;
 
 /// Map counter type string to CounterType enum.
+/// Accepts both canonical names ("P1P1") and oracle text forms ("+1/+1").
 fn parse_counter_type(s: &str) -> CounterType {
     match s {
-        "P1P1" => CounterType::Plus1Plus1,
-        "M1M1" => CounterType::Minus1Minus1,
+        "P1P1" | "+1/+1" => CounterType::Plus1Plus1,
+        "M1M1" | "-1/-1" => CounterType::Minus1Minus1,
         "LOYALTY" => CounterType::Loyalty,
         other => CounterType::Generic(other.to_string()),
     }
@@ -39,57 +40,56 @@ pub fn resolve_add(
         _ => ("P1P1".to_string(), 1),
     };
 
-    for target in &ability.targets {
-        if let TargetRef::Object(obj_id) = target {
-            let proposed = ProposedEvent::AddCounter {
-                object_id: *obj_id,
-                counter_type: counter_type_str.clone(),
-                count: counter_num,
-                applied: HashSet::new(),
-            };
+    let targets = resolve_defined_or_targets(ability);
+    for obj_id in targets {
+        let proposed = ProposedEvent::AddCounter {
+            object_id: obj_id,
+            counter_type: counter_type_str.clone(),
+            count: counter_num,
+            applied: HashSet::new(),
+        };
 
-            match replacement::replace_event(state, proposed, events) {
-                ReplacementResult::Execute(event) => {
-                    if let ProposedEvent::AddCounter {
+        match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(event) => {
+                if let ProposedEvent::AddCounter {
+                    object_id,
+                    counter_type,
+                    count,
+                    ..
+                } = event
+                {
+                    let ct = parse_counter_type(&counter_type);
+                    let obj = state
+                        .objects
+                        .get_mut(&object_id)
+                        .ok_or(EffectError::ObjectNotFound(object_id))?;
+                    let entry = obj.counters.entry(ct.clone()).or_insert(0);
+                    *entry += count;
+
+                    // Mark layers dirty for P/T counters
+                    if matches!(ct, CounterType::Plus1Plus1 | CounterType::Minus1Minus1) {
+                        state.layers_dirty = true;
+                    }
+
+                    events.push(GameEvent::CounterAdded {
                         object_id,
                         counter_type,
                         count,
-                        ..
-                    } = event
-                    {
-                        let ct = parse_counter_type(&counter_type);
-                        let obj = state
-                            .objects
-                            .get_mut(&object_id)
-                            .ok_or(EffectError::ObjectNotFound(object_id))?;
-                        let entry = obj.counters.entry(ct.clone()).or_insert(0);
-                        *entry += count;
-
-                        // Mark layers dirty for P/T counters
-                        if matches!(ct, CounterType::Plus1Plus1 | CounterType::Minus1Minus1) {
-                            state.layers_dirty = true;
-                        }
-
-                        events.push(GameEvent::CounterAdded {
-                            object_id,
-                            counter_type,
-                            count,
-                        });
-                    }
+                    });
                 }
-                ReplacementResult::Prevented => {}
-                ReplacementResult::NeedsChoice(player) => {
-                    let candidate_count = state
-                        .pending_replacement
-                        .as_ref()
-                        .map(|p| p.candidates.len())
-                        .unwrap_or(0);
-                    state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
-                        player,
-                        candidate_count,
-                    };
-                    return Ok(());
-                }
+            }
+            ReplacementResult::Prevented => {}
+            ReplacementResult::NeedsChoice(player) => {
+                let candidate_count = state
+                    .pending_replacement
+                    .as_ref()
+                    .map(|p| p.candidates.len())
+                    .unwrap_or(0);
+                state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
+                    player,
+                    candidate_count,
+                };
+                return Ok(());
             }
         }
     }
@@ -199,56 +199,55 @@ pub fn resolve_remove(
         _ => ("P1P1".to_string(), 1),
     };
 
-    for target in &ability.targets {
-        if let TargetRef::Object(obj_id) = target {
-            let proposed = ProposedEvent::RemoveCounter {
-                object_id: *obj_id,
-                counter_type: counter_type_str.clone(),
-                count: counter_num,
-                applied: HashSet::new(),
-            };
+    let targets = resolve_defined_or_targets(ability);
+    for obj_id in targets {
+        let proposed = ProposedEvent::RemoveCounter {
+            object_id: obj_id,
+            counter_type: counter_type_str.clone(),
+            count: counter_num,
+            applied: HashSet::new(),
+        };
 
-            match replacement::replace_event(state, proposed, events) {
-                ReplacementResult::Execute(event) => {
-                    if let ProposedEvent::RemoveCounter {
+        match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(event) => {
+                if let ProposedEvent::RemoveCounter {
+                    object_id,
+                    counter_type,
+                    count,
+                    ..
+                } = event
+                {
+                    let ct = parse_counter_type(&counter_type);
+                    let obj = state
+                        .objects
+                        .get_mut(&object_id)
+                        .ok_or(EffectError::ObjectNotFound(object_id))?;
+                    let entry = obj.counters.entry(ct.clone()).or_insert(0);
+                    *entry = entry.saturating_sub(count);
+
+                    if matches!(ct, CounterType::Plus1Plus1 | CounterType::Minus1Minus1) {
+                        state.layers_dirty = true;
+                    }
+
+                    events.push(GameEvent::CounterRemoved {
                         object_id,
                         counter_type,
                         count,
-                        ..
-                    } = event
-                    {
-                        let ct = parse_counter_type(&counter_type);
-                        let obj = state
-                            .objects
-                            .get_mut(&object_id)
-                            .ok_or(EffectError::ObjectNotFound(object_id))?;
-                        let entry = obj.counters.entry(ct.clone()).or_insert(0);
-                        *entry = entry.saturating_sub(count);
-
-                        if matches!(ct, CounterType::Plus1Plus1 | CounterType::Minus1Minus1) {
-                            state.layers_dirty = true;
-                        }
-
-                        events.push(GameEvent::CounterRemoved {
-                            object_id,
-                            counter_type,
-                            count,
-                        });
-                    }
+                    });
                 }
-                ReplacementResult::Prevented => {}
-                ReplacementResult::NeedsChoice(player) => {
-                    let candidate_count = state
-                        .pending_replacement
-                        .as_ref()
-                        .map(|p| p.candidates.len())
-                        .unwrap_or(0);
-                    state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
-                        player,
-                        candidate_count,
-                    };
-                    return Ok(());
-                }
+            }
+            ReplacementResult::Prevented => {}
+            ReplacementResult::NeedsChoice(player) => {
+                let candidate_count = state
+                    .pending_replacement
+                    .as_ref()
+                    .map(|p| p.candidates.len())
+                    .unwrap_or(0);
+                state.waiting_for = crate::types::game_state::WaitingFor::ReplacementChoice {
+                    player,
+                    candidate_count,
+                };
+                return Ok(());
             }
         }
     }
@@ -402,5 +401,49 @@ mod tests {
         .unwrap();
 
         assert!(events.iter().any(|e| matches!(e, GameEvent::CounterAdded { counter_type, count: 1, .. } if counter_type == "P1P1")));
+    }
+
+    /// Regression test: SelfRef PutCounter (Ajani's Pridemate trigger) must apply the counter
+    /// to the source object even when ability.targets is empty.
+    #[test]
+    fn put_counter_self_ref_applies_to_source() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+
+        let ability = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: "P1P1".to_string(),
+                count: 1,
+                target: TargetFilter::SelfRef,
+            },
+            vec![], // empty targets — must resolve via SelfRef → source_id
+            source_id,
+            PlayerId(0),
+        );
+
+        resolve_add(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&source_id].counters[&CounterType::Plus1Plus1],
+            1,
+            "SelfRef counter must land on the source object"
+        );
+        assert!(state.layers_dirty, "layers must be dirtied for P/T counter");
+    }
+
+    /// Regression test: "+1/+1" oracle-text counter type must map to Plus1Plus1.
+    #[test]
+    fn parse_counter_type_oracle_text_forms() {
+        assert_eq!(parse_counter_type("+1/+1"), CounterType::Plus1Plus1);
+        assert_eq!(parse_counter_type("-1/-1"), CounterType::Minus1Minus1);
+        assert_eq!(parse_counter_type("P1P1"), CounterType::Plus1Plus1);
+        assert_eq!(parse_counter_type("M1M1"), CounterType::Minus1Minus1);
     }
 }
