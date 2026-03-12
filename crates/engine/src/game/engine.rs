@@ -433,6 +433,15 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
             let mut ability = trigger.ability;
             ability.targets = targets;
+
+            casting::emit_targeting_events(
+                state,
+                &ability.targets,
+                trigger.source_id,
+                trigger.controller,
+                &mut events,
+            );
+
             let entry_id = ObjectId(state.next_object_id);
             state.next_object_id += 1;
             let entry = crate::types::game_state::StackEntry {

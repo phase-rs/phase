@@ -33,6 +33,54 @@ pub struct PendingTrigger {
     pub timestamp: u32,
 }
 
+#[allow(clippy::too_many_arguments)]
+/// Check trigger definitions on an object against an event, collecting matches into `pending`.
+///
+/// When `zone_filter` is `Some(zone)`, only trigger definitions whose `trigger_zones`
+/// contains that zone will be checked. This enables graveyard (and future exile) triggers
+/// without scanning every zone unconditionally.
+fn collect_matching_triggers(
+    state: &mut GameState,
+    registry: &HashMap<TriggerMode, TriggerMatcher>,
+    event: &GameEvent,
+    obj_id: ObjectId,
+    controller: PlayerId,
+    trigger_defs: &[TriggerDefinition],
+    timestamp: u32,
+    zone_filter: Option<Zone>,
+    pending: &mut Vec<PendingTrigger>,
+) {
+    for (trig_idx, trig_def) in trigger_defs.iter().enumerate() {
+        // When scanning a non-battlefield zone, only check triggers declared for that zone
+        if let Some(zone) = zone_filter {
+            if !trig_def.trigger_zones.contains(&zone) {
+                continue;
+            }
+        }
+        if let Some(matcher) = registry.get(&trig_def.mode) {
+            if matcher(event, trig_def, obj_id, state) {
+                if !check_trigger_constraint(state, trig_def, obj_id, trig_idx, controller) {
+                    continue;
+                }
+                if let Some(ref condition) = trig_def.condition {
+                    if !check_trigger_condition(state, condition, controller) {
+                        continue;
+                    }
+                }
+                let ability = build_triggered_ability(trig_def, obj_id, controller);
+                pending.push(PendingTrigger {
+                    source_id: obj_id,
+                    controller,
+                    trigger_def: trig_def.clone(),
+                    ability,
+                    timestamp,
+                });
+                record_trigger_fired(state, trig_def, obj_id, trig_idx);
+            }
+        }
+    }
+}
+
 /// Process events and place triggered abilities on the stack in APNAP order.
 pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
     let registry = build_trigger_registry();
@@ -55,34 +103,17 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 )
             };
 
-            for (trig_idx, trig_def) in trigger_defs.iter().enumerate() {
-                if let Some(matcher) = registry.get(&trig_def.mode) {
-                    if matcher(event, trig_def, obj_id, state) {
-                        // Check trigger constraints before firing
-                        if !check_trigger_constraint(state, trig_def, obj_id, trig_idx, controller)
-                        {
-                            continue;
-                        }
-                        // Check intervening-if condition (fire-time)
-                        if let Some(ref condition) = trig_def.condition {
-                            if !check_trigger_condition(state, condition, controller) {
-                                continue;
-                            }
-                        }
-                        // Build the ResolvedAbility from the trigger definition
-                        let ability = build_triggered_ability(trig_def, obj_id, controller);
-                        pending.push(PendingTrigger {
-                            source_id: obj_id,
-                            controller,
-                            trigger_def: trig_def.clone(),
-                            ability,
-                            timestamp,
-                        });
-                        // Record that this trigger fired (for once-per-turn/game tracking)
-                        record_trigger_fired(state, trig_def, obj_id, trig_idx);
-                    }
-                }
-            }
+            collect_matching_triggers(
+                state,
+                &registry,
+                event,
+                obj_id,
+                controller,
+                &trigger_defs,
+                timestamp,
+                None,
+                &mut pending,
+            );
 
             // Keyword-based triggers: Prowess
             // Prowess triggers when the controller casts a noncreature spell.
@@ -144,6 +175,34 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 }
             }
         }
+
+        // Scan graveyard objects for triggers with trigger_zones containing Graveyard
+        let graveyard_ids: Vec<ObjectId> = state
+            .players
+            .iter()
+            .flat_map(|p| p.graveyard.iter().copied())
+            .collect();
+        for obj_id in graveyard_ids {
+            let (controller, trigger_defs) = {
+                let obj = match state.objects.get(&obj_id) {
+                    Some(o) => o,
+                    None => continue,
+                };
+                (obj.controller, obj.trigger_definitions.clone())
+            };
+
+            collect_matching_triggers(
+                state,
+                &registry,
+                event,
+                obj_id,
+                controller,
+                &trigger_defs,
+                0,
+                Some(Zone::Graveyard),
+                &mut pending,
+            );
+        }
     }
 
     if pending.is_empty() {
@@ -183,6 +242,13 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 // Auto-target: set the target and push to stack
                 let mut ability = trigger.ability;
                 ability.targets = legal;
+                super::casting::emit_targeting_events(
+                    state,
+                    &ability.targets,
+                    trigger.source_id,
+                    trigger.controller,
+                    &mut events_out,
+                );
                 let entry_id = ObjectId(state.next_object_id);
                 state.next_object_id += 1;
                 let condition = trigger.trigger_def.condition.clone();
@@ -477,6 +543,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // Promoted trigger matchers -- day/night
     r.insert(TriggerMode::DayTimeChanges, match_day_time_changes);
 
+    // Promoted trigger matchers -- crime mechanic (OTJ+)
+    r.insert(TriggerMode::CommitCrime, match_commit_crime);
+
     // Remaining trigger modes: recognized but not yet matched against events.
     let unimplemented_modes = [
         TriggerMode::DamagePreventedOnce,
@@ -534,7 +603,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::CaseSolved,
         TriggerMode::ClaimPrize,
         TriggerMode::CollectEvidence,
-        TriggerMode::CommitCrime,
         TriggerMode::CrankContraption,
         TriggerMode::Devoured,
         TriggerMode::Discover,
@@ -1208,6 +1276,25 @@ fn match_becomes_target(
         } else {
             *object_id == source_id
         }
+    } else {
+        false
+    }
+}
+
+/// Match CommitCrime triggers: fires when the trigger's controller commits a crime.
+fn match_commit_crime(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::CrimeCommitted { player_id } = event {
+        // Fire when the crime was committed by the trigger source's controller
+        state
+            .objects
+            .get(&source_id)
+            .map(|obj| obj.controller == *player_id)
+            .unwrap_or(false)
     } else {
         false
     }
@@ -3041,5 +3128,112 @@ pub mod tests {
         // No targeting needed -> should be on stack immediately
         assert_eq!(state.stack.len(), 1);
         assert!(state.pending_trigger.is_none());
+    }
+
+    #[test]
+    fn commit_crime_matcher_fires_for_controller() {
+        let mut state = setup();
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Criminal".to_string(),
+            Zone::Battlefield,
+        );
+
+        let event = GameEvent::CrimeCommitted {
+            player_id: PlayerId(0),
+        };
+        let trigger = make_trigger(TriggerMode::CommitCrime);
+
+        assert!(match_commit_crime(&event, &trigger, obj_id, &state));
+    }
+
+    #[test]
+    fn commit_crime_matcher_ignores_opponent_crime() {
+        let mut state = setup();
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Criminal".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Opponent committed the crime, not us
+        let event = GameEvent::CrimeCommitted {
+            player_id: PlayerId(1),
+        };
+        let trigger = make_trigger(TriggerMode::CommitCrime);
+
+        assert!(!match_commit_crime(&event, &trigger, obj_id, &state));
+    }
+
+    #[test]
+    fn graveyard_trigger_fires_on_matching_event() {
+        let mut state = setup();
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forsaken Miner".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            let mut trigger = make_trigger(TriggerMode::CommitCrime);
+            trigger.trigger_zones = vec![Zone::Graveyard];
+            trigger.execute = Some(Box::new(crate::types::ability::AbilityDefinition {
+                kind: AbilityKind::Spell,
+                effect: Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::SelfRef,
+                },
+                target_prompt: None,
+                sub_ability: None,
+                cost: None,
+                duration: None,
+                description: None,
+                sorcery_speed: false,
+            }));
+            obj.trigger_definitions.push(trigger);
+        }
+
+        let events = vec![GameEvent::CrimeCommitted {
+            player_id: PlayerId(0),
+        }];
+
+        process_triggers(&mut state, &events);
+
+        // Trigger should be on the stack
+        assert_eq!(state.stack.len(), 1);
+    }
+
+    #[test]
+    fn graveyard_trigger_ignored_without_trigger_zone() {
+        let mut state = setup();
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "No Graveyard Trigger".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            // trigger_zones is empty — should NOT fire from graveyard
+            let trigger = make_trigger(TriggerMode::CommitCrime);
+            obj.trigger_definitions.push(trigger);
+        }
+
+        let events = vec![GameEvent::CrimeCommitted {
+            player_id: PlayerId(0),
+        }];
+
+        process_triggers(&mut state, &events);
+
+        // Should NOT be on the stack
+        assert_eq!(state.stack.len(), 0);
     }
 }

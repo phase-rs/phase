@@ -14,6 +14,47 @@ use super::stack;
 use super::targeting;
 use super::zones;
 
+/// Emit `BecomesTarget` and `CrimeCommitted` events for each target.
+///
+/// Called whenever targets are locked in for a spell or ability. Per MTG rules,
+/// targeting an opponent, their permanent, or a card in their graveyard is a crime.
+pub(crate) fn emit_targeting_events(
+    state: &GameState,
+    targets: &[TargetRef],
+    source_id: ObjectId,
+    controller: PlayerId,
+    events: &mut Vec<GameEvent>,
+) {
+    let mut crime_committed = false;
+    for target in targets {
+        match target {
+            TargetRef::Object(obj_id) => {
+                events.push(GameEvent::BecomesTarget {
+                    object_id: *obj_id,
+                    source_id,
+                });
+                if !crime_committed {
+                    if let Some(obj) = state.objects.get(obj_id) {
+                        if obj.controller != controller && obj.owner != controller {
+                            crime_committed = true;
+                        }
+                    }
+                }
+            }
+            TargetRef::Player(pid) => {
+                if !crime_committed && *pid != controller {
+                    crime_committed = true;
+                }
+            }
+        }
+    }
+    if crime_committed {
+        events.push(GameEvent::CrimeCommitted {
+            player_id: controller,
+        });
+    }
+}
+
 /// Cast a spell from hand (or command zone in Commander format).
 pub fn handle_cast_spell(
     state: &mut GameState,
@@ -453,6 +494,9 @@ pub fn handle_activate_ability(
         if legal.len() == 1 {
             let mut resolved = resolved;
             resolved.targets = legal;
+
+            emit_targeting_events(state, &resolved.targets, source_id, player, events);
+
             // Fall through to push to stack
             let entry_id = ObjectId(state.next_object_id);
             state.next_object_id += 1;
@@ -584,6 +628,9 @@ fn pay_and_push(
         .get(&object_id)
         .map(|obj| obj.zone == Zone::Command && obj.is_commander)
         .unwrap_or(false);
+
+    // Emit targeting events before the spell moves to the stack
+    emit_targeting_events(state, &ability.targets, object_id, player, events);
 
     // Move card from hand/command zone to stack zone
     zones::move_to_zone(state, object_id, Zone::Stack, events);
@@ -1174,5 +1221,63 @@ mod tests {
         // Should resolve normally (Priority), not enter TargetSelection
         assert!(matches!(result, WaitingFor::Priority { .. }));
         assert_eq!(state.stack.len(), 1);
+    }
+
+    #[test]
+    fn emit_targeting_events_opponent_object_is_crime() {
+        let mut state = setup_game_at_main_phase();
+        let target = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(1),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+        emit_targeting_events(
+            &state,
+            &[TargetRef::Object(target)],
+            ObjectId(99),
+            PlayerId(0),
+            &mut events,
+        );
+        assert!(events.iter().any(|e| matches!(e, GameEvent::BecomesTarget { object_id, .. } if *object_id == target)));
+        assert!(events.iter().any(|e| matches!(e, GameEvent::CrimeCommitted { player_id } if *player_id == PlayerId(0))));
+    }
+
+    #[test]
+    fn emit_targeting_events_own_object_no_crime() {
+        let mut state = setup_game_at_main_phase();
+        let target = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+        emit_targeting_events(
+            &state,
+            &[TargetRef::Object(target)],
+            ObjectId(99),
+            PlayerId(0),
+            &mut events,
+        );
+        assert!(events.iter().any(|e| matches!(e, GameEvent::BecomesTarget { .. })));
+        assert!(!events.iter().any(|e| matches!(e, GameEvent::CrimeCommitted { .. })));
+    }
+
+    #[test]
+    fn emit_targeting_events_opponent_player_is_crime() {
+        let state = setup_game_at_main_phase();
+        let mut events = Vec::new();
+        emit_targeting_events(
+            &state,
+            &[TargetRef::Player(PlayerId(1))],
+            ObjectId(99),
+            PlayerId(0),
+            &mut events,
+        );
+        assert!(events.iter().any(|e| matches!(e, GameEvent::CrimeCommitted { player_id } if *player_id == PlayerId(0))));
     }
 }

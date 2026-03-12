@@ -145,6 +145,9 @@ pub enum GameEvent {
     PlayerEliminated {
         player_id: PlayerId,
     },
+    CrimeCommitted {
+        player_id: PlayerId,
+    },
 }
 
 #[cfg(test)]
