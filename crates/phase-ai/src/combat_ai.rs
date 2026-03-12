@@ -92,15 +92,22 @@ pub fn choose_attackers_with_targets(
             .map(|&bid| {
                 let blocker = state.objects.get(&bid).unwrap();
                 let blocker_toughness = blocker.toughness.unwrap_or(0);
-                (bid, evaluate_creature(state, bid), blocker_toughness)
+                let blocker_power = blocker.power.unwrap_or(0);
+                (bid, evaluate_creature(state, bid), blocker_toughness, blocker_power)
             })
             .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         match best_blocker_value {
             None => attacking_ids.push(id),
-            Some((_blocker_id, blocker_value, blocker_toughness)) => {
-                let profitable = my_power >= blocker_toughness && my_value <= blocker_value;
-                if profitable || ahead_on_life {
+            Some((_blocker_id, blocker_value, blocker_toughness, blocker_power)) => {
+                let attacker_toughness = obj.toughness.unwrap_or(0);
+                let kills_blocker = my_power >= blocker_toughness;
+                let attacker_survives = attacker_toughness > blocker_power;
+                // Free damage: attacker kills the blocker and lives to fight again
+                let free_damage = kills_blocker && attacker_survives;
+                // Favorable trade: attacker kills blocker and is worth less (trading up)
+                let favorable_trade = kills_blocker && my_value <= blocker_value;
+                if free_damage || favorable_trade || ahead_on_life {
                     attacking_ids.push(id);
                 }
             }
@@ -293,8 +300,12 @@ pub fn choose_blockers(
             });
 
         if let Some((blocker_id, priority, _)) = best {
-            // Only block if the blocker survives or the trade is worthwhile
-            if priority > 0 {
+            let attacker_power = attacker.power.unwrap_or(0);
+            let p_life = state.players[player.0 as usize].life;
+            // Chump block: sacrifice the blocker to prevent significant damage
+            // when life total is threatened (attacker power >= 3 and life <= 3x that)
+            let should_chump = priority == 0 && attacker_power >= 3 && p_life <= attacker_power * 3;
+            if priority > 0 || should_chump {
                 assignments.push((blocker_id, attacker_id));
                 used_blockers.push(blocker_id);
             }
