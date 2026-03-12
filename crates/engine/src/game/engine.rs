@@ -436,6 +436,47 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 WaitingFor::Priority { player: p }
             }
         }
+        // RevealChoice: player selects a card from revealed hand.
+        // Chosen card becomes the target for the pending_continuation sub-ability
+        // (e.g. ChangeZone to exile, DiscardCard, etc.). Unchosen cards stay in hand.
+        // Clear revealed_cards so opponent's hand goes hidden again.
+        (
+            WaitingFor::RevealChoice {
+                player,
+                cards: all_cards,
+                ..
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            let p = *player;
+            let all = all_cards.clone();
+            if chosen.len() != 1 {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must select exactly 1 card, got {}",
+                    chosen.len()
+                )));
+            }
+            let chosen_id = chosen[0];
+            if !all.contains(&chosen_id) {
+                return Err(EngineError::InvalidAction(
+                    "Selected card not in revealed hand".to_string(),
+                ));
+            }
+
+            // Clear revealed status
+            for &card_id in &all {
+                state.revealed_cards.remove(&card_id);
+            }
+
+            // Run the pending continuation with the chosen card as its target
+            if let Some(mut cont) = state.pending_continuation.take() {
+                cont.targets = vec![crate::types::ability::TargetRef::Object(chosen_id)];
+                let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
+                state.waiting_for.clone()
+            } else {
+                WaitingFor::Priority { player: p }
+            }
+        }
         (WaitingFor::Priority { player }, GameAction::PlayFaceDown { card_id }) => {
             if state.priority_player != *player {
                 return Err(EngineError::NotYourPriority);

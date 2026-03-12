@@ -310,6 +310,13 @@ fn parse_imperative_effect(text: &str) -> Effect {
 
     // --- Reveal ---
     if lower.starts_with("reveal ") {
+        // "reveal their/your hand" → RevealHand
+        if lower.contains("hand") {
+            return Effect::RevealHand {
+                target: TargetFilter::Any,
+            };
+        }
+        // "reveal the top N cards of your library" → Dig
         let count = if lower.contains("the top ") {
             let after_top = &lower[lower.find("the top ").unwrap() + 8..];
             parse_number(after_top).map(|(n, _)| n).unwrap_or(1)
@@ -390,12 +397,66 @@ fn parse_imperative_effect(text: &str) -> Effect {
         return parse_effect(&text[8..]);
     }
 
+    // --- Choose card from revealed hand (absorbed into RevealHand filter) ---
+    if lower.starts_with("choose ") && lower.contains("card from it") {
+        let filter = parse_choose_filter(&lower);
+        return Effect::RevealHand { target: filter };
+    }
+
     // --- Fallback ---
     let verb = lower.split_whitespace().next().unwrap_or("unknown");
     Effect::Unimplemented {
         name: verb.to_string(),
         description: Some(text.to_string()),
     }
+}
+
+fn parse_choose_filter(lower: &str) -> TargetFilter {
+    // Extract type info between "choose" and "card from it"
+    let after_choose = lower.strip_prefix("choose ").unwrap_or(lower);
+    let before_card = after_choose.split("card").next().unwrap_or("");
+    let cleaned = before_card
+        .trim()
+        .trim_start_matches("a ")
+        .trim_start_matches("an ")
+        .trim();
+
+    let parts: Vec<&str> = cleaned.split(" or ").collect();
+    if parts.len() > 1 {
+        let filters: Vec<TargetFilter> = parts
+            .iter()
+            .filter_map(|p| type_str_to_target_filter(p.trim()))
+            .collect();
+        if filters.len() > 1 {
+            return TargetFilter::Or { filters };
+        }
+        if let Some(f) = filters.into_iter().next() {
+            return f;
+        }
+    }
+    if let Some(f) = type_str_to_target_filter(cleaned) {
+        return f;
+    }
+    TargetFilter::Any
+}
+
+fn type_str_to_target_filter(s: &str) -> Option<TargetFilter> {
+    let card_type = match s {
+        "artifact" => Some(TypeFilter::Artifact),
+        "creature" => Some(TypeFilter::Creature),
+        "enchantment" => Some(TypeFilter::Enchantment),
+        "instant" => Some(TypeFilter::Instant),
+        "sorcery" => Some(TypeFilter::Sorcery),
+        "planeswalker" => Some(TypeFilter::Planeswalker),
+        "land" => Some(TypeFilter::Land),
+        _ => None,
+    };
+    card_type.map(|ct| TargetFilter::Typed {
+        card_type: Some(ct),
+        subtype: None,
+        controller: None,
+        properties: vec![],
+    })
 }
 
 fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {

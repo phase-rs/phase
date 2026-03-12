@@ -15,7 +15,9 @@ pub fn filter_state_for_player(state: &GameState, viewer: PlayerId) -> GameState
         .flat_map(|&opp| filtered.players[opp.0 as usize].hand.iter().copied())
         .collect();
     for obj_id in opp_hand_ids {
-        hide_card(&mut filtered, obj_id);
+        if !state.revealed_cards.contains(&obj_id) {
+            hide_card(&mut filtered, obj_id);
+        }
     }
 
     // Hide library contents for ALL players (no one should see card details in libraries)
@@ -187,6 +189,22 @@ mod tests {
         let original_opp_hand_size = state.players[1].hand.len();
         let filtered = filter_state_for_player(&state, PlayerId(0));
         assert_eq!(filtered.players[1].hand.len(), original_opp_hand_size);
+    }
+
+    #[test]
+    fn revealed_cards_remain_visible_in_opponent_hand() {
+        let mut state = setup_state();
+        let opp_hand = &state.players[1].hand;
+        let revealed_id = opp_hand[0];
+
+        // Mark the card as revealed
+        state.revealed_cards.insert(revealed_id);
+
+        let filtered = filter_state_for_player(&state, PlayerId(0));
+
+        let obj = filtered.objects.get(&revealed_id).unwrap();
+        assert_ne!(obj.name, "Hidden Card", "Revealed card should not be hidden");
+        assert!(!obj.face_down, "Revealed card should not be face_down");
     }
 
     #[test]

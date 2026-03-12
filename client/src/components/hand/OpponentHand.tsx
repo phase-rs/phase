@@ -41,7 +41,8 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
     >
       <AnimatePresence>
         {opponent.hand.map((id, i) => {
-          const obj = showCards && objects ? objects[id] : null;
+          const obj = objects ? objects[id] : null;
+          const showFace = showCards || (obj && !obj.face_down);
           // Negate rotation so fan opens toward opponent (top of screen)
           const rotation = -((i - center) * 6);
 
@@ -58,7 +59,7 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
               transition={{ delay: i * 0.03, duration: 0.25 }}
               style={{ marginLeft: i > 0 ? "-16px" : undefined, zIndex: i }}
             >
-              {obj ? (
+              {showFace && obj ? (
                 <div
                   style={{ transform: "scale(0.6) rotate(180deg)", transformOrigin: "center center", width: "calc(var(--card-w) * 0.6)", height: "calc(var(--card-h) * 0.6)" }}
                   onMouseEnter={() => inspectObject(id)}

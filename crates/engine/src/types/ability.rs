@@ -690,6 +690,10 @@ pub enum Effect {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
     },
+    RevealHand {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
     /// Semantic marker for effects the engine has not yet implemented a handler for.
     /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.
     Unimplemented {
@@ -733,7 +737,7 @@ fn default_two_i32() -> i32 {
     2
 }
 
-fn default_target_filter_any() -> TargetFilter {
+pub(crate) fn default_target_filter_any() -> TargetFilter {
     TargetFilter::Any
 }
 
@@ -788,6 +792,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Mana { .. } => "Mana",
         Effect::Discard { .. } => "Discard",
         Effect::Shuffle { .. } => "Shuffle",
+        Effect::RevealHand { .. } => "RevealHand",
         Effect::Unimplemented { name, .. } => name,
     }
 }
@@ -894,6 +899,7 @@ impl From<&Effect> for EffectKind {
             Effect::Mana { .. } => EffectKind::Mana,
             Effect::Discard { .. } => EffectKind::Discard,
             Effect::Shuffle { .. } => EffectKind::Shuffle,
+            Effect::RevealHand { .. } => EffectKind::Reveal,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,
         }
     }

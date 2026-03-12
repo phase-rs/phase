@@ -4,7 +4,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
-use super::ability::{ResolvedAbility, TargetRef, TriggerCondition};
+use super::ability::{ResolvedAbility, TargetFilter, TargetRef, TriggerCondition};
 use super::events::GameEvent;
 use super::format::FormatConfig;
 use super::identifiers::{CardId, ObjectId};
@@ -125,6 +125,12 @@ pub enum WaitingFor {
     SurveilChoice {
         player: PlayerId,
         cards: Vec<ObjectId>,
+    },
+    RevealChoice {
+        player: PlayerId,
+        cards: Vec<ObjectId>,
+        #[serde(default = "super::ability::default_target_filter_any")]
+        filter: TargetFilter,
     },
     TriggerTargetSelection {
         player: PlayerId,
@@ -270,6 +276,11 @@ pub struct GameState {
     #[serde(default)]
     pub triggers_fired_this_game: HashSet<(ObjectId, usize)>,
 
+    /// Cards currently revealed to all players (e.g. during a RevealHand effect).
+    /// `filter_state_for_player` skips hiding these cards.
+    #[serde(default)]
+    pub revealed_cards: HashSet<ObjectId>,
+
     // Pending ability continuation after a player choice (Scry/Dig/Surveil).
     // When resolve_ability_chain pauses mid-chain for a choice state, the remaining
     // sub-ability is stored here and executed after the player responds.
@@ -344,6 +355,7 @@ impl GameState {
             sideboard_submitted: Vec::new(),
             triggers_fired_this_turn: HashSet::new(),
             triggers_fired_this_game: HashSet::new(),
+            revealed_cards: HashSet::new(),
             pending_continuation: None,
         }
     }

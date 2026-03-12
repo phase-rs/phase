@@ -137,6 +137,18 @@ pub fn choose_action(
         });
     }
 
+    if let WaitingFor::RevealChoice { cards, .. } = &state.waiting_for {
+        // Pick the highest-value card from opponent's hand to exile/discard
+        let mut scored: Vec<_> = cards
+            .iter()
+            .map(|&id| (id, evaluate_card_value(state, id)))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        if let Some((best, _)) = scored.first() {
+            return Some(GameAction::SelectCards { cards: vec![*best] });
+        }
+    }
+
     // Combat decisions: delegate to specialized combat AI
     if let WaitingFor::DeclareAttackers { .. } = &state.waiting_for {
         let attacks = choose_attackers_with_targets(state, ai_player);

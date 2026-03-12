@@ -84,6 +84,12 @@ pub fn get_legal_actions(state: &GameState) -> Vec<GameAction> {
             }
             actions
         }
+        WaitingFor::RevealChoice { cards, .. } => {
+            cards
+                .iter()
+                .map(|&card| GameAction::SelectCards { cards: vec![card] })
+                .collect()
+        }
         WaitingFor::TriggerTargetSelection { legal_targets, .. } => legal_targets
             .iter()
             .map(|t| GameAction::SelectTargets {

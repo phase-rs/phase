@@ -12,6 +12,7 @@ import { usePlayerId } from "../../hooks/usePlayerId.ts";
 type ScryChoice = Extract<WaitingFor, { type: "ScryChoice" }>;
 type DigChoice = Extract<WaitingFor, { type: "DigChoice" }>;
 type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
+type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
 
 /**
  * Generic card choice modal for Scry, Dig, and Surveil.
@@ -36,6 +37,9 @@ export function CardChoiceModal() {
     case "SurveilChoice":
       if (waitingFor.data.player !== playerId) return null;
       return <SurveilModal data={waitingFor.data} />;
+    case "RevealChoice":
+      if (waitingFor.data.player !== playerId) return null;
+      return <RevealModal data={waitingFor.data} />;
     default:
       return null;
   }
@@ -289,6 +293,75 @@ function SurveilModal({ data }: { data: SurveilChoice["data"] }) {
         })}
       </div>
       <ConfirmButton onClick={handleConfirm} />
+    </ChoiceOverlay>
+  );
+}
+
+// ── Reveal Modal ─────────────────────────────────────────────────────────────
+
+function RevealModal({ data }: { data: RevealChoice["data"] }) {
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const inspectObject = useUiStore((s) => s.inspectObject);
+  const [selected, setSelected] = useState<ObjectId | null>(null);
+
+  const handleConfirm = useCallback(() => {
+    if (selected !== null) {
+      dispatch({
+        type: "SelectCards",
+        data: { cards: [selected] },
+      });
+    }
+  }, [dispatch, selected]);
+
+  if (!objects) return null;
+
+  return (
+    <ChoiceOverlay
+      title="Opponent's Hand"
+      subtitle="Choose a card"
+    >
+      <div className="mb-6 flex w-full max-w-5xl items-center justify-center gap-3 sm:mb-10">
+        {data.cards.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          const isSelected = selected === id;
+          return (
+            <motion.button
+              key={id}
+              className={`relative rounded-lg transition ${
+                isSelected
+                  ? "z-10 ring-2 ring-emerald-400/80"
+                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+              }`}
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6 }}
+              onClick={() => setSelected(isSelected ? null : id)}
+              onMouseEnter={() => inspectObject(id)}
+              onMouseLeave={() => inspectObject(null)}
+            >
+              <CardImage
+                cardName={obj.name}
+                size="normal"
+                className="h-[clamp(160px,28vh,224px)] w-[clamp(114px,20vh,160px)]"
+              />
+              {isSelected && (
+                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
+                  <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
+                    Choose
+                  </span>
+                </div>
+              )}
+            </motion.button>
+          );
+        })}
+      </div>
+      <ConfirmButton
+        onClick={handleConfirm}
+        disabled={selected === null}
+      />
     </ChoiceOverlay>
   );
 }
