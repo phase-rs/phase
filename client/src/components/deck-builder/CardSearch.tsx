@@ -94,7 +94,7 @@ export function CardSearch({ onResults, format = "standard" }: CardSearchProps) 
         }
       }
     },
-    [onResults],
+    [onResults, format],
   );
 
   const scheduleSearch = useCallback(

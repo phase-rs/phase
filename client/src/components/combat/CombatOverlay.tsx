@@ -52,16 +52,22 @@ export function CombatOverlay({ mode }: CombatOverlayProps) {
   }, [mode, setCombatMode, clearCombatSelection]);
 
   // Valid attacker IDs from engine
-  const validAttackerIds =
-    waitingFor?.type === "DeclareAttackers"
-      ? (waitingFor.data.valid_attacker_ids ?? [])
-      : [];
+  const validAttackerIds = useMemo(
+    () =>
+      waitingFor?.type === "DeclareAttackers"
+        ? (waitingFor.data.valid_attacker_ids ?? [])
+        : [],
+    [waitingFor],
+  );
 
   // Valid blocker IDs from engine
-  const validBlockerIds =
-    waitingFor?.type === "DeclareBlockers"
-      ? (waitingFor.data.valid_blocker_ids ?? [])
-      : [];
+  const validBlockerIds = useMemo(
+    () =>
+      waitingFor?.type === "DeclareBlockers"
+        ? (waitingFor.data.valid_blocker_ids ?? [])
+        : [],
+    [waitingFor],
+  );
 
   // Register blocker click handler
   const handleBlockerClick = useCallback(

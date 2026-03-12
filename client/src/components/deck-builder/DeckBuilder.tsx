@@ -9,13 +9,13 @@ import { CardGrid } from "./CardGrid";
 import { DeckList } from "./DeckList";
 import { ManaCurve } from "./ManaCurve";
 import { FormatFilter, type DeckFormat } from "./FormatFilter";
+import { CommanderPanel } from "./CommanderPanel";
 import {
-  CommanderPanel,
   getColorIdentityViolations,
   getSingletonViolations,
   canBeCommander,
   canAddPartner,
-} from "./CommanderPanel";
+} from "./commanderUtils";
 
 function listSavedDecks(): string[] {
   const keys: string[] = [];

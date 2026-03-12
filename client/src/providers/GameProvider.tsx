@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, type ReactNode } from "react";
+import { createContext, useEffect, useRef, type ReactNode } from "react";
 
 import type { FormatConfig, GameAction, MatchConfig } from "../adapter/types";
 import { P2PHostAdapter, P2PGuestAdapter } from "../adapter/p2p-adapter";
@@ -394,8 +394,4 @@ export function GameProvider({
       {children}
     </GameDispatchContext.Provider>
   );
-}
-
-export function useDispatch(): (action: GameAction) => Promise<void> {
-  return useContext(GameDispatchContext);
 }

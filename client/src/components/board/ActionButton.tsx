@@ -112,16 +112,22 @@ export function ActionButton() {
   }, [mode, setCombatMode, clearCombatSelection]);
 
   // Valid blocker IDs from engine
-  const validBlockerIds =
-    waitingFor?.type === "DeclareBlockers"
-      ? (waitingFor.data.valid_blocker_ids ?? [])
-      : [];
+  const validBlockerIds = useMemo(
+    () =>
+      waitingFor?.type === "DeclareBlockers"
+        ? (waitingFor.data.valid_blocker_ids ?? [])
+        : [],
+    [waitingFor],
+  );
 
   // Per-blocker valid attacker targets from engine
-  const validBlockTargets =
-    waitingFor?.type === "DeclareBlockers"
-      ? (waitingFor.data.valid_block_targets ?? {})
-      : {};
+  const validBlockTargets = useMemo(
+    () =>
+      waitingFor?.type === "DeclareBlockers"
+        ? (waitingFor.data.valid_block_targets ?? {})
+        : {},
+    [waitingFor],
+  );
 
   // Blocker click handler
   const handleBlockerClick = useCallback(

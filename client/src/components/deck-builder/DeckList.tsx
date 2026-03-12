@@ -12,13 +12,6 @@ interface DeckListProps {
   format?: string;
 }
 
-/** Categorize a type_line string into a group for display. */
-function categorizeType(typeLine: string): string {
-  const lower = typeLine.toLowerCase();
-  if (lower.includes("creature")) return "Creatures";
-  if (lower.includes("land")) return "Lands";
-  return "Spells";
-}
 
 interface GroupedEntries {
   Creatures: DeckEntry[];
@@ -351,4 +344,4 @@ export function DeckList({
   );
 }
 
-export { categorizeType };
+
