@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import type { FormatConfig, GameFormat } from "../../adapter/types";
+import type { FormatConfig, GameFormat, MatchType } from "../../adapter/types";
 import { FORMAT_DEFAULTS, useMultiplayerStore } from "../../stores/multiplayerStore";
 import { menuButtonClass } from "../menu/buttonStyles";
 
@@ -10,6 +10,7 @@ export interface HostSettings {
   password: string;
   timerSeconds: number | null;
   formatConfig: FormatConfig;
+  matchType: MatchType;
   aiSeats: AiSeatConfig[];
 }
 
@@ -73,6 +74,7 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
   const [selectedFormat, setSelectedFormat] = useState<GameFormat>("Standard");
   const [formatConfig, setLocalFormatConfig] = useState<FormatConfig>(FORMAT_DEFAULTS.Standard);
   const [playerCount, setPlayerCount] = useState(FORMAT_DEFAULTS.Standard.min_players);
+  const [matchType, setMatchType] = useState<MatchType>("Bo1");
   const [aiSeats, setAiSeats] = useState<AiSeatConfig[]>([]);
 
   const isP2P = connectionMode === "p2p";
@@ -85,11 +87,17 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
     setLocalFormatConfig(defaults);
     const newCount = isP2P ? 2 : defaults.min_players;
     setPlayerCount(newCount);
+    if (newCount !== 2) {
+      setMatchType("Bo1");
+    }
     setAiSeats([]);
   };
 
   const handlePlayerCountChange = (count: number) => {
     setPlayerCount(count);
+    if (count !== 2) {
+      setMatchType("Bo1");
+    }
     // Remove AI seats that exceed the new count (seat 0 is always the host)
     setAiSeats((prev) => prev.filter((s) => s.seatIndex < count));
   };
@@ -122,6 +130,7 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
       password: showPassword ? password : "",
       timerSeconds,
       formatConfig: finalConfig,
+      matchType: playerCount === 2 ? matchType : "Bo1",
       aiSeats,
     });
   };
@@ -230,6 +239,36 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
                   ))}
                 </div>
               </div>
+            )}
+
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-gray-400">Match Type</span>
+              <div className="flex rounded bg-gray-700 p-0.5 ring-1 ring-gray-600">
+                <button
+                  onClick={() => setMatchType("Bo1")}
+                  className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
+                    matchType === "Bo1"
+                      ? "bg-cyan-600 text-white"
+                      : "text-gray-400 hover:text-gray-200"
+                  }`}
+                >
+                  BO1
+                </button>
+                <button
+                  onClick={() => setMatchType("Bo3")}
+                  disabled={playerCount !== 2}
+                  className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
+                    matchType === "Bo3"
+                      ? "bg-cyan-600 text-white"
+                      : "text-gray-400 hover:text-gray-200"
+                  } ${playerCount !== 2 ? "cursor-not-allowed opacity-40" : ""}`}
+                >
+                  BO3
+                </button>
+              </div>
+            </div>
+            {playerCount !== 2 && (
+              <p className="text-xs text-gray-500">BO3 is available only for 2-player matches.</p>
             )}
 
             {/* Commander damage threshold (Commander only) */}

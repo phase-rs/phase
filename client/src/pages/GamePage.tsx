@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
 import { AnimatePresence, motion } from "framer-motion";
 
-import type { GameFormat } from "../adapter/types";
+import type { GameFormat, MatchConfig } from "../adapter/types";
 import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
 import { TurnBanner } from "../components/animation/TurnBanner.tsx";
 import { BattlefieldBackground } from "../components/board/BattlefieldBackground.tsx";
@@ -57,8 +57,15 @@ export function GamePage() {
   const joinCode = searchParams.get("code") ?? "";
   const formatParam = searchParams.get("format") as GameFormat | null;
   const playersParam = searchParams.get("players");
+  const matchParam = searchParams.get("match");
   const playerCount = playersParam ? Number(playersParam) : undefined;
   const formatConfig = formatParam ? FORMAT_DEFAULTS[formatParam] : undefined;
+  const matchConfig = useMemo<MatchConfig>(
+    () => ({
+      match_type: matchParam?.toLowerCase() === "bo3" ? "Bo3" : "Bo1",
+    }),
+    [matchParam],
+  );
 
   // Map URL modes to GameProvider modes
   const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" =
@@ -176,6 +183,7 @@ export function GamePage() {
       joinCode={joinCode || undefined}
       formatConfig={formatConfig}
       playerCount={playerCount}
+      matchConfig={matchConfig}
       onWsEvent={mode === "online" ? handleWsEvent : undefined}
       onP2PEvent={mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined}
       onReady={mode === "online" || mode === "p2p-host" || mode === "p2p-join" ? handleReady : undefined}
@@ -323,6 +331,38 @@ function GamePageContent({
     (id: string) => {
       const cards = id.split(",").map(Number).filter(Boolean);
       dispatch({ type: "SelectCards", data: { cards } });
+    },
+    [dispatch],
+  );
+
+  const handleSubmitSideboard = useCallback(() => {
+    if (!gameState?.deck_pools) return;
+    const pool = gameState.deck_pools.find((deckPool) => deckPool.player === playerId);
+    if (!pool) return;
+    const toSortedCounts = (entries: Array<{ card: { name: string }; count: number }>) => {
+      const counts = new Map<string, number>();
+      for (const entry of entries) {
+        counts.set(entry.card.name, (counts.get(entry.card.name) ?? 0) + entry.count);
+      }
+      return [...counts.entries()]
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([name, count]) => ({ name, count }));
+    };
+    dispatch({
+      type: "SubmitSideboard",
+      data: {
+        main: toSortedCounts(pool.current_main),
+        sideboard: toSortedCounts(pool.current_sideboard),
+      },
+    });
+  }, [dispatch, gameState, playerId]);
+
+  const handleChoosePlayDraw = useCallback(
+    (playFirst: boolean) => {
+      dispatch({
+        type: "ChoosePlayDraw",
+        data: { play_first: playFirst },
+      });
     },
     [dispatch],
   );
@@ -542,6 +582,26 @@ function GamePageContent({
         />
       )}
 
+      {waitingFor?.type === "BetweenGamesSideboard" && waitingFor.data.player === playerId && (
+        <BetweenGamesSideboardPrompt
+          gameNumber={waitingFor.data.game_number}
+          score={waitingFor.data.score}
+          onSubmit={handleSubmitSideboard}
+        />
+      )}
+
+      {waitingFor?.type === "BetweenGamesChoosePlayDraw" && waitingFor.data.player === playerId && (
+        <ChoiceModal
+          title={`Game ${waitingFor.data.game_number}: Choose Play or Draw`}
+          subtitle={`Match score ${waitingFor.data.score.p0_wins}-${waitingFor.data.score.p1_wins}`}
+          options={[
+            { id: "play", label: "Play First", description: "Take the first turn" },
+            { id: "draw", label: "Draw First", description: "Take the extra draw on your first turn" },
+          ]}
+          onChoose={(id) => handleChoosePlayDraw(id === "play")}
+        />
+      )}
+
       {/* Multiplayer UX overlays */}
       {isOnlineMode && (
         <>
@@ -587,6 +647,31 @@ interface MulliganBottomCardsPromptProps {
   playerId: number;
   count: number;
   onChoose: (id: string) => void;
+}
+
+function BetweenGamesSideboardPrompt({
+  gameNumber,
+  score,
+  onSubmit,
+}: {
+  gameNumber: number;
+  score: { p0_wins: number; p1_wins: number; draws: number };
+  onSubmit: () => void;
+}) {
+  return (
+    <ChoiceModal
+      title={`Game ${gameNumber}: Sideboarding`}
+      subtitle={`Match score ${score.p0_wins}-${score.p1_wins}${score.draws > 0 ? ` (${score.draws} draw)` : ""}`}
+      options={[
+        {
+          id: "submit",
+          label: "Submit Deck",
+          description: "Keep current main/sideboard configuration",
+        },
+      ]}
+      onChoose={() => onSubmit()}
+    />
+  );
 }
 
 interface MulliganDecisionPromptProps {

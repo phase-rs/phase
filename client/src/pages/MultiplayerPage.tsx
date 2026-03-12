@@ -117,6 +117,8 @@ export function MultiplayerPage() {
               public: settings.public,
               password: settings.password || null,
               timer_seconds: settings.timerSeconds,
+              player_count: settings.formatConfig.max_players,
+              match_config: { match_type: settings.matchType },
               format_config: settings.formatConfig,
               ai_seats: settings.aiSeats,
             },
@@ -159,14 +161,14 @@ export function MultiplayerPage() {
     [activeDeckName, serverAddress, navigate, fallbackToP2PMode],
   );
 
-  const handleHostP2P = useCallback(() => {
+  const handleHostP2P = useCallback((settings: HostSettings) => {
     if (!activeDeckName) {
       setView("deck-select");
       return;
     }
     const gameId = crypto.randomUUID();
     useGameStore.setState({ gameId });
-    navigate(`/game/${gameId}?mode=p2p-host`);
+    navigate(`/game/${gameId}?mode=p2p-host&match=${settings.matchType.toLowerCase()}`);
   }, [activeDeckName, navigate]);
 
   const handleJoinWithPassword = useCallback(
@@ -265,7 +267,7 @@ export function MultiplayerPage() {
 
       {view === "host-setup" && (
         <HostSetup
-          onHost={connectionMode === "p2p" ? () => handleHostP2P() : handleHostWithSettings}
+          onHost={connectionMode === "p2p" ? handleHostP2P : handleHostWithSettings}
           onBack={() => setView("lobby")}
           connectionMode={connectionMode}
         />

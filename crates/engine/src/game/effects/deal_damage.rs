@@ -77,9 +77,7 @@ pub fn resolve(
                             }
                         }
                         TargetRef::Player(player_id) => {
-                            super::life::apply_damage_life_loss(
-                                state, *player_id, amount, events,
-                            );
+                            super::life::apply_damage_life_loss(state, *player_id, amount, events);
                         }
                     }
                     events.push(GameEvent::DamageDealt {

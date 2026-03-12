@@ -638,7 +638,11 @@ fn pay_and_push(
 
     // Auto-pay mana cost
     {
-        let player_data = state.players.iter().find(|p| p.id == player).expect("player exists");
+        let player_data = state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .expect("player exists");
         if !mana_payment::can_pay(&player_data.mana_pool, cost) {
             return Err(EngineError::ActionNotAllowed(
                 "Cannot pay mana cost".to_string(),
@@ -1276,8 +1280,12 @@ mod tests {
             PlayerId(0),
             &mut events,
         );
-        assert!(events.iter().any(|e| matches!(e, GameEvent::BecomesTarget { object_id, .. } if *object_id == target)));
-        assert!(events.iter().any(|e| matches!(e, GameEvent::CrimeCommitted { player_id } if *player_id == PlayerId(0))));
+        assert!(events.iter().any(
+            |e| matches!(e, GameEvent::BecomesTarget { object_id, .. } if *object_id == target)
+        ));
+        assert!(events.iter().any(
+            |e| matches!(e, GameEvent::CrimeCommitted { player_id } if *player_id == PlayerId(0))
+        ));
     }
 
     #[test]
@@ -1298,8 +1306,12 @@ mod tests {
             PlayerId(0),
             &mut events,
         );
-        assert!(events.iter().any(|e| matches!(e, GameEvent::BecomesTarget { .. })));
-        assert!(!events.iter().any(|e| matches!(e, GameEvent::CrimeCommitted { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::BecomesTarget { .. })));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, GameEvent::CrimeCommitted { .. })));
     }
 
     #[test]
@@ -1313,6 +1325,8 @@ mod tests {
             PlayerId(0),
             &mut events,
         );
-        assert!(events.iter().any(|e| matches!(e, GameEvent::CrimeCommitted { player_id } if *player_id == PlayerId(0))));
+        assert!(events.iter().any(
+            |e| matches!(e, GameEvent::CrimeCommitted { player_id } if *player_id == PlayerId(0))
+        ));
     }
 }

@@ -96,7 +96,12 @@ export class WebSocketAdapter implements EngineAdapter {
     }
   }
 
-  async initializeGame(_deckData?: unknown): Promise<GameEvent[]> {
+  async initializeGame(
+    _deckData?: unknown,
+    _formatConfig?: unknown,
+    _playerCount?: number,
+    _matchConfig?: unknown,
+  ): Promise<GameEvent[]> {
     // Server handles deck data via WebSocket protocol during initialize()
     return [];
   }

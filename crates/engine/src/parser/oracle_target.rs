@@ -279,7 +279,9 @@ fn parse_color_prefix(text: &str) -> Option<(FilterProp, usize)> {
 fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
     let rest = trimmed.strip_prefix("with power ")?;
-    let num_end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let num_end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
     if num_end == 0 {
         return None;
     }

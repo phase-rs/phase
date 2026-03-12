@@ -64,6 +64,20 @@ pub fn choose_action(
     if actions.is_empty() {
         return None;
     }
+
+    if matches!(
+        state.waiting_for,
+        WaitingFor::BetweenGamesChoosePlayDraw { .. }
+    ) {
+        return Some(GameAction::ChoosePlayDraw { play_first: true });
+    }
+
+    if matches!(state.waiting_for, WaitingFor::BetweenGamesSideboard { .. }) {
+        return actions
+            .into_iter()
+            .find(|action| matches!(action, GameAction::SubmitSideboard { .. }));
+    }
+
     if actions.len() == 1 {
         return Some(actions.into_iter().next().unwrap());
     }

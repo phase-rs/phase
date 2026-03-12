@@ -1,6 +1,7 @@
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
+use engine::types::match_config::MatchConfig;
 use engine::types::player::PlayerId;
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +46,8 @@ pub enum ClientMessage {
         timer_seconds: Option<u32>,
         #[serde(default = "default_player_count")]
         player_count: u8,
+        #[serde(default)]
+        match_config: MatchConfig,
     },
     JoinGameWithPassword {
         game_code: String,
@@ -264,6 +267,7 @@ mod tests {
             password: Some("secret".to_string()),
             timer_seconds: Some(60),
             player_count: 4,
+            match_config: MatchConfig::default(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -274,6 +278,7 @@ mod tests {
                 password,
                 timer_seconds,
                 player_count,
+                match_config,
                 ..
             } => {
                 assert_eq!(display_name, "Alice");
@@ -281,6 +286,29 @@ mod tests {
                 assert_eq!(password, Some("secret".to_string()));
                 assert_eq!(timer_seconds, Some(60));
                 assert_eq!(player_count, 4);
+                assert_eq!(match_config, MatchConfig::default());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn create_game_with_settings_missing_match_config_defaults_to_bo1() {
+        let json = r#"{
+          "type":"CreateGameWithSettings",
+          "data":{
+            "deck":{"main_deck":["Forest"],"sideboard":[]},
+            "display_name":"Alice",
+            "public":true,
+            "password":null,
+            "timer_seconds":null,
+            "player_count":2
+          }
+        }"#;
+        let parsed: ClientMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            ClientMessage::CreateGameWithSettings { match_config, .. } => {
+                assert_eq!(match_config, MatchConfig::default());
             }
             _ => panic!("wrong variant"),
         }

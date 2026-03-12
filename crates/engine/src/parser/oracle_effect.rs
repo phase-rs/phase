@@ -2245,7 +2245,13 @@ mod tests {
     #[test]
     fn effect_gain_life() {
         let e = parse_effect("You gain 3 life");
-        assert!(matches!(e, Effect::GainLife { amount: LifeAmount::Fixed(3), .. }));
+        assert!(matches!(
+            e,
+            Effect::GainLife {
+                amount: LifeAmount::Fixed(3),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2292,7 +2298,13 @@ mod tests {
     #[test]
     fn effect_chain_revitalize() {
         let def = parse_effect_chain("You gain 3 life. Draw a card.", AbilityKind::Spell);
-        assert!(matches!(def.effect, Effect::GainLife { amount: LifeAmount::Fixed(3), .. }));
+        assert!(matches!(
+            def.effect,
+            Effect::GainLife {
+                amount: LifeAmount::Fixed(3),
+                ..
+            }
+        ));
         assert!(def.sub_ability.is_some());
         assert!(matches!(
             def.sub_ability.unwrap().effect,

@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useRef, type ReactNode } from "react";
 
-import type { FormatConfig, GameAction } from "../adapter/types";
+import type { FormatConfig, GameAction, MatchConfig } from "../adapter/types";
 import { P2PHostAdapter, P2PGuestAdapter } from "../adapter/p2p-adapter";
 import type { P2PAdapterEvent } from "../adapter/p2p-adapter";
 import { WasmAdapter } from "../adapter/wasm-adapter";
@@ -54,11 +54,21 @@ function pickOpponentDeck(playerDeck: ParsedDeck): Array<{ name: string; count: 
 }
 
 /** Build a DeckList (name-only) for the WASM engine to resolve. */
-function buildDeckList(deck: ParsedDeck): { player_deck: string[]; opponent_deck: string[] } {
+function buildDeckList(deck: ParsedDeck): {
+  player: { main_deck: string[]; sideboard: string[] };
+  opponent: { main_deck: string[]; sideboard: string[] };
+  ai_decks: Array<{ main_deck: string[]; sideboard: string[] }>;
+} {
   const playerNames: string[] = [];
   for (const entry of deck.main) {
     for (let i = 0; i < entry.count; i++) {
       playerNames.push(entry.name);
+    }
+  }
+  const playerSideboard: string[] = [];
+  for (const entry of deck.sideboard) {
+    for (let i = 0; i < entry.count; i++) {
+      playerSideboard.push(entry.name);
     }
   }
   const opponentCards = pickOpponentDeck(deck);
@@ -68,7 +78,11 @@ function buildDeckList(deck: ParsedDeck): { player_deck: string[]; opponent_deck
       opponentNames.push(entry.name);
     }
   }
-  return { player_deck: playerNames, opponent_deck: opponentNames };
+  return {
+    player: { main_deck: playerNames, sideboard: playerSideboard },
+    opponent: { main_deck: opponentNames, sideboard: [] },
+    ai_decks: [],
+  };
 }
 
 const GameDispatchContext = createContext<(action: GameAction) => Promise<void>>(
@@ -84,6 +98,7 @@ export interface GameProviderProps {
   joinCode?: string;
   formatConfig?: FormatConfig;
   playerCount?: number;
+  matchConfig?: MatchConfig;
   onWsEvent?: (event: WsAdapterEvent) => void;
   onP2PEvent?: (event: P2PAdapterEvent) => void;
   onReady?: () => void;
@@ -99,6 +114,7 @@ export function GameProvider({
   joinCode,
   formatConfig,
   playerCount,
+  matchConfig,
   onWsEvent,
   onP2PEvent,
   onReady,
@@ -172,7 +188,7 @@ export function GameProvider({
               onP2PEventRef.current?.(event);
             });
 
-            await initGame(gameId, adapter);
+            await initGame(gameId, adapter, undefined, undefined, undefined, matchConfig);
             if (cancelled) return;
             controller = createGameLoopController({ mode: "online" });
             controller.start();
@@ -198,7 +214,7 @@ export function GameProvider({
               onP2PEventRef.current?.(event);
             });
 
-            await initGame(gameId, adapter);
+            await initGame(gameId, adapter, undefined, undefined, undefined, matchConfig);
             if (cancelled) return;
             controller = createGameLoopController({ mode: "online" });
             controller.start();
@@ -268,7 +284,10 @@ export function GameProvider({
               ...(needAdapter ? { adapter: wsAdapter } : {}),
             });
             useMultiplayerStore.getState().setConnectionStatus("connected");
-            if (event.state.waiting_for.type === "GameOver") {
+            if (
+              event.state.match_phase === "Completed"
+              || (!event.state.match_phase && event.state.waiting_for.type === "GameOver")
+            ) {
               clearActiveGame();
             }
           }
@@ -295,7 +314,7 @@ export function GameProvider({
         if (isReconnect) {
           wsAdapter.tryReconnect();
         } else {
-          initGame(gameId, wsAdapter).then(() => {
+          initGame(gameId, wsAdapter, undefined, undefined, undefined, matchConfig).then(() => {
             if (cancelled) return;
             useMultiplayerStore.getState().setConnectionStatus("connected");
             onReadyRef.current?.();
@@ -348,7 +367,7 @@ export function GameProvider({
 
     const deckList = buildDeckList(parsedDeck);
 
-    initGame(gameId, adapter, deckList, formatConfig, playerCount).then(() => {
+    initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig).then(() => {
       if (cancelled) return;
 
       if (!adapter.cardDbLoaded) {
@@ -368,7 +387,7 @@ export function GameProvider({
       audioManager.stopMusic(0);
       reset();
     };
-  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount]);
+  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig]);
 
   return (
     <GameDispatchContext.Provider value={dispatchAction}>

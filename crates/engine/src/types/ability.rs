@@ -291,25 +291,46 @@ pub enum FilterProp {
     Token,
     Attacking,
     Tapped,
-    NonType { value: String },
-    WithKeyword { value: String },
-    CountersGE { counter_type: String, count: u32 },
-    CmcGE { value: u32 },
-    InZone { zone: Zone },
-    Owned { controller: ControllerRef },
+    NonType {
+        value: String,
+    },
+    WithKeyword {
+        value: String,
+    },
+    CountersGE {
+        counter_type: String,
+        count: u32,
+    },
+    CmcGE {
+        value: u32,
+    },
+    InZone {
+        zone: Zone,
+    },
+    Owned {
+        controller: ControllerRef,
+    },
     EnchantedBy,
     EquippedBy,
     /// Matches any object that is NOT the trigger source (for "another creature" triggers).
     Another,
     /// Matches objects with a specific color (for "white creature", "red spell", etc.).
-    HasColor { color: String },
+    HasColor {
+        color: String,
+    },
     /// Matches objects with power <= N (for "creature with power 2 or less").
-    PowerLE { value: i32 },
+    PowerLE {
+        value: i32,
+    },
     /// Matches objects with power >= N (for "creature with power 3 or greater").
-    PowerGE { value: i32 },
+    PowerGE {
+        value: i32,
+    },
     /// Matches multicolored objects (2+ colors).
     Multicolored,
-    Other { value: String },
+    Other {
+        value: String,
+    },
 }
 
 /// Typed target filter replacing all Forge filter strings and TargetSpec.
@@ -1149,7 +1170,10 @@ mod tests {
             event: ReplacementEvent::DamageDone,
             execute: Some(Box::new(AbilityDefinition {
                 kind: AbilityKind::Spell,
-                effect: Effect::GainLife { amount: LifeAmount::Fixed(1), player: GainLifePlayer::Controller },
+                effect: Effect::GainLife {
+                    amount: LifeAmount::Fixed(1),
+                    player: GainLifePlayer::Controller,
+                },
                 cost: None,
                 sub_ability: None,
                 duration: None,

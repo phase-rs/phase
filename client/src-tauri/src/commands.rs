@@ -6,6 +6,7 @@ use engine::game::engine::apply;
 use engine::game::static_abilities::{check_static_ability, StaticCheckContext};
 use engine::game::{load_deck_into_state, start_game, DeckPayload};
 use engine::types::game_state::ActionResult;
+use engine::types::match_config::MatchConfig;
 use engine::types::player::PlayerId;
 use engine::types::{GameAction, GameState};
 
@@ -21,9 +22,11 @@ pub fn initialize_game(
     state: tauri::State<AppState>,
     deck_data: Option<DeckPayload>,
     seed: Option<u64>,
+    match_config: Option<MatchConfig>,
 ) -> Result<ActionResult, String> {
     let seed = seed.unwrap_or(42);
     let mut game = GameState::new_two_player(seed);
+    game.match_config = match_config.unwrap_or_default();
 
     if let Some(payload) = deck_data {
         load_deck_into_state(&mut game, &payload);

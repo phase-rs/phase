@@ -9,16 +9,22 @@ use super::events::GameEvent;
 use super::format::FormatConfig;
 use super::identifiers::{CardId, ObjectId};
 use super::mana::ManaCost;
+use super::match_config::{MatchConfig, MatchPhase, MatchScore};
 use super::phase::Phase;
 use super::player::{Player, PlayerId};
 use super::proposed_event::{ProposedEvent, ReplacementId};
 
 use crate::game::combat::CombatState;
+use crate::game::deck_loading::DeckEntry;
 
 use crate::game::game_object::GameObject;
 
 fn default_rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(0)
+}
+
+fn default_game_number() -> u8 {
+    1
 }
 
 /// Tracks whether the game is in day or night state (MTG Rule 727).
@@ -48,6 +54,15 @@ pub struct PendingCast {
     pub card_id: CardId,
     pub ability: ResolvedAbility,
     pub cost: ManaCost,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PlayerDeckPool {
+    pub player: PlayerId,
+    pub registered_main: Vec<DeckEntry>,
+    pub registered_sideboard: Vec<DeckEntry>,
+    pub current_main: Vec<DeckEntry>,
+    pub current_sideboard: Vec<DeckEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +127,16 @@ pub enum WaitingFor {
     TriggerTargetSelection {
         player: PlayerId,
         legal_targets: Vec<TargetRef>,
+    },
+    BetweenGamesSideboard {
+        player: PlayerId,
+        game_number: u8,
+        score: MatchScore,
+    },
+    BetweenGamesChoosePlayDraw {
+        player: PlayerId,
+        game_number: u8,
+        score: MatchScore,
     },
 }
 
@@ -216,6 +241,23 @@ pub struct GameState {
     #[serde(default)]
     pub priority_passes: BTreeSet<PlayerId>,
 
+    #[serde(default)]
+    pub match_config: MatchConfig,
+    #[serde(default)]
+    pub match_phase: MatchPhase,
+    #[serde(default)]
+    pub match_score: MatchScore,
+    #[serde(default = "default_game_number")]
+    pub game_number: u8,
+    #[serde(default)]
+    pub current_starting_player: PlayerId,
+    #[serde(default)]
+    pub next_game_chooser: Option<PlayerId>,
+    #[serde(default)]
+    pub deck_pools: Vec<PlayerDeckPool>,
+    #[serde(default)]
+    pub sideboard_submitted: Vec<PlayerId>,
+
     // Trigger constraint tracking: (object_id, trigger_index) pairs that have fired
     #[serde(default)]
     pub triggers_fired_this_turn: HashSet<(ObjectId, usize)>,
@@ -281,6 +323,14 @@ impl GameState {
             eliminated_players: Vec::new(),
             commander_damage: Vec::new(),
             priority_passes: BTreeSet::new(),
+            match_config: MatchConfig::default(),
+            match_phase: MatchPhase::InGame,
+            match_score: MatchScore::default(),
+            game_number: default_game_number(),
+            current_starting_player: PlayerId(0),
+            next_game_chooser: None,
+            deck_pools: Vec::new(),
+            sideboard_submitted: Vec::new(),
             triggers_fired_this_turn: HashSet::new(),
             triggers_fired_this_game: HashSet::new(),
             pending_continuation: None,
@@ -338,6 +388,17 @@ impl PartialEq for GameState {
             && self.eliminated_players == other.eliminated_players
             && self.commander_damage == other.commander_damage
             && self.priority_passes == other.priority_passes
+            && self.match_config == other.match_config
+            && self.match_phase == other.match_phase
+            && self.match_score == other.match_score
+            && self.game_number == other.game_number
+            && self.current_starting_player == other.current_starting_player
+            && self.next_game_chooser == other.next_game_chooser
+            && self.deck_pools == other.deck_pools
+            && self.sideboard_submitted == other.sideboard_submitted
+            && self.triggers_fired_this_turn == other.triggers_fired_this_turn
+            && self.triggers_fired_this_game == other.triggers_fired_this_game
+            && self.pending_continuation == other.pending_continuation
     }
 }
 

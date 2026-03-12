@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ability::TargetRef;
 use super::identifiers::{CardId, ObjectId};
+use super::match_config::DeckCardCount;
 use crate::game::combat::AttackTarget;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -53,6 +54,13 @@ pub enum GameAction {
     },
     TurnFaceUp {
         object_id: ObjectId,
+    },
+    SubmitSideboard {
+        main: Vec<DeckCardCount>,
+        sideboard: Vec<DeckCardCount>,
+    },
+    ChoosePlayDraw {
+        play_first: bool,
     },
 }
 

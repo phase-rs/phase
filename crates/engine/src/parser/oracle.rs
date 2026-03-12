@@ -273,9 +273,9 @@ fn extract_keyword_line(line: &str, mtgjson_keyword_names: &[String]) -> Option<
         // Check if this part matches or extends an MTGJSON keyword name.
         // Exact match: "flying" == "flying"
         // Prefix match: "protection from multicolored" starts with "protection"
-        let mtgjson_match = mtgjson_keyword_names.iter().any(|name| {
-            lower == *name || lower.starts_with(&format!("{name} "))
-        });
+        let mtgjson_match = mtgjson_keyword_names
+            .iter()
+            .any(|name| lower == *name || lower.starts_with(&format!("{name} ")));
 
         if mtgjson_match {
             any_mtgjson_match = true;

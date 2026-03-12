@@ -21,6 +21,33 @@ export interface FormatConfig {
   team_based: boolean;
 }
 
+// ── Match / Series ───────────────────────────────────────────────────────
+
+export type MatchType = "Bo1" | "Bo3";
+export type MatchPhase = "InGame" | "BetweenGames" | "Completed";
+
+export interface MatchConfig {
+  match_type: MatchType;
+}
+
+export interface MatchScore {
+  p0_wins: number;
+  p1_wins: number;
+  draws: number;
+}
+
+export interface DeckCardCount {
+  name: string;
+  count: number;
+}
+
+export interface DeckPoolEntry {
+  card: {
+    name: string;
+  };
+  count: number;
+}
+
 // ── Attack Target ───────────────────────────────────────────────────────
 
 export type AttackTarget =
@@ -244,7 +271,9 @@ export type WaitingFor =
   | { type: "ScryChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "DigChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_count: number } }
   | { type: "SurveilChoice"; data: { player: PlayerId; cards: ObjectId[] } }
-  | { type: "TriggerTargetSelection"; data: { player: PlayerId; legal_targets: TargetRef[] } };
+  | { type: "TriggerTargetSelection"; data: { player: PlayerId; legal_targets: TargetRef[] } }
+  | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
+  | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } };
 
 // ── Action Result ────────────────────────────────────────────────────────
 
@@ -271,7 +300,9 @@ export type GameAction =
   | { type: "Equip"; data: { equipment_id: ObjectId; target_id: ObjectId } }
   | { type: "Transform"; data: { object_id: ObjectId } }
   | { type: "PlayFaceDown"; data: { card_id: CardId } }
-  | { type: "TurnFaceUp"; data: { object_id: ObjectId } };
+  | { type: "TurnFaceUp"; data: { object_id: ObjectId } }
+  | { type: "SubmitSideboard"; data: { main: DeckCardCount[]; sideboard: DeckCardCount[] } }
+  | { type: "ChoosePlayDraw"; data: { play_first: boolean } };
 
 // ── Game Events (discriminated union, tag="type", content="data") ────────
 
@@ -341,6 +372,20 @@ export interface GameState {
   eliminated_players?: PlayerId[];
   commander_damage?: CommanderDamageEntry[];
   exile_links?: Array<{ exiled_id: ObjectId; source_id: ObjectId }>;
+  match_config?: MatchConfig;
+  match_phase?: MatchPhase;
+  match_score?: MatchScore;
+  game_number?: number;
+  current_starting_player?: PlayerId;
+  next_game_chooser?: PlayerId | null;
+  deck_pools?: Array<{
+    player: PlayerId;
+    registered_main: DeckPoolEntry[];
+    registered_sideboard: DeckPoolEntry[];
+    current_main: DeckPoolEntry[];
+    current_sideboard: DeckPoolEntry[];
+  }>;
+  sideboard_submitted?: PlayerId[];
 }
 
 // ── Adapter Interface ────────────────────────────────────────────────────
@@ -375,7 +420,12 @@ export const AdapterErrorCode = {
  */
 export interface EngineAdapter {
   initialize(): Promise<void>;
-  initializeGame(deckData?: unknown, formatConfig?: FormatConfig, playerCount?: number): Promise<GameEvent[]> | GameEvent[];
+  initializeGame(
+    deckData?: unknown,
+    formatConfig?: FormatConfig,
+    playerCount?: number,
+    matchConfig?: MatchConfig,
+  ): Promise<GameEvent[]> | GameEvent[];
   submitAction(action: GameAction): Promise<GameEvent[]>;
   getState(): Promise<GameState>;
   getLegalActions(): Promise<GameAction[]>;

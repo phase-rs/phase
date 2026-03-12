@@ -293,9 +293,7 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
     }
 
     // "a "/"an " + type phrase (general subject)
-    let after_article = text
-        .strip_prefix("a ")
-        .or_else(|| text.strip_prefix("an "));
+    let after_article = text.strip_prefix("a ").or_else(|| text.strip_prefix("an "));
     if let Some(after) = after_article {
         let (filter, rest) = parse_type_phrase(after);
         return (filter, rest);
@@ -816,9 +814,8 @@ mod tests {
 
     #[test]
     fn extract_if_strips_condition_from_effect() {
-        let (cleaned, cond) = extract_if_condition(
-            "draw a card if you've gained 3 or more life this turn.",
-        );
+        let (cleaned, cond) =
+            extract_if_condition("draw a card if you've gained 3 or more life this turn.");
         assert_eq!(cleaned, "draw a card");
         assert_eq!(
             cond,
@@ -843,10 +840,16 @@ mod tests {
         // Constraint sentence should NOT leak as a sub-ability
         if let Some(ref exec) = def.execute {
             assert!(
-                !matches!(exec.effect, crate::types::ability::Effect::Unimplemented { .. }),
+                !matches!(
+                    exec.effect,
+                    crate::types::ability::Effect::Unimplemented { .. }
+                ),
                 "Effect should be Draw, not Unimplemented"
             );
-            assert!(exec.sub_ability.is_none(), "No spurious sub-ability from constraint text");
+            assert!(
+                exec.sub_ability.is_none(),
+                "No spurious sub-ability from constraint text"
+            );
         }
     }
 
@@ -890,9 +893,8 @@ mod tests {
 
     #[test]
     fn strip_constraint_does_not_affect_effect() {
-        let result = strip_constraint_sentences(
-            "draw a card. this ability triggers only once each turn.",
-        );
+        let result =
+            strip_constraint_sentences("draw a card. this ability triggers only once each turn.");
         assert_eq!(result, "draw a card");
     }
 

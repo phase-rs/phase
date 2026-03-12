@@ -7,7 +7,7 @@ use super::card_type::CardType;
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardFace {
     pub name: String,
     pub mana_cost: ManaCost,
@@ -29,7 +29,7 @@ pub struct CardFace {
     pub scryfall_oracle_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CardLayout {
     Single(CardFace),
     Split(CardFace, CardFace),
@@ -42,7 +42,7 @@ pub enum CardLayout {
     Specialize(CardFace, Vec<CardFace>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardRules {
     pub layout: CardLayout,
     pub meld_with: Option<String>,

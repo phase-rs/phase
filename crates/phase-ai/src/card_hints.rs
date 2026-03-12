@@ -267,7 +267,7 @@ mod tests {
 
         let mut state = make_state();
         state.active_player = PlayerId(1); // Opponent's turn
-        // Put something on the stack so the counterspell has a target
+                                           // Put something on the stack so the counterspell has a target
         state.stack.push(StackEntry {
             id: ObjectId(999),
             source_id: ObjectId(998),

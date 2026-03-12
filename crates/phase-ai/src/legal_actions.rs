@@ -1,5 +1,8 @@
+use std::collections::BTreeMap;
+
 use engine::game::casting::spell_has_legal_targets;
 use engine::game::combat::AttackTarget;
+use engine::game::deck_loading::DeckEntry;
 use engine::game::game_object::GameObject;
 use engine::game::mana_payment;
 use engine::types::actions::GameAction;
@@ -7,6 +10,7 @@ use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType};
+use engine::types::match_config::DeckCardCount;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
@@ -86,7 +90,38 @@ pub fn get_legal_actions(state: &GameState) -> Vec<GameAction> {
                 targets: vec![t.clone()],
             })
             .collect(),
+        WaitingFor::BetweenGamesSideboard { player, .. } => sideboard_actions(state, *player),
+        WaitingFor::BetweenGamesChoosePlayDraw { .. } => {
+            vec![
+                GameAction::ChoosePlayDraw { play_first: true },
+                GameAction::ChoosePlayDraw { play_first: false },
+            ]
+        }
     }
+}
+
+fn sideboard_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
+    let Some(pool) = state.deck_pools.iter().find(|pool| pool.player == player) else {
+        return Vec::new();
+    };
+
+    vec![GameAction::SubmitSideboard {
+        main: deck_entries_to_counts(&pool.current_main),
+        sideboard: deck_entries_to_counts(&pool.current_sideboard),
+    }]
+}
+
+fn deck_entries_to_counts(entries: &[DeckEntry]) -> Vec<DeckCardCount> {
+    let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+    for entry in entries {
+        if entry.count > 0 {
+            *counts.entry(entry.card.name.clone()).or_insert(0) += entry.count;
+        }
+    }
+    counts
+        .into_iter()
+        .map(|(name, count)| DeckCardCount { name, count })
+        .collect()
 }
 
 fn priority_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
@@ -213,11 +248,17 @@ impl AvailableMana {
     fn spend_shard(&mut self, shard: &ManaCostShard) -> bool {
         match shard {
             // Single color
-            ManaCostShard::White | ManaCostShard::PhyrexianWhite => self.spend_color(ManaType::White),
+            ManaCostShard::White | ManaCostShard::PhyrexianWhite => {
+                self.spend_color(ManaType::White)
+            }
             ManaCostShard::Blue | ManaCostShard::PhyrexianBlue => self.spend_color(ManaType::Blue),
-            ManaCostShard::Black | ManaCostShard::PhyrexianBlack => self.spend_color(ManaType::Black),
+            ManaCostShard::Black | ManaCostShard::PhyrexianBlack => {
+                self.spend_color(ManaType::Black)
+            }
             ManaCostShard::Red | ManaCostShard::PhyrexianRed => self.spend_color(ManaType::Red),
-            ManaCostShard::Green | ManaCostShard::PhyrexianGreen => self.spend_color(ManaType::Green),
+            ManaCostShard::Green | ManaCostShard::PhyrexianGreen => {
+                self.spend_color(ManaType::Green)
+            }
             ManaCostShard::Colorless => self.spend_color(ManaType::Colorless),
             // Hybrid: either color works
             ManaCostShard::WhiteBlue | ManaCostShard::PhyrexianWhiteBlue => {
@@ -252,19 +293,44 @@ impl AvailableMana {
             }
             // Two-generic hybrid: 1 colored or 2 generic
             ManaCostShard::TwoWhite => {
-                self.spend_color(ManaType::White) || self.total() >= 2 && { self.spend_any(); self.spend_any(); true }
+                self.spend_color(ManaType::White)
+                    || self.total() >= 2 && {
+                        self.spend_any();
+                        self.spend_any();
+                        true
+                    }
             }
             ManaCostShard::TwoBlue => {
-                self.spend_color(ManaType::Blue) || self.total() >= 2 && { self.spend_any(); self.spend_any(); true }
+                self.spend_color(ManaType::Blue)
+                    || self.total() >= 2 && {
+                        self.spend_any();
+                        self.spend_any();
+                        true
+                    }
             }
             ManaCostShard::TwoBlack => {
-                self.spend_color(ManaType::Black) || self.total() >= 2 && { self.spend_any(); self.spend_any(); true }
+                self.spend_color(ManaType::Black)
+                    || self.total() >= 2 && {
+                        self.spend_any();
+                        self.spend_any();
+                        true
+                    }
             }
             ManaCostShard::TwoRed => {
-                self.spend_color(ManaType::Red) || self.total() >= 2 && { self.spend_any(); self.spend_any(); true }
+                self.spend_color(ManaType::Red)
+                    || self.total() >= 2 && {
+                        self.spend_any();
+                        self.spend_any();
+                        true
+                    }
             }
             ManaCostShard::TwoGreen => {
-                self.spend_color(ManaType::Green) || self.total() >= 2 && { self.spend_any(); self.spend_any(); true }
+                self.spend_color(ManaType::Green)
+                    || self.total() >= 2 && {
+                        self.spend_any();
+                        self.spend_any();
+                        true
+                    }
             }
             // Colorless hybrid: colorless or colored
             ManaCostShard::ColorlessWhite => {
@@ -372,7 +438,6 @@ fn can_afford_with(available: &AvailableMana, cost: &ManaCost) -> bool {
         }
     }
 }
-
 
 fn bottom_card_actions(state: &GameState, player: PlayerId, count: u8) -> Vec<GameAction> {
     let p = &state.players[player.0 as usize];

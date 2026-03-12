@@ -93,7 +93,12 @@ pub fn choose_attackers_with_targets(
                 let blocker = state.objects.get(&bid).unwrap();
                 let blocker_toughness = blocker.toughness.unwrap_or(0);
                 let blocker_power = blocker.power.unwrap_or(0);
-                (bid, evaluate_creature(state, bid), blocker_toughness, blocker_power)
+                (
+                    bid,
+                    evaluate_creature(state, bid),
+                    blocker_toughness,
+                    blocker_power,
+                )
             })
             .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 

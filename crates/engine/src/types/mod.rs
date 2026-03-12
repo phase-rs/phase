@@ -9,6 +9,7 @@ pub mod identifiers;
 pub mod keywords;
 pub mod layers;
 pub mod mana;
+pub mod match_config;
 pub mod phase;
 pub mod player;
 pub mod proposed_event;
@@ -29,13 +30,16 @@ pub use card_type::{CardType, CoreType, Supertype};
 pub use events::GameEvent;
 pub use format::{FormatConfig, GameFormat};
 pub use game_state::{
-    ActionResult, CommanderDamageEntry, GameState, PendingReplacement, StackEntry, StackEntryKind,
-    WaitingFor,
+    ActionResult, CommanderDamageEntry, GameState, PendingReplacement, PlayerDeckPool, StackEntry,
+    StackEntryKind, WaitingFor,
 };
 pub use identifiers::{CardId, ObjectId};
 pub use keywords::{Keyword, ProtectionTarget};
 pub use layers::{ActiveContinuousEffect, Layer};
 pub use mana::{ManaColor, ManaCost, ManaCostShard, ManaPool, ManaRestriction, ManaType, ManaUnit};
+pub use match_config::{
+    BetweenGamesPrompt, DeckCardCount, MatchConfig, MatchPhase, MatchScore, MatchType,
+};
 pub use phase::Phase;
 pub use player::{Player, PlayerId};
 pub use proposed_event::{ProposedEvent, ReplacementId};

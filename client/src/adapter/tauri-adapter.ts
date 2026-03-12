@@ -1,4 +1,11 @@
-import type { ActionResult, EngineAdapter, GameAction, GameEvent, GameState } from "./types";
+import type {
+  ActionResult,
+  EngineAdapter,
+  GameAction,
+  GameEvent,
+  GameState,
+  MatchConfig,
+} from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
 
 /**
@@ -20,12 +27,18 @@ export class TauriAdapter implements EngineAdapter {
     this.invoke = tauriCore.invoke as InvokeFn;
   }
 
-  async initializeGame(deckData?: unknown): Promise<GameEvent[]> {
+  async initializeGame(
+    deckData?: unknown,
+    _formatConfig?: unknown,
+    _playerCount?: number,
+    matchConfig?: MatchConfig,
+  ): Promise<GameEvent[]> {
     this.assertInitialized();
     const seed = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
     const result = await this.invoke!("initialize_game", {
       deckData: deckData ?? null,
       seed,
+      matchConfig: matchConfig ?? null,
     });
     return (result as ActionResult).events ?? [];
   }

@@ -10,6 +10,7 @@ use engine::database::CardDatabase;
 use engine::game::engine::apply;
 use engine::game::{load_deck_into_state, resolve_deck_list, start_game, DeckList};
 use engine::types::format::FormatConfig;
+use engine::types::match_config::MatchConfig;
 use engine::types::{
     GameAction, GameEvent, GameState, ManaColor, ManaPool, ManaType, Phase, PlayerId, Zone,
 };
@@ -52,6 +53,7 @@ pub fn load_card_database(json_str: &str) -> Result<u32, JsValue> {
 /// Initialize a new game.
 /// Accepts deck_data as a DeckList (name-only) or null/undefined for empty libraries.
 /// format_config_js: optional FormatConfig JSON — defaults to Standard if null/undefined.
+/// match_config_js: optional MatchConfig JSON — defaults to BO1 if null/undefined.
 /// player_count: number of players — defaults to 2 if not provided.
 /// Names are resolved against the card database loaded via load_card_database().
 /// Returns the initial ActionResult (events + waiting_for).
@@ -60,6 +62,7 @@ pub fn initialize_game(
     deck_data: JsValue,
     seed: Option<f64>,
     format_config_js: JsValue,
+    match_config_js: JsValue,
     player_count: Option<u8>,
 ) -> JsValue {
     let seed = seed.map(|s| s as u64).unwrap_or(42);
@@ -73,6 +76,12 @@ pub fn initialize_game(
     let count = player_count.unwrap_or(2);
 
     let mut state = GameState::new(format_config, count, seed);
+    state.match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
+        serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
+            .unwrap_or_else(|_| MatchConfig::default())
+    } else {
+        MatchConfig::default()
+    };
 
     // Load deck data if provided — resolve names via the loaded card database
     if !deck_data.is_null() && !deck_data.is_undefined() {
@@ -85,7 +94,7 @@ pub fn initialize_game(
                     // replicate the opponent deck for all additional AI players.
                     if count > 2 && payload.ai_decks.is_empty() {
                         for _ in 2..count {
-                            payload.ai_decks.push(payload.opponent_deck.clone());
+                            payload.ai_decks.push(payload.opponent.clone());
                         }
                     }
 

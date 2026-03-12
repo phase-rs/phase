@@ -1,9 +1,11 @@
+use rand::Rng;
 use thiserror::Error;
 
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ActionResult, GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::match_config::MatchType;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -13,6 +15,7 @@ use super::derived::derive_display_state;
 use super::effects;
 use super::mana_abilities;
 use super::mana_payment;
+use super::match_flow;
 use super::mulligan;
 use super::planeswalker;
 use super::priority;
@@ -475,6 +478,16 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             state.priority_pass_count = 0;
             WaitingFor::Priority { player: *player }
         }
+        (
+            WaitingFor::BetweenGamesSideboard { player, .. },
+            GameAction::SubmitSideboard { main, sideboard },
+        ) => match_flow::handle_submit_sideboard(state, *player, main, sideboard)
+            .map_err(EngineError::InvalidAction)?,
+        (
+            WaitingFor::BetweenGamesChoosePlayDraw { player, .. },
+            GameAction::ChoosePlayDraw { play_first },
+        ) => match_flow::handle_choose_play_draw(state, *player, play_first, &mut events)
+            .map_err(EngineError::InvalidAction)?,
         (waiting, action) => {
             return Err(EngineError::ActionNotAllowed(format!(
                 "Cannot perform {:?} while waiting for {:?}",
@@ -493,6 +506,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
 
         // SBA might have set game over
         if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+            match_flow::handle_game_over_transition(state);
             let wf = state.waiting_for.clone();
             return Ok(ActionResult {
                 events,
@@ -804,18 +818,51 @@ pub fn new_game(seed: u64) -> GameState {
 
 /// Start game with mulligan flow. If no cards in libraries, skips mulligan.
 pub fn start_game(state: &mut GameState) -> ActionResult {
+    let starting_player = if state.match_config.match_type == MatchType::Bo3
+        && state.players.len() == 2
+        && state.game_number == 1
+    {
+        if state.rng.random_bool(0.5) {
+            PlayerId(0)
+        } else {
+            PlayerId(1)
+        }
+    } else {
+        PlayerId(0)
+    };
+    start_game_with_starting_player(state, starting_player)
+}
+
+/// Start game with a specific player taking the first turn.
+pub fn start_game_with_starting_player(
+    state: &mut GameState,
+    starting_player: PlayerId,
+) -> ActionResult {
     let mut events = Vec::new();
+
+    if state.match_config.match_type == MatchType::Bo3 && state.players.len() != 2 {
+        state.match_config.match_type = MatchType::Bo1;
+    }
 
     events.push(GameEvent::GameStarted);
 
     // Begin the game: set turn 1
     state.turn_number = 1;
-    state.active_player = PlayerId(0);
-    state.priority_player = PlayerId(0);
+    state.active_player = starting_player;
+    state.priority_player = starting_player;
+    state.current_starting_player = starting_player;
+    // First-game default chooser is the starting player; BO3 restarts can pre-set this.
+    if state.next_game_chooser.is_none() {
+        state.next_game_chooser = Some(starting_player);
+    }
+    // Rotate seat order so mulligan starts with the starting player.
+    if let Some(idx) = state.seat_order.iter().position(|&p| p == starting_player) {
+        state.seat_order.rotate_left(idx);
+    }
     state.phase = Phase::Untap;
 
     events.push(GameEvent::TurnStarted {
-        player_id: PlayerId(0),
+        player_id: starting_player,
         turn_number: 1,
     });
 
@@ -2931,7 +2978,9 @@ mod exile_return_tests {
 mod phase_trigger_regression_tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, GainLifePlayer, LifeAmount, TriggerDefinition};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, GainLifePlayer, LifeAmount, TriggerDefinition,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
@@ -2975,7 +3024,10 @@ mod phase_trigger_regression_tests {
                 phase: Some(Phase::BeginCombat),
                 execute: Some(Box::new(AbilityDefinition {
                     kind: AbilityKind::Activated,
-                    effect: Effect::GainLife { amount: LifeAmount::Fixed(1), player: GainLifePlayer::Controller },
+                    effect: Effect::GainLife {
+                        amount: LifeAmount::Fixed(1),
+                        player: GainLifePlayer::Controller,
+                    },
                     cost: None,
                     sub_ability: None,
                     target_prompt: None,

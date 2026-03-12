@@ -1,6 +1,14 @@
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
-import type { EngineAdapter, FormatConfig, GameAction, GameEvent, GameState, WaitingFor } from "../adapter/types";
+import type {
+  EngineAdapter,
+  FormatConfig,
+  GameAction,
+  GameEvent,
+  GameState,
+  MatchConfig,
+  WaitingFor,
+} from "../adapter/types";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { ACTIVE_GAME_KEY, GAME_KEY_PREFIX } from "../constants/storage";
 
@@ -22,7 +30,14 @@ interface GameStoreState {
 }
 
 interface GameStoreActions {
-  initGame: (gameId: string, adapter: EngineAdapter, deckData?: unknown, formatConfig?: FormatConfig, playerCount?: number) => Promise<void>;
+  initGame: (
+    gameId: string,
+    adapter: EngineAdapter,
+    deckData?: unknown,
+    formatConfig?: FormatConfig,
+    playerCount?: number,
+    matchConfig?: MatchConfig,
+  ) => Promise<void>;
   resumeGame: (gameId: string, adapter: EngineAdapter, savedState: GameState) => Promise<void>;
   dispatch: (action: GameAction) => Promise<GameEvent[]>;
   undo: () => Promise<void>;
@@ -47,7 +62,10 @@ const initialState: GameStoreState = {
 };
 
 export function saveGame(gameId: string, state: GameState): void {
-  if (state.waiting_for.type === "GameOver") {
+  if (
+    state.match_phase === "Completed"
+    || (!state.match_phase && state.waiting_for.type === "GameOver")
+  ) {
     clearGame(gameId);
     return;
   }
@@ -99,9 +117,9 @@ export const useGameStore = create<GameStore>()(
   subscribeWithSelector((set, get) => ({
     ...initialState,
 
-    initGame: async (gameId, adapter, deckData, formatConfig, playerCount) => {
+    initGame: async (gameId, adapter, deckData, formatConfig, playerCount, matchConfig) => {
       await adapter.initialize();
-      await adapter.initializeGame(deckData, formatConfig, playerCount);
+      await adapter.initializeGame(deckData, formatConfig, playerCount, matchConfig);
       const state = await adapter.getState();
       const legalActions = await adapter.getLegalActions();
       set({

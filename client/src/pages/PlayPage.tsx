@@ -53,7 +53,7 @@ export function PlayPage() {
     const meta: ActiveGameMeta = { id: gameId, mode: "ai", difficulty };
     saveActiveGame(meta);
     useGameStore.setState({ gameId });
-    navigate(`/game/${gameId}?mode=ai&difficulty=${difficulty}`);
+    navigate(`/game/${gameId}?mode=ai&difficulty=${difficulty}&match=bo1`);
   };
 
   return (

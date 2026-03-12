@@ -166,7 +166,13 @@ fn build_oracle_face(mtgjson: &AtomicCard, oracle_id: Option<String>) -> CardFac
     let types: Vec<String> = mtgjson.types.clone();
     let subtypes: Vec<String> = mtgjson.subtypes.clone();
 
-    let parsed = parse_oracle_text(oracle_text, face_name, &mtgjson_keyword_names, &types, &subtypes);
+    let parsed = parse_oracle_text(
+        oracle_text,
+        face_name,
+        &mtgjson_keyword_names,
+        &types,
+        &subtypes,
+    );
 
     // Merge keywords extracted from Oracle text with MTGJSON keywords
     keywords.extend(parsed.extracted_keywords);

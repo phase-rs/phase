@@ -1600,7 +1600,8 @@ pub mod tests {
     use crate::game::filter::matches_target_filter;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityKind, ControllerRef, GainLifePlayer, LifeAmount, TargetFilter, TriggerDefinition, TypeFilter,
+        AbilityKind, ControllerRef, GainLifePlayer, LifeAmount, TargetFilter, TriggerDefinition,
+        TypeFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
@@ -2072,7 +2073,9 @@ pub mod tests {
         assert_eq!(entry.source_id, trigger_creature);
         assert_eq!(entry.controller, PlayerId(0));
         match &entry.kind {
-            StackEntryKind::TriggeredAbility { source_id, ability, .. } => {
+            StackEntryKind::TriggeredAbility {
+                source_id, ability, ..
+            } => {
                 assert_eq!(*source_id, trigger_creature);
                 assert_eq!(
                     crate::types::ability::effect_variant_name(&ability.effect),
@@ -2625,7 +2628,10 @@ pub mod tests {
                 cost: None,
                 sub_ability: Some(Box::new(AbilityDefinition {
                     kind: AbilityKind::Database,
-                    effect: Effect::GainLife { amount: LifeAmount::Fixed(3), player: GainLifePlayer::Controller },
+                    effect: Effect::GainLife {
+                        amount: LifeAmount::Fixed(3),
+                        player: GainLifePlayer::Controller,
+                    },
                     cost: None,
                     sub_ability: None,
                     duration: None,

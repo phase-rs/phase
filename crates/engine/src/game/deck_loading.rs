@@ -14,28 +14,42 @@ use crate::types::zones::Zone;
 
 use super::zones::create_object;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeckEntry {
     pub card: CardFace,
     pub count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeckPayload {
-    pub player_deck: Vec<DeckEntry>,
-    pub opponent_deck: Vec<DeckEntry>,
+pub struct PlayerDeckPayload {
+    pub main_deck: Vec<DeckEntry>,
     #[serde(default)]
-    pub ai_decks: Vec<Vec<DeckEntry>>,
+    pub sideboard: Vec<DeckEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeckPayload {
+    pub player: PlayerDeckPayload,
+    pub opponent: PlayerDeckPayload,
+    #[serde(default)]
+    pub ai_decks: Vec<PlayerDeckPayload>,
 }
 
 /// Lightweight deck format using card names only.
 /// Resolved into a DeckPayload via a CardDatabase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeckList {
-    pub player_deck: Vec<String>,
-    pub opponent_deck: Vec<String>,
+pub struct PlayerDeckList {
+    pub main_deck: Vec<String>,
     #[serde(default)]
-    pub ai_decks: Vec<Vec<String>>,
+    pub sideboard: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeckList {
+    pub player: PlayerDeckList,
+    pub opponent: PlayerDeckList,
+    #[serde(default)]
+    pub ai_decks: Vec<PlayerDeckList>,
 }
 
 /// Resolve a flat name list into DeckEntry entries using the card database.
@@ -61,12 +75,21 @@ fn resolve_names(db: &CardDatabase, names: &[String]) -> Vec<DeckEntry> {
 /// using a CardDatabase for lookup. Unresolvable names are silently skipped.
 pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
     DeckPayload {
-        player_deck: resolve_names(db, &list.player_deck),
-        opponent_deck: resolve_names(db, &list.opponent_deck),
+        player: PlayerDeckPayload {
+            main_deck: resolve_names(db, &list.player.main_deck),
+            sideboard: resolve_names(db, &list.player.sideboard),
+        },
+        opponent: PlayerDeckPayload {
+            main_deck: resolve_names(db, &list.opponent.main_deck),
+            sideboard: resolve_names(db, &list.opponent.sideboard),
+        },
         ai_decks: list
             .ai_decks
             .iter()
-            .map(|names| resolve_names(db, names))
+            .map(|deck| PlayerDeckPayload {
+                main_deck: resolve_names(db, &deck.main_deck),
+                sideboard: resolve_names(db, &deck.sideboard),
+            })
             .collect(),
     }
 }
@@ -239,13 +262,47 @@ pub fn create_commander_from_card_face(
 
 /// Load deck data into a GameState, creating GameObjects in each player's library and shuffling.
 pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
-    for entry in &payload.player_deck {
+    state.deck_pools.clear();
+    state.sideboard_submitted.clear();
+
+    state
+        .deck_pools
+        .push(crate::types::game_state::PlayerDeckPool {
+            player: PlayerId(0),
+            registered_main: payload.player.main_deck.clone(),
+            registered_sideboard: payload.player.sideboard.clone(),
+            current_main: payload.player.main_deck.clone(),
+            current_sideboard: payload.player.sideboard.clone(),
+        });
+    state
+        .deck_pools
+        .push(crate::types::game_state::PlayerDeckPool {
+            player: PlayerId(1),
+            registered_main: payload.opponent.main_deck.clone(),
+            registered_sideboard: payload.opponent.sideboard.clone(),
+            current_main: payload.opponent.main_deck.clone(),
+            current_sideboard: payload.opponent.sideboard.clone(),
+        });
+    for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
+        let player_id = PlayerId((2 + i) as u8);
+        state
+            .deck_pools
+            .push(crate::types::game_state::PlayerDeckPool {
+                player: player_id,
+                registered_main: ai_deck.main_deck.clone(),
+                registered_sideboard: ai_deck.sideboard.clone(),
+                current_main: ai_deck.main_deck.clone(),
+                current_sideboard: ai_deck.sideboard.clone(),
+            });
+    }
+
+    for entry in &payload.player.main_deck {
         for _ in 0..entry.count {
             create_object_from_card_face(state, &entry.card, PlayerId(0));
         }
     }
 
-    for entry in &payload.opponent_deck {
+    for entry in &payload.opponent.main_deck {
         for _ in 0..entry.count {
             create_object_from_card_face(state, &entry.card, PlayerId(1));
         }
@@ -254,7 +311,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     // Load additional AI decks into PlayerId(2), PlayerId(3), etc.
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         let player_id = PlayerId((2 + i) as u8);
-        for entry in ai_deck {
+        for entry in &ai_deck.main_deck {
             for _ in 0..entry.count {
                 create_object_from_card_face(state, &entry.card, player_id);
             }
@@ -436,20 +493,26 @@ mod tests {
     fn load_deck_creates_correct_object_count() {
         let mut state = GameState::new_two_player(42);
         let payload = DeckPayload {
-            player_deck: vec![
-                DeckEntry {
+            player: PlayerDeckPayload {
+                main_deck: vec![
+                    DeckEntry {
+                        card: make_creature_face(),
+                        count: 4,
+                    },
+                    DeckEntry {
+                        card: make_instant_face(),
+                        count: 2,
+                    },
+                ],
+                sideboard: vec![],
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
                     card: make_creature_face(),
-                    count: 4,
-                },
-                DeckEntry {
-                    card: make_instant_face(),
-                    count: 2,
-                },
-            ],
-            opponent_deck: vec![DeckEntry {
-                card: make_creature_face(),
-                count: 3,
-            }],
+                    count: 3,
+                }],
+                sideboard: vec![],
+            },
             ai_decks: vec![],
         };
 
@@ -476,8 +539,14 @@ mod tests {
 
         let mut state = GameState::new_two_player(42);
         let payload = DeckPayload {
-            player_deck: entries,
-            opponent_deck: vec![],
+            player: PlayerDeckPayload {
+                main_deck: entries,
+                sideboard: vec![],
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: vec![],
+                sideboard: vec![],
+            },
             ai_decks: vec![],
         };
         load_deck_into_state(&mut state, &payload);
@@ -608,17 +677,23 @@ mod tests {
     #[test]
     fn deck_payload_serializes_roundtrips() {
         let payload = DeckPayload {
-            player_deck: vec![DeckEntry {
-                card: make_creature_face(),
-                count: 4,
-            }],
-            opponent_deck: vec![],
+            player: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: make_creature_face(),
+                    count: 4,
+                }],
+                sideboard: vec![],
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: vec![],
+                sideboard: vec![],
+            },
             ai_decks: vec![],
         };
         let json = serde_json::to_string(&payload).unwrap();
         let deserialized: DeckPayload = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.player_deck.len(), 1);
-        assert_eq!(deserialized.player_deck[0].count, 4);
-        assert_eq!(deserialized.player_deck[0].card.name, "Grizzly Bears");
+        assert_eq!(deserialized.player.main_deck.len(), 1);
+        assert_eq!(deserialized.player.main_deck[0].count, 4);
+        assert_eq!(deserialized.player.main_deck[0].card.name, "Grizzly Bears");
     }
 }

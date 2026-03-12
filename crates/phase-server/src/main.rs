@@ -603,6 +603,7 @@ async fn handle_client_message(
             password,
             timer_seconds,
             player_count: requested_player_count,
+            match_config,
         } => {
             info!(
                 display_name = %display_name,
@@ -626,8 +627,13 @@ async fn handle_client_message(
 
             let mut mgr = state.lock().await;
             let pc = requested_player_count.clamp(2, 6);
-            let (game_code, player_token) =
-                mgr.create_game_n_players(resolved, display_name.clone(), timer_seconds, pc);
+            let (game_code, player_token) = mgr.create_game_n_players(
+                resolved,
+                display_name.clone(),
+                timer_seconds,
+                pc,
+                match_config,
+            );
             info!(game = %game_code, host = %display_name, players = pc, "game created via lobby");
 
             identity.game_code = Some(game_code.clone());

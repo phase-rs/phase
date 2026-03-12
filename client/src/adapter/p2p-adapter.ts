@@ -4,6 +4,7 @@ import type {
   GameEvent,
   GameObject,
   GameState,
+  MatchConfig,
   PlayerId,
 } from "./types";
 
@@ -24,6 +25,12 @@ export type P2PAdapterEvent =
   | { type: "stateChanged"; state: GameState; events: GameEvent[]; legalActions: GameAction[] };
 
 type P2PAdapterEventListener = (event: P2PAdapterEvent) => void;
+
+interface DeckListPayload {
+  player: { main_deck: string[]; sideboard: string[] };
+  opponent: { main_deck: string[]; sideboard: string[] };
+  ai_decks: Array<{ main_deck: string[]; sideboard: string[] }>;
+}
 
 /** Scrub a card object so only its zone/ID remain visible (card back). */
 function scrubObject(obj: GameObject): void {
@@ -49,6 +56,15 @@ function scrubObject(obj: GameObject): void {
  */
 function filterStateForGuest(state: GameState): GameState {
   const clone = JSON.parse(JSON.stringify(state)) as GameState;
+
+  for (const pool of clone.deck_pools ?? []) {
+    if (pool.player !== 1) {
+      pool.registered_main = [];
+      pool.registered_sideboard = [];
+      pool.current_main = [];
+      pool.current_sideboard = [];
+    }
+  }
 
   // Scrub host's hand objects (guest sees card backs, not contents)
   for (const objId of clone.players[0]?.hand ?? []) {
@@ -125,19 +141,26 @@ export class P2PHostAdapter implements EngineAdapter {
     });
   }
 
-  async initializeGame(_deckData?: unknown): Promise<GameEvent[]> {
+  async initializeGame(
+    _deckData?: unknown,
+    _formatConfig?: unknown,
+    _playerCount?: number,
+    matchConfig?: MatchConfig,
+  ): Promise<GameEvent[]> {
     // Await the eagerly-created promise — resolves immediately if
     // guest_deck arrived during initialize(), otherwise waits.
     const guestDeckData = await this.guestDeckPromise;
 
     // Build combined deck payload for WASM
+    const hostDeck = this.deckData as DeckListPayload;
+    const guestDeck = guestDeckData as DeckListPayload;
     const deckPayload = {
-      ...(this.deckData as Record<string, unknown>),
-      opponent_deck: (guestDeckData as Record<string, unknown>).opponent_deck ??
-        (guestDeckData as Record<string, unknown>).player_deck,
+      player: hostDeck.player,
+      opponent: guestDeck.player,
+      ai_decks: [],
     };
 
-    const events = this.wasm.initializeGame(deckPayload);
+    const events = this.wasm.initializeGame(deckPayload, undefined, 2, matchConfig);
     const state = await this.wasm.getState();
     const legalActions = await this.wasm.getLegalActions();
 
@@ -292,7 +315,12 @@ export class P2PGuestAdapter implements EngineAdapter {
     this.session.send({ type: "guest_deck", deckData: this.deckData });
   }
 
-  async initializeGame(_deckData?: unknown): Promise<GameEvent[]> {
+  async initializeGame(
+    _deckData?: unknown,
+    _formatConfig?: unknown,
+    _playerCount?: number,
+    _matchConfig?: MatchConfig,
+  ): Promise<GameEvent[]> {
     // Guest is player 1
     useMultiplayerStore.getState().setActivePlayerId(1);
 

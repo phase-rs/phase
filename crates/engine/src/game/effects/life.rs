@@ -237,7 +237,10 @@ mod tests {
     fn gain_life_increases_controller_life() {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
-            Effect::GainLife { amount: LifeAmount::Fixed(5), player: GainLifePlayer::Controller },
+            Effect::GainLife {
+                amount: LifeAmount::Fixed(5),
+                player: GainLifePlayer::Controller,
+            },
             vec![],
             ObjectId(100),
             PlayerId(0),
@@ -269,7 +272,10 @@ mod tests {
     fn gain_life_emits_positive_life_changed() {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
-            Effect::GainLife { amount: LifeAmount::Fixed(4), player: GainLifePlayer::Controller },
+            Effect::GainLife {
+                amount: LifeAmount::Fixed(4),
+                player: GainLifePlayer::Controller,
+            },
             vec![],
             ObjectId(100),
             PlayerId(0),

@@ -368,10 +368,9 @@ fn apply_combat_damage(
 
         // Protection: prevent combat damage from sources with matching quality
         if let DamageTarget::Object(target_id) = &assignment.target {
-            if let (Some(target_obj), Some(source_obj)) = (
-                state.objects.get(target_id),
-                state.objects.get(source_id),
-            ) {
+            if let (Some(target_obj), Some(source_obj)) =
+                (state.objects.get(target_id), state.objects.get(source_id))
+            {
                 if crate::game::keywords::protection_prevents_from(target_obj, source_obj) {
                     continue;
                 }

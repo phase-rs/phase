@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 
-import type { FormatConfig, GameFormat } from "../adapter/types";
+import type { FormatConfig, GameFormat, MatchType } from "../adapter/types";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { HostSetup } from "../components/lobby/HostSetup";
 import { LobbyView } from "../components/lobby/LobbyView";
@@ -73,6 +73,7 @@ export function GameSetupPage() {
   const [playerCount, setPlayerCount] = useState(2);
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
   const [difficulty, setDifficulty] = useState("Medium");
+  const [matchType, setMatchType] = useState<MatchType>("Bo1");
 
   // Multiplayer state
   const [hostGameCode, setHostGameCode] = useState<string | null>(null);
@@ -101,6 +102,9 @@ export function GameSetupPage() {
     setSelectedFormat(format);
     setFormatConfig(defaults);
     setPlayerCount(defaults.min_players);
+    if (defaults.min_players !== 2) {
+      setMatchType("Bo1");
+    }
     setStep("config");
   };
 
@@ -122,7 +126,9 @@ export function GameSetupPage() {
     const gameId = crypto.randomUUID();
     saveActiveGame({ id: gameId, mode: "ai", difficulty });
     useGameStore.setState({ gameId });
-    navigate(`/game/${gameId}?mode=ai&difficulty=${difficulty}&format=${formatConfig.format}&players=${playerCount}`);
+    navigate(
+      `/game/${gameId}?mode=ai&difficulty=${difficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}`,
+    );
   };
 
   const handleSavePreset = () => {
@@ -194,6 +200,8 @@ export function GameSetupPage() {
               public: settings.public,
               password: settings.password || null,
               timer_seconds: settings.timerSeconds,
+              player_count: settings.formatConfig.max_players,
+              match_config: { match_type: settings.matchType },
               format_config: settings.formatConfig,
               ai_seats: settings.aiSeats,
             },
@@ -232,14 +240,14 @@ export function GameSetupPage() {
     [activeDeckName, serverAddress, navigate],
   );
 
-  const handleHostP2P = useCallback(() => {
+  const handleHostP2P = useCallback((settings: HostSettings) => {
     if (!activeDeckName) {
       setStep("deck-select");
       return;
     }
     const gameId = crypto.randomUUID();
     useGameStore.setState({ gameId });
-    navigate(`/game/${gameId}?mode=p2p-host`);
+    navigate(`/game/${gameId}?mode=p2p-host&match=${settings.matchType.toLowerCase()}`);
   }, [activeDeckName, navigate]);
 
   const handleJoinWithPassword = useCallback(
@@ -338,12 +346,50 @@ export function GameSetupPage() {
                   min={formatConfig.min_players}
                   max={formatConfig.max_players}
                   value={playerCount}
-                  onChange={(e) => setPlayerCount(Number(e.target.value))}
+                  onChange={(e) => {
+                    const nextCount = Number(e.target.value);
+                    setPlayerCount(nextCount);
+                    if (nextCount !== 2) {
+                      setMatchType("Bo1");
+                    }
+                  }}
                   className="w-full"
                 />
                 <span className="text-center text-lg font-semibold">{playerCount}</span>
               </label>
             )}
+
+            <label className="flex w-full flex-col gap-2">
+              <span className="text-sm text-gray-400">Match Type</span>
+              <div className="flex overflow-hidden rounded-lg border border-gray-700">
+                <button
+                  type="button"
+                  onClick={() => setMatchType("Bo1")}
+                  className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
+                    matchType === "Bo1"
+                      ? "bg-indigo-600 text-white"
+                      : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+                  }`}
+                >
+                  BO1
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMatchType("Bo3")}
+                  disabled={playerCount !== 2}
+                  className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
+                    matchType === "Bo3"
+                      ? "bg-indigo-600 text-white"
+                      : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+                  } ${playerCount !== 2 ? "cursor-not-allowed opacity-40" : ""}`}
+                >
+                  BO3
+                </button>
+              </div>
+              {playerCount !== 2 && (
+                <span className="text-xs text-gray-500">BO3 is available only for 2-player matches.</span>
+              )}
+            </label>
 
             {formatConfig.command_zone && (
               <div className="w-full rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
@@ -455,7 +501,7 @@ export function GameSetupPage() {
 
         {step === "host-setup" && (
           <HostSetup
-            onHost={connectionMode === "p2p" ? () => handleHostP2P() : handleHostWithSettings}
+            onHost={connectionMode === "p2p" ? handleHostP2P : handleHostWithSettings}
             onBack={() => setStep("lobby")}
             connectionMode={connectionMode}
           />

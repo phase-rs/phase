@@ -1,11 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use engine::game::deck_loading::{load_deck_into_state, DeckEntry, DeckPayload};
+use engine::game::deck_loading::{load_deck_into_state, DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{apply, start_game};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
+use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::match_config::MatchConfig;
 use engine::types::player::PlayerId;
 use phase_ai::get_legal_actions;
 use rand::Rng;
@@ -31,7 +33,9 @@ pub fn acting_player(waiting_for: &WaitingFor) -> Option<PlayerId> {
         | WaitingFor::ScryChoice { player, .. }
         | WaitingFor::DigChoice { player, .. }
         | WaitingFor::SurveilChoice { player, .. }
-        | WaitingFor::TriggerTargetSelection { player, .. } => Some(*player),
+        | WaitingFor::TriggerTargetSelection { player, .. }
+        | WaitingFor::BetweenGamesSideboard { player, .. }
+        | WaitingFor::BetweenGamesChoosePlayDraw { player, .. } => Some(*player),
         WaitingFor::GameOver { .. } => None,
     }
 }
@@ -42,7 +46,7 @@ pub struct GameSession {
     /// Player tokens indexed by seat (0..player_count). Empty string = seat not yet claimed.
     pub player_tokens: Vec<String>,
     pub connected: Vec<bool>,
-    pub decks: Vec<Option<Vec<DeckEntry>>>,
+    pub decks: Vec<Option<PlayerDeckPayload>>,
     pub display_names: Vec<String>,
     pub timer_seconds: Option<u32>,
     /// Number of human player seats in this game.
@@ -96,27 +100,29 @@ impl SessionManager {
     }
 
     /// Create a new game session (2-player default). Returns (game_code, player_token).
-    pub fn create_game(&mut self, deck: Vec<DeckEntry>) -> (String, String) {
-        self.create_game_n_players(deck, String::new(), None, 2)
+    pub fn create_game(&mut self, deck: PlayerDeckPayload) -> (String, String) {
+        self.create_game_n_players(deck, String::new(), None, 2, MatchConfig::default())
     }
 
     /// Create a new game session with lobby settings (2-player default). Returns (game_code, player_token).
     pub fn create_game_with_settings(
         &mut self,
-        deck: Vec<DeckEntry>,
+        deck: PlayerDeckPayload,
         display_name: String,
         timer_seconds: Option<u32>,
+        match_config: MatchConfig,
     ) -> (String, String) {
-        self.create_game_n_players(deck, display_name, timer_seconds, 2)
+        self.create_game_n_players(deck, display_name, timer_seconds, 2, match_config)
     }
 
     /// Create a new N-player game session. Returns (game_code, player_token).
     pub fn create_game_n_players(
         &mut self,
-        deck: Vec<DeckEntry>,
+        deck: PlayerDeckPayload,
         display_name: String,
         timer_seconds: Option<u32>,
         player_count: u8,
+        match_config: MatchConfig,
     ) -> (String, String) {
         let game_code = generate_game_code();
         let player_token = generate_player_token();
@@ -131,9 +137,17 @@ impl SessionManager {
         let mut display_names = vec![String::new(); pc];
         display_names[0] = display_name;
 
+        let mut state =
+            GameState::new(FormatConfig::standard(), player_count, rand::rng().random());
+        state.match_config = if player_count == 2 {
+            match_config
+        } else {
+            MatchConfig::default()
+        };
+
         let session = GameSession {
             game_code: game_code.clone(),
-            state: GameState::new_two_player(rand::rng().random()),
+            state,
             player_tokens,
             connected,
             decks,
@@ -154,7 +168,7 @@ impl SessionManager {
     pub fn join_game(
         &mut self,
         game_code: &str,
-        deck: Vec<DeckEntry>,
+        deck: PlayerDeckPayload,
     ) -> Result<(String, GameState), String> {
         self.join_game_with_name(game_code, deck, String::new())
     }
@@ -164,7 +178,7 @@ impl SessionManager {
     pub fn join_game_with_name(
         &mut self,
         game_code: &str,
-        deck: Vec<DeckEntry>,
+        deck: PlayerDeckPayload,
         display_name: String,
     ) -> Result<(String, GameState), String> {
         let session = self
@@ -189,11 +203,17 @@ impl SessionManager {
         // Start the game when the last human seat is filled
         if session.is_full() {
             // Load deck data into game state before starting
-            let player_deck = session.decks[0].clone().unwrap_or_default();
-            let opponent_deck = session.decks[1].clone().unwrap_or_default();
+            let player_deck = session.decks[0].clone().unwrap_or(PlayerDeckPayload {
+                main_deck: Vec::new(),
+                sideboard: Vec::new(),
+            });
+            let opponent_deck = session.decks[1].clone().unwrap_or(PlayerDeckPayload {
+                main_deck: Vec::new(),
+                sideboard: Vec::new(),
+            });
             let payload = DeckPayload {
-                player_deck,
-                opponent_deck,
+                player: player_deck,
+                opponent: opponent_deck,
                 ai_decks: vec![],
             };
             load_deck_into_state(&mut session.state, &payload);
@@ -334,37 +354,41 @@ fn generate_player_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::game::deck_loading::DeckEntry;
     use engine::types::card::CardFace;
     use engine::types::card_type::CardType;
     use engine::types::mana::ManaCost;
 
-    fn make_deck() -> Vec<DeckEntry> {
-        vec![DeckEntry {
-            card: CardFace {
-                name: "Forest".to_string(),
-                mana_cost: ManaCost::NoCost,
-                card_type: CardType {
-                    supertypes: vec![],
-                    core_types: vec![engine::types::card_type::CoreType::Land],
-                    subtypes: vec!["Forest".to_string()],
+    fn make_deck() -> PlayerDeckPayload {
+        PlayerDeckPayload {
+            main_deck: vec![DeckEntry {
+                card: CardFace {
+                    name: "Forest".to_string(),
+                    mana_cost: ManaCost::NoCost,
+                    card_type: CardType {
+                        supertypes: vec![],
+                        core_types: vec![engine::types::card_type::CoreType::Land],
+                        subtypes: vec!["Forest".to_string()],
+                    },
+                    power: None,
+                    toughness: None,
+                    loyalty: None,
+                    defense: None,
+                    oracle_text: None,
+                    non_ability_text: None,
+                    flavor_name: None,
+                    keywords: vec![],
+                    abilities: vec![],
+                    triggers: vec![],
+                    static_abilities: vec![],
+                    replacements: vec![],
+                    color_override: None,
+                    scryfall_oracle_id: None,
                 },
-                power: None,
-                toughness: None,
-                loyalty: None,
-                defense: None,
-                oracle_text: None,
-                non_ability_text: None,
-                flavor_name: None,
-                keywords: vec![],
-                abilities: vec![],
-                triggers: vec![],
-                static_abilities: vec![],
-                replacements: vec![],
-                color_override: None,
-                scryfall_oracle_id: None,
-            },
-            count: 10,
-        }]
+                count: 10,
+            }],
+            sideboard: Vec::new(),
+        }
     }
 
     #[test]
@@ -447,6 +471,36 @@ mod tests {
         mgr.handle_disconnect(&code, PlayerId(0));
         let result = mgr.handle_reconnect(&code, &token1);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn reconnect_restores_between_games_waiting_state() {
+        let mut mgr = SessionManager::new();
+        let (code, token0) = mgr.create_game(make_deck());
+        let _ = mgr.join_game(&code, make_deck()).unwrap();
+
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        session.state.match_phase = engine::types::match_config::MatchPhase::BetweenGames;
+        session.state.waiting_for = WaitingFor::BetweenGamesSideboard {
+            player: PlayerId(0),
+            game_number: 2,
+            score: engine::types::match_config::MatchScore {
+                p0_wins: 1,
+                p1_wins: 0,
+                draws: 0,
+            },
+        };
+
+        mgr.handle_disconnect(&code, PlayerId(0));
+        let filtered = mgr.handle_reconnect(&code, &token0).unwrap();
+        assert!(matches!(
+            filtered.waiting_for,
+            WaitingFor::BetweenGamesSideboard {
+                player: PlayerId(0),
+                game_number: 2,
+                ..
+            }
+        ));
     }
 
     #[test]

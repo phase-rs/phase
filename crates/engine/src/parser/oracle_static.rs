@@ -899,8 +899,7 @@ mod tests {
 
     #[test]
     fn during_your_turn_has_lifelink() {
-        let def =
-            parse_static_line("During your turn, this creature has lifelink.").unwrap();
+        let def = parse_static_line("During your turn, this creature has lifelink.").unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);
         assert_eq!(def.affected, Some(TargetFilter::SelfRef));
         assert_eq!(def.condition, Some(StaticCondition::DuringYourTurn));
