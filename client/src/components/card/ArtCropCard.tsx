@@ -3,7 +3,7 @@ import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { computePTDisplay } from "../../viewmodel/cardProps.ts";
-import { getCardDisplayColors, getFrameGradient } from "./cardFrame.ts";
+import { frameNeedsLightText, getCardDisplayColors, getFrameGradient } from "./cardFrame.ts";
 
 interface ArtCropCardProps {
   objectId: number;
@@ -40,6 +40,7 @@ export function ArtCropCard({ objectId }: ArtCropCardProps) {
     obj.available_mana_colors,
   );
   const frameGradient = getFrameGradient(displayColors);
+  const lightText = frameNeedsLightText(displayColors);
   const ptDisplay = computePTDisplay(obj);
   const counters = Object.entries(obj.counters);
   const devotionValue = obj.devotion ?? null;
@@ -95,7 +96,7 @@ export function ArtCropCard({ objectId }: ArtCropCardProps) {
 
           {/* 3. HEADER AREA: Uses isToken to make the background slightly translucent for tokens */}
           <div className={`h-[20px] w-full flex items-center px-1.5 shrink-0 z-10 border-b border-black/40 shadow-[0_1px_2px_rgba(0,0,0,0.4)] ${isToken ? 'bg-black/10' : ''}`}>
-            <span className={`text-[11.5px] font-extrabold tracking-tight leading-none truncate mt-[1px] ${isToken ? 'text-[#1a1a1a] drop-shadow-[0_1px_1px_rgba(255,255,255,0.6)]' : 'text-[#111] drop-shadow-[0_1px_0_rgba(255,255,255,0.5)]'}`}>
+            <span className={`text-[11.5px] font-extrabold tracking-tight leading-none truncate mt-[1px] ${lightText ? 'text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.8)]' : isToken ? 'text-[#1a1a1a] drop-shadow-[0_1px_1px_rgba(255,255,255,0.6)]' : 'text-[#111] drop-shadow-[0_1px_0_rgba(255,255,255,0.5)]'}`}>
               {cardName}
             </span>
           </div>

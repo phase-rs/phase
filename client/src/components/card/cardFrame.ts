@@ -60,6 +60,19 @@ function blend(color: string, target: string, amount: number): string {
   return `rgb(${r}, ${g}, ${b})`;
 }
 
+export function frameNeedsLightText(colors: string[]): boolean {
+  if (colors.length === 0) return false;
+  if (colors.length >= 2) return false; // gold frames use dark text
+  const hex = FRAME_COLORS[colors[0]];
+  if (!hex) return false;
+  const [r, g, b] = hexToRgb(hex).map((c) => {
+    const s = c / 255;
+    return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  });
+  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  return luminance < 0.35;
+}
+
 export function getBevelBorderStyle(
   colors: string[],
   borderWidth = 3,
