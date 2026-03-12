@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use indexmap::IndexMap;
 
-use crate::types::ability::ReplacementMode;
+use crate::types::ability::{ReplacementCondition, ReplacementMode};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingReplacement, WaitingFor};
 use crate::types::identifiers::ObjectId;
@@ -1318,6 +1318,31 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
 
 // --- Pipeline functions ---
 
+/// Evaluate a replacement condition against the current game state.
+/// Returns `true` if the replacement should apply, `false` if it should be skipped.
+fn evaluate_replacement_condition(
+    condition: &ReplacementCondition,
+    controller: PlayerId,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    match condition {
+        ReplacementCondition::UnlessControlsSubtype { subtypes } => {
+            // "unless you control a [subtype]" → suppressed if controller has a matching permanent
+            let controls_any = state.objects.values().any(|o| {
+                o.zone == Zone::Battlefield
+                    && o.controller == controller
+                    && o.id != source_id
+                    && subtypes
+                        .iter()
+                        .any(|st| o.card_types.subtypes.iter().any(|s| s.eq_ignore_ascii_case(st)))
+            });
+            // If the "unless" is satisfied (they DO control one), skip the replacement
+            !controls_any
+        }
+    }
+}
+
 pub fn find_applicable_replacements(
     state: &GameState,
     event: &ProposedEvent,
@@ -1379,6 +1404,12 @@ pub fn find_applicable_replacements(
                             })
                             .unwrap_or(false);
                         if !matches {
+                            continue;
+                        }
+                    }
+                    // Evaluate replacement condition (e.g. "unless you control a Mountain")
+                    if let Some(ref cond) = repl_def.condition {
+                        if !evaluate_replacement_condition(cond, obj.controller, obj.id, state) {
                             continue;
                         }
                     }
@@ -1608,13 +1639,7 @@ mod tests {
     use std::collections::HashSet;
 
     fn make_repl(event: ReplacementEvent) -> ReplacementDefinition {
-        ReplacementDefinition {
-            event,
-            execute: None,
-            mode: ReplacementMode::Mandatory,
-            valid_card: None,
-            description: None,
-        }
+        ReplacementDefinition::new(event)
     }
 
     fn test_state_with_object(

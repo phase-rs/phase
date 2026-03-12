@@ -1,7 +1,8 @@
 use super::oracle_effect::parse_effect_chain;
 use super::oracle_util::strip_reminder_text;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, ReplacementMode, TargetFilter,
+    AbilityDefinition, AbilityKind, Effect, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, TargetFilter,
 };
 use crate::types::replacements::ReplacementEvent;
 
@@ -20,7 +21,13 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
         return Some(def);
     }
 
-    // --- "~ enters the battlefield tapped" ---
+    // --- Check lands: "enters tapped unless you control a [LandType] or a [LandType]" ---
+    // Must be checked BEFORE the generic "enters tapped" pattern.
+    if let Some(def) = parse_check_land(&norm_lower, &text) {
+        return Some(def);
+    }
+
+    // --- "~ enters the battlefield tapped" (unconditional) ---
     if norm_lower.contains("enters the battlefield tapped") || norm_lower.contains("enters tapped")
     {
         let tap_effect = Box::new(AbilityDefinition {
@@ -36,11 +43,10 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
             sorcery_speed: false,
         });
         return Some(ReplacementDefinition {
-            event: ReplacementEvent::Moved,
             execute: Some(tap_effect),
-            mode: ReplacementMode::Mandatory,
             valid_card: Some(TargetFilter::SelfRef),
             description: Some(text.to_string()),
+            ..ReplacementDefinition::new(ReplacementEvent::Moved)
         });
     }
 
@@ -49,31 +55,24 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
         let effect_text = extract_replacement_effect(&normalized);
         let execute = effect_text.map(|e| Box::new(parse_effect_chain(&e, AbilityKind::Spell)));
         return Some(ReplacementDefinition {
-            event: ReplacementEvent::Destroy,
             execute,
-            mode: ReplacementMode::Mandatory,
             valid_card: Some(TargetFilter::SelfRef),
             description: Some(text.to_string()),
+            ..ReplacementDefinition::new(ReplacementEvent::Destroy)
         });
     }
 
     // --- "Prevent all combat damage" / "damage ... can't be prevented" ---
     if lower.contains("prevent all") && lower.contains("damage") {
         return Some(ReplacementDefinition {
-            event: ReplacementEvent::DamageDone,
-            execute: None,
-            mode: ReplacementMode::Mandatory,
-            valid_card: None,
             description: Some(text.to_string()),
+            ..ReplacementDefinition::new(ReplacementEvent::DamageDone)
         });
     }
     if lower.contains("damage") && lower.contains("can't be prevented") {
         return Some(ReplacementDefinition {
-            event: ReplacementEvent::DamageDone,
-            execute: None,
-            mode: ReplacementMode::Mandatory,
-            valid_card: None,
             description: Some(text.to_string()),
+            ..ReplacementDefinition::new(ReplacementEvent::DamageDone)
         });
     }
 
@@ -82,11 +81,9 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
         let effect_text = extract_replacement_effect(&normalized);
         let execute = effect_text.map(|e| Box::new(parse_effect_chain(&e, AbilityKind::Spell)));
         return Some(ReplacementDefinition {
-            event: ReplacementEvent::Draw,
             execute,
-            mode: ReplacementMode::Mandatory,
-            valid_card: None,
             description: Some(text.to_string()),
+            ..ReplacementDefinition::new(ReplacementEvent::Draw)
         });
     }
 
@@ -95,22 +92,17 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
         let effect_text = extract_replacement_effect(&normalized);
         let execute = effect_text.map(|e| Box::new(parse_effect_chain(&e, AbilityKind::Spell)));
         return Some(ReplacementDefinition {
-            event: ReplacementEvent::GainLife,
             execute,
-            mode: ReplacementMode::Mandatory,
-            valid_card: None,
             description: Some(text.to_string()),
+            ..ReplacementDefinition::new(ReplacementEvent::GainLife)
         });
     }
 
     // --- "If [someone] would lose life, they lose twice that much life instead" ---
     if lower.contains("would lose life") {
         return Some(ReplacementDefinition {
-            event: ReplacementEvent::LoseLife,
-            execute: None,
-            mode: ReplacementMode::Mandatory,
-            valid_card: None,
             description: Some(text.to_string()),
+            ..ReplacementDefinition::new(ReplacementEvent::LoseLife)
         });
     }
 
@@ -184,14 +176,76 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
     };
 
     Some(ReplacementDefinition {
-        event: ReplacementEvent::Moved,
         execute: Some(Box::new(execute)),
         mode: ReplacementMode::Optional {
             decline: Some(Box::new(decline)),
         },
         valid_card: Some(TargetFilter::SelfRef),
         description: Some(original_text.to_string()),
+        ..ReplacementDefinition::new(ReplacementEvent::Moved)
     })
+}
+
+/// Parse check land pattern: "enters tapped unless you control a [LandType] or a [LandType]"
+/// Returns Mandatory ReplacementDefinition with an UnlessControlsSubtype condition.
+fn parse_check_land(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+    if !norm_lower.contains("enters tapped") && !norm_lower.contains("enters the battlefield tapped")
+    {
+        return None;
+    }
+
+    let unless_idx = norm_lower.find("unless you control ")?;
+    let rest = &norm_lower[unless_idx + "unless you control ".len()..];
+    let rest = rest.trim_end_matches('.');
+
+    let mut subtypes = Vec::new();
+    for part in rest.split(" or ") {
+        let trimmed = part
+            .trim()
+            .trim_start_matches("a ")
+            .trim_start_matches("an ");
+        let canonical = canonical_land_subtype(trimmed)?;
+        if !subtypes.contains(&canonical) {
+            subtypes.push(canonical);
+        }
+    }
+
+    if subtypes.is_empty() {
+        return None;
+    }
+
+    let tap_effect = Box::new(AbilityDefinition {
+        kind: AbilityKind::Spell,
+        effect: Effect::Tap {
+            target: TargetFilter::SelfRef,
+        },
+        cost: None,
+        sub_ability: None,
+        duration: None,
+        description: None,
+        target_prompt: None,
+        sorcery_speed: false,
+    });
+
+    Some(ReplacementDefinition {
+        execute: Some(tap_effect),
+        valid_card: Some(TargetFilter::SelfRef),
+        description: Some(original_text.to_string()),
+        condition: Some(ReplacementCondition::UnlessControlsSubtype { subtypes }),
+        ..ReplacementDefinition::new(ReplacementEvent::Moved)
+    })
+}
+
+/// Map lowercase land subtype name to canonical (title-cased) form.
+fn canonical_land_subtype(raw: &str) -> Option<String> {
+    match raw {
+        "plains" => Some("Plains".to_string()),
+        "island" => Some("Island".to_string()),
+        "swamp" => Some("Swamp".to_string()),
+        "mountain" => Some("Mountain".to_string()),
+        "forest" => Some("Forest".to_string()),
+        _ => None,
+    }
 }
 
 /// Extract life payment amount from "pay N life" pattern.
@@ -305,6 +359,46 @@ mod tests {
         .unwrap();
         let execute = def.execute.as_ref().unwrap();
         assert!(matches!(execute.effect, Effect::LoseLife { amount: 3 }));
+    }
+
+    #[test]
+    fn check_land_clifftop_retreat() {
+        let def = parse_replacement_line(
+            "This land enters tapped unless you control a Mountain or a Plains.",
+            "Clifftop Retreat",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(def.mode, ReplacementMode::Mandatory));
+        assert!(matches!(
+            def.execute.as_ref().unwrap().effect,
+            Effect::Tap {
+                target: TargetFilter::SelfRef
+            }
+        ));
+        match &def.condition {
+            Some(ReplacementCondition::UnlessControlsSubtype { subtypes }) => {
+                assert_eq!(subtypes, &["Mountain", "Plains"]);
+            }
+            other => panic!("Expected UnlessControlsSubtype, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_land_drowned_catacomb() {
+        let def = parse_replacement_line(
+            "Drowned Catacomb enters the battlefield tapped unless you control an Island or a Swamp.",
+            "Drowned Catacomb",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        match &def.condition {
+            Some(ReplacementCondition::UnlessControlsSubtype { subtypes }) => {
+                assert_eq!(subtypes, &["Island", "Swamp"]);
+            }
+            other => panic!("Expected UnlessControlsSubtype, got {other:?}"),
+        }
     }
 
     #[test]

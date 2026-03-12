@@ -623,11 +623,10 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let mut face = make_creature_face();
         face.replacements = vec![crate::types::ability::ReplacementDefinition {
-            event: crate::types::replacements::ReplacementEvent::DamageDone,
-            execute: None,
-            mode: crate::types::ability::ReplacementMode::Mandatory,
             valid_card: Some(TargetFilter::SelfRef),
-            description: None,
+            ..crate::types::ability::ReplacementDefinition::new(
+                crate::types::replacements::ReplacementEvent::DamageDone,
+            )
         }];
 
         let obj_id = create_object_from_card_face(&mut state, &face, PlayerId(0));

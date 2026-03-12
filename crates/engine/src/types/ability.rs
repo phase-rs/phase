@@ -948,6 +948,17 @@ pub enum TriggerCondition {
     LifeGainedThisTurn { minimum: u32 },
 }
 
+/// Condition that gates whether a replacement effect applies.
+/// Checked when determining if the replacement is a candidate for an event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum ReplacementCondition {
+    /// "unless you control a [subtype] or a [subtype]"
+    /// Replacement is suppressed if the controller controls any permanent with a listed subtype.
+    /// Used for check lands (Clifftop Retreat, Drowned Catacomb, etc.).
+    UnlessControlsSubtype { subtypes: Vec<String> },
+}
+
 /// Rate-limiting constraint for triggered abilities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
@@ -1040,6 +1051,23 @@ pub struct ReplacementDefinition {
     pub valid_card: Option<TargetFilter>,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
+    pub condition: Option<ReplacementCondition>,
+}
+
+impl ReplacementDefinition {
+    /// Create a new replacement definition with only the required event field.
+    /// All optional fields default to `None`/`Mandatory`.
+    pub fn new(event: ReplacementEvent) -> Self {
+        Self {
+            event,
+            execute: None,
+            mode: ReplacementMode::Mandatory,
+            valid_card: None,
+            description: None,
+            condition: None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1305,7 +1333,6 @@ mod tests {
     #[test]
     fn replacement_definition_roundtrip() {
         let replacement = ReplacementDefinition {
-            event: ReplacementEvent::DamageDone,
             execute: Some(Box::new(AbilityDefinition {
                 kind: AbilityKind::Spell,
                 effect: Effect::GainLife {
@@ -1319,11 +1346,11 @@ mod tests {
                 target_prompt: None,
                 sorcery_speed: false,
             })),
-            mode: ReplacementMode::Mandatory,
             valid_card: Some(TargetFilter::SelfRef),
             description: Some(
                 "If damage would be dealt to ~, prevent it and gain 1 life.".to_string(),
             ),
+            ..ReplacementDefinition::new(ReplacementEvent::DamageDone)
         };
         let json = serde_json::to_string(&replacement).unwrap();
         let deserialized: ReplacementDefinition = serde_json::from_str(&json).unwrap();

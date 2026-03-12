@@ -1,5 +1,6 @@
 ---
 source: crates/engine/tests/oracle_parser.rs
+assertion_line: 68
 expression: result
 ---
 {
@@ -73,7 +74,8 @@ expression: result
         "type": "Mandatory"
       },
       "valid_card": null,
-      "description": "Combat damage that would be dealt by creatures you control can't be prevented."
+      "description": "Combat damage that would be dealt by creatures you control can't be prevented.",
+      "condition": null
     }
   ],
   "extractedKeywords": []

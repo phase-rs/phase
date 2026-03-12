@@ -2854,7 +2854,7 @@ mod tests {
 
     #[test]
     fn land_with_etb_tapped_replacement_enters_tapped() {
-        use crate::types::ability::{ReplacementDefinition, ReplacementMode};
+        use crate::types::ability::ReplacementDefinition;
         use crate::types::replacements::ReplacementEvent;
 
         let mut state = setup_game_at_main_phase();
@@ -2865,16 +2865,15 @@ mod tests {
         let obj = state.objects.get_mut(&obj_id).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
         obj.replacement_definitions.push(ReplacementDefinition {
-            event: ReplacementEvent::Moved,
             execute: Some(Box::new(AbilityDefinition {
                 kind: AbilityKind::Spell,
                 effect: Effect::Tap { target: TargetFilter::SelfRef },
                 cost: None, sub_ability: None, duration: None,
                 description: None, target_prompt: None, sorcery_speed: false,
             })),
-            mode: ReplacementMode::Mandatory,
             valid_card: Some(TargetFilter::SelfRef),
             description: Some("Selesnya Guildgate enters the battlefield tapped.".into()),
+            ..ReplacementDefinition::new(ReplacementEvent::Moved)
         });
 
         let _result = apply(&mut state, GameAction::PlayLand { card_id: CardId(1) }).unwrap();
