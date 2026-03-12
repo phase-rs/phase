@@ -86,7 +86,12 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   if (!obj) return null;
 
   const isLand = obj.card_types.core_types.includes("Land");
-  const displayColors = getCardDisplayColors(obj.color, isLand, obj.card_types.subtypes);
+  const displayColors = getCardDisplayColors(
+    obj.color,
+    isLand,
+    obj.card_types.subtypes,
+    obj.available_mana_colors,
+  );
   const hasSummoningSickness = obj.has_summoning_sickness ?? false;
 
   const ptDisplay = computePTDisplay(obj);
@@ -272,7 +277,12 @@ function ExileGhostCard({ objectId, offset }: ExileGhostCardProps) {
   if (!obj) return null;
 
   const isLand = obj.card_types.core_types.includes("Land");
-  const displayColors = getCardDisplayColors(obj.color, isLand, obj.card_types.subtypes);
+  const displayColors = getCardDisplayColors(
+    obj.color,
+    isLand,
+    obj.card_types.subtypes,
+    obj.available_mana_colors,
+  );
   const useArtCrop = battlefieldCardDisplay === "art_crop";
 
   return (

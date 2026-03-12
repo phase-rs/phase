@@ -4,7 +4,7 @@ use engine::game::casting::spell_has_legal_targets;
 use engine::game::combat::AttackTarget;
 use engine::game::deck_loading::DeckEntry;
 use engine::game::game_object::GameObject;
-use engine::game::mana_payment;
+use engine::game::mana_sources;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -205,8 +205,8 @@ fn can_cast(
         return false;
     }
 
-    // Check if player could afford the cost using pool + untapped lands
-    let available = compute_available_mana(state, player);
+    // Check if player could afford the cost using pool + untapped lands.
+    let available = compute_available_mana_for_cost(state, player, &obj.mana_cost);
     can_afford_with(&available, &obj.mana_cost)
 }
 
@@ -371,7 +371,11 @@ impl AvailableMana {
     }
 }
 
-fn compute_available_mana(state: &GameState, player: PlayerId) -> AvailableMana {
+fn compute_available_mana_for_cost(
+    state: &GameState,
+    player: PlayerId,
+    cost: &ManaCost,
+) -> AvailableMana {
     let p = &state.players[player.0 as usize];
     let pool = &p.mana_pool;
 
@@ -384,7 +388,8 @@ fn compute_available_mana(state: &GameState, player: PlayerId) -> AvailableMana 
         colorless: pool.count_color(ManaType::Colorless),
     };
 
-    // Add potential mana from untapped lands on the battlefield
+    // Collect one option-set per untapped land the player controls.
+    let mut land_option_sets: Vec<Vec<ManaType>> = Vec::new();
     for &obj_id in &state.battlefield {
         if let Some(obj) = state.objects.get(&obj_id) {
             if obj.controller != player || obj.tapped {
@@ -393,25 +398,138 @@ fn compute_available_mana(state: &GameState, player: PlayerId) -> AvailableMana 
             if !obj.card_types.core_types.contains(&CoreType::Land) {
                 continue;
             }
-            if let Some(mana_type) = obj
-                .card_types
-                .subtypes
-                .iter()
-                .find_map(|s| mana_payment::land_subtype_to_mana_type(s))
-            {
-                match mana_type {
-                    ManaType::White => available.white += 1,
-                    ManaType::Blue => available.blue += 1,
-                    ManaType::Black => available.black += 1,
-                    ManaType::Red => available.red += 1,
-                    ManaType::Green => available.green += 1,
-                    ManaType::Colorless => available.colorless += 1,
+            let options = mana_sources::activatable_land_mana_options(state, obj_id, player);
+            if options.is_empty() {
+                continue;
+            }
+            let mut dedup = Vec::new();
+            for option in options {
+                if !dedup.contains(&option.mana_type) {
+                    dedup.push(option.mana_type);
                 }
+            }
+            land_option_sets.push(dedup);
+        }
+    }
+
+    // Assign lands to colored requirements first (each land can contribute once).
+    let mut used = vec![false; land_option_sets.len()];
+    if let ManaCost::Cost { shards, .. } = cost {
+        for shard in shards {
+            for candidate in preferred_colors_for_shard(*shard) {
+                let Some(idx) = land_option_sets
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, options)| {
+                        if !used[i] && options.contains(&candidate) {
+                            Some(i)
+                        } else {
+                            None
+                        }
+                    })
+                else {
+                    continue;
+                };
+                used[idx] = true;
+                add_available_mana(&mut available, *candidate);
+                break;
             }
         }
     }
 
+    // Remaining lands can still contribute toward generic costs.
+    for (idx, options) in land_option_sets.iter().enumerate() {
+        if used[idx] {
+            continue;
+        }
+        let fallback = options
+            .iter()
+            .copied()
+            .find(|t| *t == ManaType::Colorless)
+            .or_else(|| options.first().copied())
+            .unwrap_or(ManaType::Colorless);
+        add_available_mana(&mut available, fallback);
+    }
+
     available
+}
+
+fn preferred_colors_for_shard(shard: ManaCostShard) -> &'static [ManaType] {
+    match shard {
+        ManaCostShard::White => &[ManaType::White],
+        ManaCostShard::Blue => &[ManaType::Blue],
+        ManaCostShard::Black => &[ManaType::Black],
+        ManaCostShard::Red => &[ManaType::Red],
+        ManaCostShard::Green => &[ManaType::Green],
+        ManaCostShard::Colorless => &[ManaType::Colorless],
+        ManaCostShard::WhiteBlue => &[ManaType::White, ManaType::Blue],
+        ManaCostShard::WhiteBlack => &[ManaType::White, ManaType::Black],
+        ManaCostShard::BlueBlack => &[ManaType::Blue, ManaType::Black],
+        ManaCostShard::BlueRed => &[ManaType::Blue, ManaType::Red],
+        ManaCostShard::BlackRed => &[ManaType::Black, ManaType::Red],
+        ManaCostShard::BlackGreen => &[ManaType::Black, ManaType::Green],
+        ManaCostShard::RedWhite => &[ManaType::Red, ManaType::White],
+        ManaCostShard::RedGreen => &[ManaType::Red, ManaType::Green],
+        ManaCostShard::GreenWhite => &[ManaType::Green, ManaType::White],
+        ManaCostShard::GreenBlue => &[ManaType::Green, ManaType::Blue],
+        ManaCostShard::TwoWhite => &[ManaType::White],
+        ManaCostShard::TwoBlue => &[ManaType::Blue],
+        ManaCostShard::TwoBlack => &[ManaType::Black],
+        ManaCostShard::TwoRed => &[ManaType::Red],
+        ManaCostShard::TwoGreen => &[ManaType::Green],
+        ManaCostShard::PhyrexianWhite => &[ManaType::White],
+        ManaCostShard::PhyrexianBlue => &[ManaType::Blue],
+        ManaCostShard::PhyrexianBlack => &[ManaType::Black],
+        ManaCostShard::PhyrexianRed => &[ManaType::Red],
+        ManaCostShard::PhyrexianGreen => &[ManaType::Green],
+        ManaCostShard::ColorlessWhite => &[ManaType::Colorless, ManaType::White],
+        ManaCostShard::ColorlessBlue => &[ManaType::Colorless, ManaType::Blue],
+        ManaCostShard::ColorlessBlack => &[ManaType::Colorless, ManaType::Black],
+        ManaCostShard::ColorlessRed => &[ManaType::Colorless, ManaType::Red],
+        ManaCostShard::ColorlessGreen => &[ManaType::Colorless, ManaType::Green],
+        ManaCostShard::PhyrexianWhiteBlue => &[ManaType::White, ManaType::Blue],
+        ManaCostShard::PhyrexianWhiteBlack => &[ManaType::White, ManaType::Black],
+        ManaCostShard::PhyrexianBlueBlack => &[ManaType::Blue, ManaType::Black],
+        ManaCostShard::PhyrexianBlueRed => &[ManaType::Blue, ManaType::Red],
+        ManaCostShard::PhyrexianBlackRed => &[ManaType::Black, ManaType::Red],
+        ManaCostShard::PhyrexianBlackGreen => &[ManaType::Black, ManaType::Green],
+        ManaCostShard::PhyrexianRedWhite => &[ManaType::Red, ManaType::White],
+        ManaCostShard::PhyrexianRedGreen => &[ManaType::Red, ManaType::Green],
+        ManaCostShard::PhyrexianGreenWhite => &[ManaType::Green, ManaType::White],
+        ManaCostShard::PhyrexianGreenBlue => &[ManaType::Green, ManaType::Blue],
+        ManaCostShard::Snow | ManaCostShard::X => &[],
+    }
+}
+
+fn add_available_mana(available: &mut AvailableMana, mana_type: ManaType) {
+    match mana_type {
+        ManaType::White => available.white += 1,
+        ManaType::Blue => available.blue += 1,
+        ManaType::Black => available.black += 1,
+        ManaType::Red => available.red += 1,
+        ManaType::Green => available.green += 1,
+        ManaType::Colorless => available.colorless += 1,
+    }
+}
+
+fn mana_payment_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
+    let mut actions = Vec::new();
+
+    // Find untapped lands controlled by this player that currently have at least
+    // one activatable tap-for-mana option.
+    for &obj_id in &state.battlefield {
+        if let Some(obj) = state.objects.get(&obj_id) {
+            if obj.controller == player
+                && !obj.tapped
+                && obj.card_types.core_types.contains(&CoreType::Land)
+                && !mana_sources::activatable_land_mana_options(state, obj_id, player).is_empty()
+            {
+                actions.push(GameAction::TapLandForMana { object_id: obj_id });
+            }
+        }
+    }
+
+    actions
 }
 
 fn can_afford_with(available: &AvailableMana, cost: &ManaCost) -> bool {
@@ -490,24 +608,6 @@ fn combinations(
     // Exclude first element
     result.extend(combinations(&items[1..], k));
     result
-}
-
-fn mana_payment_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
-    let mut actions = Vec::new();
-
-    // Find untapped lands controlled by this player
-    for &obj_id in &state.battlefield {
-        if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player
-                && !obj.tapped
-                && obj.card_types.core_types.contains(&CoreType::Land)
-            {
-                actions.push(GameAction::TapLandForMana { object_id: obj_id });
-            }
-        }
-    }
-
-    actions
 }
 
 fn target_selection_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
@@ -917,12 +1017,74 @@ mod tests {
             .card_types
             .core_types
             .push(CoreType::Land);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Forest".to_string());
 
         let actions = get_legal_actions(&state);
         assert!(actions.iter().any(|a| matches!(
             a,
             GameAction::TapLandForMana { object_id } if *object_id == id
         )));
+    }
+
+    fn add_gloomlake_verge(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            "Gloomlake Verge".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.abilities
+            .push(engine::types::ability::AbilityDefinition {
+                kind: engine::types::ability::AbilityKind::Activated,
+                effect: engine::types::ability::Effect::Mana {
+                    produced: engine::types::ability::ManaProduction::Fixed {
+                        colors: vec![engine::types::mana::ManaColor::Blue],
+                    },
+                },
+                cost: Some(engine::types::ability::AbilityCost::Tap),
+                sub_ability: None,
+                duration: None,
+                description: None,
+                target_prompt: None,
+                sorcery_speed: false,
+            });
+        obj.abilities
+            .push(engine::types::ability::AbilityDefinition {
+                kind: engine::types::ability::AbilityKind::Activated,
+                effect: engine::types::ability::Effect::Mana {
+                    produced: engine::types::ability::ManaProduction::Fixed {
+                        colors: vec![engine::types::mana::ManaColor::Black],
+                    },
+                },
+                cost: Some(engine::types::ability::AbilityCost::Tap),
+                sub_ability: Some(Box::new(engine::types::ability::AbilityDefinition {
+                    kind: engine::types::ability::AbilityKind::Activated,
+                    effect: engine::types::ability::Effect::Unimplemented {
+                        name: "activate_only_if_controls_land_subtype_any".to_string(),
+                        description: Some("Island|Swamp".to_string()),
+                    },
+                    cost: None,
+                    sub_ability: None,
+                    duration: None,
+                    description: None,
+                    target_prompt: None,
+                    sorcery_speed: false,
+                })),
+                duration: None,
+                description: None,
+                target_prompt: None,
+                sorcery_speed: false,
+            });
+        id
     }
 
     fn add_land_to_battlefield(
@@ -1021,6 +1183,39 @@ mod tests {
         );
         // Only one Island — need 2 total mana
         add_land_to_battlefield(&mut state, PlayerId(0), "Island", "Island");
+        let actions = get_legal_actions(&state);
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, GameAction::CastSpell { .. })));
+    }
+
+    #[test]
+    fn conditional_land_enables_secondary_color_when_requirement_met() {
+        let mut state = make_state();
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        };
+        add_card_to_hand(&mut state, PlayerId(0), "Cut Down", CoreType::Instant, cost);
+        add_gloomlake_verge(&mut state, PlayerId(0));
+        add_land_to_battlefield(&mut state, PlayerId(0), "Island", "Island");
+
+        let actions = get_legal_actions(&state);
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, GameAction::CastSpell { .. })));
+    }
+
+    #[test]
+    fn conditional_land_does_not_count_secondary_color_without_requirement() {
+        let mut state = make_state();
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        };
+        add_card_to_hand(&mut state, PlayerId(0), "Cut Down", CoreType::Instant, cost);
+        add_gloomlake_verge(&mut state, PlayerId(0));
+
         let actions = get_legal_actions(&state);
         assert!(!actions
             .iter()

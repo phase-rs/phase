@@ -33,7 +33,12 @@ export function ArtCropCard({ objectId }: ArtCropCardProps) {
 
   const hasDfc = obj.back_face != null;
   const isLand = obj.card_types.core_types.includes("Land");
-  const displayColors = getCardDisplayColors(obj.color, isLand, obj.card_types.subtypes);
+  const displayColors = getCardDisplayColors(
+    obj.color,
+    isLand,
+    obj.card_types.subtypes,
+    obj.available_mana_colors,
+  );
   const frameGradient = getFrameGradient(displayColors);
   const ptDisplay = computePTDisplay(obj);
   const counters = Object.entries(obj.counters);

@@ -15,6 +15,7 @@ use super::derived::derive_display_state;
 use super::effects;
 use super::mana_abilities;
 use super::mana_payment;
+use super::mana_sources;
 use super::match_flow;
 use super::mulligan;
 use super::planeswalker;
@@ -693,24 +694,42 @@ fn handle_tap_land_for_mana(
         ));
     }
 
-    // Determine mana color from subtypes
-    let mana_type = obj
-        .card_types
-        .subtypes
-        .iter()
-        .find_map(|s| mana_payment::land_subtype_to_mana_type(s))
+    let mana_option = mana_sources::activatable_land_mana_options(state, object_id, obj.controller)
+        .into_iter()
+        .next()
         .ok_or_else(|| {
-            EngineError::InvalidAction("Land has no recognized basic land subtype".to_string())
+            EngineError::ActionNotAllowed("Land has no activatable mana ability".to_string())
         })?;
 
-    // Tap the permanent
-    let obj = state.objects.get_mut(&object_id).unwrap();
-    obj.tapped = true;
+    let ability_to_resolve = mana_option.ability_index.and_then(|ability_index| {
+        state
+            .objects
+            .get(&object_id)
+            .and_then(|land| land.abilities.get(ability_index))
+            .cloned()
+    });
 
-    events.push(GameEvent::PermanentTapped { object_id });
-
-    // Produce mana
-    mana_payment::produce_mana(state, object_id, mana_type, state.priority_player, events);
+    if let Some(ability_def) = ability_to_resolve {
+        mana_abilities::resolve_mana_ability(
+            state,
+            object_id,
+            state.priority_player,
+            &ability_def,
+            events,
+        )?;
+    } else {
+        // Legacy fallback for subtype-only lands.
+        let obj = state.objects.get_mut(&object_id).unwrap();
+        obj.tapped = true;
+        events.push(GameEvent::PermanentTapped { object_id });
+        mana_payment::produce_mana(
+            state,
+            object_id,
+            mana_option.mana_type,
+            state.priority_player,
+            events,
+        );
+    }
 
     Ok(WaitingFor::Priority {
         player: state.priority_player,
@@ -1444,6 +1463,93 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn tap_land_for_mana_uses_mana_ability_with_activation_condition() {
+        let mut state = setup_game_at_main_phase();
+
+        let verge_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Gloomlake Verge".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&verge_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.abilities
+                .push(crate::types::ability::AbilityDefinition {
+                    kind: crate::types::ability::AbilityKind::Activated,
+                    effect: crate::types::ability::Effect::Mana {
+                        produced: crate::types::ability::ManaProduction::Fixed {
+                            colors: vec![crate::types::mana::ManaColor::Blue],
+                        },
+                    },
+                    cost: Some(crate::types::ability::AbilityCost::Tap),
+                    sub_ability: None,
+                    duration: None,
+                    description: None,
+                    target_prompt: None,
+                    sorcery_speed: false,
+                });
+            obj.abilities
+                .push(crate::types::ability::AbilityDefinition {
+                    kind: crate::types::ability::AbilityKind::Activated,
+                    effect: crate::types::ability::Effect::Mana {
+                        produced: crate::types::ability::ManaProduction::Fixed {
+                            colors: vec![crate::types::mana::ManaColor::Black],
+                        },
+                    },
+                    cost: Some(crate::types::ability::AbilityCost::Tap),
+                    sub_ability: Some(Box::new(crate::types::ability::AbilityDefinition {
+                        kind: crate::types::ability::AbilityKind::Activated,
+                        effect: crate::types::ability::Effect::Unimplemented {
+                            name: "activate_only_if_controls_land_subtype_any".to_string(),
+                            description: Some("Island|Swamp".to_string()),
+                        },
+                        cost: None,
+                        sub_ability: None,
+                        duration: None,
+                        description: None,
+                        target_prompt: None,
+                        sorcery_speed: false,
+                    })),
+                    duration: None,
+                    description: None,
+                    target_prompt: None,
+                    sorcery_speed: false,
+                });
+        }
+
+        let result = apply(
+            &mut state,
+            GameAction::TapLandForMana {
+                object_id: verge_id,
+            },
+        )
+        .unwrap();
+
+        assert!(state.objects[&verge_id].tapped);
+        assert_eq!(
+            state.players[0]
+                .mana_pool
+                .count_color(crate::types::mana::ManaType::Blue),
+            1
+        );
+        assert_eq!(
+            state.players[0]
+                .mana_pool
+                .count_color(crate::types::mana::ManaType::Black),
+            0
+        );
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
     }
 
     #[test]

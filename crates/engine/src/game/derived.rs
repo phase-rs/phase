@@ -1,8 +1,10 @@
 use crate::game::combat::has_summoning_sickness;
 use crate::game::coverage::unimplemented_mechanics;
 use crate::game::devotion::count_devotion;
+use crate::game::mana_sources::display_land_mana_colors;
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
 use crate::types::ability::StaticCondition;
+use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 
 /// Compute display-only derived fields on game state before serialization.
@@ -19,6 +21,7 @@ pub fn derive_display_state(state: &mut GameState) {
     for obj in state.objects.values_mut() {
         obj.unimplemented_mechanics = unimplemented_mechanics(obj);
         obj.has_summoning_sickness = has_summoning_sickness(obj, turn);
+        obj.available_mana_colors.clear();
     }
 
     // Compute per-card devotion for cards with CheckSVar/DevotionGE conditions
@@ -45,6 +48,25 @@ pub fn derive_display_state(state: &mut GameState) {
     for (id, devotion) in devotion_cards {
         if let Some(obj) = state.objects.get_mut(&id) {
             obj.devotion = Some(devotion);
+        }
+    }
+
+    // Compute dynamic land frame colors from currently available mana options.
+    let mana_color_cards: Vec<_> = state
+        .battlefield
+        .iter()
+        .filter_map(|&id| {
+            let obj = state.objects.get(&id)?;
+            if !obj.card_types.core_types.contains(&CoreType::Land) {
+                return None;
+            }
+            let colors = display_land_mana_colors(state, id, obj.controller);
+            Some((id, colors))
+        })
+        .collect();
+    for (id, colors) in mana_color_cards {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.available_mana_colors = colors;
         }
     }
 

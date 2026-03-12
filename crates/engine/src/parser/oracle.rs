@@ -1043,6 +1043,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_activate_only_land_condition_into_canonical_sub_ability_marker() {
+        let r = parse(
+            "{T}: Add {U}.\n{T}: Add {B}. Activate only if you control an Island or a Swamp.",
+            "Gloomlake Verge",
+            &[],
+            &["Land"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 2);
+        let second = &r.abilities[1];
+        let Some(sub) = second.sub_ability.as_ref() else {
+            panic!("expected activation-condition marker sub_ability");
+        };
+        assert!(matches!(
+            &sub.effect,
+            Effect::Unimplemented {
+                name,
+                description: Some(description),
+            } if name == "activate_only_if_controls_land_subtype_any" && description == "Island|Swamp"
+        ));
+    }
+
+    #[test]
     fn extracts_protection_keyword_from_oracle_text() {
         use crate::types::keywords::ProtectionTarget;
         // Soldier of the Pantheon: MTGJSON lists "Protection" as keyword name,

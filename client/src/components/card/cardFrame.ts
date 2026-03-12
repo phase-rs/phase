@@ -18,7 +18,11 @@ export function getCardDisplayColors(
   color: string[],
   isLand: boolean,
   subtypes: string[],
+  availableManaColors?: string[],
 ): string[] {
+  if (isLand && availableManaColors && availableManaColors.length > 0) {
+    return availableManaColors;
+  }
   if (isLand && color.length === 0) {
     return subtypes.flatMap((s) => (LAND_SUBTYPE_COLORS[s] ? [LAND_SUBTYPE_COLORS[s]] : []));
   }

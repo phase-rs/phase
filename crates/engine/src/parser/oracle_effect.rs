@@ -100,6 +100,11 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
 fn parse_imperative_effect(text: &str) -> Effect {
     let lower = text.to_lowercase();
 
+    // --- Activation restrictions carried in ability sub-chains ---
+    if let Some(effect) = try_parse_activate_only_condition(text) {
+        return effect;
+    }
+
     // --- Mana production ---
     if let Some(mana_effect) = try_parse_add_mana_effect(text) {
         return mana_effect;
@@ -497,6 +502,45 @@ fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
     }
 
     None
+}
+
+fn try_parse_activate_only_condition(text: &str) -> Option<Effect> {
+    let trimmed = text.trim().trim_end_matches('.');
+    let lower = trimmed.to_ascii_lowercase();
+    let prefix = "activate only if you control ";
+    if !lower.starts_with(prefix) {
+        return None;
+    }
+
+    let raw = &lower[prefix.len()..];
+    let mut subtypes = Vec::new();
+    for part in raw.split(" or ") {
+        let token = part
+            .trim()
+            .trim_start_matches("a ")
+            .trim_start_matches("an ")
+            .trim();
+        let subtype = match token {
+            "plains" => "Plains",
+            "island" => "Island",
+            "swamp" => "Swamp",
+            "mountain" => "Mountain",
+            "forest" => "Forest",
+            _ => return None,
+        };
+        if !subtypes.iter().any(|s| *s == subtype) {
+            subtypes.push(subtype);
+        }
+    }
+
+    if subtypes.is_empty() {
+        return None;
+    }
+
+    Some(Effect::Unimplemented {
+        name: "activate_only_if_controls_land_subtype_any".to_string(),
+        description: Some(subtypes.join("|")),
+    })
 }
 
 fn parse_mana_production_clause(text: &str) -> Option<ManaProduction> {
@@ -3185,5 +3229,29 @@ mod tests {
             panic!("Expected PutCounter");
         };
         assert_eq!(counter_type, "charge");
+    }
+
+    #[test]
+    fn parse_activate_only_condition_with_two_land_subtypes() {
+        let e = parse_effect("Activate only if you control an Island or a Swamp.");
+        assert!(matches!(
+            e,
+            Effect::Unimplemented {
+                name,
+                description: Some(description),
+            } if name == "activate_only_if_controls_land_subtype_any" && description == "Island|Swamp"
+        ));
+    }
+
+    #[test]
+    fn parse_activate_only_condition_non_land_clause_falls_back() {
+        let e = parse_effect("Activate only if you control a creature with power 4 or greater.");
+        assert!(matches!(
+            e,
+            Effect::Unimplemented {
+                name,
+                description: Some(_),
+            } if name == "activate"
+        ));
     }
 }

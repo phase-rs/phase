@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, ResolvedAbility, TargetRef};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -9,7 +11,9 @@ use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
 use super::engine::EngineError;
+use super::mana_abilities;
 use super::mana_payment;
+use super::mana_sources::{self, ManaSourceOption};
 use super::stack;
 use super::targeting;
 use super::zones;
@@ -706,24 +710,21 @@ fn pay_and_push(
 
 /// Find and mark the first unused land producing `needed` color. Returns true if found.
 fn tap_matching_land(
-    available: &[(ObjectId, ManaType)],
-    used: &mut [bool],
-    to_tap: &mut Vec<(ObjectId, ManaType)>,
+    available: &[ManaSourceOption],
+    used_sources: &mut HashSet<ObjectId>,
+    to_tap: &mut Vec<ManaSourceOption>,
     needed: ManaType,
 ) -> bool {
-    if let Some(idx) = available.iter().enumerate().find_map(|(i, (_, color))| {
-        if !used[i] && *color == needed {
-            Some(i)
-        } else {
-            None
-        }
-    }) {
-        used[idx] = true;
-        to_tap.push(available[idx]);
-        true
-    } else {
-        false
-    }
+    let Some(option) = available
+        .iter()
+        .find(|option| option.mana_type == needed && !used_sources.contains(&option.object_id))
+    else {
+        return false;
+    };
+
+    used_sources.insert(option.object_id);
+    to_tap.push(*option);
+    true
 }
 
 /// Auto-tap untapped lands controlled by `player` to produce enough mana for `cost`.
@@ -744,8 +745,8 @@ fn auto_tap_lands(
         ManaCost::Cost { shards, generic } => (shards, *generic),
     };
 
-    // Build list of (object_id, mana_color) for untapped lands this player controls
-    let available: Vec<(ObjectId, ManaType)> = state
+    // Build list of activatable mana options for untapped lands this player controls.
+    let available: Vec<ManaSourceOption> = state
         .battlefield
         .iter()
         .filter_map(|&oid| {
@@ -760,18 +761,15 @@ fn auto_tap_lands(
             {
                 return None;
             }
-            let color = obj
-                .card_types
-                .subtypes
-                .iter()
-                .find_map(|st| mana_payment::land_subtype_to_mana_type(st))
-                .unwrap_or(ManaType::Colorless);
-            Some((oid, color))
+            Some(mana_sources::activatable_land_mana_options(
+                state, oid, player,
+            ))
         })
+        .flatten()
         .collect();
 
-    let mut to_tap: Vec<(ObjectId, ManaType)> = Vec::new();
-    let mut used: Vec<bool> = vec![false; available.len()];
+    let mut to_tap: Vec<ManaSourceOption> = Vec::new();
+    let mut used_sources: HashSet<ObjectId> = HashSet::new();
 
     // Phase 1: satisfy colored and hybrid shards by tapping matching lands
     let mut deferred_generic: usize = 0;
@@ -779,27 +777,32 @@ fn auto_tap_lands(
         use crate::game::mana_payment::{shard_to_mana_type, ShardRequirement};
         match shard_to_mana_type(*shard) {
             ShardRequirement::Single(color) | ShardRequirement::Phyrexian(color) => {
-                tap_matching_land(&available, &mut used, &mut to_tap, color);
+                tap_matching_land(&available, &mut used_sources, &mut to_tap, color);
             }
             ShardRequirement::Hybrid(a, b) => {
-                if !tap_matching_land(&available, &mut used, &mut to_tap, a) {
-                    tap_matching_land(&available, &mut used, &mut to_tap, b);
+                if !tap_matching_land(&available, &mut used_sources, &mut to_tap, a) {
+                    tap_matching_land(&available, &mut used_sources, &mut to_tap, b);
                 }
             }
             ShardRequirement::TwoGenericHybrid(color) => {
                 // Prefer 1 matching-color land over 2 generic lands
-                if !tap_matching_land(&available, &mut used, &mut to_tap, color) {
+                if !tap_matching_land(&available, &mut used_sources, &mut to_tap, color) {
                     deferred_generic += 2;
                 }
             }
             ShardRequirement::ColorlessHybrid(color) => {
-                if !tap_matching_land(&available, &mut used, &mut to_tap, ManaType::Colorless) {
-                    tap_matching_land(&available, &mut used, &mut to_tap, color);
+                if !tap_matching_land(
+                    &available,
+                    &mut used_sources,
+                    &mut to_tap,
+                    ManaType::Colorless,
+                ) {
+                    tap_matching_land(&available, &mut used_sources, &mut to_tap, color);
                 }
             }
             ShardRequirement::HybridPhyrexian(a, b) => {
-                if !tap_matching_land(&available, &mut used, &mut to_tap, a) {
-                    tap_matching_land(&available, &mut used, &mut to_tap, b);
+                if !tap_matching_land(&available, &mut used_sources, &mut to_tap, a) {
+                    tap_matching_land(&available, &mut used_sources, &mut to_tap, b);
                 }
             }
             ShardRequirement::Snow | ShardRequirement::X => {
@@ -810,24 +813,44 @@ fn auto_tap_lands(
 
     // Phase 2: satisfy generic cost + deferred shards with any remaining untapped lands
     let mut remaining_generic = generic as usize + deferred_generic;
-    for (i, &(oid, color)) in available.iter().enumerate() {
+    for option in &available {
         if remaining_generic == 0 {
             break;
         }
-        if !used[i] {
-            used[i] = true;
-            to_tap.push((oid, color));
-            remaining_generic -= 1;
+        if used_sources.insert(option.object_id) {
+            to_tap.push(*option);
+            remaining_generic = remaining_generic.saturating_sub(1);
         }
     }
 
     // Phase 3: tap and produce mana
-    for (oid, color) in to_tap {
-        if let Some(obj) = state.objects.get_mut(&oid) {
+    for option in to_tap {
+        if let Some(ability_index) = option.ability_index {
+            let Some(ability_def) = state
+                .objects
+                .get(&option.object_id)
+                .and_then(|obj| obj.abilities.get(ability_index))
+                .cloned()
+            else {
+                continue;
+            };
+            let _ = mana_abilities::resolve_mana_ability(
+                state,
+                option.object_id,
+                player,
+                &ability_def,
+                events,
+            );
+            continue;
+        }
+
+        if let Some(obj) = state.objects.get_mut(&option.object_id) {
             obj.tapped = true;
         }
-        events.push(GameEvent::PermanentTapped { object_id: oid });
-        mana_payment::produce_mana(state, oid, color, player, events);
+        events.push(GameEvent::PermanentTapped {
+            object_id: option.object_id,
+        });
+        mana_payment::produce_mana(state, option.object_id, option.mana_type, player, events);
     }
 }
 
@@ -836,7 +859,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::card_type::CoreType;
-    use crate::types::mana::{ManaCost, ManaType, ManaUnit};
+    use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 
     fn setup_game_at_main_phase() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -920,6 +943,59 @@ mod tests {
                 generic: 2,
             };
         }
+        obj_id
+    }
+
+    fn create_gloomlake_verge(state: &mut GameState, player: PlayerId) -> ObjectId {
+        let obj_id = create_object(
+            state,
+            CardId(21),
+            player,
+            "Gloomlake Verge".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.abilities.push(AbilityDefinition {
+            kind: AbilityKind::Activated,
+            effect: Effect::Mana {
+                produced: crate::types::ability::ManaProduction::Fixed {
+                    colors: vec![ManaColor::Blue],
+                },
+            },
+            cost: Some(crate::types::ability::AbilityCost::Tap),
+            sub_ability: None,
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
+        });
+        obj.abilities.push(AbilityDefinition {
+            kind: AbilityKind::Activated,
+            effect: Effect::Mana {
+                produced: crate::types::ability::ManaProduction::Fixed {
+                    colors: vec![ManaColor::Black],
+                },
+            },
+            cost: Some(crate::types::ability::AbilityCost::Tap),
+            sub_ability: Some(Box::new(AbilityDefinition {
+                kind: AbilityKind::Activated,
+                effect: Effect::Unimplemented {
+                    name: "activate_only_if_controls_land_subtype_any".to_string(),
+                    description: Some("Island|Swamp".to_string()),
+                },
+                cost: None,
+                sub_ability: None,
+                duration: None,
+                description: None,
+                target_prompt: None,
+                sorcery_speed: false,
+            })),
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
+        });
         obj_id
     }
 
@@ -1034,6 +1110,98 @@ mod tests {
         let mut events = Vec::new();
         let result = handle_cast_spell(&mut state, PlayerId(0), CardId(20), &mut events);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn auto_tap_respects_conditional_land_secondary_color() {
+        let mut state = setup_game_at_main_phase();
+
+        // Spell cost {B}
+        let spell_id = create_object(
+            &mut state,
+            CardId(22),
+            PlayerId(0),
+            "Cut Down".to_string(),
+            Zone::Hand,
+        );
+        {
+            let spell = state.objects.get_mut(&spell_id).unwrap();
+            spell.card_types.core_types.push(CoreType::Instant);
+            spell.abilities.push(AbilityDefinition {
+                kind: AbilityKind::Spell,
+                effect: Effect::Draw { count: 1 },
+                cost: None,
+                sub_ability: None,
+                duration: None,
+                description: None,
+                target_prompt: None,
+                sorcery_speed: false,
+            });
+            spell.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 0,
+            };
+        }
+
+        create_gloomlake_verge(&mut state, PlayerId(0));
+        let island = create_object(
+            &mut state,
+            CardId(23),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Battlefield,
+        );
+        let island_obj = state.objects.get_mut(&island).unwrap();
+        island_obj.card_types.core_types.push(CoreType::Land);
+        island_obj.card_types.subtypes.push("Island".to_string());
+
+        let mut events = Vec::new();
+        let result = handle_cast_spell(&mut state, PlayerId(0), CardId(22), &mut events);
+        assert!(
+            result.is_ok(),
+            "expected conditional black mana to be available"
+        );
+    }
+
+    #[test]
+    fn auto_tap_blocks_conditional_land_secondary_color_without_requirement() {
+        let mut state = setup_game_at_main_phase();
+
+        // Spell cost {B}
+        let spell_id = create_object(
+            &mut state,
+            CardId(24),
+            PlayerId(0),
+            "Cut Down".to_string(),
+            Zone::Hand,
+        );
+        {
+            let spell = state.objects.get_mut(&spell_id).unwrap();
+            spell.card_types.core_types.push(CoreType::Instant);
+            spell.abilities.push(AbilityDefinition {
+                kind: AbilityKind::Spell,
+                effect: Effect::Draw { count: 1 },
+                cost: None,
+                sub_ability: None,
+                duration: None,
+                description: None,
+                target_prompt: None,
+                sorcery_speed: false,
+            });
+            spell.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 0,
+            };
+        }
+
+        create_gloomlake_verge(&mut state, PlayerId(0));
+
+        let mut events = Vec::new();
+        let result = handle_cast_spell(&mut state, PlayerId(0), CardId(24), &mut events);
+        assert!(
+            result.is_err(),
+            "expected cast to fail without Island/Swamp support"
+        );
     }
 
     #[test]

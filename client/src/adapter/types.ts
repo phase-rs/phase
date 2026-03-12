@@ -176,6 +176,7 @@ export interface GameObject {
   unimplemented_mechanics?: string[];
   has_summoning_sickness?: boolean;
   devotion?: number;
+  available_mana_colors?: ManaColor[];
   back_face?: {
     name: string;
     power: number | null;

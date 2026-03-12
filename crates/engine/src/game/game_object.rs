@@ -103,6 +103,11 @@ pub struct GameObject {
     #[serde(skip_deserializing, default, skip_serializing_if = "Option::is_none")]
     pub devotion: Option<u32>,
 
+    // Derived field: currently available colored mana options for this object.
+    // Computed before serialization from mana abilities + activation constraints.
+    #[serde(skip_deserializing, default, skip_serializing_if = "Vec::is_empty")]
+    pub available_mana_colors: Vec<ManaColor>,
+
     // Planeswalker: whether a loyalty ability has been activated this turn
     #[serde(skip_deserializing, default)]
     pub loyalty_activated_this_turn: bool,
@@ -151,6 +156,7 @@ impl GameObject {
             unimplemented_mechanics: Vec::new(),
             has_summoning_sickness: false,
             devotion: None,
+            available_mana_colors: Vec::new(),
             loyalty_activated_this_turn: false,
             is_commander: false,
         }
