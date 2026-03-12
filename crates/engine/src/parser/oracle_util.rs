@@ -151,32 +151,53 @@ pub fn parse_mana_symbols(text: &str) -> Option<(ManaCost, &str)> {
 /// Possessive variants used in MTG Oracle text ("your library", "their hand", etc.).
 const POSSESSIVES: &[&str] = &["your", "their", "its owner's", "that player's"];
 
+/// Object pronouns in MTG Oracle text that refer to previously-mentioned objects.
+/// Used in anaphoric references like "shuffle it into", "put them onto", "exile that card".
+pub const OBJECT_PRONOUNS: &[&str] = &["it", "them", "that card", "those cards"];
+
+/// Test whether `text` matches `"{prefix} {word} {suffix}"` for any word in `variants`,
+/// using the given match strategy.
+fn match_phrase_variants(
+    text: &str,
+    prefix: &str,
+    suffix: &str,
+    variants: &[&str],
+    strategy: fn(&str, &str) -> bool,
+) -> bool {
+    variants.iter().any(|word| {
+        let mut needle = String::with_capacity(prefix.len() + word.len() + suffix.len() + 2);
+        needle.push_str(prefix);
+        needle.push(' ');
+        needle.push_str(word);
+        needle.push(' ');
+        needle.push_str(suffix);
+        strategy(text, &needle)
+    })
+}
+
 /// Check if `text` contains `"{prefix} {possessive} {suffix}"` for any possessive variant.
 ///
 /// Useful for matching zone references like "into your hand" / "into their hand" without
 /// enumerating every possessive form at each call site.
 pub fn contains_possessive(text: &str, prefix: &str, suffix: &str) -> bool {
-    POSSESSIVES.iter().any(|p| {
-        let mut needle = String::with_capacity(prefix.len() + p.len() + suffix.len() + 2);
-        needle.push_str(prefix);
-        needle.push(' ');
-        needle.push_str(p);
-        needle.push(' ');
-        needle.push_str(suffix);
-        text.contains(&needle)
+    match_phrase_variants(text, prefix, suffix, POSSESSIVES, |hay, needle| {
+        hay.contains(needle)
     })
 }
 
 /// Like `contains_possessive`, but checks if `text` starts with the phrase.
 pub fn starts_with_possessive(text: &str, prefix: &str, suffix: &str) -> bool {
-    POSSESSIVES.iter().any(|p| {
-        let mut needle = String::with_capacity(prefix.len() + p.len() + suffix.len() + 2);
-        needle.push_str(prefix);
-        needle.push(' ');
-        needle.push_str(p);
-        needle.push(' ');
-        needle.push_str(suffix);
-        text.starts_with(&needle)
+    match_phrase_variants(text, prefix, suffix, POSSESSIVES, |hay, needle| {
+        hay.starts_with(needle)
+    })
+}
+
+/// Check if `text` contains `"{prefix} {pronoun} {suffix}"` for any object pronoun variant.
+///
+/// Matches anaphoric references like "shuffle it into", "put them onto", "exile that card from".
+pub fn contains_object_pronoun(text: &str, prefix: &str, suffix: &str) -> bool {
+    match_phrase_variants(text, prefix, suffix, OBJECT_PRONOUNS, |hay, needle| {
+        hay.contains(needle)
     })
 }
 
@@ -348,6 +369,35 @@ mod tests {
             "then search your library",
             "search",
             "library"
+        ));
+    }
+
+    #[test]
+    fn contains_object_pronoun_matches_variants() {
+        assert!(contains_object_pronoun(
+            "shuffle it into",
+            "shuffle",
+            "into"
+        ));
+        assert!(contains_object_pronoun(
+            "shuffle them into",
+            "shuffle",
+            "into"
+        ));
+        assert!(contains_object_pronoun(
+            "shuffle that card into",
+            "shuffle",
+            "into"
+        ));
+        assert!(contains_object_pronoun(
+            "put those cards onto the battlefield",
+            "put",
+            "onto"
+        ));
+        assert!(!contains_object_pronoun(
+            "shuffle your into",
+            "shuffle",
+            "into"
         ));
     }
 }

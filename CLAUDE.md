@@ -14,12 +14,15 @@ phase.rs is a Magic: The Gathering game engine written in Rust (compiling to nat
 - **The engine is the source of truth.** All game logic, validation, derived state, and rules live in the `engine` crate. Transport layers (WASM bridge, Tauri IPC, WebSocket server) are thin serialization boundaries — zero game logic allowed.
 - **Push logic down, not out.** If multiple consumers need the same behavior, it belongs in the engine. Never duplicate logic across adapters. When in doubt, put it in the engine.
 - **Extend, don't hack.** New features should slot cleanly into existing patterns (effect handlers, game modules, ability definitions). If a feature requires working around the architecture, the architecture should be extended first.
+- **Compose from building blocks.** Every new capability should be decomposed into reusable primitives that unlock future features. A one-off solution that handles one card is worse than a composable building block that handles fifty. Before writing specific logic, ask: "What is the general pattern here?" and build that instead. Examples: `contains_possessive`/`contains_object_pronoun` for Oracle text matching, `ChangeZone` + `Shuffle` composition for compound shuffles, the sub_ability chain for multi-step effects.
+- **Production quality, always.** Write code as if a professional team will audit every line. No "good enough for now." No tech debt IOUs. Every function should be clear, every abstraction should earn its keep, and every pattern should be consistent across the codebase. If you're about to write something that duplicates existing logic, stop and factor out the shared building block first.
 
 ### When in Doubt
 
 - Is this logic in the right crate? → It probably belongs in `engine`.
 - Am I fighting the type system? → Redesign the types, don't work around them.
 - Should I add a special case? → Extend the existing pattern instead.
+- Am I solving one card or a pattern? → Build the building block, not the special case.
 - Is this the Rust way? → Check how `std` and well-known crates solve similar problems.
 
 ## Setup

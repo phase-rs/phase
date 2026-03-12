@@ -3,8 +3,8 @@ use std::str::FromStr;
 use super::oracle_static::parse_continuous_modifications;
 use super::oracle_target::parse_target;
 use super::oracle_util::{
-    contains_possessive, parse_mana_production, parse_number, starts_with_possessive,
-    strip_reminder_text,
+    contains_object_pronoun, contains_possessive, parse_mana_production, parse_number,
+    starts_with_possessive, strip_reminder_text,
 };
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ControllerRef, CountValue, DamageAmount, Duration, Effect,
@@ -311,7 +311,34 @@ fn parse_imperative_effect(text: &str) -> Effect {
                 target: TargetFilter::Player,
             };
         }
-        // Compound shuffle patterns ("shuffle X into library") — not yet handled
+        // "shuffle it/them/that card into its owner's library" → ChangeZone to Library.
+        // The pronoun target is inherited from the parent ability chain.
+        if contains_object_pronoun(&lower, "shuffle", "into")
+            || contains_object_pronoun(&lower, "shuffles", "into")
+        {
+            return Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Library,
+                target: TargetFilter::Any,
+            };
+        }
+        // "shuffle your/their graveyard into your/their library"
+        if contains_possessive(&lower, "shuffle", "graveyard") {
+            return Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Library,
+                target: TargetFilter::Controller,
+            };
+        }
+        // "shuffle your/their hand into your/their library"
+        if contains_possessive(&lower, "shuffle", "hand") {
+            return Effect::ChangeZoneAll {
+                origin: Some(Zone::Hand),
+                destination: Zone::Library,
+                target: TargetFilter::Controller,
+            };
+        }
+        // Unrecognized compound shuffle
         return Effect::Unimplemented {
             name: "shuffle".to_string(),
             description: Some(text.to_string()),
@@ -2100,7 +2127,11 @@ fn split_token_keyword_list(text: &str) -> Vec<&str> {
 }
 
 fn map_token_keyword(text: &str) -> Option<Keyword> {
-    match Keyword::from_str(text.trim()) {
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case("all creature types") {
+        return Some(Keyword::Changeling);
+    }
+    match Keyword::from_str(trimmed) {
         Ok(Keyword::Unknown(_)) => None,
         Ok(keyword) => Some(keyword),
         Err(_) => None,
@@ -2134,7 +2165,6 @@ fn parse_animation_spec(text: &str) -> Option<AnimationSpec> {
         || lower.contains(" all activated abilities ")
         || lower.contains(" loses all other card types ")
         || lower.contains(" all colors")
-        || lower.contains(" all creature types")
     {
         return None;
     }
@@ -2662,6 +2692,44 @@ mod tests {
             e,
             Effect::Shuffle {
                 target: TargetFilter::Player,
+            }
+        ));
+    }
+
+    #[test]
+    fn compound_shuffle_it_into_library() {
+        let e = parse_effect("Shuffle it into its owner's library");
+        assert!(matches!(
+            e,
+            Effect::ChangeZone {
+                destination: Zone::Library,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compound_shuffle_graveyard_into_library() {
+        let e = parse_effect("Shuffle your graveyard into your library");
+        assert!(matches!(
+            e,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Library,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compound_shuffle_hand_into_library() {
+        let e = parse_effect("Shuffle your hand into your library");
+        assert!(matches!(
+            e,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Hand),
+                destination: Zone::Library,
+                ..
             }
         ));
     }
@@ -3401,6 +3469,42 @@ mod tests {
                         subtype: "Shark".to_string(),
                     }
                 )
+        ));
+    }
+
+    #[test]
+    fn effect_land_becomes_creature_with_all_creature_types() {
+        let e =
+            parse_effect("This land becomes a 3/3 creature with vigilance and all creature types");
+        assert!(matches!(
+            e,
+            Effect::GenericEffect {
+                target: None,
+                static_abilities,
+                ..
+            } if static_abilities.len() == 1
+                && static_abilities[0].affected == Some(TargetFilter::SelfRef)
+                && static_abilities[0]
+                    .modifications
+                    .contains(&ContinuousModification::SetPower { value: 3 })
+                && static_abilities[0]
+                    .modifications
+                    .contains(&ContinuousModification::SetToughness { value: 3 })
+                && static_abilities[0]
+                    .modifications
+                    .contains(&ContinuousModification::AddType {
+                        core_type: crate::types::card_type::CoreType::Creature,
+                    })
+                && static_abilities[0]
+                    .modifications
+                    .contains(&ContinuousModification::AddKeyword {
+                        keyword: Keyword::Vigilance,
+                    })
+                && static_abilities[0]
+                    .modifications
+                    .contains(&ContinuousModification::AddKeyword {
+                        keyword: Keyword::Changeling,
+                    })
         ));
     }
 
