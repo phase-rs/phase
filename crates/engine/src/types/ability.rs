@@ -1110,6 +1110,9 @@ pub enum ContinuousModification {
     RemoveType { core_type: CoreType },
     AddSubtype { subtype: String },
     RemoveSubtype { subtype: String },
+    /// Grants every creature type (Changeling CDA). Expanded at runtime
+    /// using `GameState::all_creature_types`.
+    AddAllCreatureTypes,
     SetColor { colors: Vec<ManaColor> },
     AddColor { color: ManaColor },
 }

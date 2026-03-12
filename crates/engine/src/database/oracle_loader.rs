@@ -9,8 +9,8 @@ use crate::database::mtgjson::{load_atomic_cards, parse_mtgjson_mana_cost, Atomi
 use crate::game::deck_loading::derive_colors_from_mana_cost;
 use crate::parser::oracle::parse_oracle_text;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaProduction, PtValue,
-    TargetFilter, TypeFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Effect,
+    ManaProduction, PtValue, StaticDefinition, TargetFilter, TypeFilter,
 };
 use crate::types::card::{CardFace, CardLayout, CardRules};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -140,6 +140,24 @@ fn synthesize_equip(face: &mut CardFace) {
     face.abilities.extend(equip_abilities);
 }
 
+/// If the card has Changeling as a printed keyword, emit a characteristic-defining
+/// static ability that grants all creature types (expanded at runtime via
+/// `GameState::all_creature_types`).
+fn synthesize_changeling_cda(face: &mut CardFace) {
+    if face.keywords.iter().any(|k| matches!(k, Keyword::Changeling)) {
+        face.static_abilities.push(StaticDefinition {
+            mode: crate::types::statics::StaticMode::Continuous,
+            affected: Some(TargetFilter::SelfRef),
+            modifications: vec![ContinuousModification::AddAllCreatureTypes],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            characteristic_defining: true,
+            description: None,
+        });
+    }
+}
+
 fn build_oracle_face(mtgjson: &AtomicCard, oracle_id: Option<String>) -> CardFace {
     let card_type = build_card_type(mtgjson);
     // Raw MTGJSON keyword names (lowercased) for keyword-only line detection
@@ -219,6 +237,7 @@ fn build_oracle_face(mtgjson: &AtomicCard, oracle_id: Option<String>) -> CardFac
 
     synthesize_basic_land_mana(&mut face);
     synthesize_equip(&mut face);
+    synthesize_changeling_cda(&mut face);
     face
 }
 

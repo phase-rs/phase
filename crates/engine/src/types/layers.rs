@@ -70,7 +70,8 @@ impl ContinuousModification {
             ContinuousModification::AddType { .. }
             | ContinuousModification::RemoveType { .. }
             | ContinuousModification::AddSubtype { .. }
-            | ContinuousModification::RemoveSubtype { .. } => Layer::Type,
+            | ContinuousModification::RemoveSubtype { .. }
+            | ContinuousModification::AddAllCreatureTypes => Layer::Type,
             ContinuousModification::SetColor { .. } | ContinuousModification::AddColor { .. } => {
                 Layer::Color
             }
@@ -88,6 +89,9 @@ pub struct ActiveContinuousEffect {
     pub modification: ContinuousModification,
     pub affected_filter: TargetFilter,
     pub mode: StaticMode,
+    /// True for characteristic-defining abilities (CDAs), which are processed
+    /// before other effects within their layer per CR 604.3.
+    pub characteristic_defining: bool,
 }
 
 #[cfg(test)]

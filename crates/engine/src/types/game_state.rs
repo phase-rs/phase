@@ -294,6 +294,11 @@ pub struct GameState {
     // sub-ability is stored here and executed after the player responds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_continuation: Option<Box<crate::types::ability::ResolvedAbility>>,
+
+    /// All creature subtypes seen across loaded cards. Used by Changeling CDA
+    /// to grant every creature type at runtime.
+    #[serde(default)]
+    pub all_creature_types: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -365,6 +370,7 @@ impl GameState {
             triggers_fired_this_game: HashSet::new(),
             revealed_cards: HashSet::new(),
             pending_continuation: None,
+            all_creature_types: Vec::new(),
         }
     }
 

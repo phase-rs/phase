@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
@@ -317,6 +317,28 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             }
         }
     }
+
+    // Collect all creature subtypes for Changeling CDA expansion
+    let mut creature_types: HashSet<String> = HashSet::new();
+    let all_entries = payload
+        .player
+        .main_deck
+        .iter()
+        .chain(&payload.opponent.main_deck)
+        .chain(payload.ai_decks.iter().flat_map(|d| &d.main_deck));
+    for entry in all_entries {
+        if entry
+            .card
+            .card_type
+            .core_types
+            .contains(&crate::types::card_type::CoreType::Creature)
+        {
+            creature_types.extend(entry.card.card_type.subtypes.iter().cloned());
+        }
+    }
+    let mut sorted: Vec<String> = creature_types.into_iter().collect();
+    sorted.sort();
+    state.all_creature_types = sorted;
 
     // Shuffle each player's library
     // Extract libraries, shuffle with rng, then put back to avoid conflicting mutable borrows

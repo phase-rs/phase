@@ -7,6 +7,7 @@ use crate::game::game_object::CounterType;
 use crate::types::ability::{ContinuousModification, StaticCondition, TargetFilter};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
+use crate::types::keywords::Keyword;
 use crate::types::layers::{ActiveContinuousEffect, Layer};
 use crate::types::statics::StaticMode;
 
@@ -62,6 +63,29 @@ pub fn evaluate_layers(state: &mut GameState) {
 
         for effect in &ordered {
             apply_continuous_effect(state, effect);
+        }
+    }
+
+    // Step 3b: Changeling post-fixup — if Changeling was granted via AddKeyword
+    // in Layer 6 (Ability), the CDA in Layer 4 (Type) was already processed.
+    // Expand creature types for any object that now has Changeling but wasn't
+    // covered by its own CDA static definition.
+    if !state.all_creature_types.is_empty() {
+        for &id in &bf_ids {
+            let has_changeling = state
+                .objects
+                .get(&id)
+                .is_some_and(|o| o.has_keyword(&Keyword::Changeling));
+            if has_changeling {
+                let all_types = state.all_creature_types.clone();
+                if let Some(obj) = state.objects.get_mut(&id) {
+                    for subtype in &all_types {
+                        if !obj.card_types.subtypes.iter().any(|s| s == subtype) {
+                            obj.card_types.subtypes.push(subtype.clone());
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -143,6 +167,7 @@ fn gather_active_continuous_effects(state: &GameState) -> Vec<ActiveContinuousEf
                     modification: modification.clone(),
                     affected_filter: affected_filter.clone(),
                     mode: def.mode.clone(),
+                    characteristic_defining: def.characteristic_defining,
                 });
             }
         }
@@ -181,9 +206,11 @@ fn order_with_dependencies(
         return effects.iter().map(|e| (*e).clone()).collect();
     }
 
-    // Start with timestamp ordering as fallback
+    // Start with timestamp ordering as fallback; CDAs sort first per CR 604.3
     let mut sorted: Vec<&ActiveContinuousEffect> = effects.to_vec();
-    sorted.sort_by_key(|e| (e.timestamp, e.source_id.0, e.def_index));
+    sorted.sort_by_key(|e| {
+        (!e.characteristic_defining, e.timestamp, e.source_id.0, e.def_index)
+    });
 
     let mut graph = DiGraph::<usize, ()>::new();
     let nodes: Vec<_> = (0..sorted.len()).map(|i| graph.add_node(i)).collect();
@@ -223,6 +250,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::RemoveType { .. }
             | ContinuousModification::AddSubtype { .. }
             | ContinuousModification::RemoveSubtype { .. }
+            | ContinuousModification::AddAllCreatureTypes
     );
 
     if b_changes_types && filter_references_type(&a.affected_filter) {
@@ -268,10 +296,12 @@ fn filter_references_ability(filter: &TargetFilter) -> bool {
     }
 }
 
-/// Order effects by timestamp (deterministic fallback).
+/// Order effects by timestamp (deterministic fallback). CDAs sort first per CR 604.3.
 fn order_by_timestamp(effects: &[&ActiveContinuousEffect]) -> Vec<ActiveContinuousEffect> {
     let mut sorted: Vec<ActiveContinuousEffect> = effects.iter().map(|e| (*e).clone()).collect();
-    sorted.sort_by_key(|e| (e.timestamp, e.source_id.0, e.def_index));
+    sorted.sort_by_key(|e| {
+        (!e.characteristic_defining, e.timestamp, e.source_id.0, e.def_index)
+    });
     sorted
 }
 
@@ -344,6 +374,13 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             }
             ContinuousModification::RemoveSubtype { ref subtype } => {
                 obj.card_types.subtypes.retain(|s| s != subtype);
+            }
+            ContinuousModification::AddAllCreatureTypes => {
+                for subtype in &state.all_creature_types {
+                    if !obj.card_types.subtypes.iter().any(|s| s == subtype) {
+                        obj.card_types.subtypes.push(subtype.clone());
+                    }
+                }
             }
             ContinuousModification::AddAbility { .. } => { /* TODO: future */ }
         }
@@ -790,5 +827,164 @@ mod tests {
             "Bear returns to base P/T after lord leaves"
         );
         assert_eq!(bear_obj.toughness, Some(2));
+    }
+
+    #[test]
+    fn test_changeling_cda_grants_all_creature_types() {
+        let mut state = setup();
+        state.all_creature_types = vec![
+            "Dragon".to_string(),
+            "Elf".to_string(),
+            "Human".to_string(),
+            "Wizard".to_string(),
+        ];
+
+        let shapeshifter = make_creature(&mut state, "Shapeshifter", 2, 2, PlayerId(0));
+        // Give it the Changeling keyword (printed)
+        state
+            .objects
+            .get_mut(&shapeshifter)
+            .unwrap()
+            .base_keywords
+            .push(Keyword::Changeling);
+        state
+            .objects
+            .get_mut(&shapeshifter)
+            .unwrap()
+            .keywords
+            .push(Keyword::Changeling);
+
+        // Add the CDA static definition (as the parser/loader would)
+        let cda = StaticDefinition {
+            mode: StaticMode::Continuous,
+            affected: Some(TargetFilter::SelfRef),
+            modifications: vec![ContinuousModification::AddAllCreatureTypes],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            characteristic_defining: true,
+            description: None,
+        };
+        state
+            .objects
+            .get_mut(&shapeshifter)
+            .unwrap()
+            .static_definitions
+            .push(cda);
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&shapeshifter).unwrap();
+        assert!(obj.card_types.subtypes.contains(&"Dragon".to_string()));
+        assert!(obj.card_types.subtypes.contains(&"Elf".to_string()));
+        assert!(obj.card_types.subtypes.contains(&"Human".to_string()));
+        assert!(obj.card_types.subtypes.contains(&"Wizard".to_string()));
+    }
+
+    #[test]
+    fn test_granted_changeling_gets_all_creature_types_via_postfixup() {
+        let mut state = setup();
+        state.all_creature_types = vec!["Beast".to_string(), "Goblin".to_string()];
+
+        let creature = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        let lord = make_creature(&mut state, "Changeling Lord", 1, 1, PlayerId(0));
+
+        // Lord grants Changeling to all your creatures via AddKeyword (Layer 6)
+        let def = StaticDefinition {
+            mode: StaticMode::Continuous,
+            affected: Some(creature_you_ctrl()),
+            modifications: vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Changeling,
+            }],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            characteristic_defining: false,
+            description: None,
+        };
+        state
+            .objects
+            .get_mut(&lord)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        // The bear should have all creature types via the post-fixup
+        let obj = state.objects.get(&creature).unwrap();
+        assert!(obj.has_keyword(&Keyword::Changeling));
+        assert!(
+            obj.card_types.subtypes.contains(&"Beast".to_string()),
+            "Granted Changeling should add Beast via post-fixup"
+        );
+        assert!(
+            obj.card_types.subtypes.contains(&"Goblin".to_string()),
+            "Granted Changeling should add Goblin via post-fixup"
+        );
+    }
+
+    #[test]
+    fn test_changeling_cda_sorts_before_non_cda_in_same_layer() {
+        let mut state = setup();
+        state.all_creature_types = vec!["Elf".to_string(), "Sliver".to_string()];
+
+        let shapeshifter = make_creature(&mut state, "Shapeshifter", 1, 1, PlayerId(0));
+        state
+            .objects
+            .get_mut(&shapeshifter)
+            .unwrap()
+            .base_keywords
+            .push(Keyword::Changeling);
+        state
+            .objects
+            .get_mut(&shapeshifter)
+            .unwrap()
+            .keywords
+            .push(Keyword::Changeling);
+
+        // CDA: add all creature types (characteristic_defining = true)
+        let cda = StaticDefinition {
+            mode: StaticMode::Continuous,
+            affected: Some(TargetFilter::SelfRef),
+            modifications: vec![ContinuousModification::AddAllCreatureTypes],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            characteristic_defining: true,
+            description: None,
+        };
+
+        // Non-CDA: also adds a subtype (later timestamp, but same layer)
+        let non_cda = StaticDefinition {
+            mode: StaticMode::Continuous,
+            affected: Some(TargetFilter::SelfRef),
+            modifications: vec![ContinuousModification::AddSubtype {
+                subtype: "Shapeshifter".to_string(),
+            }],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            characteristic_defining: false,
+            description: None,
+        };
+
+        let obj = state.objects.get_mut(&shapeshifter).unwrap();
+        obj.static_definitions.push(cda);
+        obj.static_definitions.push(non_cda);
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&shapeshifter).unwrap();
+        // All types from CDA + the explicit Shapeshifter subtype should be present
+        assert!(obj.card_types.subtypes.contains(&"Elf".to_string()));
+        assert!(obj.card_types.subtypes.contains(&"Sliver".to_string()));
+        assert!(obj
+            .card_types
+            .subtypes
+            .contains(&"Shapeshifter".to_string()));
     }
 }
