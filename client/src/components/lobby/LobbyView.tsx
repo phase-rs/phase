@@ -139,7 +139,8 @@ export function LobbyView({
     onJoinGame(parsed.code);
   }, [joinCode, onJoinGame]);
 
-  const handlePasswordSubmit = useCallback(() => {
+  const handlePasswordSubmit = useCallback((e: React.FormEvent) => {
+    e.preventDefault();
     if (passwordModal && passwordInput) {
       onJoinGame(passwordModal.gameCode, passwordInput);
       setPasswordModal(null);
@@ -283,34 +284,36 @@ export function LobbyView({
             <h3 className="mb-3 text-sm font-semibold text-white">
               Password Required
             </h3>
-            <input
-              type="password"
-              value={passwordInput}
-              onChange={(e) => setPasswordInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handlePasswordSubmit()}
-              placeholder="Enter password"
-              className="mb-4 w-full rounded-lg bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none ring-1 ring-gray-700 focus:ring-cyan-500"
-              autoFocus
-            />
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setPasswordModal(null)}
-                className={menuButtonClass({ tone: "neutral", size: "sm" })}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handlePasswordSubmit}
-                disabled={!passwordInput}
-                className={menuButtonClass({
-                  tone: "cyan",
-                  size: "sm",
-                  disabled: !passwordInput,
-                })}
-              >
-                Join
-              </button>
-            </div>
+            <form onSubmit={handlePasswordSubmit}>
+              <input
+                type="password"
+                value={passwordInput}
+                onChange={(e) => setPasswordInput(e.target.value)}
+                placeholder="Enter password"
+                className="mb-4 w-full rounded-lg bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none ring-1 ring-gray-700 focus:ring-cyan-500"
+                autoFocus
+              />
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPasswordModal(null)}
+                  className={menuButtonClass({ tone: "neutral", size: "sm" })}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={!passwordInput}
+                  className={menuButtonClass({
+                    tone: "cyan",
+                    size: "sm",
+                    disabled: !passwordInput,
+                  })}
+                >
+                  Join
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

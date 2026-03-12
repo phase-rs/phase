@@ -141,7 +141,10 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
     : FORMAT_OPTIONS;
 
   return (
-    <div className="relative z-10 flex w-full max-w-md flex-col items-center gap-6 px-4">
+    <form
+      onSubmit={(e) => { e.preventDefault(); handleHost(); }}
+      className="relative z-10 flex w-full max-w-md flex-col items-center gap-6 px-4"
+    >
       <h2 className={`text-2xl font-bold tracking-tight ${isP2P ? "text-cyan-200" : "text-white"}`}>
         {isP2P ? "Host P2P Game" : "Host Game"}
       </h2>
@@ -413,18 +416,19 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
       {/* Action buttons */}
       <div className="flex gap-3">
         <button
+          type="button"
           onClick={onBack}
           className={menuButtonClass({ tone: "neutral", size: "sm" })}
         >
           Back
         </button>
         <button
-          onClick={handleHost}
+          type="submit"
           className={menuButtonClass({ tone: accentTone, size: "md" })}
         >
           {isP2P ? "Host P2P Game" : "Host Game"}
         </button>
       </div>
-    </div>
+    </form>
   );
 }
