@@ -676,6 +676,7 @@ fn is_replacement_pattern(lower: &str) -> bool {
         || lower.contains("can't be prevented")
         || lower.contains("enters the battlefield tapped")
         || lower.contains("enters tapped")
+        || (lower.contains("as ") && lower.contains("enters") && lower.contains("choose a"))
 }
 
 /// Check if a line is a saga chapter (e.g. "I —", "II —", "III —").

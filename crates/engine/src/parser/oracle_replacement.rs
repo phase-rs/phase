@@ -1,4 +1,4 @@
-use super::oracle_effect::parse_effect_chain;
+use super::oracle_effect::{parse_effect_chain, try_parse_named_choice};
 use super::oracle_util::strip_reminder_text;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChoiceType, Effect, ReplacementCondition,
@@ -14,6 +14,12 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
     let lower = text.to_lowercase();
     let normalized = replace_self_refs(&text, card_name);
     let norm_lower = normalized.to_lowercase();
+
+    // --- "As ~ enters, choose a [type]" → Moved replacement with persisted Choose ---
+    // Must be checked BEFORE shock lands, which may contain this as a sub-pattern.
+    if let Some(def) = parse_as_enters_choose(&norm_lower, &text) {
+        return Some(def);
+    }
 
     // --- Shock lands: "As ~ enters, you may pay N life. If you don't, it enters tapped." ---
     // Must be checked BEFORE the generic "enters tapped" pattern.
@@ -222,6 +228,47 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
         mode: ReplacementMode::Optional {
             decline: Some(Box::new(decline)),
         },
+        valid_card: Some(TargetFilter::SelfRef),
+        description: Some(original_text.to_string()),
+        ..ReplacementDefinition::new(ReplacementEvent::Moved)
+    })
+}
+
+/// Parse "As ~ enters, choose a [type]" into a Moved replacement with persisted Choose.
+/// Skips lines that also contain shock land markers (handled by parse_shock_land).
+fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+    // Must have "as" + "enters" framing
+    if !norm_lower.contains("as ") || !norm_lower.contains("enters") {
+        return None;
+    }
+
+    // Don't match shock lands — they have their own handler
+    if norm_lower.contains("you may pay") && norm_lower.contains("life") {
+        return None;
+    }
+
+    // Extract the "choose a ..." clause
+    let choose_idx = norm_lower.find("choose ")?;
+    let choose_text = &norm_lower[choose_idx..];
+    let choice_type = try_parse_named_choice(choose_text)?;
+
+    let execute = Box::new(AbilityDefinition {
+        kind: AbilityKind::Spell,
+        effect: Effect::Choose {
+            choice_type,
+            persist: true,
+        },
+        cost: None,
+        sub_ability: None,
+        duration: None,
+        description: None,
+        target_prompt: None,
+        sorcery_speed: false,
+        condition: None,
+    });
+
+    Some(ReplacementDefinition {
+        execute: Some(execute),
         valid_card: Some(TargetFilter::SelfRef),
         description: Some(original_text.to_string()),
         ..ReplacementDefinition::new(ReplacementEvent::Moved)
@@ -443,6 +490,56 @@ mod tests {
                 }
             ));
         }
+    }
+
+    #[test]
+    fn as_enters_choose_a_color() {
+        let def = parse_replacement_line(
+            "As Captivating Crossroads enters, choose a color.",
+            "Captivating Crossroads",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(def.mode, ReplacementMode::Mandatory));
+        let execute = def.execute.as_ref().unwrap();
+        assert!(matches!(
+            execute.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Color,
+                persist: true,
+            }
+        ));
+    }
+
+    #[test]
+    fn as_enters_choose_a_creature_type() {
+        let def = parse_replacement_line(
+            "As Door of Destinies enters, choose a creature type.",
+            "Door of Destinies",
+        )
+        .unwrap();
+        let execute = def.execute.as_ref().unwrap();
+        assert!(matches!(
+            execute.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::CreatureType,
+                persist: true,
+            }
+        ));
+    }
+
+    #[test]
+    fn as_enters_choose_does_not_match_shock_land() {
+        // Shock lands with "choose a basic land type" should be handled by parse_shock_land,
+        // not parse_as_enters_choose
+        let def = parse_replacement_line(
+            "As this land enters, choose a basic land type. Then you may pay 2 life. If you don't, it enters tapped.",
+            "Multiversal Passage",
+        )
+        .unwrap();
+        // Should be Optional (shock land), not Mandatory (simple choose)
+        assert!(matches!(def.mode, ReplacementMode::Optional { .. }));
     }
 
     #[test]

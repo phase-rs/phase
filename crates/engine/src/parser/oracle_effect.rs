@@ -555,7 +555,7 @@ fn is_choose_as_targeting(rest: &str) -> bool {
 
 /// Match "choose a creature type", "choose a color", "choose odd or even",
 /// "choose a basic land type", "choose a card type" from lowercased Oracle text.
-fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
+pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
     if !lower.starts_with("choose ") {
         return None;
     }
