@@ -27,6 +27,9 @@ pub struct ParsedAbilities {
     /// Modal spell metadata, set when Oracle text begins with "Choose one —" etc.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modal: Option<ModalChoice>,
+    /// Optional additional casting cost parsed from "As an additional cost..." text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optional_cost: Option<AbilityCost>,
 }
 
 /// Parse Oracle text into structured ability definitions.
@@ -56,6 +59,7 @@ pub fn parse_oracle_text(
         replacements: Vec::new(),
         extracted_keywords: Vec::new(),
         modal: None,
+        optional_cost: None,
     };
 
     let lines: Vec<&str> = oracle_text.split('\n').collect();

@@ -229,6 +229,7 @@ fn build_oracle_face(mtgjson: &AtomicCard, oracle_id: Option<String>) -> CardFac
         color_override,
         scryfall_oracle_id: oracle_id,
         modal: parsed.modal,
+        optional_cost: parsed.optional_cost,
     };
 
     synthesize_basic_land_mana(&mut face);
