@@ -114,6 +114,12 @@ pub fn get_legal_actions(state: &GameState) -> Vec<GameAction> {
                 GameAction::ChoosePlayDraw { play_first: false },
             ]
         }
+        WaitingFor::NamedChoice { options, .. } => options
+            .iter()
+            .map(|choice| GameAction::ChooseOption {
+                choice: choice.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -1074,6 +1080,7 @@ mod tests {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             });
         obj.abilities
             .push(engine::types::ability::AbilityDefinition {
@@ -1096,11 +1103,13 @@ mod tests {
                     description: None,
                     target_prompt: None,
                     sorcery_speed: false,
+                    condition: None,
                 })),
                 duration: None,
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             });
         id
     }
@@ -1336,6 +1345,7 @@ mod tests {
                 description: None,
                 duration: None,
                 sorcery_speed: false,
+                condition: None,
             },
         );
 

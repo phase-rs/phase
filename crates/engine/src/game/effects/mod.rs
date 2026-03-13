@@ -6,6 +6,7 @@ pub mod animate;
 pub mod attach;
 pub mod bounce;
 pub mod change_zone;
+pub mod choose;
 pub mod choose_card;
 pub mod cleanup;
 pub mod copy_spell;
@@ -83,6 +84,7 @@ pub fn resolve_effect(
         Effect::SearchLibrary { .. } => search_library::resolve(state, ability, events),
         Effect::RevealHand { .. } => reveal_hand::resolve(state, ability, events),
         Effect::TargetOnly { .. } => Ok(()), // no-op: targeting is established at cast time
+        Effect::Choose { .. } => choose::resolve(state, ability, events),
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);
@@ -139,6 +141,7 @@ pub fn resolve_ability_chain(
                 | WaitingFor::SurveilChoice { .. }
                 | WaitingFor::RevealChoice { .. }
                 | WaitingFor::SearchChoice { .. }
+                | WaitingFor::NamedChoice { .. }
         ) {
             let mut sub_clone = sub.as_ref().clone();
             if sub_clone.targets.is_empty() && !ability.targets.is_empty() {
@@ -164,7 +167,7 @@ pub fn resolve_ability_chain(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{DamageAmount, TargetFilter, SpellContext, TargetRef};
+    use crate::types::ability::{DamageAmount, SpellContext, TargetFilter, TargetRef};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;

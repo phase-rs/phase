@@ -7,9 +7,9 @@ use super::oracle_util::{
     starts_with_possessive, strip_reminder_text,
 };
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, ControllerRef, CountValue, DamageAmount,
-    Duration, Effect, FilterProp, GainLifePlayer, LifeAmount, ManaProduction, PtValue,
-    StaticDefinition, TargetFilter, TypeFilter,
+    AbilityCondition, AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, CountValue,
+    DamageAmount, Duration, Effect, FilterProp, GainLifePlayer, LifeAmount, ManaProduction,
+    PtValue, StaticDefinition, TargetFilter, TypeFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -481,6 +481,11 @@ fn parse_imperative_effect(text: &str) -> Effect {
         }
     }
 
+    // --- Named choices: "choose a creature type", "choose a color", etc. ---
+    if let Some(choice_type) = try_parse_named_choice(&lower) {
+        return Effect::Choose { choice_type };
+    }
+
     // --- Choose card from revealed hand (absorbed into RevealHand filter) ---
     if lower.starts_with("choose ") && lower.contains("card from it") {
         let filter = parse_choose_filter(&lower);
@@ -497,6 +502,7 @@ fn parse_imperative_effect(text: &str) -> Effect {
         description: Some(text.to_string()),
     }
 }
+
 
 /// Determines if text after "choose " is a targeting synonym rather than
 /// a modal choice ("choose one —"), color choice, or creature type choice.
@@ -548,6 +554,28 @@ fn is_choose_as_targeting(rest: &str) -> bool {
     }
 
     false
+}
+
+/// Match "choose a creature type", "choose a color", "choose odd or even",
+/// "choose a basic land type", "choose a card type" from lowercased Oracle text.
+fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
+    if !lower.starts_with("choose ") {
+        return None;
+    }
+    let rest = &lower[7..]; // skip "choose "
+    if rest.starts_with("a creature type") {
+        Some(ChoiceType::CreatureType)
+    } else if rest.starts_with("a color") {
+        Some(ChoiceType::Color)
+    } else if rest.starts_with("odd or even") {
+        Some(ChoiceType::OddOrEven)
+    } else if rest.starts_with("a basic land type") {
+        Some(ChoiceType::BasicLandType)
+    } else if rest.starts_with("a card type") {
+        Some(ChoiceType::CardType)
+    } else {
+        None
+    }
 }
 
 fn parse_choose_filter(lower: &str) -> TargetFilter {
@@ -4128,6 +4156,7 @@ mod tests {
         assert_eq!(rest, "exile a card");
     }
 
+
     // --- "Choose" as targeting synonym ---
 
     #[test]
@@ -4176,17 +4205,19 @@ mod tests {
     }
 
     #[test]
-    fn choose_does_not_match_modal() {
-        // "Choose a color" should remain Unimplemented (different mechanic)
+    fn choose_does_not_match_targeting_as_color() {
+        // "Choose a color" should NOT be treated as targeting — it's a named choice
         let e = parse_effect("Choose a color");
-        assert!(matches!(e, Effect::Unimplemented { .. }));
+        assert!(!matches!(e, Effect::TargetOnly { .. }));
+        assert!(matches!(e, Effect::Choose { .. }));
     }
 
     #[test]
-    fn choose_does_not_match_creature_type() {
-        // "Choose a creature type" should remain Unimplemented (different mechanic)
+    fn choose_does_not_match_targeting_as_creature_type() {
+        // "Choose a creature type" should NOT be treated as targeting — it's a named choice
         let e = parse_effect("Choose a creature type");
-        assert!(matches!(e, Effect::Unimplemented { .. }));
+        assert!(!matches!(e, Effect::TargetOnly { .. }));
+        assert!(matches!(e, Effect::Choose { .. }));
     }
 
     #[test]
@@ -4210,5 +4241,60 @@ mod tests {
         assert!(!is_choose_as_targeting("a card type"));
         assert!(!is_choose_as_targeting("one —"));
         assert!(!is_choose_as_targeting("a creature card from it"));
+    }
+
+    #[test]
+    fn choose_a_creature_type() {
+        let e = parse_effect("Choose a creature type");
+        assert_eq!(
+            e,
+            Effect::Choose {
+                choice_type: ChoiceType::CreatureType
+            }
+        );
+    }
+
+    #[test]
+    fn choose_a_color() {
+        let e = parse_effect("Choose a color");
+        assert_eq!(
+            e,
+            Effect::Choose {
+                choice_type: ChoiceType::Color
+            }
+        );
+    }
+
+    #[test]
+    fn choose_odd_or_even() {
+        let e = parse_effect("Choose odd or even");
+        assert_eq!(
+            e,
+            Effect::Choose {
+                choice_type: ChoiceType::OddOrEven
+            }
+        );
+    }
+
+    #[test]
+    fn choose_a_basic_land_type() {
+        let e = parse_effect("Choose a basic land type");
+        assert_eq!(
+            e,
+            Effect::Choose {
+                choice_type: ChoiceType::BasicLandType
+            }
+        );
+    }
+
+    #[test]
+    fn choose_a_card_type() {
+        let e = parse_effect("Choose a card type");
+        assert_eq!(
+            e,
+            Effect::Choose {
+                choice_type: ChoiceType::CardType
+            }
+        );
     }
 }

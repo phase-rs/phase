@@ -276,7 +276,8 @@ export type WaitingFor =
   | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number } }
   | { type: "TriggerTargetSelection"; data: { player: PlayerId; legal_targets: TargetRef[] } }
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
-  | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } };
+  | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
+  | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string; options: string[] } };
 
 // ── Action Result ────────────────────────────────────────────────────────
 
@@ -305,7 +306,8 @@ export type GameAction =
   | { type: "PlayFaceDown"; data: { card_id: CardId } }
   | { type: "TurnFaceUp"; data: { object_id: ObjectId } }
   | { type: "SubmitSideboard"; data: { main: DeckCardCount[]; sideboard: DeckCardCount[] } }
-  | { type: "ChoosePlayDraw"; data: { play_first: boolean } };
+  | { type: "ChoosePlayDraw"; data: { play_first: boolean } }
+  | { type: "ChooseOption"; data: { choice: string } };
 
 // ── Game Events (discriminated union, tag="type", content="data") ────────
 

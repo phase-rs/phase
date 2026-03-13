@@ -378,7 +378,7 @@ fn synthesize_equip(face: &mut CardFace) {
                     description: None,
                     target_prompt: None,
                     sorcery_speed: false,
-                condition: None,
+                    condition: None,
                 })
             } else {
                 None

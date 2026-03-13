@@ -17,6 +17,16 @@ use super::zones::Zone;
 // Supporting types
 // ---------------------------------------------------------------------------
 
+/// What kind of named choice the player must make at resolution time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum ChoiceType {
+    CreatureType,
+    Color,
+    OddOrEven,
+    BasicLandType,
+    CardType,
+}
+
 /// How to specify a damage amount -- either a fixed integer or a variable reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", content = "value")]
@@ -723,6 +733,11 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// Resolution-time named choice: "choose a creature type", "choose a color", etc.
+    /// Sets WaitingFor::NamedChoice and stores the result in GameState::last_named_choice.
+    Choose {
+        choice_type: ChoiceType,
+    },
     /// Semantic marker for effects the engine has not yet implemented a handler for.
     /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.
     Unimplemented {
@@ -824,6 +839,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::SearchLibrary { .. } => "SearchLibrary",
         Effect::RevealHand { .. } => "RevealHand",
         Effect::TargetOnly { .. } => "TargetOnly",
+        Effect::Choose { .. } => "Choose",
         Effect::Unimplemented { name, .. } => name,
     }
 }
@@ -880,6 +896,7 @@ pub enum EffectKind {
     Shuffle,
     SearchLibrary,
     TargetOnly,
+    Choose,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
     Equip,
@@ -935,6 +952,7 @@ impl From<&Effect> for EffectKind {
             Effect::SearchLibrary { .. } => EffectKind::SearchLibrary,
             Effect::RevealHand { .. } => EffectKind::Reveal,
             Effect::TargetOnly { .. } => EffectKind::TargetOnly,
+            Effect::Choose { .. } => EffectKind::Choose,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,
         }
     }
