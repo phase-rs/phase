@@ -1,6 +1,6 @@
 use crate::game::filter;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, StaticDefinition, TargetFilter,  TargetRef,
+    Effect, EffectError, EffectKind, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -90,7 +90,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ContinuousModification, ControllerRef, SpellContext, Duration, StaticDefinition, TypeFilter,
+        ContinuousModification, ControllerRef, Duration, SpellContext, StaticDefinition, TypeFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;

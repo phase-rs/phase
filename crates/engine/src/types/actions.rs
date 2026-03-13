@@ -62,6 +62,9 @@ pub enum GameAction {
     ChoosePlayDraw {
         play_first: bool,
     },
+    SelectModes {
+        indices: Vec<usize>,
+    },
 }
 
 #[cfg(test)]

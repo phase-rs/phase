@@ -214,6 +214,7 @@ pub fn create_object_from_card_face(
     obj.replacement_definitions = card_face.replacements.clone();
     obj.color = color.clone();
     obj.base_color = color;
+    obj.modal = card_face.modal.clone();
 
     obj_id
 }
@@ -256,6 +257,7 @@ pub fn create_commander_from_card_face(
     obj.color = color.clone();
     obj.base_color = color;
     obj.is_commander = true;
+    obj.modal = card_face.modal.clone();
 
     obj_id
 }
@@ -403,6 +405,7 @@ mod tests {
             replacements: vec![],
             color_override: None,
             scryfall_oracle_id: None,
+            modal: None,
         }
     }
 
@@ -445,6 +448,7 @@ mod tests {
             replacements: vec![],
             color_override: None,
             scryfall_oracle_id: None,
+            modal: None,
         }
     }
 

@@ -163,7 +163,7 @@ pub fn resolve_ability_chain(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{DamageAmount, TargetFilter, SpellContext, TargetRef};
+    use crate::types::ability::{DamageAmount, SpellContext, TargetFilter, TargetRef};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;

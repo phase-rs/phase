@@ -107,6 +107,7 @@ pub fn get_legal_actions(state: &GameState) -> Vec<GameAction> {
                 targets: vec![t.clone()],
             })
             .collect(),
+        WaitingFor::ModeChoice { modal, .. } => mode_choice_actions(modal),
         WaitingFor::BetweenGamesSideboard { player, .. } => sideboard_actions(state, *player),
         WaitingFor::BetweenGamesChoosePlayDraw { .. } => {
             vec![
@@ -139,6 +140,39 @@ fn deck_entries_to_counts(entries: &[DeckEntry]) -> Vec<DeckCardCount> {
         .into_iter()
         .map(|(name, count)| DeckCardCount { name, count })
         .collect()
+}
+
+/// Generate all valid mode combinations for a modal spell.
+fn mode_choice_actions(modal: &engine::types::ability::ModalChoice) -> Vec<GameAction> {
+    let indices: Vec<usize> = (0..modal.mode_count).collect();
+    let mut actions = Vec::new();
+    for k in modal.min_choices..=modal.max_choices {
+        for combo in index_combinations(&indices, k) {
+            actions.push(GameAction::SelectModes { indices: combo });
+        }
+    }
+    actions
+}
+
+/// Compute combinations of `k` elements from a slice of indices.
+fn index_combinations(items: &[usize], k: usize) -> Vec<Vec<usize>> {
+    if k == 0 {
+        return vec![Vec::new()];
+    }
+    if items.len() < k {
+        return Vec::new();
+    }
+    if items.len() == k {
+        return vec![items.to_vec()];
+    }
+
+    let mut result = Vec::new();
+    for mut combo in index_combinations(&items[1..], k - 1) {
+        combo.insert(0, items[0]);
+        result.push(combo);
+    }
+    result.extend(index_combinations(&items[1..], k));
+    result
 }
 
 fn priority_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
@@ -1074,6 +1108,7 @@ mod tests {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             });
         obj.abilities
             .push(engine::types::ability::AbilityDefinition {
@@ -1096,11 +1131,13 @@ mod tests {
                     description: None,
                     target_prompt: None,
                     sorcery_speed: false,
+                    condition: None,
                 })),
                 duration: None,
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             });
         id
     }
@@ -1336,6 +1373,7 @@ mod tests {
                 description: None,
                 duration: None,
                 sorcery_speed: false,
+                condition: None,
             },
         );
 

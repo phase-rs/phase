@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    AbilityDefinition, PtValue, ReplacementDefinition, StaticDefinition, TriggerDefinition,
+    AbilityDefinition, ModalChoice, PtValue, ReplacementDefinition, StaticDefinition,
+    TriggerDefinition,
 };
 use super::card_type::CardType;
 use super::keywords::Keyword;
@@ -27,6 +28,9 @@ pub struct CardFace {
     pub color_override: Option<Vec<ManaColor>>,
     #[serde(default)]
     pub scryfall_oracle_id: Option<String>,
+    /// Modal spell metadata ("Choose one —", "Choose two —", etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modal: Option<ModalChoice>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

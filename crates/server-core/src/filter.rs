@@ -98,6 +98,7 @@ mod tests {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         }];
 
         // Add cards to player 1's hand
@@ -119,6 +120,7 @@ mod tests {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         }];
 
         // Add cards to libraries
@@ -236,6 +238,7 @@ mod tests {
                 replacements: vec![],
                 color_override: None,
                 scryfall_oracle_id: None,
+                modal: None,
             },
             count: 4,
         };

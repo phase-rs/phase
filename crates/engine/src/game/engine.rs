@@ -125,6 +125,20 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 )?
             }
         }
+        (WaitingFor::ModeChoice { player, .. }, GameAction::SelectModes { indices }) => {
+            casting::handle_select_modes(state, *player, indices, &mut events)?
+        }
+        (
+            WaitingFor::ModeChoice {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => {
+            casting::handle_cancel_cast(state, pending_cast, &mut events);
+            WaitingFor::Priority { player: *player }
+        }
         (WaitingFor::TargetSelection { player, .. }, GameAction::SelectTargets { targets }) => {
             casting::handle_select_targets(state, *player, targets, &mut events)?
         }
@@ -1174,8 +1188,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, DamageAmount, Effect, ResolvedAbility, SpellContext,
-        TargetFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, DamageAmount, Effect, ResolvedAbility,
+        SpellContext, TargetFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -2963,7 +2977,7 @@ mod trigger_target_tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ControllerRef, Effect, TargetFilter, SpellContext, TargetRef, TriggerDefinition, TypeFilter,
+        ControllerRef, Effect, SpellContext, TargetFilter, TargetRef, TriggerDefinition, TypeFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;

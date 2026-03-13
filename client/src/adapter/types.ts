@@ -256,6 +256,15 @@ export interface PendingCast {
   cost: ManaCost;
 }
 
+// ── Modal Choice metadata ─────────────────────────────────────────────
+
+export interface ModalChoice {
+  min_choices: number;
+  max_choices: number;
+  mode_count: number;
+  mode_descriptions: string[];
+}
+
 // ── WaitingFor (discriminated union with tag="type", content="data") ─────
 
 export type WaitingFor =
@@ -276,7 +285,8 @@ export type WaitingFor =
   | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number } }
   | { type: "TriggerTargetSelection"; data: { player: PlayerId; legal_targets: TargetRef[] } }
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
-  | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } };
+  | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
+  | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast } };
 
 // ── Action Result ────────────────────────────────────────────────────────
 
@@ -305,7 +315,8 @@ export type GameAction =
   | { type: "PlayFaceDown"; data: { card_id: CardId } }
   | { type: "TurnFaceUp"; data: { object_id: ObjectId } }
   | { type: "SubmitSideboard"; data: { main: DeckCardCount[]; sideboard: DeckCardCount[] } }
-  | { type: "ChoosePlayDraw"; data: { play_first: boolean } };
+  | { type: "ChoosePlayDraw"; data: { play_first: boolean } }
+  | { type: "SelectModes"; data: { indices: number[] } };
 
 // ── Game Events (discriminated union, tag="type", content="data") ────────
 

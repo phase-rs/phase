@@ -1000,10 +1000,7 @@ mod tests {
 
     #[test]
     fn trigger_land_enters() {
-        let def = parse_trigger_line(
-            "When this land enters, you gain 1 life.",
-            "Bloodfell Caves",
-        );
+        let def = parse_trigger_line("When this land enters, you gain 1 life.", "Bloodfell Caves");
         assert_eq!(def.mode, TriggerMode::ChangesZone);
         assert_eq!(def.destination, Some(Zone::Battlefield));
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));

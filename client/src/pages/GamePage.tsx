@@ -21,6 +21,7 @@ import { ManaPaymentUI } from "../components/mana/ManaPaymentUI.tsx";
 import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.tsx";
 import { CardChoiceModal } from "../components/modal/CardChoiceModal.tsx";
 import { ChoiceModal } from "../components/modal/ChoiceModal.tsx";
+import { ModeChoiceModal } from "../components/modal/ModeChoiceModal.tsx";
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
 import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
@@ -562,6 +563,7 @@ function GamePageContent({
       {(waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection") && waitingFor.data.player === playerId && <TargetingOverlay />}
       {waitingFor?.type === "ManaPayment" && waitingFor.data.player === playerId && <ManaPaymentUI />}
       {waitingFor?.type === "ReplacementChoice" && waitingFor.data.player === playerId && <ReplacementModal />}
+      <ModeChoiceModal />
 
       {/* Scry/Dig/Surveil card choice modal */}
       <CardChoiceModal />

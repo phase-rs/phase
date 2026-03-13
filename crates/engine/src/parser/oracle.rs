@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, StaticDefinition,
-    TriggerDefinition,
+    AbilityCost, AbilityDefinition, AbilityKind, Effect, ModalChoice, ReplacementDefinition,
+    StaticDefinition, TriggerDefinition,
 };
 use crate::types::keywords::Keyword;
 
@@ -24,6 +24,9 @@ pub struct ParsedAbilities {
     /// Keywords extracted from Oracle text keyword-only lines (e.g. "Protection from multicolored").
     /// Merged with MTGJSON keywords in the loader to form the complete keyword set.
     pub extracted_keywords: Vec<Keyword>,
+    /// Modal spell metadata, set when Oracle text begins with "Choose one —" etc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modal: Option<ModalChoice>,
 }
 
 /// Parse Oracle text into structured ability definitions.
@@ -52,6 +55,7 @@ pub fn parse_oracle_text(
         statics: Vec::new(),
         replacements: Vec::new(),
         extracted_keywords: Vec::new(),
+        modal: None,
     };
 
     let lines: Vec<&str> = oracle_text.split('\n').collect();
@@ -97,6 +101,7 @@ pub fn parse_oracle_text(
 
         // Priority 10: Modal "Choose one —" / "Choose two —" etc.
         if lower.starts_with("choose ") && (lower.contains(" —") || lower.contains(" -")) {
+            let (min_choices, max_choices) = parse_modal_choose_count(&lower);
             let mut bullets = Vec::new();
             let mut j = i + 1;
             while j < lines.len() {
@@ -115,6 +120,13 @@ pub fn parse_oracle_text(
             }
             if bullets.is_empty() {
                 result.abilities.push(make_unimplemented(&line));
+            } else {
+                result.modal = Some(ModalChoice {
+                    min_choices,
+                    max_choices,
+                    mode_count: bullets.len(),
+                    mode_descriptions: bullets.clone(),
+                });
             }
             i = j;
             continue;
@@ -830,6 +842,31 @@ fn is_effect_sentence_candidate(lower: &str) -> bool {
         .any(|prefix| lower.starts_with(prefix))
 }
 
+/// Parse the "choose N" count from the modal header line.
+///
+/// Returns (min_choices, max_choices). Examples:
+/// - "choose one —" → (1, 1)
+/// - "choose two —" → (2, 2)
+/// - "choose one or both —" → (1, 2)
+/// - "choose one or more —" → (1, usize::MAX) (capped to mode_count by caller)
+/// - "choose any number of —" → (1, usize::MAX)
+fn parse_modal_choose_count(lower: &str) -> (usize, usize) {
+    if lower.contains("one or both") {
+        return (1, 2);
+    }
+    if lower.contains("one or more") || lower.contains("any number") {
+        return (1, usize::MAX);
+    }
+    // Extract the number word after "choose "
+    if let Some(rest) = lower.strip_prefix("choose ") {
+        if let Some((n, _)) = super::oracle_util::parse_number(rest) {
+            return (n as usize, n as usize);
+        }
+    }
+    // Default fallback
+    (1, 1)
+}
+
 /// Create an Unimplemented fallback ability.
 fn make_unimplemented(line: &str) -> AbilityDefinition {
     AbilityDefinition {
@@ -1136,5 +1173,83 @@ mod tests {
         assert!(r.extracted_keywords.is_empty());
         // Line should fall through to equip ability parsing
         assert_eq!(r.abilities.len(), 1);
+    }
+
+    // ── Modal parsing tests ──────────────────────────────────────────────
+
+    #[test]
+    fn choose_one_modal_metadata() {
+        let r = parse(
+            "Choose one —\n• Deal 3 damage to any target.\n• Draw a card.\n• Gain 3 life.",
+            "Test Charm",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 3);
+        let modal = r.modal.expect("should have modal metadata");
+        assert_eq!(modal.min_choices, 1);
+        assert_eq!(modal.max_choices, 1);
+        assert_eq!(modal.mode_count, 3);
+        assert_eq!(modal.mode_descriptions.len(), 3);
+    }
+
+    #[test]
+    fn choose_two_modal_metadata() {
+        let r = parse(
+            "Choose two —\n• Counter target spell.\n• Return target permanent to its owner's hand.\n• Tap all creatures your opponents control.\n• Draw a card.",
+            "Cryptic Command",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 4);
+        let modal = r.modal.expect("should have modal metadata");
+        assert_eq!(modal.min_choices, 2);
+        assert_eq!(modal.max_choices, 2);
+        assert_eq!(modal.mode_count, 4);
+    }
+
+    #[test]
+    fn choose_one_or_both_modal_metadata() {
+        let r = parse(
+            "Choose one or both —\n• Destroy target artifact.\n• Destroy target enchantment.",
+            "Wear // Tear",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        let modal = r.modal.expect("should have modal metadata");
+        assert_eq!(modal.min_choices, 1);
+        assert_eq!(modal.max_choices, 2);
+        assert_eq!(modal.mode_count, 2);
+    }
+
+    #[test]
+    fn non_modal_spell_has_no_modal_metadata() {
+        let r = parse(
+            "Deal 3 damage to any target.",
+            "Lightning Bolt",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert!(r.modal.is_none());
+    }
+
+    #[test]
+    fn parse_modal_choose_count_variants() {
+        assert_eq!(parse_modal_choose_count("choose one —"), (1, 1));
+        assert_eq!(parse_modal_choose_count("choose two —"), (2, 2));
+        assert_eq!(parse_modal_choose_count("choose three —"), (3, 3));
+        assert_eq!(parse_modal_choose_count("choose one or both —"), (1, 2));
+        assert_eq!(
+            parse_modal_choose_count("choose one or more —"),
+            (1, usize::MAX)
+        );
+        assert_eq!(
+            parse_modal_choose_count("choose any number of —"),
+            (1, usize::MAX)
+        );
     }
 }

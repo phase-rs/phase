@@ -131,6 +131,7 @@ mod tests {
             replacements: Vec::<ReplacementDefinition>::new(),
             color_override: None,
             scryfall_oracle_id: None,
+            modal: None,
         }
     }
 
