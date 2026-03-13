@@ -65,7 +65,12 @@ pub fn resolve(
                     zones::move_to_zone(state, *obj_id, Zone::Graveyard, events);
                 } else {
                     // Ability was countered — apply source_static if present
-                    apply_source_static(state, ability.source_id, source_permanent_id, &source_static);
+                    apply_source_static(
+                        state,
+                        ability.source_id,
+                        source_permanent_id,
+                        &source_static,
+                    );
                 }
 
                 events.push(GameEvent::SpellCountered {

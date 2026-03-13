@@ -590,9 +590,69 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
         || rest.starts_with("a creature card name")
     {
         Some(ChoiceType::CardName)
+    } else if let Some(range_rest) = rest.strip_prefix("a number between ") {
+        // "choose a number between 0 and 13"
+        let mut parts = range_rest.splitn(3, ' ');
+        let min = parts.next().and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
+        let and = parts.next();
+        let max = parts
+            .next()
+            .and_then(|s| {
+                s.trim_end_matches(|c: char| !c.is_ascii_digit())
+                    .parse::<u8>()
+                    .ok()
+            })
+            .unwrap_or(20);
+        if and == Some("and") {
+            Some(ChoiceType::NumberRange { min, max })
+        } else {
+            None
+        }
+    } else if let Some(gt_rest) = rest.strip_prefix("a number greater than ") {
+        // "choose a number greater than 0" — open-ended, cap at 20
+        let n = gt_rest
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse::<u8>().ok())
+            .unwrap_or(0);
+        Some(ChoiceType::NumberRange {
+            min: n + 1,
+            max: 20,
+        })
+    } else if rest == "a number" || rest.starts_with("a number ") {
+        // Generic "choose a number" — default range 0-20
+        Some(ChoiceType::NumberRange { min: 0, max: 20 })
+    } else if rest.starts_with("a land type") || rest.starts_with("a nonbasic land type") {
+        Some(ChoiceType::LandType)
     } else {
-        None
+        // Generic "X or Y" pattern — must come AFTER all specific patterns above
+        try_parse_binary_choice(rest).map(|options| ChoiceType::Labeled { options })
     }
+}
+
+/// Try to parse "X or Y" as a binary labeled choice.
+/// Only matches simple one-or-two-word labels separated by " or ".
+/// Returns capitalized labels.
+/// This must come AFTER all specific patterns in try_parse_named_choice to avoid
+/// accidentally matching "choose left or right" against targeting patterns.
+fn try_parse_binary_choice(rest: &str) -> Option<Vec<String>> {
+    let (left, right) = rest.split_once(" or ")?;
+    let left = left.trim();
+    let right = right.trim();
+
+    // Labels must be short (≤2 words) — longer phrases are likely clauses, not choices
+    if left.split_whitespace().count() > 2 || right.split_whitespace().count() > 2 {
+        return None;
+    }
+    // Reject known non-choice patterns
+    if left.contains("target") || right.contains("target") {
+        return None;
+    }
+    if right == "more" || left == "both" || right == "both" {
+        return None;
+    }
+
+    Some(vec![capitalize(left), capitalize(right)])
 }
 
 fn parse_choose_filter(lower: &str) -> TargetFilter {
@@ -1120,19 +1180,16 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
         let mut absorbed_indices = Vec::new();
         for (idx, sentence) in sentences.iter().enumerate().skip(1) {
             let sub_lower = sentence.to_lowercase();
-            if sub_lower.contains("countered this way")
-                && sub_lower.contains("loses all abilities")
+            if sub_lower.contains("countered this way") && sub_lower.contains("loses all abilities")
             {
                 if let Effect::Counter {
                     ref mut source_static,
                     ..
                 } = defs[0].effect
                 {
-                    *source_static = Some(
-                        StaticDefinition::continuous().modifications(vec![
-                            crate::types::ability::ContinuousModification::RemoveAllAbilities,
-                        ]),
-                    );
+                    *source_static = Some(StaticDefinition::continuous().modifications(vec![
+                        crate::types::ability::ContinuousModification::RemoveAllAbilities,
+                    ]));
                 }
                 absorbed_indices.push(idx);
             }
@@ -2979,7 +3036,10 @@ mod tests {
         );
         // The "if...countered this way...loses all abilities" sentence should be absorbed
         // into the Counter effect's source_static, not left as a sub_ability.
-        assert!(ability.sub_ability.is_none(), "sub_ability should be absorbed");
+        assert!(
+            ability.sub_ability.is_none(),
+            "sub_ability should be absorbed"
+        );
         if let Effect::Counter { source_static, .. } = &ability.effect {
             let static_def = source_static.as_ref().expect("should have source_static");
             assert_eq!(static_def.mode, StaticMode::Continuous);
@@ -4491,6 +4551,108 @@ mod tests {
                 persist: false,
             }
         );
+    }
+
+    #[test]
+    fn choose_a_number_between_0_and_13() {
+        let e = parse_effect("Choose a number between 0 and 13");
+        assert!(matches!(
+            e,
+            Effect::Choose {
+                choice_type: ChoiceType::NumberRange { min: 0, max: 13 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn choose_a_number_greater_than_0() {
+        let e = parse_effect("Choose a number greater than 0");
+        assert!(matches!(
+            e,
+            Effect::Choose {
+                choice_type: ChoiceType::NumberRange { min: 1, .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn choose_a_number_generic() {
+        let e = parse_effect("Choose a number");
+        assert!(matches!(
+            e,
+            Effect::Choose {
+                choice_type: ChoiceType::NumberRange { min: 0, max: 20 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn choose_left_or_right() {
+        let e = parse_effect("Choose left or right");
+        match e {
+            Effect::Choose {
+                choice_type: ChoiceType::Labeled { options },
+                ..
+            } => {
+                assert_eq!(options, vec!["Left", "Right"]);
+            }
+            other => panic!("Expected Choose Labeled, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn choose_fame_or_fortune() {
+        let e = parse_effect("choose fame or fortune");
+        match e {
+            Effect::Choose {
+                choice_type: ChoiceType::Labeled { options },
+                ..
+            } => {
+                assert_eq!(options, vec!["Fame", "Fortune"]);
+            }
+            other => panic!("Expected Choose Labeled, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn choose_hexproof_or_indestructible() {
+        let e = parse_effect("Choose hexproof or indestructible");
+        match e {
+            Effect::Choose {
+                choice_type: ChoiceType::Labeled { options },
+                ..
+            } => {
+                assert_eq!(options, vec!["Hexproof", "Indestructible"]);
+            }
+            other => panic!("Expected Choose Labeled, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn choose_a_land_type() {
+        let e = parse_effect("Choose a land type");
+        assert!(matches!(
+            e,
+            Effect::Choose {
+                choice_type: ChoiceType::LandType,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn choose_a_nonbasic_land_type() {
+        let e = parse_effect("Choose a nonbasic land type");
+        assert!(matches!(
+            e,
+            Effect::Choose {
+                choice_type: ChoiceType::LandType,
+                ..
+            }
+        ));
     }
 
     #[test]

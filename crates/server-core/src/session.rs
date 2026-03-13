@@ -41,7 +41,8 @@ pub fn acting_player(waiting_for: &WaitingFor) -> Option<PlayerId> {
         | WaitingFor::NamedChoice { player, .. }
         | WaitingFor::ModeChoice { player, .. }
         | WaitingFor::DiscardToHandSize { player, .. }
-        | WaitingFor::OptionalCostChoice { player, .. } => Some(*player),
+        | WaitingFor::OptionalCostChoice { player, .. }
+        | WaitingFor::AbilityModeChoice { player, .. } => Some(*player),
         WaitingFor::GameOver { .. } => None,
     }
 }

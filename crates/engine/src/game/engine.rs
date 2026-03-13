@@ -663,7 +663,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
 
             // Store typed attribute on source object if this is a persisted choice
             if let Some(obj_id) = source_id {
-                if let Some(attr) = ChosenAttribute::from_choice(*choice_type, &choice) {
+                if let Some(attr) = ChosenAttribute::from_choice(choice_type.clone(), &choice) {
                     if let Some(obj) = state.objects.get_mut(obj_id) {
                         obj.chosen_attributes.push(attr);
                     }
@@ -771,6 +771,151 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             GameAction::ChoosePlayDraw { play_first },
         ) => match_flow::handle_choose_play_draw(state, *player, play_first, &mut events)
             .map_err(EngineError::InvalidAction)?,
+        (
+            WaitingFor::AbilityModeChoice {
+                player,
+                modal,
+                source_id,
+                mode_abilities,
+                is_activated,
+                ability_cost,
+            },
+            GameAction::SelectModes { indices },
+        ) => {
+            if indices.len() < modal.min_choices || indices.len() > modal.max_choices {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must choose between {} and {} modes, got {}",
+                    modal.min_choices,
+                    modal.max_choices,
+                    indices.len()
+                )));
+            }
+
+            let mut seen = std::collections::HashSet::new();
+            for &idx in indices.iter() {
+                if idx >= modal.mode_count {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Mode index {} out of range ({})",
+                        idx, modal.mode_count
+                    )));
+                }
+                if !seen.insert(idx) {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Duplicate mode index {}",
+                        idx
+                    )));
+                }
+            }
+
+            let p = *player;
+            let sid = *source_id;
+            let resolved =
+                casting::build_chained_resolved(mode_abilities, indices.as_slice(), sid, p)?;
+
+            if *is_activated {
+                if matches!(ability_cost, Some(crate::types::ability::AbilityCost::Tap)) {
+                    let obj = state.objects.get_mut(&sid).ok_or_else(|| {
+                        EngineError::InvalidAction("Source object not found".to_string())
+                    })?;
+                    if obj.tapped {
+                        return Err(EngineError::ActionNotAllowed(
+                            "Cannot activate tap ability: permanent is tapped".to_string(),
+                        ));
+                    }
+                    obj.tapped = true;
+                    events.push(GameEvent::PermanentTapped { object_id: sid });
+                }
+
+                if state.layers_dirty {
+                    super::layers::evaluate_layers(state);
+                }
+
+                let first_filter = casting::find_first_target_filter_in_chain(&resolved);
+                if let Some(filter) = first_filter {
+                    let legal = super::targeting::find_legal_targets(state, filter, p, sid);
+                    if legal.is_empty() {
+                        return Err(EngineError::ActionNotAllowed(
+                            "No legal targets available".to_string(),
+                        ));
+                    }
+                    if legal.len() == 1 {
+                        let mut resolved = resolved;
+                        resolved.targets = legal;
+
+                        let entry_id = ObjectId(state.next_object_id);
+                        state.next_object_id += 1;
+                        super::stack::push_to_stack(
+                            state,
+                            crate::types::game_state::StackEntry {
+                                id: entry_id,
+                                source_id: sid,
+                                controller: p,
+                                kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
+                                    source_id: sid,
+                                    ability: resolved,
+                                },
+                            },
+                            &mut events,
+                        );
+                    } else {
+                        return Ok(ActionResult {
+                            events,
+                            waiting_for: WaitingFor::TargetSelection {
+                                player: p,
+                                pending_cast: Box::new(crate::types::game_state::PendingCast {
+                                    object_id: sid,
+                                    card_id: CardId(0),
+                                    ability: resolved,
+                                    cost: crate::types::mana::ManaCost::NoCost,
+                                }),
+                                legal_targets: legal,
+                            },
+                        });
+                    }
+                } else {
+                    let entry_id = ObjectId(state.next_object_id);
+                    state.next_object_id += 1;
+                    super::stack::push_to_stack(
+                        state,
+                        crate::types::game_state::StackEntry {
+                            id: entry_id,
+                            source_id: sid,
+                            controller: p,
+                            kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
+                                source_id: sid,
+                                ability: resolved,
+                            },
+                        },
+                        &mut events,
+                    );
+                }
+
+                events.push(GameEvent::AbilityActivated { source_id: sid });
+                state.priority_passes.clear();
+                state.priority_pass_count = 0;
+                WaitingFor::Priority { player: p }
+            } else {
+                // Triggered ability modal: push as triggered ability
+                let entry_id = ObjectId(state.next_object_id);
+                state.next_object_id += 1;
+                super::stack::push_to_stack(
+                    state,
+                    crate::types::game_state::StackEntry {
+                        id: entry_id,
+                        source_id: sid,
+                        controller: p,
+                        kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
+                            source_id: sid,
+                            ability: resolved,
+                        },
+                    },
+                    &mut events,
+                );
+                state.priority_passes.clear();
+                state.priority_pass_count = 0;
+                WaitingFor::Priority { player: p }
+            }
+        }
         (waiting, action) => {
             return Err(EngineError::ActionNotAllowed(format!(
                 "Cannot perform {:?} while waiting for {:?}",
