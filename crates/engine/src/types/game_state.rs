@@ -4,7 +4,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
-use super::ability::{ResolvedAbility, TargetFilter, TargetRef, TriggerCondition};
+use super::ability::{ChoiceType, ResolvedAbility, TargetFilter, TargetRef, TriggerCondition};
 use super::events::GameEvent;
 use super::format::FormatConfig;
 use super::identifiers::{CardId, ObjectId};
@@ -154,6 +154,12 @@ pub enum WaitingFor {
         game_number: u8,
         score: MatchScore,
     },
+    /// Player must choose from a named set of options (creature type, color, etc.).
+    NamedChoice {
+        player: PlayerId,
+        choice_type: ChoiceType,
+        options: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -295,6 +301,11 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_continuation: Option<Box<crate::types::ability::ResolvedAbility>>,
 
+    /// The most recently chosen named value (creature type, color, etc.).
+    /// Set by the NamedChoice handler, consumed by continuation effects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_named_choice: Option<String>,
+
     /// All creature subtypes seen across loaded cards. Used by Changeling CDA
     /// to grant every creature type at runtime.
     #[serde(default)]
@@ -370,6 +381,7 @@ impl GameState {
             triggers_fired_this_game: HashSet::new(),
             revealed_cards: HashSet::new(),
             pending_continuation: None,
+            last_named_choice: None,
             all_creature_types: Vec::new(),
         }
     }

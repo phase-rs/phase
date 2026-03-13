@@ -522,6 +522,36 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 WaitingFor::Priority { player: p }
             }
         }
+        // NamedChoice: player selects from a set of named options (creature type, color, etc.).
+        // Stores the chosen value in last_named_choice and resumes any pending continuation.
+        (
+            WaitingFor::NamedChoice {
+                player, options, ..
+            },
+            GameAction::ChooseOption { choice },
+        ) => {
+            let p = *player;
+            let valid_options = options.clone();
+
+            // Validate the chosen option
+            if !valid_options.contains(&choice) {
+                return Err(EngineError::InvalidAction(format!(
+                    "Invalid choice '{}', must be one of: {:?}",
+                    choice, valid_options
+                )));
+            }
+
+            // Store the chosen value for continuations to read
+            state.last_named_choice = Some(choice);
+
+            // Resume pending continuation if present
+            if let Some(cont) = state.pending_continuation.take() {
+                let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
+                state.waiting_for.clone()
+            } else {
+                WaitingFor::Priority { player: p }
+            }
+        }
         (WaitingFor::Priority { player }, GameAction::PlayFaceDown { card_id }) => {
             if state.priority_player != *player {
                 return Err(EngineError::NotYourPriority);
@@ -1174,8 +1204,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, DamageAmount, Effect, ResolvedAbility, SpellContext,
-        TargetFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, DamageAmount, Effect, ResolvedAbility,
+        SpellContext, TargetFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -2963,7 +2993,7 @@ mod trigger_target_tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ControllerRef, Effect, TargetFilter, SpellContext, TargetRef, TriggerDefinition, TypeFilter,
+        ControllerRef, Effect, SpellContext, TargetFilter, TargetRef, TriggerDefinition, TypeFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
