@@ -143,6 +143,9 @@ impl ChosenAttribute {
             ChoiceType::CardType => value.parse::<CoreType>().ok().map(Self::CardType),
             ChoiceType::OddOrEven => value.parse::<Parity>().ok().map(Self::OddOrEven),
             ChoiceType::CardName => Some(Self::CardName(value.to_string())),
+            // These choice types represent ephemeral selections (numbers, binary labels, land types)
+            // that don't map to a typed ChosenAttribute. If persist=true is used with these variants,
+            // the choice is not stored on the object — extend ChosenAttribute if persistence is needed.
             ChoiceType::NumberRange { .. } | ChoiceType::Labeled { .. } | ChoiceType::LandType => {
                 None
             }

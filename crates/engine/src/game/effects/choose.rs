@@ -96,7 +96,9 @@ const LAND_TYPES: &[&str] = &[
     "Locus",
     "Mine",
     "Power-Plant",
+    "Sphere",
     "Tower",
+    "Urza's",
 ];
 
 /// Compute the valid options for a given choice type.
@@ -350,7 +352,9 @@ mod tests {
             WaitingFor::NamedChoice { options, .. } => {
                 assert!(options.contains(&"Plains".to_string()));
                 assert!(options.contains(&"Forest".to_string()));
-                assert!(options.len() > 5);
+                assert!(options.contains(&"Sphere".to_string()));
+                assert!(options.contains(&"Urza's".to_string()));
+                assert!(options.len() >= 14);
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }
