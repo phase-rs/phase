@@ -15,15 +15,28 @@ const CHOICE_TYPE_LABELS: Record<string, string> = {
   BasicLandType: "Choose a Basic Land Type",
   CardType: "Choose a Card Type",
   CardName: "Name a Card",
+  LandType: "Choose a Land Type",
+  NumberRange: "Choose a Number",
+  Labeled: "Make a Choice",
 };
+
+/** Extract the string key from a ChoiceType value.
+ * Unit variants serialize as strings; data variants serialize as
+ * { "NumberRange": { ... } } objects (externally-tagged serde enum). */
+function getChoiceTypeKey(choiceType: string | Record<string, unknown>): string {
+  if (typeof choiceType === "string") return choiceType;
+  const key = Object.keys(choiceType)[0];
+  return key ?? "Unknown";
+}
 
 const MAX_RESULTS = 10;
 
 export function NamedChoiceModal({ data }: { data: NamedChoice["data"] }) {
-  if (data.choice_type === "CardName") {
+  const typeKey = getChoiceTypeKey(data.choice_type);
+  if (typeKey === "CardName") {
     return <CardNameSearch />;
   }
-  return <ButtonGrid data={data} />;
+  return <ButtonGrid data={data} typeKey={typeKey} />;
 }
 
 function CardNameSearch() {
@@ -185,7 +198,7 @@ function HighlightedName({ name, query }: { name: string; query: string }) {
   );
 }
 
-function ButtonGrid({ data }: { data: NamedChoice["data"] }) {
+function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: string }) {
   const dispatch = useGameDispatch();
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -195,7 +208,7 @@ function ButtonGrid({ data }: { data: NamedChoice["data"] }) {
     }
   }, [dispatch, selected]);
 
-  const title = CHOICE_TYPE_LABELS[data.choice_type] ?? "Make a Choice";
+  const title = CHOICE_TYPE_LABELS[typeKey] ?? "Make a Choice";
 
   return (
     <ChoiceOverlay title={title} subtitle="Select one option">
