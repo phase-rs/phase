@@ -19,7 +19,7 @@ interface DeckStackItem {
   count: number;
   name: string;
   section: DeckStackSection;
-  sortKey: [number, number, string];
+  sortKey: [number, number, number, string];
 }
 
 const CARD_HEIGHT = 156;
@@ -51,10 +51,11 @@ function getTypeRank(card: ScryfallCard | undefined): number {
 function sortDeckStackItems(items: DeckStackItem[]): DeckStackItem[] {
   const next = [...items];
   next.sort((left, right) => {
-    const [leftRank, leftCmc, leftName] = left.sortKey;
-    const [rightRank, rightCmc, rightName] = right.sortKey;
+    const [leftRank, leftCmc, leftCountOrder, leftName] = left.sortKey;
+    const [rightRank, rightCmc, rightCountOrder, rightName] = right.sortKey;
     if (leftRank !== rightRank) return leftRank - rightRank;
     if (leftCmc !== rightCmc) return leftCmc - rightCmc;
+    if (leftCountOrder !== rightCountOrder) return leftCountOrder - rightCountOrder;
     return leftName.localeCompare(rightName);
   });
   return next;
@@ -72,7 +73,7 @@ function createDeckStackItems(
       count: 1,
       name,
       section: "commander",
-      sortKey: [0, card?.cmc ?? 0, name.toLowerCase()],
+      sortKey: [0, card?.cmc ?? 0, -1, name.toLowerCase()],
     });
   }
 
@@ -83,7 +84,7 @@ function createDeckStackItems(
       count: entry.count,
       name: entry.name,
       section: "main",
-      sortKey: [1 + getTypeRank(card), card?.cmc ?? 0, entry.name.toLowerCase()],
+      sortKey: [1 + getTypeRank(card), card?.cmc ?? 0, -entry.count, entry.name.toLowerCase()],
     });
   }
 
@@ -94,7 +95,7 @@ function createDeckStackItems(
       count: entry.count,
       name: entry.name,
       section: "sideboard",
-      sortKey: [4 + getTypeRank(card), card?.cmc ?? 0, entry.name.toLowerCase()],
+      sortKey: [4 + getTypeRank(card), card?.cmc ?? 0, -entry.count, entry.name.toLowerCase()],
     });
   }
 
