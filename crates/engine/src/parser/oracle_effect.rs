@@ -636,9 +636,9 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
 /// This must come AFTER all specific patterns in try_parse_named_choice to avoid
 /// accidentally matching "choose left or right" against targeting patterns.
 fn try_parse_binary_choice(rest: &str) -> Option<Vec<String>> {
-    let or_pos = rest.find(" or ")?;
-    let left = rest[..or_pos].trim();
-    let right = rest[or_pos + 4..].trim();
+    let (left, right) = rest.split_once(" or ")?;
+    let left = left.trim();
+    let right = right.trim();
 
     // Labels must be short (≤2 words) — longer phrases are likely clauses, not choices
     if left.split_whitespace().count() > 2 || right.split_whitespace().count() > 2 {
@@ -650,14 +650,6 @@ fn try_parse_binary_choice(rest: &str) -> Option<Vec<String>> {
     }
     if right == "more" || left == "both" || right == "both" {
         return None;
-    }
-
-    fn capitalize(s: &str) -> String {
-        let mut chars = s.chars();
-        match chars.next() {
-            None => String::new(),
-            Some(f) => f.to_uppercase().to_string() + chars.as_str(),
-        }
     }
 
     Some(vec![capitalize(left), capitalize(right)])
