@@ -29,7 +29,8 @@ expression: result
       "duration": null,
       "description": "Equip {1}",
       "target_prompt": null,
-      "sorcery_speed": true
+      "sorcery_speed": true,
+      "condition": null
     }
   ],
   "triggers": [],

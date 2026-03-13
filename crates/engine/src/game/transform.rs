@@ -137,6 +137,7 @@ mod tests {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         }];
         obj.color = vec![ManaColor::Green];
         obj.base_color = vec![ManaColor::Green];
@@ -163,6 +164,7 @@ mod tests {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             }],
             color: vec![ManaColor::Green, ManaColor::Red],
         });

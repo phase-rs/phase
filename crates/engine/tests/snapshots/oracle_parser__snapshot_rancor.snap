@@ -23,7 +23,8 @@ expression: result
         "duration": null,
         "description": null,
         "target_prompt": null,
-        "sorcery_speed": false
+        "sorcery_speed": false,
+        "condition": null
       },
       "valid_card": null,
       "origin": null,

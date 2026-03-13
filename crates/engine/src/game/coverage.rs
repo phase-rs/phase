@@ -242,6 +242,7 @@ mod tests {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             });
         assert!(unimplemented_mechanics(&obj).is_empty());
     }
@@ -262,6 +263,7 @@ mod tests {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             });
         assert!(!unimplemented_mechanics(&obj).is_empty());
     }

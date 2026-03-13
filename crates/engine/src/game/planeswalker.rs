@@ -199,6 +199,7 @@ mod tests {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         }
     }
 
@@ -409,6 +410,7 @@ mod tests {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         };
         assert_eq!(parse_loyalty_cost(&ability), -3);
     }
@@ -426,6 +428,7 @@ mod tests {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         };
         assert_eq!(parse_loyalty_cost(&ability), 0);
     }
@@ -465,6 +468,7 @@ mod tests {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         };
         assert_eq!(parse_loyalty_cost(&no_cost), 0);
     }

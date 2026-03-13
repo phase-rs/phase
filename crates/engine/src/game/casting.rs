@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 
-use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, ResolvedAbility, TargetRef};
+use crate::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, ResolvedAbility, SpellContext, TargetRef,
+};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor};
@@ -120,6 +122,7 @@ pub fn handle_cast_spell(
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         }
     } else {
         obj.abilities[0].clone()
@@ -193,6 +196,8 @@ pub fn handle_cast_spell(
             .as_ref()
             .map(|sub| Box::new(build_resolved_from_def(sub, object_id, player))),
         duration: None,
+        condition: ability_def.condition.clone(),
+        context: SpellContext::default(),
     };
 
     // 5. Handle targeting -- ensure layers evaluated before target legality
@@ -325,6 +330,8 @@ fn build_resolved_from_def(
             .as_ref()
             .map(|sub| Box::new(build_resolved_from_def(sub, source_id, controller))),
         duration: def.duration.clone(),
+        condition: def.condition.clone(),
+        context: SpellContext::default(),
     }
 }
 
@@ -432,6 +439,8 @@ pub fn handle_activate_ability(
             .as_ref()
             .map(|sub| Box::new(build_resolved_from_def(sub, source_id, player))),
         duration: None,
+        condition: ability_def.condition.clone(),
+        context: SpellContext::default(),
     };
 
     // Handle targeting
@@ -820,6 +829,7 @@ mod tests {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             });
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],
@@ -849,6 +859,7 @@ mod tests {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             });
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Blue],
@@ -881,6 +892,7 @@ mod tests {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         });
         obj.abilities.push(AbilityDefinition {
             kind: AbilityKind::Activated,
@@ -902,11 +914,13 @@ mod tests {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             })),
             duration: None,
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         });
         obj_id
     }
@@ -1048,6 +1062,7 @@ mod tests {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             });
             spell.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Black],
@@ -1099,6 +1114,7 @@ mod tests {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             });
             spell.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Black],

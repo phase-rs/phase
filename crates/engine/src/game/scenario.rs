@@ -161,6 +161,7 @@ impl GameScenario {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         });
         id
     }
@@ -189,6 +190,7 @@ impl GameScenario {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         });
         id
     }
@@ -359,6 +361,7 @@ impl<'a> CardBuilder<'a> {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         });
         self
     }

@@ -143,6 +143,7 @@ fn no_legal_targets_prevents_casting() {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             });
     }
 

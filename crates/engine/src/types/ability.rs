@@ -962,6 +962,29 @@ pub struct AbilityDefinition {
     pub target_prompt: Option<String>,
     #[serde(default)]
     pub sorcery_speed: bool,
+    /// Condition that must be met for this ability to execute during resolution.
+    #[serde(default)]
+    pub condition: Option<AbilityCondition>,
+}
+
+/// Condition on an ability within a sub_ability chain.
+/// Checked during resolve_ability_chain before executing the ability.
+/// The condition is a pure predicate — it describes WHAT to check, not the outcome.
+/// Casting-time facts needed for evaluation are stored in `SpellContext`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum AbilityCondition {
+    /// This ability only fires if the spell's optional additional cost was paid.
+    AdditionalCostPaid,
+}
+
+/// Casting-time facts that flow with a spell from casting through resolution.
+/// Conditions in the sub_ability chain are evaluated against this context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+pub struct SpellContext {
+    /// Whether the spell's optional additional cost was paid during casting.
+    #[serde(default)]
+    pub additional_cost_paid: bool,
 }
 
 /// Intervening-if condition for triggered abilities.
@@ -1175,6 +1198,12 @@ pub struct ResolvedAbility {
     pub sub_ability: Option<Box<ResolvedAbility>>,
     #[serde(default)]
     pub duration: Option<Duration>,
+    /// Condition that must be met for this ability to execute during resolution.
+    #[serde(default)]
+    pub condition: Option<AbilityCondition>,
+    /// Casting-time facts for evaluating conditions during resolution.
+    #[serde(default)]
+    pub context: SpellContext,
 }
 
 impl ResolvedAbility {
@@ -1192,6 +1221,8 @@ impl ResolvedAbility {
             controller,
             sub_ability: None,
             duration: None,
+            condition: None,
+            context: SpellContext::default(),
         }
     }
 }
@@ -1258,6 +1289,8 @@ mod tests {
             controller: PlayerId(0),
             sub_ability: None,
             duration: None,
+            condition: None,
+            context: SpellContext::default(),
         };
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
@@ -1273,6 +1306,8 @@ mod tests {
             controller: PlayerId(0),
             sub_ability: None,
             duration: None,
+            condition: None,
+            context: SpellContext::default(),
         };
         let ability = ResolvedAbility {
             effect: Effect::DealDamage {
@@ -1284,6 +1319,8 @@ mod tests {
             controller: PlayerId(0),
             sub_ability: Some(Box::new(sub)),
             duration: None,
+            condition: None,
+            context: SpellContext::default(),
         };
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
@@ -1339,6 +1376,7 @@ mod tests {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             })),
             valid_card: Some(TargetFilter::SelfRef),
             origin: Some(Zone::Battlefield),
@@ -1399,6 +1437,7 @@ mod tests {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             })),
             valid_card: Some(TargetFilter::SelfRef),
             description: Some(
@@ -1454,11 +1493,13 @@ mod tests {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             })),
             duration: Some(Duration::UntilEndOfTurn),
             description: Some("Deal 3 damage, then draw a card.".to_string()),
             target_prompt: Some("Choose a target".to_string()),
             sorcery_speed: true,
+            condition: None,
         };
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: AbilityDefinition = serde_json::from_str(&json).unwrap();
@@ -1766,6 +1807,8 @@ mod tests {
             controller: PlayerId(0),
             sub_ability: None,
             duration: Some(Duration::UntilHostLeavesPlay),
+            condition: None,
+            context: SpellContext::default(),
         };
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();

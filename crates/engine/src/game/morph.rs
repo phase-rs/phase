@@ -293,6 +293,7 @@ mod tests {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         }];
         obj.color = vec![ManaColor::Green];
         id

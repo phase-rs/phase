@@ -1,4 +1,4 @@
-use crate::types::ability::{Effect, EffectError, ResolvedAbility};
+use crate::types::ability::{AbilityCondition, Effect, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 
@@ -118,6 +118,16 @@ pub fn resolve_ability_chain(
     // This allows sub-abilities like "its controller gains life" to access the object
     // targeted by the parent (e.g. the exiled creature in Swords to Plowshares).
     if let Some(ref sub) = ability.sub_ability {
+        // Check if the sub_ability has a condition that gates its execution.
+        // Casting-time conditions are evaluated against the parent's SpellContext.
+        if let Some(ref condition) = sub.condition {
+            let condition_met = match condition {
+                AbilityCondition::AdditionalCostPaid => ability.context.additional_cost_paid,
+            };
+            if !condition_met {
+                return Ok(());
+            }
+        }
         // If resolve_effect just entered a player-choice state (Scry/Dig/Surveil),
         // save the sub-ability as a continuation to execute after the player responds,
         // rather than immediately processing it (which would bypass the UI).
@@ -153,7 +163,7 @@ pub fn resolve_ability_chain(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{DamageAmount, TargetFilter, TargetRef};
+    use crate::types::ability::{DamageAmount, TargetFilter, SpellContext, TargetRef};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -244,6 +254,8 @@ mod tests {
             controller: PlayerId(0),
             sub_ability: Some(Box::new(sub)),
             duration: None,
+            condition: None,
+            context: SpellContext::default(),
         };
         let mut events = Vec::new();
 

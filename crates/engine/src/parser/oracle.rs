@@ -531,6 +531,7 @@ fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
         description: Some(line.to_string()),
         target_prompt: None,
         sorcery_speed: true,
+        condition: None,
     })
 }
 
@@ -843,6 +844,7 @@ fn make_unimplemented(line: &str) -> AbilityDefinition {
         description: Some(line.to_string()),
         target_prompt: None,
         sorcery_speed: false,
+        condition: None,
     }
 }
 

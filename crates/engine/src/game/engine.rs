@@ -1174,7 +1174,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, DamageAmount, Effect, ResolvedAbility,
+        AbilityCost, AbilityDefinition, AbilityKind, DamageAmount, Effect, ResolvedAbility, SpellContext,
         TargetFilter,
     };
     use crate::types::card_type::CoreType;
@@ -1191,6 +1191,7 @@ mod tests {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         }
     }
 
@@ -1212,6 +1213,7 @@ mod tests {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         }
     }
 
@@ -1533,6 +1535,8 @@ mod tests {
                         controller: PlayerId(0),
                         sub_ability: None,
                         duration: None,
+                        condition: None,
+                        context: SpellContext::default(),
                     },
                 },
             },
@@ -1556,6 +1560,8 @@ mod tests {
                         controller: PlayerId(0),
                         sub_ability: None,
                         duration: None,
+                        condition: None,
+                        context: SpellContext::default(),
                     },
                 },
             },
@@ -1688,6 +1694,7 @@ mod tests {
                     description: None,
                     target_prompt: None,
                     sorcery_speed: false,
+                    condition: None,
                 });
             obj.abilities
                 .push(crate::types::ability::AbilityDefinition {
@@ -1710,11 +1717,13 @@ mod tests {
                         description: None,
                         target_prompt: None,
                         sorcery_speed: false,
+                        condition: None,
                     })),
                     duration: None,
                     description: None,
                     target_prompt: None,
                     sorcery_speed: false,
+                    condition: None,
                 });
         }
 
@@ -2305,6 +2314,7 @@ mod tests {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             });
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
@@ -2398,6 +2408,7 @@ mod tests {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             });
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Green],
@@ -2535,6 +2546,7 @@ mod tests {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             });
         }
 
@@ -2602,6 +2614,7 @@ mod tests {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             });
         }
 
@@ -2852,6 +2865,8 @@ mod tests {
                         controller: PlayerId(1),
                         sub_ability: None,
                         duration: None,
+                        condition: None,
+                        context: SpellContext::default(),
                     },
                 },
             });
@@ -2927,6 +2942,7 @@ mod tests {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             })),
             valid_card: Some(TargetFilter::SelfRef),
             description: Some("Selesnya Guildgate enters the battlefield tapped.".into()),
@@ -2947,7 +2963,7 @@ mod trigger_target_tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ControllerRef, Effect, TargetFilter, TargetRef, TriggerDefinition, TypeFilter,
+        ControllerRef, Effect, TargetFilter, SpellContext, TargetRef, TriggerDefinition, TypeFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
@@ -3024,6 +3040,8 @@ mod trigger_target_tests {
             controller: PlayerId(0),
             sub_ability: None,
             duration: Some(crate::types::ability::Duration::UntilHostLeavesPlay),
+            condition: None,
+            context: SpellContext::default(),
         };
 
         state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
@@ -3376,6 +3394,7 @@ mod phase_trigger_regression_tests {
                     description: None,
                     duration: None,
                     sorcery_speed: false,
+                    condition: None,
                 })),
                 valid_card: None,
                 origin: None,

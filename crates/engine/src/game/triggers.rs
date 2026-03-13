@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    AbilityDefinition, Effect, EffectKind, ResolvedAbility, TargetFilter, TriggerCondition,
-    TriggerDefinition,
+    AbilityDefinition, Effect, EffectKind, ResolvedAbility, SpellContext, TargetFilter,
+    TriggerCondition, TriggerDefinition,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -147,6 +147,8 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             controller,
                             sub_ability: None,
                             duration: None,
+                            condition: None,
+                            context: SpellContext::default(),
                         };
                         let prowess_trig_def = TriggerDefinition {
                             mode: TriggerMode::SpellCast,
@@ -380,6 +382,8 @@ fn build_triggered_ability(
             controller,
             sub_ability: None,
             duration: None,
+            condition: None,
+            context: SpellContext::default(),
         }
     }
 }
@@ -400,6 +404,8 @@ fn build_resolved_from_def(
             .as_ref()
             .map(|sub| Box::new(build_resolved_from_def(sub, source_id, controller))),
         duration: def.duration.clone(),
+        condition: def.condition.clone(),
+        context: SpellContext::default(),
     }
 }
 
@@ -1797,6 +1803,7 @@ pub mod tests {
                     description: None,
                     target_prompt: None,
                     sorcery_speed: false,
+                    condition: None,
                 })),
                 valid_card: None,
                 origin: None,
@@ -1837,6 +1844,7 @@ pub mod tests {
                     description: None,
                     target_prompt: None,
                     sorcery_speed: false,
+                    condition: None,
                 })),
                 valid_card: None,
                 origin: None,
@@ -2087,6 +2095,7 @@ pub mod tests {
                     description: None,
                     target_prompt: None,
                     sorcery_speed: false,
+                    condition: None,
                 })),
                 valid_card: None,
                 origin: None,
@@ -2160,6 +2169,7 @@ pub mod tests {
                     description: None,
                     target_prompt: None,
                     sorcery_speed: false,
+                    condition: None,
                 })),
                 valid_card: None,
                 origin: None,
@@ -2200,6 +2210,7 @@ pub mod tests {
                     description: None,
                     target_prompt: None,
                     sorcery_speed: false,
+                    condition: None,
                 })),
                 valid_card: None,
                 origin: None,
@@ -2259,6 +2270,7 @@ pub mod tests {
                     description: None,
                     target_prompt: None,
                     sorcery_speed: false,
+                    condition: None,
                 })),
                 valid_card: Some(TargetFilter::Typed {
                     card_type: Some(crate::types::ability::TypeFilter::Creature),
@@ -2684,11 +2696,13 @@ pub mod tests {
                     description: None,
                     target_prompt: None,
                     sorcery_speed: false,
+                    condition: None,
                 })),
                 duration: None,
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             })),
             valid_card: None,
             origin: None,
@@ -2867,6 +2881,7 @@ pub mod tests {
                     description: None,
                     target_prompt: None,
                     sorcery_speed: false,
+                    condition: None,
                 })),
                 valid_card: Some(TargetFilter::SelfRef),
                 origin: None,
@@ -2959,6 +2974,7 @@ pub mod tests {
                     description: None,
                     target_prompt: None,
                     sorcery_speed: false,
+                    condition: None,
                 })),
                 valid_card: Some(TargetFilter::SelfRef),
                 origin: None,
@@ -3042,6 +3058,7 @@ pub mod tests {
                     description: None,
                     target_prompt: None,
                     sorcery_speed: false,
+                    condition: None,
                 })),
                 valid_card: Some(TargetFilter::SelfRef),
                 origin: None,
@@ -3152,6 +3169,7 @@ pub mod tests {
                     description: None,
                     target_prompt: None,
                     sorcery_speed: false,
+                    condition: None,
                 })),
                 valid_card: None,
                 origin: None,
@@ -3248,6 +3266,7 @@ pub mod tests {
                 duration: None,
                 description: None,
                 sorcery_speed: false,
+                condition: None,
             }));
             obj.trigger_definitions.push(trigger);
         }
@@ -3340,11 +3359,13 @@ pub mod tests {
                         description: None,
                         target_prompt: None,
                         sorcery_speed: false,
+                        condition: None,
                     })),
                     duration: None,
                     description: None,
                     target_prompt: None,
                     sorcery_speed: false,
+                    condition: None,
                 })),
                 valid_card: Some(TargetFilter::SelfRef),
                 origin: None,

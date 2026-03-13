@@ -289,6 +289,7 @@ mod tests {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         }
     }
 
@@ -325,11 +326,13 @@ mod tests {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             })),
             duration: None,
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         });
         verge
     }
@@ -409,11 +412,13 @@ mod tests {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             })),
             duration: None,
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         };
 
         let parsed = extract_land_subtype_activation_condition(&def).unwrap();

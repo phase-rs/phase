@@ -41,6 +41,7 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         });
         return Some(ReplacementDefinition {
             execute: Some(tap_effect),
@@ -160,6 +161,7 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
         description: None,
         target_prompt: None,
         sorcery_speed: false,
+        condition: None,
     };
 
     let decline = AbilityDefinition {
@@ -173,6 +175,7 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
         description: None,
         target_prompt: None,
         sorcery_speed: false,
+        condition: None,
     };
 
     Some(ReplacementDefinition {
@@ -226,6 +229,7 @@ fn parse_check_land(norm_lower: &str, original_text: &str) -> Option<Replacement
         description: None,
         target_prompt: None,
         sorcery_speed: false,
+        condition: None,
     });
 
     Some(ReplacementDefinition {

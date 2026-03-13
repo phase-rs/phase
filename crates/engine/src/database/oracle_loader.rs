@@ -103,6 +103,7 @@ fn synthesize_basic_land_mana(face: &mut CardFace) {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition: None,
             });
         }
     }
@@ -130,6 +131,7 @@ fn synthesize_equip(face: &mut CardFace) {
                     description: None,
                     target_prompt: None,
                     sorcery_speed: false,
+                condition: None,
                 })
             } else {
                 None

@@ -1,6 +1,5 @@
 ---
 source: crates/engine/tests/oracle_parser.rs
-assertion_line: 92
 expression: result
 ---
 {
@@ -31,12 +30,14 @@ expression: result
         "duration": null,
         "description": null,
         "target_prompt": null,
-        "sorcery_speed": false
+        "sorcery_speed": false,
+        "condition": null
       },
       "duration": null,
       "description": null,
       "target_prompt": null,
-      "sorcery_speed": false
+      "sorcery_speed": false,
+      "condition": null
     },
     {
       "kind": "Activated",
@@ -63,12 +64,14 @@ expression: result
         "duration": null,
         "description": null,
         "target_prompt": null,
-        "sorcery_speed": false
+        "sorcery_speed": false,
+        "condition": null
       },
       "duration": null,
       "description": null,
       "target_prompt": null,
-      "sorcery_speed": false
+      "sorcery_speed": false,
+      "condition": null
     },
     {
       "kind": "Activated",
@@ -91,7 +94,8 @@ expression: result
       "duration": null,
       "description": null,
       "target_prompt": null,
-      "sorcery_speed": false
+      "sorcery_speed": false,
+      "condition": null
     },
     {
       "kind": "Activated",
@@ -126,12 +130,14 @@ expression: result
         "duration": null,
         "description": null,
         "target_prompt": null,
-        "sorcery_speed": false
+        "sorcery_speed": false,
+        "condition": null
       },
       "duration": null,
       "description": null,
       "target_prompt": null,
-      "sorcery_speed": false
+      "sorcery_speed": false,
+      "condition": null
     }
   ],
   "triggers": [],

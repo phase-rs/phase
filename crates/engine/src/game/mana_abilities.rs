@@ -79,6 +79,7 @@ mod tests {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         }
     }
 
@@ -104,6 +105,7 @@ mod tests {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         };
         assert!(!is_mana_ability(&def));
     }
@@ -119,6 +121,7 @@ mod tests {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         };
         assert!(!is_mana_ability(&def));
     }
@@ -195,6 +198,7 @@ mod tests {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         };
         let mut events = Vec::new();
         resolve_mana_ability(&mut state, obj_id, PlayerId(0), &def, &mut events).unwrap();

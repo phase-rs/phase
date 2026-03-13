@@ -7,9 +7,9 @@ use super::oracle_util::{
     starts_with_possessive, strip_reminder_text,
 };
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ControllerRef, CountValue, DamageAmount, Duration, Effect,
-    FilterProp, GainLifePlayer, LifeAmount, ManaProduction, PtValue, StaticDefinition,
-    TargetFilter, TypeFilter,
+    AbilityCondition, AbilityDefinition, AbilityKind, ControllerRef, CountValue, DamageAmount,
+    Duration, Effect, FilterProp, GainLifePlayer, LifeAmount, ManaProduction, PtValue,
+    StaticDefinition, TargetFilter, TypeFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -882,7 +882,8 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     let mut defs: Vec<AbilityDefinition> = sentences
         .iter()
         .map(|s| {
-            let clause = parse_effect_clause(s);
+            let (condition, text) = strip_additional_cost_conditional(s);
+            let clause = parse_effect_clause(&text);
             AbilityDefinition {
                 kind,
                 effect: clause.effect,
@@ -892,6 +893,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
                 description: None,
                 target_prompt: None,
                 sorcery_speed: false,
+                condition,
             }
         })
         .collect();
@@ -915,6 +917,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         };
         // Insert ChangeZone as second element (between search and shuffle)
         defs.insert(1, change_zone);
@@ -962,6 +965,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            condition: None,
         })
     }
 }
@@ -1201,6 +1205,23 @@ fn strip_leading_conditional(text: &str) -> Option<String> {
     }
 
     None
+}
+
+/// Detect "if this spell's additional cost was paid, {effect}" and return
+/// the condition + remaining effect text. Called at the sentence level in
+/// parse_effect_chain BEFORE parse_effect_clause, so the condition is preserved
+/// rather than being discarded by strip_leading_conditional.
+fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCondition>, String) {
+    let lower = text.to_lowercase();
+    if let Some(rest) = lower.strip_prefix("if this spell's additional cost was paid, ") {
+        let offset = text.len() - rest.len();
+        (
+            Some(AbilityCondition::AdditionalCostPaid),
+            text[offset..].to_string(),
+        )
+    } else {
+        (None, text.to_string())
+    }
 }
 
 fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {
