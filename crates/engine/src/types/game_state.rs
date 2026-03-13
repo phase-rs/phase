@@ -4,7 +4,9 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
-use super::ability::{ChoiceType, ModalChoice, ResolvedAbility, TargetFilter, TargetRef, TriggerCondition};
+use super::ability::{
+    ChoiceType, ModalChoice, ResolvedAbility, TargetFilter, TargetRef, TriggerCondition,
+};
 use super::events::GameEvent;
 use super::format::FormatConfig;
 use super::identifiers::{CardId, ObjectId};

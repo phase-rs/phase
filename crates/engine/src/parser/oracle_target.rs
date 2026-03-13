@@ -1,4 +1,7 @@
 use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter};
+use crate::types::zones::Zone;
+
+use super::oracle_util::contains_possessive;
 
 /// Parse a target description from Oracle text, returning (filter, remaining_text).
 /// Consumes the longest matching target phrase.
@@ -171,7 +174,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     }
 
     // Check controller suffix
-    let controller = parse_controller_suffix(&lower[pos..]);
+    let mut controller = parse_controller_suffix(&lower[pos..]);
     let ctrl_len = controller.as_ref().map_or(0, |c| match c {
         ControllerRef::You => " you control".len(),
         ControllerRef::Opponent => " an opponent controls".len(),
@@ -188,6 +191,16 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..]) {
         properties.push(prop);
         pos += consumed;
+    }
+
+    // Check zone suffix: "card from a graveyard", "card in your graveyard", "from exile", etc.
+    if let Some((zone_prop, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
+        properties.push(zone_prop);
+        pos += consumed;
+        // Apply zone-derived controller if we don't already have one
+        if controller.is_none() {
+            controller = zone_ctrl;
+        }
     }
 
     let filter = TargetFilter::Typed {
@@ -338,6 +351,89 @@ fn typed(
         controller: None,
         properties,
     }
+}
+
+/// Parse a zone suffix like "card from a graveyard", "from your graveyard", "from exile".
+/// Returns (FilterProp::InZone, optional ControllerRef, bytes consumed).
+///
+/// Handles:
+/// - Possessive: "from your graveyard", "from their graveyard", "from its owner's graveyard"
+/// - Indefinite: "from a graveyard", "in a graveyard"
+/// - Direct: "from exile", "in exile"
+///
+/// Skips optional leading "card"/"cards" before zone detection.
+fn parse_zone_suffix(text: &str) -> Option<(FilterProp, Option<ControllerRef>, usize)> {
+    let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
+
+    // Skip optional "card"/"cards" before zone preposition
+    let (after_card, card_skip) = if let Some(rest) = trimmed.strip_prefix("cards ") {
+        (rest, "cards ".len())
+    } else if let Some(rest) = trimmed.strip_prefix("card ") {
+        (rest, "card ".len())
+    } else {
+        (trimmed, 0)
+    };
+
+    let zones: &[(&str, Zone)] = &[
+        ("graveyard", Zone::Graveyard),
+        ("exile", Zone::Exile),
+        ("hand", Zone::Hand),
+        ("library", Zone::Library),
+    ];
+
+    for prep in &["from", "in"] {
+        for &(zone_word, ref zone) in zones {
+            // Possessive: "from your graveyard", "from their graveyard"
+            if contains_possessive(after_card, prep, zone_word) {
+                let pattern = format!("{prep} your {zone_word}");
+                let ctrl = if after_card.to_lowercase().contains(&pattern) {
+                    Some(ControllerRef::You)
+                } else {
+                    None
+                };
+                // Find end of the zone word in after_card
+                let zone_end = after_card
+                    .to_lowercase()
+                    .find(zone_word)
+                    .map(|i| i + zone_word.len())
+                    .unwrap_or(after_card.len());
+                return Some((
+                    FilterProp::InZone { zone: *zone },
+                    ctrl,
+                    leading_ws + card_skip + zone_end,
+                ));
+            }
+
+            // Indefinite: "from a graveyard", "in a graveyard"
+            let indef = format!("{prep} a {zone_word}");
+            if after_card.to_lowercase().starts_with(&indef) {
+                return Some((
+                    FilterProp::InZone { zone: *zone },
+                    None,
+                    leading_ws + card_skip + indef.len(),
+                ));
+            }
+
+            // Direct (no article): "from exile", "in exile"
+            let direct = format!("{prep} {zone_word}");
+            if after_card.to_lowercase().starts_with(&direct) {
+                // Make sure it's not a possessive that we missed
+                let after = &after_card[direct.len()..];
+                if after.is_empty()
+                    || after.starts_with(|c: char| c.is_whitespace() || c == ',' || c == '.')
+                {
+                    return Some((
+                        FilterProp::InZone { zone: *zone },
+                        None,
+                        leading_ws + card_skip + direct.len(),
+                    ));
+                }
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -584,6 +680,71 @@ mod tests {
                 subtype: None,
                 controller: None,
                 properties: vec![FilterProp::PowerGE { value: 3 }],
+            }
+        );
+    }
+
+    #[test]
+    fn target_card_from_a_graveyard() {
+        let (f, rest) = parse_target("target card from a graveyard");
+        assert_eq!(
+            f,
+            TargetFilter::Typed {
+                card_type: Some(TypeFilter::Card),
+                subtype: None,
+                controller: None,
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Graveyard
+                }],
+            }
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn target_creature_card_in_your_graveyard() {
+        let (f, rest) = parse_target("target creature card in your graveyard");
+        assert_eq!(
+            f,
+            TargetFilter::Typed {
+                card_type: Some(TypeFilter::Creature),
+                subtype: None,
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Graveyard
+                }],
+            }
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn target_card_from_exile() {
+        let (f, rest) = parse_target("target card from exile");
+        assert_eq!(
+            f,
+            TargetFilter::Typed {
+                card_type: Some(TypeFilter::Card),
+                subtype: None,
+                controller: None,
+                properties: vec![FilterProp::InZone { zone: Zone::Exile }],
+            }
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn target_card_in_a_graveyard() {
+        let (f, _) = parse_target("target card in a graveyard");
+        assert_eq!(
+            f,
+            TargetFilter::Typed {
+                card_type: Some(TypeFilter::Card),
+                subtype: None,
+                controller: None,
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Graveyard
+                }],
             }
         );
     }

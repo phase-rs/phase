@@ -459,12 +459,13 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             WaitingFor::RevealChoice {
                 player,
                 cards: all_cards,
-                ..
+                filter,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
             let p = *player;
             let all = all_cards.clone();
+            let card_filter = filter.clone();
             if chosen.len() != 1 {
                 return Err(EngineError::InvalidAction(format!(
                     "Must select exactly 1 card, got {}",
@@ -476,6 +477,18 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 return Err(EngineError::InvalidAction(
                     "Selected card not in revealed hand".to_string(),
                 ));
+            }
+
+            // Validate chosen card matches the filter (e.g. "nonland card")
+            if !matches!(card_filter, crate::types::ability::TargetFilter::Any) {
+                // Use a dummy source_id for filter matching since the source
+                // may have left play; controller isn't relevant for hand cards
+                if !super::filter::matches_target_filter(state, chosen_id, &card_filter, chosen_id)
+                {
+                    return Err(EngineError::InvalidAction(
+                        "Selected card does not match the required filter".to_string(),
+                    ));
+                }
             }
 
             // Clear revealed status
@@ -553,7 +566,11 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             // All other choice types validate against the provided options list.
             if matches!(choice_type, ChoiceType::CardName) {
                 let lower = choice.to_lowercase();
-                if !state.all_card_names.iter().any(|n| n.to_lowercase() == lower) {
+                if !state
+                    .all_card_names
+                    .iter()
+                    .any(|n| n.to_lowercase() == lower)
+                {
                     return Err(EngineError::InvalidAction(format!(
                         "Invalid card name '{}'",
                         choice

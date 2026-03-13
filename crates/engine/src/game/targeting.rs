@@ -1,8 +1,9 @@
-use crate::types::ability::TargetRef;
+use crate::types::ability::{FilterProp, TargetFilter, TargetRef};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{Keyword, ProtectionTarget};
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 /// Find legal targets using a typed TargetFilter.
 ///
@@ -10,11 +11,11 @@ use crate::types::player::PlayerId;
 /// and includes players/stack spells where appropriate.
 pub fn find_legal_targets(
     state: &GameState,
-    filter: &crate::types::ability::TargetFilter,
+    filter: &TargetFilter,
     source_controller: PlayerId,
     source_id: ObjectId,
 ) -> Vec<TargetRef> {
-    use crate::types::ability::{ControllerRef, TargetFilter};
+    use crate::types::ability::ControllerRef;
     let mut targets = Vec::new();
 
     // Check if filter could match players
@@ -44,26 +45,58 @@ pub fn find_legal_targets(
         return targets;
     }
 
-    // Check stack spells only when the filter explicitly allows stack targets.
-    if filter_targets_stack_spells(filter) {
-        add_stack_spells(state, filter, source_controller, source_id, &mut targets);
-    }
+    let explicit_zones = extract_explicit_zones(filter);
 
-    // Check battlefield objects using typed filter
-    for &obj_id in &state.battlefield {
-        if super::filter::matches_target_filter_controlled(
-            state,
-            obj_id,
-            filter,
-            source_id,
-            source_controller,
-        ) {
-            let obj = match state.objects.get(&obj_id) {
-                Some(o) => o,
-                None => continue,
-            };
-            if can_target(obj, source_controller, source_id, state) {
-                targets.push(TargetRef::Object(obj_id));
+    if !explicit_zones.is_empty() {
+        // Explicit zone search: ONLY search the specified zones
+        for zone in &explicit_zones {
+            for obj_id in zone_object_ids(state, *zone) {
+                if super::filter::matches_target_filter_controlled(
+                    state,
+                    obj_id,
+                    filter,
+                    source_id,
+                    source_controller,
+                ) {
+                    let obj = match state.objects.get(&obj_id) {
+                        Some(o) => o,
+                        None => continue,
+                    };
+                    if *zone == Zone::Battlefield {
+                        // Full targeting rules on battlefield (hexproof, shroud, protection)
+                        if can_target(obj, source_controller, source_id, state) {
+                            targets.push(TargetRef::Object(obj_id));
+                        }
+                    } else {
+                        // Non-battlefield: only protection applies (702.16a)
+                        if !is_protected_from(obj, source_id, state) {
+                            targets.push(TargetRef::Object(obj_id));
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        // No explicit zone: default behavior (battlefield + stack for Card type)
+        if filter_targets_stack_spells(filter) {
+            add_stack_spells(state, filter, source_controller, source_id, &mut targets);
+        }
+
+        for &obj_id in &state.battlefield {
+            if super::filter::matches_target_filter_controlled(
+                state,
+                obj_id,
+                filter,
+                source_id,
+                source_controller,
+            ) {
+                let obj = match state.objects.get(&obj_id) {
+                    Some(o) => o,
+                    None => continue,
+                };
+                if can_target(obj, source_controller, source_id, state) {
+                    targets.push(TargetRef::Object(obj_id));
+                }
             }
         }
     }
@@ -75,7 +108,7 @@ pub fn find_legal_targets(
 pub fn validate_targets(
     state: &GameState,
     targets: &[TargetRef],
-    filter: &crate::types::ability::TargetFilter,
+    filter: &TargetFilter,
     source_controller: PlayerId,
     source_id: ObjectId,
 ) -> Vec<TargetRef> {
@@ -99,7 +132,7 @@ pub fn check_fizzle(original_targets: &[TargetRef], legal_targets: &[TargetRef])
 
 fn add_stack_spells(
     state: &GameState,
-    filter: &crate::types::ability::TargetFilter,
+    filter: &TargetFilter,
     source_controller: PlayerId,
     source_id: ObjectId,
     targets: &mut Vec<TargetRef>,
@@ -129,8 +162,8 @@ fn add_stack_spells(
     }
 }
 
-fn filter_targets_stack_spells(filter: &crate::types::ability::TargetFilter) -> bool {
-    use crate::types::ability::{FilterProp, TargetFilter, TypeFilter};
+fn filter_targets_stack_spells(filter: &TargetFilter) -> bool {
+    use crate::types::ability::TypeFilter;
     match filter {
         TargetFilter::Typed {
             card_type,
@@ -139,7 +172,7 @@ fn filter_targets_stack_spells(filter: &crate::types::ability::TargetFilter) -> 
         } => {
             let in_stack = properties
                 .iter()
-                .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == crate::types::zones::Zone::Stack));
+                .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Stack));
             in_stack || matches!(card_type, Some(TypeFilter::Card))
         }
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
@@ -156,42 +189,95 @@ fn add_players(state: &GameState, targets: &mut Vec<TargetRef>) {
     }
 }
 
-fn can_target(
+/// Check if an object has protection from the given source (works in any zone per MTG rules).
+fn is_protected_from(
     obj: &crate::game::game_object::GameObject,
-    source_controller: PlayerId,
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    // Shroud: can't be targeted by anyone
-    if obj.has_keyword(&Keyword::Shroud) {
-        return false;
-    }
-    // Hexproof: can't be targeted by opponents
-    if obj.has_keyword(&Keyword::Hexproof) && obj.controller != source_controller {
-        return false;
-    }
-    // Protection: can't be targeted by sources with the protected quality
     for kw in &obj.keywords {
         match kw {
             Keyword::Protection(ProtectionTarget::Color(color)) => {
                 if let Some(source_obj) = state.objects.get(&source_id) {
                     if source_obj.color.contains(color) {
-                        return false;
+                        return true;
                     }
                 }
             }
             Keyword::Protection(ProtectionTarget::Multicolored) => {
                 if let Some(source_obj) = state.objects.get(&source_id) {
                     if source_obj.color.len() > 1 {
-                        return false;
+                        return true;
                     }
                 }
             }
             _ => {}
         }
     }
+    false
+}
+
+/// Full battlefield targeting check: shroud + hexproof + protection (702.16a).
+fn can_target(
+    obj: &crate::game::game_object::GameObject,
+    source_controller: PlayerId,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if obj.has_keyword(&Keyword::Shroud) {
+        return false;
+    }
+    if obj.has_keyword(&Keyword::Hexproof) && obj.controller != source_controller {
+        return false;
+    }
+    if is_protected_from(obj, source_id, state) {
+        return false;
+    }
     // Ward: targeting is legal, cost enforcement deferred to mana payment UI
     true
+}
+
+/// Returns all object IDs in the given zone.
+fn zone_object_ids(state: &GameState, zone: Zone) -> Vec<ObjectId> {
+    match zone {
+        Zone::Battlefield => state.battlefield.clone(),
+        Zone::Stack => state.stack.iter().map(|e| e.id).collect(),
+        Zone::Exile => state.exile.clone(),
+        Zone::Graveyard => state
+            .players
+            .iter()
+            .flat_map(|p| p.graveyard.iter().copied())
+            .collect(),
+        Zone::Hand => state
+            .players
+            .iter()
+            .flat_map(|p| p.hand.iter().copied())
+            .collect(),
+        Zone::Library => state
+            .players
+            .iter()
+            .flat_map(|p| p.library.iter().copied())
+            .collect(),
+        Zone::Command => vec![],
+    }
+}
+
+/// Extract all explicit `InZone` zones from a target filter, recursing through combinators.
+fn extract_explicit_zones(filter: &TargetFilter) -> Vec<Zone> {
+    match filter {
+        TargetFilter::Typed { properties, .. } => properties
+            .iter()
+            .filter_map(|p| match p {
+                FilterProp::InZone { zone } => Some(*zone),
+                _ => None,
+            })
+            .collect(),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().flat_map(extract_explicit_zones).collect()
+        }
+        TargetFilter::Not { filter } => extract_explicit_zones(filter),
+        _ => vec![],
+    }
 }
 
 #[cfg(test)]
@@ -656,12 +742,168 @@ mod tests {
             card_type: Some(TypeFilter::Artifact),
             subtype: None,
             controller: None,
-            properties: vec![FilterProp::InZone {
-                zone: crate::types::zones::Zone::Stack,
-            }],
+            properties: vec![FilterProp::InZone { zone: Zone::Stack }],
         };
         let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(spell_id)));
         assert!(!targets.contains(&TargetRef::Object(c0)));
+    }
+
+    #[test]
+    fn find_legal_targets_graveyard_finds_graveyard_cards() {
+        let mut state = GameState::new_two_player(42);
+
+        // Card in player 0's graveyard
+        let gy_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dead Bear".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&gy_card)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Card on battlefield (should NOT be found)
+        let bf_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Live Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&bf_card)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Card),
+            subtype: None,
+            controller: None,
+            properties: vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }],
+        };
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
+        assert!(targets.contains(&TargetRef::Object(gy_card)));
+        assert!(!targets.contains(&TargetRef::Object(bf_card)));
+    }
+
+    #[test]
+    fn find_legal_targets_graveyard_excludes_battlefield() {
+        let mut state = GameState::new_two_player(42);
+
+        let bf_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&bf_card)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Card),
+            subtype: None,
+            controller: None,
+            properties: vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }],
+        };
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn protection_blocks_graveyard_targeting() {
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::mana::ManaColor;
+
+        let mut state = GameState::new_two_player(42);
+
+        let gy_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Protected Creature".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&gy_card).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords
+                .push(Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)));
+        }
+
+        // Red source trying to target graveyard card
+        let red_source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Red Spell".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&red_source)
+            .unwrap()
+            .color
+            .push(ManaColor::Red);
+
+        let filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Card),
+            subtype: None,
+            controller: None,
+            properties: vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }],
+        };
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), red_source);
+        assert!(!targets.contains(&TargetRef::Object(gy_card)));
+    }
+
+    #[test]
+    fn hexproof_does_not_block_graveyard_targeting() {
+        let mut state = GameState::new_two_player(42);
+
+        let gy_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Hexproof Creature".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&gy_card).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Hexproof);
+        }
+
+        let filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Card),
+            subtype: None,
+            controller: None,
+            properties: vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }],
+        };
+        // Opponent (player 0) CAN target hexproof card in graveyard
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
+        assert!(targets.contains(&TargetRef::Object(gy_card)));
     }
 }

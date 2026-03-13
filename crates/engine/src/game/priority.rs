@@ -33,9 +33,18 @@ pub fn handle_priority_pass(state: &mut GameState, events: &mut Vec<GameEvent>) 
         } else {
             // Non-empty stack: resolve top of stack
             super::stack::resolve_top(state, events);
-            reset_priority(state);
-            WaitingFor::Priority {
-                player: state.active_player,
+
+            // If resolve_top set an interactive WaitingFor (e.g. RevealChoice,
+            // ScryChoice, SearchChoice), preserve it instead of overwriting
+            // with Priority. Only reset to Priority if the effect didn't
+            // request player interaction.
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                reset_priority(state);
+                WaitingFor::Priority {
+                    player: state.active_player,
+                }
+            } else {
+                state.waiting_for.clone()
             }
         }
     } else {
@@ -368,5 +377,71 @@ mod tests {
         // All passed, should advance
         assert!(matches!(result, WaitingFor::Priority { .. }));
         assert!(state.priority_passes.is_empty());
+    }
+
+    #[test]
+    fn resolve_preserves_interactive_waiting_for() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{Effect, TargetFilter, TargetRef};
+        use crate::types::zones::Zone;
+
+        let mut state = setup();
+        state.priority_passes.insert(PlayerId(0));
+        state.priority_pass_count = 1;
+        state.priority_player = PlayerId(1);
+
+        // Create a triggered ability on the stack with RevealHand effect
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Deep-Cavern Bat".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Add a card to opponent's hand so RevealChoice is meaningful
+        let hand_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Lightning Bolt".to_string(),
+            Zone::Hand,
+        );
+        let _ = hand_card;
+
+        let ability = ResolvedAbility {
+            effect: Effect::RevealHand {
+                target: TargetFilter::Any,
+                card_filter: TargetFilter::Any,
+            },
+            targets: vec![TargetRef::Player(PlayerId(1))],
+            source_id,
+            controller: PlayerId(0),
+            sub_ability: None,
+            duration: None,
+            condition: None,
+            context: crate::types::ability::SpellContext::default(),
+        };
+
+        state.stack.push(StackEntry {
+            id: source_id,
+            source_id,
+            controller: PlayerId(0),
+            kind: crate::types::game_state::StackEntryKind::TriggeredAbility {
+                source_id,
+                ability,
+                condition: None,
+            },
+        });
+
+        let mut events = Vec::new();
+        let result = handle_priority_pass(&mut state, &mut events);
+
+        // RevealHand should set RevealChoice, and priority pass should preserve it
+        assert!(
+            matches!(result, WaitingFor::RevealChoice { .. }),
+            "Expected RevealChoice, got {:?}",
+            result
+        );
     }
 }

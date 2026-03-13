@@ -142,10 +142,11 @@ fn parse_imperative_effect(text: &str) -> Effect {
             target,
         };
     }
-    if lower.starts_with("exile ") {
+    if let Some(rest_lower) = lower.strip_prefix("exile ") {
         let (target, _) = parse_target(&text[6..]);
+        let origin = infer_origin_zone(rest_lower);
         return Effect::ChangeZone {
-            origin: None,
+            origin,
             destination: Zone::Exile,
             target,
         };
@@ -503,7 +504,6 @@ fn parse_imperative_effect(text: &str) -> Effect {
     }
 }
 
-
 /// Determines if text after "choose " is a targeting synonym rather than
 /// a modal choice ("choose one —"), color choice, or creature type choice.
 ///
@@ -538,9 +538,7 @@ fn is_choose_as_targeting(rest: &str) -> bool {
     // "choose a/an {type} ... you control / an opponent controls"
     if let Some(after_article) = rest.strip_prefix("a ").or_else(|| rest.strip_prefix("an ")) {
         // Exclude patterns not yet in try_parse_named_choice but still not targeting
-        if after_article.starts_with("nonbasic land type")
-            || after_article.starts_with("number")
-        {
+        if after_article.starts_with("nonbasic land type") || after_article.starts_with("number") {
             return false;
         }
         // Must reference controller to be targeting-like
@@ -584,7 +582,12 @@ fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
 
 fn parse_choose_filter(lower: &str) -> TargetFilter {
     // Extract type info between "choose" and "card from it"
-    let after_choose = lower.strip_prefix("choose ").unwrap_or(lower);
+    // Handle both "choose X" and "you choose X" forms
+    let after_choose = lower
+        .strip_prefix("you choose ")
+        .or_else(|| lower.strip_prefix("you may choose "))
+        .or_else(|| lower.strip_prefix("choose "))
+        .unwrap_or(lower);
     let before_card = after_choose.split("card").next().unwrap_or("");
     let cleaned = before_card
         .trim()
@@ -1025,14 +1028,26 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
         defs.insert(1, change_zone);
     }
 
-    // For RevealHand: extract card_filter from the exile/discard sub-ability sentence.
+    // For RevealHand: absorb "choose X card from it" sentences as the card_filter
+    // on the preceding RevealHand, then remove the redundant definition.
     // "look at target opponent's hand. You may exile a nonland card from it" →
     //   RevealHand gets card_filter: nonland, ChangeZone stays as sub_ability.
+    // "reveals their hand. You choose an artifact or creature card from it. Exile that card." →
+    //   RevealHand gets card_filter: Or[Artifact, Creature], ChangeZone stays as sub_ability.
     if !defs.is_empty() && matches!(defs[0].effect, Effect::RevealHand { .. }) {
-        for sentence in sentences.iter().skip(1) {
+        let mut absorbed_index = None;
+        for (idx, sentence) in sentences.iter().enumerate().skip(1) {
             let sub_lower = sentence.to_lowercase();
             if sub_lower.contains("card from it") || sub_lower.contains("card from among") {
-                let card_filter = parse_choose_filter_from_sentence(&sub_lower);
+                // Choose between sentence-level filter and the independently parsed def's filter
+                let card_filter =
+                    if sub_lower.starts_with("you choose ") || sub_lower.starts_with("choose ") {
+                        // "You choose an artifact or creature card from it" — use parse_choose_filter
+                        // which handles "or" conjunctions properly
+                        parse_choose_filter(&sub_lower)
+                    } else {
+                        parse_choose_filter_from_sentence(&sub_lower)
+                    };
                 if let Effect::RevealHand {
                     card_filter: ref mut cf,
                     ..
@@ -1040,8 +1055,15 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
                 {
                     *cf = card_filter;
                 }
+                // Mark this sentence's def for removal — it was absorbed into the RevealHand
+                if idx < defs.len() && matches!(defs[idx].effect, Effect::RevealHand { .. }) {
+                    absorbed_index = Some(idx);
+                }
                 break;
             }
+        }
+        if let Some(idx) = absorbed_index {
+            defs.remove(idx);
         }
     }
 
@@ -4159,7 +4181,6 @@ mod tests {
         assert_eq!(duration, Some(Duration::UntilHostLeavesPlay));
         assert_eq!(rest, "exile a card");
     }
-
 
     // --- "Choose" as targeting synonym ---
 

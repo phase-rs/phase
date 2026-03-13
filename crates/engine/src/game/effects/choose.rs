@@ -37,9 +37,27 @@ pub fn resolve(
 }
 
 const FALLBACK_CREATURE_TYPES: &[&str] = &[
-    "Human", "Elf", "Goblin", "Merfolk", "Zombie", "Soldier", "Wizard", "Dragon", "Angel",
-    "Demon", "Beast", "Bird", "Cat", "Elemental", "Faerie", "Giant", "Knight", "Rogue", "Spirit",
-    "Vampire", "Warrior",
+    "Human",
+    "Elf",
+    "Goblin",
+    "Merfolk",
+    "Zombie",
+    "Soldier",
+    "Wizard",
+    "Dragon",
+    "Angel",
+    "Demon",
+    "Beast",
+    "Bird",
+    "Cat",
+    "Elemental",
+    "Faerie",
+    "Giant",
+    "Knight",
+    "Rogue",
+    "Spirit",
+    "Vampire",
+    "Warrior",
 ];
 
 const COLORS: &[&str] = &["White", "Blue", "Black", "Red", "Green"];

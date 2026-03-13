@@ -100,6 +100,7 @@ Only needed if the effect has a `target: TargetFilter` field that isn't `None`/`
   Check that the `TargetFilter` values your effect uses are actually resolvable. Common gaps:
   - `TargetFilter::Typed { controller: Opponent, card_type: None }` → wants to target an opponent as a **player**, but typed targeting only searches battlefield objects. You may need to add player resolution for typed filters.
   - Custom `FilterProp` values → ensure they're handled in the filter matching logic.
+  - **Zone-aware targeting:** If the effect targets cards in non-battlefield zones (graveyard, exile, hand, library), the parser should produce `FilterProp::InZone { zone }` in the target filter properties. When `InZone` is present, `find_legal_targets` searches ONLY that zone exclusively. Per MTG rule 702.16a, hexproof/shroud only apply on the battlefield — non-battlefield targeting checks only protection.
 
 ### Phase 4 — Parser
 
