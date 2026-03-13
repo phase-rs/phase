@@ -125,6 +125,20 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 )?
             }
         }
+        (WaitingFor::ModeChoice { player, .. }, GameAction::SelectModes { indices }) => {
+            casting::handle_select_modes(state, *player, indices, &mut events)?
+        }
+        (
+            WaitingFor::ModeChoice {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => {
+            casting::handle_cancel_cast(state, pending_cast, &mut events);
+            WaitingFor::Priority { player: *player }
+        }
         (WaitingFor::TargetSelection { player, .. }, GameAction::SelectTargets { targets }) => {
             casting::handle_select_targets(state, *player, targets, &mut events)?
         }

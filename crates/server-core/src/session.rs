@@ -38,7 +38,8 @@ pub fn acting_player(waiting_for: &WaitingFor) -> Option<PlayerId> {
         | WaitingFor::TriggerTargetSelection { player, .. }
         | WaitingFor::BetweenGamesSideboard { player, .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { player, .. }
-        | WaitingFor::NamedChoice { player, .. } => Some(*player),
+        | WaitingFor::NamedChoice { player, .. }
+        | WaitingFor::ModeChoice { player, .. } => Some(*player),
         WaitingFor::GameOver { .. } => None,
     }
 }
@@ -387,6 +388,7 @@ mod tests {
                     replacements: vec![],
                     color_override: None,
                     scryfall_oracle_id: None,
+                    modal: None,
                 },
                 count: 10,
             }],

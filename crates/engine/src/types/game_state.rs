@@ -4,7 +4,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
-use super::ability::{ChoiceType, ResolvedAbility, TargetFilter, TargetRef, TriggerCondition};
+use super::ability::{ChoiceType, ModalChoice, ResolvedAbility, TargetFilter, TargetRef, TriggerCondition};
 use super::events::GameEvent;
 use super::format::FormatConfig;
 use super::identifiers::{CardId, ObjectId};
@@ -159,6 +159,12 @@ pub enum WaitingFor {
         player: PlayerId,
         choice_type: ChoiceType,
         options: Vec<String>,
+    },
+    /// Player must choose modes for a modal spell (e.g. "Choose one —").
+    ModeChoice {
+        player: PlayerId,
+        modal: ModalChoice,
+        pending_cast: Box<PendingCast>,
     },
 }
 
@@ -604,8 +610,31 @@ mod tests {
                 player: PlayerId(0),
                 legal_targets: vec![TargetRef::Object(ObjectId(1))],
             },
+            WaitingFor::ModeChoice {
+                player: PlayerId(0),
+                modal: ModalChoice {
+                    min_choices: 1,
+                    max_choices: 1,
+                    mode_count: 3,
+                    mode_descriptions: vec![],
+                },
+                pending_cast: Box::new(PendingCast {
+                    object_id: ObjectId(1),
+                    card_id: CardId(1),
+                    ability: ResolvedAbility::new(
+                        crate::types::ability::Effect::Unimplemented {
+                            name: "placeholder".to_string(),
+                            description: None,
+                        },
+                        vec![],
+                        ObjectId(1),
+                        PlayerId(0),
+                    ),
+                    cost: crate::types::mana::ManaCost::NoCost,
+                }),
+            },
         ];
-        assert_eq!(variants.len(), 13);
+        assert_eq!(variants.len(), 14);
     }
 
     #[test]

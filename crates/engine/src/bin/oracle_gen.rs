@@ -243,6 +243,7 @@ fn build_oracle_face(mtgjson: &AtomicCard, oracle_id: Option<String>) -> CardFac
         replacements: parsed.replacements,
         color_override,
         scryfall_oracle_id: oracle_id,
+        modal: parsed.modal,
     };
 
     synthesize_basic_land_mana(&mut face);

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
-    AbilityDefinition, ReplacementDefinition, StaticDefinition, TriggerDefinition,
+    AbilityDefinition, ModalChoice, ReplacementDefinition, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card_type::CardType;
 use crate::types::identifiers::{CardId, ObjectId};
@@ -115,6 +115,10 @@ pub struct GameObject {
     // Commander: whether this object is a commander card
     #[serde(default)]
     pub is_commander: bool,
+
+    /// Modal spell metadata ("Choose one —", etc.). Copied from CardFace at load time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modal: Option<ModalChoice>,
 }
 
 impl GameObject {
@@ -159,6 +163,7 @@ impl GameObject {
             available_mana_colors: Vec::new(),
             loyalty_activated_this_turn: false,
             is_commander: false,
+            modal: None,
         }
     }
 

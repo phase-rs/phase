@@ -65,6 +65,9 @@ pub enum GameAction {
     ChooseOption {
         choice: String,
     },
+    SelectModes {
+        indices: Vec<usize>,
+    },
 }
 
 #[cfg(test)]

@@ -970,6 +970,29 @@ pub enum AbilityKind {
 }
 
 // ---------------------------------------------------------------------------
+// Modal spell metadata
+// ---------------------------------------------------------------------------
+
+/// Metadata for modal spells ("Choose one —", "Choose two —", etc.).
+///
+/// Stored on the card data so the engine knows a spell is modal and how many
+/// modes the player must choose. The `mode_count` field records the total
+/// number of modes available; each mode corresponds to one `AbilityDefinition`
+/// in the card's abilities array.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ModalChoice {
+    /// Minimum number of modes the player must choose.
+    pub min_choices: usize,
+    /// Maximum number of modes the player may choose.
+    pub max_choices: usize,
+    /// Total number of available modes.
+    pub mode_count: usize,
+    /// Short description of each mode (bullet text from Oracle).
+    #[serde(default)]
+    pub mode_descriptions: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Definition types -- fully typed, zero HashMap
 // ---------------------------------------------------------------------------
 
