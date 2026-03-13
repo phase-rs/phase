@@ -143,6 +143,7 @@ mod tests {
             color_override: None,
             scryfall_oracle_id: None,
             modal: None,
+            additional_cost: None,
         }
     }
 

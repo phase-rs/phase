@@ -169,8 +169,7 @@ fn is_permanent_type(state: &GameState, object_id: ObjectId) -> bool {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, ResolvedAbility, TargetRef,
-    TypedFilter};
+    use crate::types::ability::{Effect, ResolvedAbility, TargetRef, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
@@ -192,7 +191,9 @@ mod tests {
             let obj = state.objects.get_mut(&aura_id).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
             obj.card_types.subtypes.push("Aura".to_string());
-            obj.keywords.push(Keyword::Enchant(crate::types::ability::TargetFilter::Typed(TypedFilter::creature())));
+            obj.keywords.push(Keyword::Enchant(
+                crate::types::ability::TargetFilter::Typed(TypedFilter::creature()),
+            ));
         }
 
         let resolved = ResolvedAbility::new(

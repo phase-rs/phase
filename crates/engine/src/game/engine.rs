@@ -155,6 +155,32 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             casting::handle_cancel_cast(state, pending_cast, &mut events);
             WaitingFor::Priority { player: *player }
         }
+        (
+            WaitingFor::OptionalCostChoice {
+                player,
+                cost,
+                pending_cast,
+            },
+            GameAction::DecideOptionalCost { pay },
+        ) => casting::handle_decide_additional_cost(
+            state,
+            *player,
+            *pending_cast.clone(),
+            cost,
+            pay,
+            &mut events,
+        )?,
+        (
+            WaitingFor::OptionalCostChoice {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => {
+            casting::handle_cancel_cast(state, pending_cast, &mut events);
+            WaitingFor::Priority { player: *player }
+        }
         (WaitingFor::ManaPayment { player }, GameAction::CancelCast) => {
             WaitingFor::Priority { player: *player }
         }
@@ -2539,7 +2565,10 @@ mod tests {
                 Effect::Pump {
                     power: crate::types::ability::PtValue::Fixed(3),
                     toughness: crate::types::ability::PtValue::Fixed(3),
-                    target: TargetFilter::Typed(TypedFilter::creature().controller(crate::types::ability::ControllerRef::You)),
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .controller(crate::types::ability::ControllerRef::You),
+                    ),
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -3143,7 +3172,9 @@ mod trigger_target_tests {
             Effect::ChangeZone {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
-                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent)),
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::Opponent),
+                ),
             },
             Vec::new(),
             trigger_creature,

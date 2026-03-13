@@ -512,7 +512,10 @@ pub struct TypedFilter {
 
 impl TypedFilter {
     pub fn new(card_type: TypeFilter) -> Self {
-        Self { card_type: Some(card_type), ..Self::default() }
+        Self {
+            card_type: Some(card_type),
+            ..Self::default()
+        }
     }
     pub fn creature() -> Self {
         Self::new(TypeFilter::Creature)
@@ -652,6 +655,11 @@ pub enum AbilityCost {
         count: u32,
     },
     Exert,
+    /// Blight N — put N -1/-1 counters on a creature you control.
+    /// Used as both activated ability costs and optional additional casting costs.
+    Blight {
+        count: u32,
+    },
     Reveal {
         count: u32,
     },
@@ -661,6 +669,25 @@ pub enum AbilityCost {
     Unimplemented {
         description: String,
     },
+}
+
+// ---------------------------------------------------------------------------
+// AdditionalCost — models the different "as an additional cost" patterns
+// ---------------------------------------------------------------------------
+
+/// An additional cost that a player must decide on during casting.
+///
+/// This is the building block for all "as an additional cost to cast this spell"
+/// patterns, including kicker, blight, and other future cost mechanics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum AdditionalCost {
+    /// "you may [cost]" — player decides whether to pay.
+    /// If paid, `SpellContext::additional_cost_paid` is set to true.
+    Optional(AbilityCost),
+    /// "[cost A] or [cost B]" — player must pay exactly one.
+    /// Choosing the first cost sets `additional_cost_paid = true`.
+    Choice(AbilityCost, AbilityCost),
 }
 
 // ---------------------------------------------------------------------------
@@ -1872,6 +1899,16 @@ mod tests {
         assert_eq!(deser, AbilityCost::Untap);
     }
 
+    #[test]
+    fn blight_cost_roundtrips() {
+        let cost = AbilityCost::Blight { count: 2 };
+        let json = serde_json::to_value(&cost).unwrap();
+        assert_eq!(json["type"], "Blight");
+        assert_eq!(json["count"], 2);
+        let deserialized: AbilityCost = serde_json::from_value(json).unwrap();
+        assert_eq!(deserialized, cost);
+    }
+
     // --- Serde roundtrip tests for new typed definitions ---
 
     #[test]
@@ -1905,7 +1942,11 @@ mod tests {
     fn static_definition_roundtrip() {
         let static_def = StaticDefinition {
             mode: StaticMode::Continuous,
-            affected: Some(TypedFilter::creature().controller(ControllerRef::You).into()),
+            affected: Some(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .into(),
+            ),
             modifications: vec![
                 ContinuousModification::AddPower { value: 1 },
                 ContinuousModification::AddToughness { value: 1 },
@@ -1946,7 +1987,9 @@ mod tests {
     fn target_filter_nested_roundtrip() {
         let filter = TargetFilter::And {
             filters: vec![
-                TypedFilter::creature().controller(ControllerRef::You).into(),
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .into(),
                 TargetFilter::Not {
                     filter: Box::new(TargetFilter::SelfRef),
                 },
@@ -2009,7 +2052,9 @@ mod tests {
             },
             AbilityCost::TapCreatures {
                 count: 2,
-                filter: TypedFilter::creature().controller(ControllerRef::You).into(),
+                filter: TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .into(),
             },
             AbilityCost::Sacrifice {
                 target: TypedFilter::new(TypeFilter::Artifact).into(),
@@ -2140,7 +2185,11 @@ mod tests {
                 threshold: 7,
             },
             StaticCondition::IsPresent {
-                filter: Some(TypedFilter::creature().controller(ControllerRef::You).into()),
+                filter: Some(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .into(),
+                ),
             },
             StaticCondition::CheckSVar {
                 var: "X".to_string(),

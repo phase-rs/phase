@@ -9,7 +9,7 @@ use super::oracle_util::{
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, CountValue,
     DamageAmount, Duration, Effect, FilterProp, GainLifePlayer, LifeAmount, ManaProduction,
-    ManaSpendRestriction, PtValue, StaticDefinition, TargetFilter, TypedFilter, TypeFilter,
+    ManaSpendRestriction, PtValue, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -653,10 +653,14 @@ fn parse_choose_filter_from_sentence(lower: &str) -> TargetFilter {
     // The word immediately before "card from" is the type descriptor
     let word = lower[..card_pos].trim().rsplit(' ').next().unwrap_or("");
     if let Some(negated) = word.strip_prefix("non") {
-        if let Some(TargetFilter::Typed(TypedFilter { card_type, .. })) = type_str_to_target_filter(negated) {
-            return TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::NonType {
-                value: card_type.map(|ct| format!("{ct:?}")).unwrap_or_default(),
-            }]));
+        if let Some(TargetFilter::Typed(TypedFilter { card_type, .. })) =
+            type_str_to_target_filter(negated)
+        {
+            return TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::NonType {
+                    value: card_type.map(|ct| format!("{ct:?}")).unwrap_or_default(),
+                },
+            ]));
         }
     }
     type_str_to_target_filter(word).unwrap_or(TargetFilter::Any)
@@ -1281,8 +1285,12 @@ fn parse_search_filter(text: &str) -> TargetFilter {
             }
             return TargetFilter::Or {
                 filters: vec![
-                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant).properties(properties.clone())),
-                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery).properties(properties)),
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Instant).properties(properties.clone()),
+                    ),
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Sorcery).properties(properties),
+                    ),
                 ],
             };
         }
@@ -1296,13 +1304,21 @@ fn parse_search_filter(text: &str) -> TargetFilter {
                         value: "Basic".to_string(),
                     });
                 }
-                return TargetFilter::Typed(TypedFilter::land().subtype(capitalize(other)).properties(properties));
+                return TargetFilter::Typed(
+                    TypedFilter::land()
+                        .subtype(capitalize(other))
+                        .properties(properties),
+                );
             }
             if other == "equipment" {
-                return TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).subtype("Equipment".to_string()));
+                return TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact).subtype("Equipment".to_string()),
+                );
             }
             if other == "aura" {
-                return TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment).subtype("Aura".to_string()));
+                return TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Enchantment).subtype("Aura".to_string()),
+                );
             }
             // Fallback: treat as Any
             return TargetFilter::Any;

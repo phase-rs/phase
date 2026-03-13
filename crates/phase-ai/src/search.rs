@@ -162,6 +162,11 @@ pub fn choose_action(
         }
     }
 
+    if let WaitingFor::OptionalCostChoice { .. } = &state.waiting_for {
+        // AI always pays optional costs when it can (simple heuristic for now)
+        return Some(GameAction::DecideOptionalCost { pay: true });
+    }
+
     if let WaitingFor::DiscardToHandSize { cards, count, .. } = &state.waiting_for {
         // Discard the lowest-value cards
         let mut scored: Vec<_> = cards

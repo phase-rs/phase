@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    AbilityDefinition, ModalChoice, PtValue, ReplacementDefinition, StaticDefinition,
-    TriggerDefinition,
+    AbilityDefinition, AdditionalCost, ModalChoice, PtValue, ReplacementDefinition,
+    StaticDefinition, TriggerDefinition,
 };
 use super::card_type::CardType;
 use super::keywords::Keyword;
@@ -31,6 +31,11 @@ pub struct CardFace {
     /// Modal spell metadata ("Choose one —", "Choose two —", etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modal: Option<ModalChoice>,
+    /// Additional casting cost ("As an additional cost to cast this spell, ...").
+    /// Parsed from Oracle text or synthesized from keywords (e.g. kicker).
+    /// When present, the casting flow prompts the player for a decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_cost: Option<AdditionalCost>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

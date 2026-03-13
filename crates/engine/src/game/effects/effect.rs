@@ -176,7 +176,9 @@ mod tests {
             .push(CoreType::Creature);
 
         let static_def = StaticDefinition::continuous()
-            .affected(TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)))
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
             .modifications(vec![ContinuousModification::AddKeyword {
                 keyword: Keyword::Trample,
             }]);

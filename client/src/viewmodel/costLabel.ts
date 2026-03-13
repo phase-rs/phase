@@ -1,4 +1,4 @@
-import type { GameAction } from "../adapter/types.ts";
+import type { AdditionalCost, GameAction, SerializedAbilityCost } from "../adapter/types.ts";
 
 // Converts Rust ManaCostShard variant names to MTG abbreviations.
 // This is the canonical bridge between engine serialization and display—
@@ -40,6 +40,7 @@ export function formatCost(cost: SerializedCost): string {
     case "PayLife": return `${cost.amount} life`;
     case "Sacrifice": return "Sacrifice";
     case "Discard": return "Discard";
+    case "Blight": return `Blight ${(cost as { count?: number }).count ?? 1}`;
     case "Composite":
       return (cost.costs ?? []).map(formatCost).join(", ");
     default:
@@ -60,6 +61,29 @@ export function abilityChoiceLabel(action: GameAction, abilities: unknown[]): { 
     return { label, description };
   }
   return { label: "Tap for Mana" };
+}
+
+/** Format a SerializedAbilityCost (same shape as SerializedCost but from the AdditionalCost type). */
+function formatAbilityCost(cost: SerializedAbilityCost): string {
+  return formatCost(cost as SerializedCost);
+}
+
+/** Build title + option labels for the OptionalCostChoice modal. */
+export function additionalCostChoices(cost: AdditionalCost): { title: string; payLabel: string; skipLabel: string } {
+  switch (cost.type) {
+    case "Optional":
+      return {
+        title: `Pay additional cost: ${formatAbilityCost(cost.data)}?`,
+        payLabel: `Pay ${formatAbilityCost(cost.data)}`,
+        skipLabel: "Skip",
+      };
+    case "Choice":
+      return {
+        title: "Choose additional cost",
+        payLabel: formatAbilityCost(cost.data[0]),
+        skipLabel: formatAbilityCost(cost.data[1]),
+      };
+  }
 }
 
 /** Strip the leading cost prefix from Oracle text (e.g. "[+2]: Draw a card." → "Draw a card.") */

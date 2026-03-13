@@ -40,7 +40,8 @@ pub fn acting_player(waiting_for: &WaitingFor) -> Option<PlayerId> {
         | WaitingFor::BetweenGamesChoosePlayDraw { player, .. }
         | WaitingFor::NamedChoice { player, .. }
         | WaitingFor::ModeChoice { player, .. }
-        | WaitingFor::DiscardToHandSize { player, .. } => Some(*player),
+        | WaitingFor::DiscardToHandSize { player, .. }
+        | WaitingFor::OptionalCostChoice { player, .. } => Some(*player),
         WaitingFor::GameOver { .. } => None,
     }
 }
@@ -397,6 +398,7 @@ mod tests {
                     color_override: None,
                     scryfall_oracle_id: None,
                     modal: None,
+                    additional_cost: None,
                 },
                 count: 10,
             }],

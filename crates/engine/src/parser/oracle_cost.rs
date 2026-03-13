@@ -158,6 +158,16 @@ fn parse_single_cost(text: &str) -> AbilityCost {
         };
     }
 
+    // "Blight N"
+    if let Some(rest) = lower.strip_prefix("blight ") {
+        let count = rest
+            .split_whitespace()
+            .next()
+            .and_then(|w| w.parse::<u32>().ok())
+            .unwrap_or(1);
+        return AbilityCost::Blight { count };
+    }
+
     // "Remove N {type} counter(s) from ~"
     if lower.starts_with("remove ") && lower.contains("counter") {
         let words: Vec<&str> = text.split_whitespace().collect();
@@ -300,6 +310,35 @@ mod tests {
                 assert_eq!(costs.len(), 3);
                 assert_eq!(costs[0], AbilityCost::Tap);
                 assert!(matches!(costs[2], AbilityCost::Sacrifice { .. }));
+            }
+            other => panic!("Expected Composite, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cost_blight() {
+        assert_eq!(
+            parse_oracle_cost("Blight 2"),
+            AbilityCost::Blight { count: 2 }
+        );
+    }
+
+    #[test]
+    fn cost_blight_one() {
+        assert_eq!(
+            parse_oracle_cost("Blight 1"),
+            AbilityCost::Blight { count: 1 }
+        );
+    }
+
+    #[test]
+    fn cost_composite_tap_blight() {
+        match parse_oracle_cost("{1}{R}, {T}, Blight 1") {
+            AbilityCost::Composite { costs } => {
+                assert_eq!(costs.len(), 3);
+                assert!(matches!(costs[0], AbilityCost::Mana { .. }));
+                assert_eq!(costs[1], AbilityCost::Tap);
+                assert_eq!(costs[2], AbilityCost::Blight { count: 1 });
             }
             other => panic!("Expected Composite, got {:?}", other),
         }

@@ -135,6 +135,12 @@ pub fn get_legal_actions(state: &GameState) -> Vec<GameAction> {
                 GameAction::ChoosePlayDraw { play_first: false },
             ]
         }
+        WaitingFor::OptionalCostChoice { .. } => {
+            vec![
+                GameAction::DecideOptionalCost { pay: true },
+                GameAction::DecideOptionalCost { pay: false },
+            ]
+        }
         WaitingFor::NamedChoice {
             options,
             choice_type,

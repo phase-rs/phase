@@ -13,6 +13,8 @@ pub use engine::types::player::PlayerId;
 pub use engine::types::zones::Zone;
 
 // Mechanic test modules (stubs -- populated in Plans 02 and 03)
+#[path = "rules/casting.rs"]
+mod casting;
 #[path = "rules/combat.rs"]
 mod combat;
 #[path = "rules/etb.rs"]

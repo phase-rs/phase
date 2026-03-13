@@ -1,4 +1,4 @@
-use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypedFilter, TypeFilter};
+use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter};
 use crate::types::zones::Zone;
 
 use super::oracle_util::contains_possessive;
@@ -441,10 +441,7 @@ mod tests {
     #[test]
     fn target_creature() {
         let (f, _) = parse_target("target creature");
-        assert_eq!(
-            f,
-            TargetFilter::Typed(TypedFilter::creature())
-        );
+        assert_eq!(f, TargetFilter::Typed(TypedFilter::creature()));
     }
 
     #[test]
@@ -461,9 +458,11 @@ mod tests {
         let (f, _) = parse_target("target nonland permanent");
         assert_eq!(
             f,
-            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::NonType {
-                value: "land".to_string()
-            }]))
+            TargetFilter::Typed(
+                TypedFilter::permanent().properties(vec![FilterProp::NonType {
+                    value: "land".to_string()
+                }])
+            )
         );
     }
 
@@ -533,7 +532,9 @@ mod tests {
                 );
                 assert_eq!(
                     filters[1],
-                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You))
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You)
+                    )
                 );
             }
             _ => panic!("Expected Or filter, got {:?}", f),
@@ -562,7 +563,9 @@ mod tests {
             TargetFilter::Typed(
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::HasColor { color: "White".to_string() }])
+                    .properties(vec![FilterProp::HasColor {
+                        color: "White".to_string()
+                    }])
             )
         );
     }
@@ -583,7 +586,9 @@ mod tests {
         let (f, _) = parse_type_phrase("spell with mana value 4 or greater");
         assert_eq!(
             f,
-            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::CmcGE { value: 4 }]))
+            TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::CmcGE { value: 4 }])
+            )
         );
     }
 
@@ -607,7 +612,9 @@ mod tests {
         let (f, _) = parse_type_phrase("creature with power 3 or greater");
         assert_eq!(
             f,
-            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::PowerGE { value: 3 }]))
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::PowerGE { value: 3 }])
+            )
         );
     }
 
@@ -631,7 +638,9 @@ mod tests {
             TargetFilter::Typed(
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::InZone { zone: Zone::Graveyard }])
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Graveyard
+                    }])
             )
         );
         assert_eq!(rest.trim(), "");
@@ -642,7 +651,9 @@ mod tests {
         let (f, rest) = parse_target("target card from exile");
         assert_eq!(
             f,
-            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InZone { zone: Zone::Exile }]))
+            TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::InZone { zone: Zone::Exile }])
+            )
         );
         assert_eq!(rest.trim(), "");
     }
