@@ -98,6 +98,7 @@ fn synthesize_basic_land_mana(face: &mut CardFace) {
                         produced: ManaProduction::Fixed {
                             colors: vec![color],
                         },
+                        restrictions: vec![],
                     },
                 )
             });

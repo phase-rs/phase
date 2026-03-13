@@ -156,6 +156,7 @@ impl GameScenario {
                     produced: crate::types::ability::ManaProduction::Fixed {
                         colors: vec![color],
                     },
+                    restrictions: vec![],
                 },
             )
         });

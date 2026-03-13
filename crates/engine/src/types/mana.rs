@@ -38,9 +38,48 @@ pub enum ManaType {
     Colorless,
 }
 
+/// Lightweight descriptor of the spell being paid for.
+/// Used by `ManaRestriction::allows_spell` to decide whether restricted mana
+/// may be spent on a given spell.
+#[derive(Debug, Clone, Default)]
+pub struct SpellMeta {
+    /// Core type names (e.g., "Creature", "Instant") — case-insensitive matching.
+    pub types: Vec<String>,
+    /// Subtypes (e.g., "Elf", "Goblin") — case-insensitive matching.
+    pub subtypes: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaRestriction {
+    /// "Spend this mana only to cast creature spells" / "only to cast artifact spells".
     OnlyForSpellType(String),
+    /// "Spend this mana only to cast a creature spell of the chosen type."
+    /// The `String` is the chosen creature type (e.g., "Elf").
+    OnlyForCreatureType(String),
+}
+
+impl ManaRestriction {
+    /// Returns `true` if this restriction permits spending mana on the given spell.
+    pub fn allows_spell(&self, meta: &SpellMeta) -> bool {
+        match self {
+            ManaRestriction::OnlyForSpellType(required_type) => meta
+                .types
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(required_type)),
+            ManaRestriction::OnlyForCreatureType(required_subtype) => {
+                // Must be a creature spell AND have the required subtype
+                let is_creature = meta
+                    .types
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case("Creature"));
+                let has_subtype = meta
+                    .subtypes
+                    .iter()
+                    .any(|s| s.eq_ignore_ascii_case(required_subtype));
+                is_creature && has_subtype
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,6 +341,31 @@ impl ManaPool {
             None
         }
     }
+
+    /// Spend one mana of the given color that is eligible for the spell described by `meta`.
+    ///
+    /// Prefers unrestricted mana first, then falls back to restricted mana whose
+    /// restrictions all allow the target spell. Mana with restrictions that don't
+    /// match the spell is never spent.
+    pub fn spend_for(&mut self, color: ManaType, meta: &SpellMeta) -> Option<ManaUnit> {
+        // First pass: prefer unrestricted mana of this color
+        if let Some(pos) = self
+            .mana
+            .iter()
+            .position(|m| m.color == color && m.restrictions.is_empty())
+        {
+            return Some(self.mana.swap_remove(pos));
+        }
+        // Second pass: restricted mana that allows this spell
+        if let Some(pos) = self.mana.iter().position(|m| {
+            m.color == color
+                && !m.restrictions.is_empty()
+                && m.restrictions.iter().all(|r| r.allows_spell(meta))
+        }) {
+            return Some(self.mana.swap_remove(pos));
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -442,5 +506,97 @@ mod tests {
         let json = serde_json::to_string(&pool).unwrap();
         let deserialized: ManaPool = serde_json::from_str(&json).unwrap();
         assert_eq!(pool, deserialized);
+    }
+
+    #[test]
+    fn restriction_allows_matching_spell_type() {
+        let restriction = ManaRestriction::OnlyForSpellType("Creature".to_string());
+        let creature_spell = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Elf".to_string()],
+        };
+        let instant_spell = SpellMeta {
+            types: vec!["Instant".to_string()],
+            subtypes: vec![],
+        };
+        assert!(restriction.allows_spell(&creature_spell));
+        assert!(!restriction.allows_spell(&instant_spell));
+    }
+
+    #[test]
+    fn restriction_creature_type_requires_both_type_and_subtype() {
+        let restriction = ManaRestriction::OnlyForCreatureType("Elf".to_string());
+        let elf_creature = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Elf".to_string(), "Warrior".to_string()],
+        };
+        let goblin_creature = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Goblin".to_string()],
+        };
+        let elf_instant = SpellMeta {
+            types: vec!["Instant".to_string()],
+            subtypes: vec!["Elf".to_string()],
+        };
+        assert!(restriction.allows_spell(&elf_creature));
+        assert!(!restriction.allows_spell(&goblin_creature));
+        assert!(!restriction.allows_spell(&elf_instant));
+    }
+
+    #[test]
+    fn spend_for_prefers_unrestricted_mana() {
+        let mut pool = ManaPool::default();
+        // Add restricted green, then unrestricted green
+        pool.add(ManaUnit {
+            color: ManaType::Green,
+            source_id: ObjectId(1),
+            snow: false,
+            restrictions: vec![ManaRestriction::OnlyForCreatureType("Elf".to_string())],
+        });
+        pool.add(make_unit(ManaType::Green));
+
+        let spell = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Elf".to_string()],
+        };
+        let spent = pool.spend_for(ManaType::Green, &spell).unwrap();
+        // Should prefer unrestricted mana first
+        assert!(spent.restrictions.is_empty());
+        assert_eq!(pool.total(), 1);
+    }
+
+    #[test]
+    fn spend_for_uses_restricted_mana_when_allowed() {
+        let mut pool = ManaPool::default();
+        pool.add(ManaUnit {
+            color: ManaType::Green,
+            source_id: ObjectId(1),
+            snow: false,
+            restrictions: vec![ManaRestriction::OnlyForCreatureType("Elf".to_string())],
+        });
+
+        let elf_spell = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Elf".to_string()],
+        };
+        assert!(pool.spend_for(ManaType::Green, &elf_spell).is_some());
+    }
+
+    #[test]
+    fn spend_for_skips_restricted_mana_when_not_allowed() {
+        let mut pool = ManaPool::default();
+        pool.add(ManaUnit {
+            color: ManaType::Green,
+            source_id: ObjectId(1),
+            snow: false,
+            restrictions: vec![ManaRestriction::OnlyForCreatureType("Elf".to_string())],
+        });
+
+        let goblin_spell = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Goblin".to_string()],
+        };
+        assert!(pool.spend_for(ManaType::Green, &goblin_spell).is_none());
+        assert_eq!(pool.total(), 1, "Restricted mana should remain in pool");
     }
 }

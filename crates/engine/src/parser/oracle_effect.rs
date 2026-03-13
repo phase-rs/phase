@@ -9,7 +9,7 @@ use super::oracle_util::{
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, CountValue,
     DamageAmount, Duration, Effect, FilterProp, GainLifePlayer, LifeAmount, ManaProduction,
-    PtValue, StaticDefinition, TargetFilter, TypeFilter,
+    ManaSpendRestriction, PtValue, StaticDefinition, TargetFilter, TypeFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -672,7 +672,10 @@ fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
     let clause = without_where_x.trim().trim_end_matches(['.', '"']);
 
     if let Some(produced) = parse_mana_production_clause(clause) {
-        return Some(Effect::Mana { produced });
+        return Some(Effect::Mana {
+            produced,
+            restrictions: vec![],
+        });
     }
 
     if let Some((count, rest)) = parse_mana_count_prefix(clause) {
@@ -688,6 +691,7 @@ fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                     count,
                     color_options: all_mana_colors(),
                 },
+                restrictions: vec![],
             });
         }
 
@@ -697,6 +701,7 @@ fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                     count,
                     color_options: all_mana_colors(),
                 },
+                restrictions: vec![],
             });
         }
 
@@ -705,6 +710,7 @@ fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
         {
             return Some(Effect::Mana {
                 produced: ManaProduction::ChosenColor { count },
+                restrictions: vec![],
             });
         }
 
@@ -717,6 +723,7 @@ fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                         count,
                         color_options,
                     },
+                    restrictions: vec![],
                 });
             }
         }
@@ -736,6 +743,7 @@ fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                 count: fallback_count,
                 color_options: all_mana_colors(),
             },
+            restrictions: vec![],
         });
     }
 
@@ -745,6 +753,7 @@ fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                 count: fallback_count,
                 color_options: all_mana_colors(),
             },
+            restrictions: vec![],
         });
     }
 
@@ -755,6 +764,7 @@ fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
             produced: ManaProduction::ChosenColor {
                 count: fallback_count,
             },
+            restrictions: vec![],
         });
     }
 
@@ -1057,6 +1067,33 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
         }
     }
 
+    // For Mana effects: absorb "Spend this mana only to cast..." sentences as restrictions
+    // on the preceding Effect::Mana, then remove the absorbed definition.
+    // "Add one mana of any color. Spend this mana only to cast a creature spell of the chosen type"
+    //   → Effect::Mana gets restrictions: [ChosenCreatureType]
+    if !defs.is_empty() && matches!(defs[0].effect, Effect::Mana { .. }) {
+        let mut absorbed_indices = Vec::new();
+        for (idx, sentence) in sentences.iter().enumerate().skip(1) {
+            let sub_lower = sentence.to_lowercase();
+            if let Some(restriction) = parse_mana_spend_restriction(&sub_lower) {
+                if let Effect::Mana {
+                    restrictions: ref mut rs,
+                    ..
+                } = defs[0].effect
+                {
+                    rs.push(restriction);
+                }
+                absorbed_indices.push(idx);
+            }
+        }
+        // Remove absorbed defs in reverse order to preserve indices
+        for idx in absorbed_indices.into_iter().rev() {
+            if idx < defs.len() {
+                defs.remove(idx);
+            }
+        }
+    }
+
     // Chain: last has no sub_ability, each earlier one chains to next
     if defs.len() > 1 {
         let last = defs.pop().unwrap();
@@ -1086,6 +1123,38 @@ fn split_effect_sentences(text: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(String::from)
         .collect()
+}
+
+/// Parse a "Spend this mana only to cast..." clause into a `ManaSpendRestriction`.
+///
+/// Handles patterns like:
+/// - "spend this mana only to cast creature spells" → SpellType("Creature")
+/// - "spend this mana only to cast a creature spell of the chosen type" → ChosenCreatureType
+/// - "spend this mana only to cast a creature spell of the chosen type, and that spell can't be countered" → ChosenCreatureType
+fn parse_mana_spend_restriction(lower: &str) -> Option<ManaSpendRestriction> {
+    let rest = lower
+        .strip_prefix("spend this mana only to cast ")?
+        .trim_end_matches(['.', '"']);
+
+    // Strip trailing ", and that spell can't be countered" or similar trailing clauses
+    let rest = rest
+        .split(", and ")
+        .next()
+        .unwrap_or(rest)
+        .trim();
+
+    if rest.contains("of the chosen type") {
+        return Some(ManaSpendRestriction::ChosenCreatureType);
+    }
+
+    // "creature spells" / "a creature spell" / "artifact spells" etc.
+    let rest = rest
+        .strip_prefix("a ")
+        .or_else(|| rest.strip_prefix("an "))
+        .unwrap_or(rest);
+    let type_word = rest.split_whitespace().next()?;
+    let type_name = capitalize(type_word);
+    Some(ManaSpendRestriction::SpellType(type_name))
 }
 
 // --- Search library parser ---
@@ -2853,7 +2922,7 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Mana {
-                produced: ManaProduction::Fixed { ref colors }
+                produced: ManaProduction::Fixed { ref colors }, ..
             } if colors == &vec![ManaColor::White]
         ));
     }
@@ -3242,7 +3311,7 @@ mod tests {
                 produced: ManaProduction::AnyOneColor {
                     count: CountValue::Fixed(1),
                     ref color_options,
-                }
+                }, ..
             } if color_options == &vec![
                 ManaColor::White,
                 ManaColor::Blue,
@@ -3262,7 +3331,7 @@ mod tests {
                 produced: ManaProduction::AnyOneColor {
                     count: CountValue::Fixed(3),
                     ..
-                }
+                }, ..
             }
         ));
     }
@@ -3276,7 +3345,7 @@ mod tests {
                 produced: ManaProduction::AnyCombination {
                     count: CountValue::Fixed(2),
                     ..
-                }
+                }, ..
             }
         ));
     }
@@ -3289,7 +3358,7 @@ mod tests {
             Effect::Mana {
                 produced: ManaProduction::ChosenColor {
                     count: CountValue::Fixed(1)
-                }
+                }, ..
             }
         ));
     }
@@ -3304,7 +3373,7 @@ mod tests {
                 produced: ManaProduction::AnyOneColor {
                     count: CountValue::Variable(ref value),
                     ..
-                }
+                }, ..
             } if value == "the number of lands you control"
         ));
     }
@@ -3318,7 +3387,7 @@ mod tests {
                 produced: ManaProduction::AnyCombination {
                     count: CountValue::Variable(ref value),
                     ref color_options,
-                }
+                }, ..
             } if value == "X"
                 && color_options == &vec![ManaColor::Blue, ManaColor::Red]
         ));
@@ -3332,7 +3401,7 @@ mod tests {
             Effect::Mana {
                 produced: ManaProduction::Colorless {
                     count: CountValue::Fixed(1)
-                }
+                }, ..
             }
         ));
     }
@@ -3346,7 +3415,7 @@ mod tests {
                 produced: ManaProduction::AnyOneColor {
                     count: CountValue::Fixed(1),
                     ref color_options,
-                }
+                }, ..
             } if color_options == &vec![ManaColor::Red, ManaColor::Green]
         ));
     }
@@ -4347,5 +4416,33 @@ mod tests {
                 persist: false,
             }
         );
+    }
+
+    #[test]
+    fn mana_spend_restriction_chosen_creature_type() {
+        let def = parse_effect_chain(
+            "Add one mana of any color. Spend this mana only to cast a creature spell of the chosen type, and that spell can't be countered.",
+            AbilityKind::Activated,
+        );
+        assert!(matches!(
+            def.effect,
+            Effect::Mana {
+                ref restrictions, ..
+            } if restrictions == &[ManaSpendRestriction::ChosenCreatureType]
+        ));
+    }
+
+    #[test]
+    fn mana_spend_restriction_spell_type() {
+        let def = parse_effect_chain(
+            "Add one mana of any color. Spend this mana only to cast creature spells.",
+            AbilityKind::Activated,
+        );
+        assert!(matches!(
+            def.effect,
+            Effect::Mana {
+                ref restrictions, ..
+            } if restrictions == &[ManaSpendRestriction::SpellType("Creature".to_string())]
+        ));
     }
 }

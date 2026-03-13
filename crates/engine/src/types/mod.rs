@@ -21,7 +21,8 @@ pub mod zones;
 pub use ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, ChosenAttribute,
     ContinuousModification, ControllerRef, DamageAmount, Duration, Effect, EffectError, FilterProp,
-    ManaProduction, Parity, PtValue, ReplacementDefinition, ResolvedAbility, StaticCondition,
+    ManaProduction, ManaSpendRestriction, Parity, PtValue, ReplacementDefinition,
+    ResolvedAbility, StaticCondition,
     StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerDefinition, TypeFilter,
 };
 pub use actions::GameAction;
@@ -36,7 +37,9 @@ pub use game_state::{
 pub use identifiers::{CardId, ObjectId};
 pub use keywords::{Keyword, ProtectionTarget};
 pub use layers::{ActiveContinuousEffect, Layer};
-pub use mana::{ManaColor, ManaCost, ManaCostShard, ManaPool, ManaRestriction, ManaType, ManaUnit};
+pub use mana::{
+    ManaColor, ManaCost, ManaCostShard, ManaPool, ManaRestriction, ManaType, ManaUnit, SpellMeta,
+};
 pub use match_config::{
     BetweenGamesPrompt, DeckCardCount, MatchConfig, MatchPhase, MatchScore, MatchType,
 };

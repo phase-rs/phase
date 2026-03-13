@@ -218,7 +218,7 @@ fn canonical_basic_land_subtype(raw: &str) -> Option<&'static str> {
 }
 
 fn mana_options_from_ability(ability: &AbilityDefinition) -> Vec<ManaType> {
-    let Effect::Mana { produced } = &ability.effect else {
+    let Effect::Mana { produced, .. } = &ability.effect else {
         return Vec::new();
     };
     mana_options_from_production(produced)
@@ -286,6 +286,7 @@ mod tests {
                     produced: ManaProduction::Fixed {
                         colors: vec![color],
                     },
+                    restrictions: vec![],
                 },
             )
         }
@@ -319,6 +320,7 @@ mod tests {
                     produced: ManaProduction::Fixed {
                         colors: vec![ManaColor::Black],
                     },
+                    restrictions: vec![],
                 },
             )
         });
@@ -395,6 +397,7 @@ mod tests {
                     produced: ManaProduction::Fixed {
                         colors: vec![ManaColor::Blue],
                     },
+                    restrictions: vec![],
                 },
             )
         };

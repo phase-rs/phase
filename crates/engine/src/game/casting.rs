@@ -7,7 +7,7 @@ use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
-use crate::types::mana::{ManaCostShard, ManaType};
+use crate::types::mana::{ManaCostShard, ManaType, SpellMeta};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -736,6 +736,17 @@ fn pay_and_push(
         }
     }
 
+    // Build spell metadata for restriction-aware mana spending
+    let spell_meta = state.objects.get(&object_id).map(|obj| SpellMeta {
+        types: obj
+            .card_types
+            .core_types
+            .iter()
+            .map(|ct| format!("{ct:?}"))
+            .collect(),
+        subtypes: obj.card_types.subtypes.clone(),
+    });
+
     // Auto-tap lands to fill mana pool before paying
     auto_tap_lands(state, player, cost, events);
 
@@ -746,7 +757,11 @@ fn pay_and_push(
             .iter()
             .find(|p| p.id == player)
             .expect("player exists");
-        if !mana_payment::can_pay(&player_data.mana_pool, cost) {
+        if !mana_payment::can_pay_for_spell(
+            &player_data.mana_pool,
+            cost,
+            spell_meta.as_ref(),
+        ) {
             return Err(EngineError::ActionNotAllowed(
                 "Cannot pay mana cost".to_string(),
             ));
@@ -760,9 +775,13 @@ fn pay_and_push(
         .iter_mut()
         .find(|p| p.id == player)
         .expect("player exists");
-    let _ =
-        mana_payment::pay_cost_with_demand(&mut player_data.mana_pool, cost, Some(&hand_demand))
-            .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
+    let _ = mana_payment::pay_cost_with_demand(
+        &mut player_data.mana_pool,
+        cost,
+        Some(&hand_demand),
+        spell_meta.as_ref(),
+    )
+    .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
 
     // Record commander cast before moving (need to check zone before move)
     let was_in_command_zone = state
@@ -1051,6 +1070,7 @@ mod tests {
                     produced: crate::types::ability::ManaProduction::Fixed {
                         colors: vec![ManaColor::Blue],
                     },
+                    restrictions: vec![],
                 },
             )
         });
@@ -1069,6 +1089,7 @@ mod tests {
                     produced: crate::types::ability::ManaProduction::Fixed {
                         colors: vec![ManaColor::Black],
                     },
+                    restrictions: vec![],
                 },
             )
         });

@@ -203,6 +203,14 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         }
     }
 
+    // Check "of the chosen type" suffix (Cavern of Souls, Metallic Mimic, etc.)
+    let remaining = lower[pos..].trim_start();
+    let remaining_offset = lower[pos..].len() - remaining.len();
+    if remaining.starts_with("of the chosen type") {
+        properties.push(FilterProp::IsChosenCreatureType);
+        pos += remaining_offset + "of the chosen type".len();
+    }
+
     let filter = TargetFilter::Typed {
         card_type,
         subtype,
@@ -745,6 +753,20 @@ mod tests {
                 properties: vec![FilterProp::InZone {
                     zone: Zone::Graveyard
                 }],
+            }
+        );
+    }
+
+    #[test]
+    fn creature_of_the_chosen_type() {
+        let (f, _) = parse_type_phrase("creature you control of the chosen type");
+        assert_eq!(
+            f,
+            TargetFilter::Typed {
+                card_type: Some(TypeFilter::Creature),
+                subtype: None,
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::IsChosenCreatureType],
             }
         );
     }

@@ -368,6 +368,20 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
     }
 }
 
+/// Parse-time template for mana spend restrictions.
+///
+/// Unlike [`ManaRestriction`](super::mana::ManaRestriction) which carries concrete values
+/// on a `ManaUnit`, this enum is stored on `Effect::Mana` and resolved at production time
+/// by reading runtime state (e.g., chosen creature type from the source object).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ManaSpendRestriction {
+    /// "Spend this mana only to cast creature spells."
+    SpellType(String),
+    /// "Spend this mana only to cast a creature spell of the chosen type."
+    /// Resolved at runtime from the source's `chosen_creature_type()`.
+    ChosenCreatureType,
+}
+
 /// Duration for temporary effects.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Duration {
@@ -455,6 +469,9 @@ pub enum FilterProp {
     HasSupertype {
         value: String,
     },
+    /// Matches objects whose subtypes include the source object's chosen creature type.
+    /// Used for "of the chosen type" patterns (Cavern of Souls, Metallic Mimic).
+    IsChosenCreatureType,
     Other {
         value: String,
     },
@@ -806,6 +823,8 @@ pub enum Effect {
     Mana {
         #[serde(default = "default_mana_production")]
         produced: ManaProduction,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        restrictions: Vec<ManaSpendRestriction>,
     },
     Discard {
         #[serde(default = "default_one")]
@@ -1789,6 +1808,7 @@ mod tests {
             produced: ManaProduction::Fixed {
                 colors: vec![ManaColor::Green, ManaColor::Green],
             },
+            restrictions: vec![],
         };
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();
@@ -1805,7 +1825,8 @@ mod tests {
             Effect::Mana {
                 produced: ManaProduction::Fixed {
                     colors: vec![ManaColor::White, ManaColor::Green],
-                }
+                },
+                restrictions: vec![],
             }
         );
     }

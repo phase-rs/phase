@@ -1127,6 +1127,7 @@ mod tests {
                     produced: engine::types::ability::ManaProduction::Fixed {
                         colors: vec![engine::types::mana::ManaColor::Blue],
                     },
+                    restrictions: vec![],
                 },
                 cost: Some(engine::types::ability::AbilityCost::Tap),
                 sub_ability: None,
@@ -1143,6 +1144,7 @@ mod tests {
                     produced: engine::types::ability::ManaProduction::Fixed {
                         colors: vec![engine::types::mana::ManaColor::Black],
                     },
+                    restrictions: vec![],
                 },
                 cost: Some(engine::types::ability::AbilityCost::Tap),
                 sub_ability: Some(Box::new(engine::types::ability::AbilityDefinition {
@@ -1392,6 +1394,7 @@ mod tests {
                     produced: engine::types::ability::ManaProduction::Fixed {
                         colors: vec![engine::types::mana::ManaColor::Green],
                     },
+                    restrictions: vec![],
                 },
                 cost: Some(engine::types::ability::AbilityCost::Tap),
                 sub_ability: None,

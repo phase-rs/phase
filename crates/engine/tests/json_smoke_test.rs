@@ -52,7 +52,7 @@ fn test_forest_has_synthesized_mana_ability() {
         matches!(
             &a.effect,
             Effect::Mana {
-                produced: ManaProduction::Fixed { colors }
+                produced: ManaProduction::Fixed { colors }, ..
             } if *colors == vec![ManaColor::Green]
         ) && a.cost == Some(AbilityCost::Tap)
     });

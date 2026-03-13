@@ -47,7 +47,7 @@ pub fn resolve_mana_ability(
     }
 
     let produced_mana = match &ability_def.effect {
-        Effect::Mana { produced } => resolve_mana_types(produced),
+        Effect::Mana { produced, .. } => resolve_mana_types(produced),
         _ => Vec::new(),
     };
 
@@ -72,7 +72,13 @@ mod tests {
     fn make_mana_ability(produced: ManaProduction) -> AbilityDefinition {
         AbilityDefinition {
             cost: Some(AbilityCost::Tap),
-            ..AbilityDefinition::new(AbilityKind::Activated, Effect::Mana { produced })
+            ..AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced,
+                    restrictions: vec![],
+                },
+            )
         }
     }
 
@@ -175,6 +181,7 @@ mod tests {
                     produced: ManaProduction::Colorless {
                         count: CountValue::Fixed(1),
                     },
+                    restrictions: vec![],
                 },
             )
         };

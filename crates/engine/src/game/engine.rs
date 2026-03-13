@@ -1789,6 +1789,7 @@ mod tests {
                             produced: crate::types::ability::ManaProduction::Fixed {
                                 colors: vec![crate::types::mana::ManaColor::Blue],
                             },
+                            restrictions: vec![],
                         },
                     )
                 });
@@ -1808,6 +1809,7 @@ mod tests {
                             produced: crate::types::ability::ManaProduction::Fixed {
                                 colors: vec![crate::types::mana::ManaColor::Black],
                             },
+                            restrictions: vec![],
                         },
                     )
                 });
@@ -2613,6 +2615,7 @@ mod tests {
                         produced: crate::types::ability::ManaProduction::Fixed {
                             colors: vec![crate::types::mana::ManaColor::Green],
                         },
+                        restrictions: vec![],
                     },
                 )
             });
@@ -2677,6 +2680,7 @@ mod tests {
                         produced: crate::types::ability::ManaProduction::Fixed {
                             colors: vec![crate::types::mana::ManaColor::Green],
                         },
+                        restrictions: vec![],
                     },
                 )
             });

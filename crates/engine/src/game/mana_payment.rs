@@ -3,7 +3,7 @@ use thiserror::Error;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
-use crate::types::mana::{ManaCost, ManaCostShard, ManaPool, ManaType, ManaUnit};
+use crate::types::mana::{ManaCost, ManaCostShard, ManaPool, ManaType, ManaUnit, SpellMeta};
 use crate::types::player::PlayerId;
 
 /// Color demand array indexed by WUBRG (White=0, Blue=1, Black=2, Red=3, Green=4).
@@ -115,6 +115,14 @@ pub fn produce_mana(
 }
 
 pub fn can_pay(pool: &ManaPool, cost: &ManaCost) -> bool {
+    can_pay_for_spell(pool, cost, None)
+}
+
+/// Check if the pool can pay the cost, respecting mana restrictions when `spell` is provided.
+///
+/// When `spell` is `Some`, restricted mana (e.g., "only for creature spells") is only
+/// counted if the restriction permits the given spell. When `None`, all mana is eligible.
+pub fn can_pay_for_spell(pool: &ManaPool, cost: &ManaCost, spell: Option<&SpellMeta>) -> bool {
     match cost {
         ManaCost::NoCost => true,
         ManaCost::Cost { shards, generic } => {
@@ -124,12 +132,14 @@ pub fn can_pay(pool: &ManaPool, cost: &ManaCost) -> bool {
             for shard in shards {
                 match shard_to_mana_type(*shard) {
                     ShardRequirement::Single(mt) => {
-                        if sim.spend(mt).is_none() {
+                        if spend_eligible(&mut sim, mt, spell).is_none() {
                             return false;
                         }
                     }
                     ShardRequirement::Hybrid(a, b) => {
-                        if sim.spend(a).is_none() && sim.spend(b).is_none() {
+                        if spend_eligible(&mut sim, a, spell).is_none()
+                            && spend_eligible(&mut sim, b, spell).is_none()
+                        {
                             return false;
                         }
                     }
@@ -138,7 +148,7 @@ pub fn can_pay(pool: &ManaPool, cost: &ManaCost) -> bool {
                     }
                     ShardRequirement::TwoGenericHybrid(color) => {
                         // Pay 1 colored or 2 generic
-                        if sim.spend(color).is_none() {
+                        if spend_eligible(&mut sim, color, spell).is_none() {
                             if sim.total() < 2 {
                                 return false;
                             }
@@ -156,7 +166,9 @@ pub fn can_pay(pool: &ManaPool, cost: &ManaCost) -> bool {
                         // X can be 0, so always satisfiable
                     }
                     ShardRequirement::ColorlessHybrid(color) => {
-                        if sim.spend(ManaType::Colorless).is_none() && sim.spend(color).is_none() {
+                        if spend_eligible(&mut sim, ManaType::Colorless, spell).is_none()
+                            && spend_eligible(&mut sim, color, spell).is_none()
+                        {
                             return false;
                         }
                     }
@@ -180,13 +192,14 @@ pub fn pay_cost(
     pool: &mut ManaPool,
     cost: &ManaCost,
 ) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
-    pay_cost_with_demand(pool, cost, None)
+    pay_cost_with_demand(pool, cost, None, None)
 }
 
 pub fn pay_cost_with_demand(
     pool: &mut ManaPool,
     cost: &ManaCost,
     hand_demand: Option<&ColorDemand>,
+    spell: Option<&SpellMeta>,
 ) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
     match cost {
         ManaCost::NoCost => Ok((Vec::new(), Vec::new())),
@@ -198,16 +211,18 @@ pub fn pay_cost_with_demand(
             for shard in shards {
                 match shard_to_mana_type(*shard) {
                     ShardRequirement::Single(mt) => {
-                        let unit = pool.spend(mt).ok_or(PaymentError::InsufficientMana)?;
+                        let unit = spend_eligible(pool, mt, spell)
+                            .ok_or(PaymentError::InsufficientMana)?;
                         spent.push(unit);
                     }
                     ShardRequirement::Hybrid(a, b) => {
                         let color = auto_pay_hybrid(pool, a, b, hand_demand);
-                        let unit = pool.spend(color).ok_or(PaymentError::InsufficientMana)?;
+                        let unit = spend_eligible(pool, color, spell)
+                            .ok_or(PaymentError::InsufficientMana)?;
                         spent.push(unit);
                     }
                     ShardRequirement::Phyrexian(color) => {
-                        if let Some(unit) = pool.spend(color) {
+                        if let Some(unit) = spend_eligible(pool, color, spell) {
                             spent.push(unit);
                         } else {
                             life_payments.push(LifePayment {
@@ -217,7 +232,7 @@ pub fn pay_cost_with_demand(
                         }
                     }
                     ShardRequirement::TwoGenericHybrid(color) => {
-                        if let Some(unit) = pool.spend(color) {
+                        if let Some(unit) = spend_eligible(pool, color, spell) {
                             spent.push(unit);
                         } else {
                             // Pay 2 generic
@@ -236,17 +251,18 @@ pub fn pay_cost_with_demand(
                         // X=0 by default; caller specifies X value separately
                     }
                     ShardRequirement::ColorlessHybrid(color) => {
-                        if let Some(unit) = pool.spend(ManaType::Colorless) {
+                        if let Some(unit) = spend_eligible(pool, ManaType::Colorless, spell) {
                             spent.push(unit);
                         } else {
-                            let unit = pool.spend(color).ok_or(PaymentError::InsufficientMana)?;
+                            let unit = spend_eligible(pool, color, spell)
+                                .ok_or(PaymentError::InsufficientMana)?;
                             spent.push(unit);
                         }
                     }
                     ShardRequirement::HybridPhyrexian(a, b) => {
                         // Try to pay with mana first (prefer the more available color)
                         let color = auto_pay_hybrid(pool, a, b, hand_demand);
-                        if let Some(unit) = pool.spend(color) {
+                        if let Some(unit) = spend_eligible(pool, color, spell) {
                             spent.push(unit);
                         } else {
                             life_payments.push(LifePayment {
@@ -316,6 +332,21 @@ pub fn land_subtype_to_mana_type(subtype: &str) -> Option<ManaType> {
         "Mountain" => Some(ManaType::Red),
         "Forest" => Some(ManaType::Green),
         _ => None,
+    }
+}
+
+/// Spend one mana of the given color, respecting restrictions if a spell context is provided.
+///
+/// When `spell` is `Some`, delegates to `ManaPool::spend_for` (restriction-aware).
+/// When `spell` is `None`, delegates to `ManaPool::spend` (unrestricted).
+fn spend_eligible(
+    pool: &mut ManaPool,
+    color: ManaType,
+    spell: Option<&SpellMeta>,
+) -> Option<ManaUnit> {
+    match spell {
+        Some(meta) => pool.spend_for(color, meta),
+        None => pool.spend(color),
     }
 }
 
@@ -454,6 +485,7 @@ fn spend_snow_unit(pool: &mut ManaPool) -> Option<ManaUnit> {
 mod tests {
     use super::*;
     use crate::types::identifiers::ObjectId;
+    use crate::types::mana::ManaRestriction;
 
     fn make_unit(color: ManaType) -> ManaUnit {
         ManaUnit {
@@ -697,7 +729,7 @@ mod tests {
             generic: 0,
         };
         let demand: ColorDemand = [1, 3, 0, 0, 0]; // W=1, U=3
-        let (spent, _) = pay_cost_with_demand(&mut pool, &cost, Some(&demand)).unwrap();
+        let (spent, _) = pay_cost_with_demand(&mut pool, &cost, Some(&demand), None).unwrap();
         assert_eq!(spent[0].color, ManaType::White);
     }
 
@@ -711,7 +743,7 @@ mod tests {
             generic: 0,
         };
         let demand: ColorDemand = [2, 2, 0, 0, 0]; // Equal
-        let (spent, _) = pay_cost_with_demand(&mut pool, &cost, Some(&demand)).unwrap();
+        let (spent, _) = pay_cost_with_demand(&mut pool, &cost, Some(&demand), None).unwrap();
         assert_eq!(spent[0].color, ManaType::White);
     }
 
@@ -725,7 +757,7 @@ mod tests {
             generic: 0,
         };
         let demand: ColorDemand = [0, 5, 0, 0, 0]; // Blue highly demanded but only option
-        let (spent, _) = pay_cost_with_demand(&mut pool, &cost, Some(&demand)).unwrap();
+        let (spent, _) = pay_cost_with_demand(&mut pool, &cost, Some(&demand), None).unwrap();
         assert_eq!(spent[0].color, ManaType::Blue);
     }
 
@@ -739,5 +771,37 @@ mod tests {
         assert_eq!(land_subtype_to_mana_type("Mountain"), Some(ManaType::Red));
         assert_eq!(land_subtype_to_mana_type("Forest"), Some(ManaType::Green));
         assert_eq!(land_subtype_to_mana_type("Desert"), None);
+    }
+
+    #[test]
+    fn can_pay_for_spell_respects_creature_type_restriction() {
+        let mut pool = ManaPool::default();
+        // One restricted green (Elf only) + one unrestricted green
+        pool.add(ManaUnit {
+            color: ManaType::Green,
+            source_id: ObjectId(1),
+            snow: false,
+            restrictions: vec![ManaRestriction::OnlyForCreatureType("Elf".to_string())],
+        });
+        pool.add(make_unit(ManaType::Green));
+
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+            generic: 0,
+        };
+
+        // Elf creature: both greens usable
+        let elf = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Elf".to_string()],
+        };
+        assert!(can_pay_for_spell(&pool, &cost, Some(&elf)));
+
+        // Goblin creature: only unrestricted green usable → insufficient
+        let goblin = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Goblin".to_string()],
+        };
+        assert!(!can_pay_for_spell(&pool, &cost, Some(&goblin)));
     }
 }

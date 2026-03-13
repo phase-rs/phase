@@ -94,7 +94,10 @@ fn filter_inner(
                 }
             }
             // All properties must match
-            let source_attached_to = state.objects.get(&source_id).and_then(|s| s.attached_to);
+            let source_obj = state.objects.get(&source_id);
+            let source_attached_to = source_obj.and_then(|s| s.attached_to);
+            let source_chosen_creature_type =
+                source_obj.and_then(|s| s.chosen_creature_type().map(|t| t.to_string()));
             properties.iter().all(|p| {
                 matches_filter_prop(
                     p,
@@ -103,6 +106,7 @@ fn filter_inner(
                     source_id,
                     source_controller,
                     source_attached_to,
+                    source_chosen_creature_type.as_deref(),
                 )
             })
         }
@@ -147,6 +151,7 @@ fn matches_filter_prop(
     _source_id: ObjectId,
     source_controller: Option<PlayerId>,
     source_attached_to: Option<ObjectId>,
+    source_chosen_creature_type: Option<&str>,
 ) -> bool {
     match prop {
         FilterProp::Token => {
@@ -235,6 +240,14 @@ fn matches_filter_prop(
                 Err(_) => true, // Unknown supertype — permissive
             }
         }
+        FilterProp::IsChosenCreatureType => match source_chosen_creature_type {
+            Some(chosen) => obj
+                .card_types
+                .subtypes
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(chosen)),
+            None => false,
+        },
         FilterProp::Other { .. } => true, // Permissive fallback for unrecognized properties
     }
 }
@@ -659,5 +672,53 @@ mod tests {
             fake_source,
             PlayerId(0)
         ));
+    }
+
+    #[test]
+    fn chosen_creature_type_matches_subtype() {
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Mimic");
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::CreatureType("Elf".to_string()));
+
+        let elf = add_creature(&mut state, PlayerId(0), "Elf Warrior");
+        state
+            .objects
+            .get_mut(&elf)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Elf".to_string());
+
+        let goblin = add_creature(&mut state, PlayerId(0), "Goblin");
+        state
+            .objects
+            .get_mut(&goblin)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Goblin".to_string());
+
+        let filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Creature),
+            subtype: None,
+            controller: None,
+            properties: vec![FilterProp::IsChosenCreatureType],
+        };
+
+        assert!(
+            matches_target_filter(&state, elf, &filter, source),
+            "Elf should match chosen creature type Elf"
+        );
+        assert!(
+            !matches_target_filter(&state, goblin, &filter, source),
+            "Goblin should not match chosen creature type Elf"
+        );
     }
 }

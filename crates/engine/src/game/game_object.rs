@@ -199,6 +199,14 @@ impl GameObject {
             _ => None,
         })
     }
+
+    /// Look up a stored creature type choice.
+    pub fn chosen_creature_type(&self) -> Option<&str> {
+        self.chosen_attributes.iter().find_map(|a| match a {
+            ChosenAttribute::CreatureType(s) => Some(s.as_str()),
+            _ => None,
+        })
+    }
 }
 
 #[cfg(test)]

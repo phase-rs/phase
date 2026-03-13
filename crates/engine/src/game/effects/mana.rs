@@ -1,9 +1,10 @@
 use crate::types::ability::{
-    CountValue, Effect, EffectError, EffectKind, ManaProduction, ResolvedAbility,
+    CountValue, Effect, EffectError, EffectKind, ManaProduction, ManaSpendRestriction,
+    ResolvedAbility,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::mana::{ManaColor, ManaType, ManaUnit};
+use crate::types::mana::{ManaColor, ManaRestriction, ManaType, ManaUnit};
 
 /// Mana effect: adds mana to the controller's mana pool.
 pub fn resolve(
@@ -11,8 +12,11 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let produced = match &ability.effect {
-        Effect::Mana { produced } => produced,
+    let (produced, restrictions) = match &ability.effect {
+        Effect::Mana {
+            produced,
+            restrictions,
+        } => (produced, restrictions),
         _ => return Err(EffectError::MissingParam("Produced".to_string())),
     };
     // ChosenColor needs to read from the source object's chosen_attributes
@@ -29,6 +33,9 @@ pub fn resolve(
         other => resolve_mana_types(other),
     };
 
+    // Resolve restriction templates into concrete restrictions
+    let concrete_restrictions = resolve_restrictions(restrictions, state, ability.source_id);
+
     let player = state
         .players
         .iter_mut()
@@ -40,7 +47,7 @@ pub fn resolve(
             color: mana_type,
             source_id: ability.source_id,
             snow: false,
-            restrictions: Vec::new(),
+            restrictions: concrete_restrictions.clone(),
         };
         player.mana_pool.add(unit);
 
@@ -57,6 +64,27 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// Resolve parse-time restriction templates into concrete `ManaRestriction` values.
+fn resolve_restrictions(
+    templates: &[ManaSpendRestriction],
+    state: &GameState,
+    source_id: crate::types::identifiers::ObjectId,
+) -> Vec<ManaRestriction> {
+    templates
+        .iter()
+        .filter_map(|template| match template {
+            ManaSpendRestriction::SpellType(t) => {
+                Some(ManaRestriction::OnlyForSpellType(t.clone()))
+            }
+            ManaSpendRestriction::ChosenCreatureType => state
+                .objects
+                .get(&source_id)
+                .and_then(|obj| obj.chosen_creature_type())
+                .map(|ct| ManaRestriction::OnlyForCreatureType(ct.to_string())),
+        })
+        .collect()
 }
 
 /// Resolve a typed mana production descriptor into concrete mana units.
@@ -122,7 +150,10 @@ mod tests {
 
     fn make_mana_ability(produced: ManaProduction) -> ResolvedAbility {
         ResolvedAbility::new(
-            Effect::Mana { produced },
+            Effect::Mana {
+                produced,
+                restrictions: vec![],
+            },
             vec![],
             ObjectId(100),
             PlayerId(0),
@@ -384,5 +415,100 @@ mod tests {
         .unwrap();
 
         assert_eq!(state.players[0].mana_pool.total(), 0);
+    }
+
+    #[test]
+    fn restriction_spell_type_attaches_to_produced_mana() {
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+
+        let ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: CountValue::Fixed(1),
+                    color_options: vec![ManaColor::Green],
+                },
+                restrictions: vec![ManaSpendRestriction::SpellType("Creature".to_string())],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let unit = &state.players[0].mana_pool.mana[0];
+        assert_eq!(unit.restrictions.len(), 1);
+        assert_eq!(
+            unit.restrictions[0],
+            ManaRestriction::OnlyForSpellType("Creature".to_string())
+        );
+    }
+
+    #[test]
+    fn restriction_chosen_creature_type_resolves_from_source() {
+        use crate::types::ability::ChosenAttribute;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let obj_id = ObjectId(200);
+        let mut obj = crate::game::game_object::GameObject::new(
+            obj_id,
+            CardId(2),
+            PlayerId(0),
+            "Cavern of Souls".to_string(),
+            Zone::Battlefield,
+        );
+        obj.chosen_attributes
+            .push(ChosenAttribute::CreatureType("Elf".to_string()));
+        state.objects.insert(obj_id, obj);
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: CountValue::Fixed(1),
+                    color_options: vec![ManaColor::Green],
+                },
+                restrictions: vec![ManaSpendRestriction::ChosenCreatureType],
+            },
+            vec![],
+            obj_id,
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let unit = &state.players[0].mana_pool.mana[0];
+        assert_eq!(unit.restrictions.len(), 1);
+        assert_eq!(
+            unit.restrictions[0],
+            ManaRestriction::OnlyForCreatureType("Elf".to_string())
+        );
+    }
+
+    #[test]
+    fn restriction_chosen_creature_type_drops_when_no_choice() {
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+
+        let ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Red],
+                },
+                restrictions: vec![ManaSpendRestriction::ChosenCreatureType],
+            },
+            vec![],
+            ObjectId(999),
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // No source object → restriction can't resolve → mana is unrestricted
+        let unit = &state.players[0].mana_pool.mana[0];
+        assert!(unit.restrictions.is_empty());
     }
 }
