@@ -2970,7 +2970,7 @@ mod tests {
 
     #[test]
     fn effect_counter_ability_with_source_static_absorption() {
-        use crate::types::ability::{ContinuousModification, StaticDefinition};
+        use crate::types::ability::ContinuousModification;
         use crate::types::statics::StaticMode;
 
         let ability = parse_effect_chain(

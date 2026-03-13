@@ -118,7 +118,7 @@ fn apply_source_static(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, TargetFilter, TriggerCondition};
+    use crate::types::ability::{Effect, TargetFilter};
     use crate::types::game_state::{StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
