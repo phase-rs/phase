@@ -1,27 +1,24 @@
 import { useCallback, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { motion } from "framer-motion";
 
 import { CardImage } from "../card/CardImage.tsx";
-import { menuButtonClass } from "../menu/buttonStyles.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import type { ObjectId, WaitingFor } from "../../adapter/types.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
+import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
 
 type ScryChoice = Extract<WaitingFor, { type: "ScryChoice" }>;
 type DigChoice = Extract<WaitingFor, { type: "DigChoice" }>;
 type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
 type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
 type SearchChoice = Extract<WaitingFor, { type: "SearchChoice" }>;
-type NamedChoice = Extract<WaitingFor, { type: "NamedChoice" }>;
 
 /**
- * Generic card choice modal for Scry, Dig, and Surveil.
- * Renders based on the WaitingFor type:
- * - ScryChoice: per-card Top/Bottom toggles (MTGA-style)
- * - DigChoice: select keep_count cards to keep
- * - SurveilChoice: per-card Keep/Graveyard toggles
+ * Generic card choice modal for Scry, Dig, Surveil, Reveal, Search, and NamedChoice.
+ * Renders based on the WaitingFor type.
  */
 export function CardChoiceModal() {
   const playerId = usePlayerId();
@@ -455,128 +452,5 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
         disabled={selectedSet.size !== data.count}
       />
     </ChoiceOverlay>
-  );
-}
-
-// ── Named Choice Modal ──────────────────────────────────────────────────────
-
-const CHOICE_TYPE_LABELS: Record<string, string> = {
-  CreatureType: "Choose a Creature Type",
-  Color: "Choose a Color",
-  OddOrEven: "Choose Odd or Even",
-  BasicLandType: "Choose a Basic Land Type",
-  CardType: "Choose a Card Type",
-};
-
-function NamedChoiceModal({ data }: { data: NamedChoice["data"] }) {
-  const dispatch = useGameDispatch();
-  const [selected, setSelected] = useState<string | null>(null);
-
-  const handleConfirm = useCallback(() => {
-    if (selected !== null) {
-      dispatch({ type: "ChooseOption", data: { choice: selected } });
-    }
-  }, [dispatch, selected]);
-
-  const title = CHOICE_TYPE_LABELS[data.choice_type] ?? "Make a Choice";
-
-  return (
-    <ChoiceOverlay title={title} subtitle="Select one option">
-      <div className="mb-6 flex w-full max-w-3xl flex-wrap items-center justify-center gap-3 sm:mb-10">
-        {data.options.map((option, index) => {
-          const isSelected = selected === option;
-          return (
-            <motion.button
-              key={option}
-              className={`rounded-lg border-2 px-5 py-3 text-base font-semibold transition ${
-                isSelected
-                  ? "border-emerald-400 bg-emerald-500/30 text-white"
-                  : "border-gray-600 bg-gray-800/80 text-gray-300 hover:border-gray-400 hover:text-white"
-              }`}
-              initial={{ opacity: 0, y: 20, scale: 0.95 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              transition={{ delay: 0.05 + index * 0.03, duration: 0.25 }}
-              whileHover={{ scale: 1.05 }}
-              onClick={() => setSelected(isSelected ? null : option)}
-            >
-              {option}
-            </motion.button>
-          );
-        })}
-      </div>
-      <ConfirmButton onClick={handleConfirm} disabled={selected === null} />
-    </ChoiceOverlay>
-  );
-}
-
-// ── Shared Components ───────────────────────────────────────────────────────
-
-function ChoiceOverlay({
-  title,
-  subtitle,
-  children,
-}: {
-  title: string;
-  subtitle: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      className="fixed inset-0 z-50 flex flex-col items-center justify-center px-4"
-      style={{
-        background:
-          "radial-gradient(ellipse at center, rgba(30,30,50,0.95) 0%, rgba(0,0,0,0.98) 70%)",
-      }}
-    >
-      <motion.div
-        className="mb-4 text-center sm:mb-8"
-        initial={{ opacity: 0, y: -20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5 }}
-      >
-        <h2
-          className="text-2xl font-black tracking-wide text-white sm:text-3xl"
-          style={{ textShadow: "0 0 20px rgba(200,200,255,0.3)" }}
-        >
-          {title}
-        </h2>
-        <p className="mt-2 text-sm text-gray-400">{subtitle}</p>
-      </motion.div>
-      {children}
-    </div>
-  );
-}
-
-function ConfirmButton({
-  onClick,
-  disabled = false,
-  label = "Confirm",
-}: {
-  onClick: () => void;
-  disabled?: boolean;
-  label?: string;
-}) {
-  return (
-    <AnimatePresence>
-      <motion.div
-        className="w-full max-w-xs px-4 sm:px-0"
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.5, duration: 0.3 }}
-      >
-        <button
-          onClick={onClick}
-          disabled={disabled}
-          className={menuButtonClass({
-            tone: "cyan",
-            size: "lg",
-            disabled,
-            className: "w-full",
-          })}
-        >
-          {label}
-        </button>
-      </motion.div>
-    </AnimatePresence>
   );
 }

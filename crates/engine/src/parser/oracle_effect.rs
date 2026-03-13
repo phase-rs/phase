@@ -519,6 +519,12 @@ fn is_choose_as_targeting(rest: &str) -> bool {
         return false;
     }
 
+    // If try_parse_named_choice would match "choose {rest}", it's a named choice, not targeting
+    let as_full = format!("choose {rest}");
+    if try_parse_named_choice(&as_full).is_some() {
+        return false;
+    }
+
     // Any phrase containing "target" is a targeting synonym
     if rest.contains("target") {
         return true;
@@ -530,18 +536,14 @@ fn is_choose_as_targeting(rest: &str) -> bool {
     }
 
     // "choose a/an {type} ... you control / an opponent controls"
-    // Excludes: "choose a color", "choose a creature type", "choose a card type"
     if let Some(after_article) = rest.strip_prefix("a ").or_else(|| rest.strip_prefix("an ")) {
-        let excluded = [
-            "color",
-            "creature type",
-            "card type",
-            "card name",
-            "nonland card name",
-            "nonbasic land type",
-            "number",
-        ];
-        if excluded.iter().any(|e| after_article.starts_with(e)) {
+        // Exclude patterns not yet in try_parse_named_choice but still not targeting
+        if after_article.starts_with("card name")
+            || after_article.starts_with("nonland card name")
+            || after_article.starts_with("creature card name")
+            || after_article.starts_with("nonbasic land type")
+            || after_article.starts_with("number")
+        {
             return false;
         }
         // Must reference controller to be targeting-like

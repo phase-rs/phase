@@ -36,38 +36,34 @@ pub fn resolve(
     Ok(())
 }
 
+const FALLBACK_CREATURE_TYPES: &[&str] = &[
+    "Human", "Elf", "Goblin", "Merfolk", "Zombie", "Soldier", "Wizard", "Dragon", "Angel",
+    "Demon", "Beast", "Bird", "Cat", "Elemental", "Faerie", "Giant", "Knight", "Rogue", "Spirit",
+    "Vampire", "Warrior",
+];
+
+const COLORS: &[&str] = &["White", "Blue", "Black", "Red", "Green"];
+
+const ODD_OR_EVEN: &[&str] = &["Odd", "Even"];
+
+const BASIC_LAND_TYPES: &[&str] = &["Plains", "Island", "Swamp", "Mountain", "Forest"];
+
+const CARD_TYPES: &[&str] = &[
+    "Artifact",
+    "Creature",
+    "Enchantment",
+    "Instant",
+    "Land",
+    "Planeswalker",
+    "Sorcery",
+];
+
 /// Compute the valid options for a given choice type.
 fn compute_options(state: &GameState, choice_type: ChoiceType) -> Vec<String> {
     match choice_type {
         ChoiceType::CreatureType => {
             if state.all_creature_types.is_empty() {
-                // Fallback: common creature types
-                vec![
-                    "Human",
-                    "Elf",
-                    "Goblin",
-                    "Merfolk",
-                    "Zombie",
-                    "Soldier",
-                    "Wizard",
-                    "Dragon",
-                    "Angel",
-                    "Demon",
-                    "Beast",
-                    "Bird",
-                    "Cat",
-                    "Elemental",
-                    "Faerie",
-                    "Giant",
-                    "Knight",
-                    "Rogue",
-                    "Spirit",
-                    "Vampire",
-                    "Warrior",
-                ]
-                .into_iter()
-                .map(String::from)
-                .collect()
+                to_strings(FALLBACK_CREATURE_TYPES)
             } else {
                 let mut types = state.all_creature_types.clone();
                 types.sort();
@@ -75,31 +71,15 @@ fn compute_options(state: &GameState, choice_type: ChoiceType) -> Vec<String> {
                 types
             }
         }
-        ChoiceType::Color => vec![
-            "White".to_string(),
-            "Blue".to_string(),
-            "Black".to_string(),
-            "Red".to_string(),
-            "Green".to_string(),
-        ],
-        ChoiceType::OddOrEven => vec!["Odd".to_string(), "Even".to_string()],
-        ChoiceType::BasicLandType => vec![
-            "Plains".to_string(),
-            "Island".to_string(),
-            "Swamp".to_string(),
-            "Mountain".to_string(),
-            "Forest".to_string(),
-        ],
-        ChoiceType::CardType => vec![
-            "Artifact".to_string(),
-            "Creature".to_string(),
-            "Enchantment".to_string(),
-            "Instant".to_string(),
-            "Land".to_string(),
-            "Planeswalker".to_string(),
-            "Sorcery".to_string(),
-        ],
+        ChoiceType::Color => to_strings(COLORS),
+        ChoiceType::OddOrEven => to_strings(ODD_OR_EVEN),
+        ChoiceType::BasicLandType => to_strings(BASIC_LAND_TYPES),
+        ChoiceType::CardType => to_strings(CARD_TYPES),
     }
+}
+
+fn to_strings(strs: &[&str]) -> Vec<String> {
+    strs.iter().map(|&s| s.to_string()).collect()
 }
 
 #[cfg(test)]
