@@ -123,6 +123,9 @@ function PhaseDot({ phase }: { phase: Phase }) {
             : "text-gray-400 hover:text-gray-200"
       }`}
     >
+      {isActive && (
+        <span className="absolute -top-1 left-1/2 h-1.5 w-1.5 -translate-x-1/2 rounded-full bg-amber-300 shadow-[0_0_10px_rgba(252,211,77,0.9)]" />
+      )}
       {PHASE_ICONS[phase]}
       {hasStop && (
         <span className="absolute -bottom-0.5 left-1/2 h-1 w-1 -translate-x-1/2 rounded-full bg-amber-400" />

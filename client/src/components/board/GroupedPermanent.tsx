@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import type { GroupedPermanent as GroupedPermanentType } from "../../viewmodel/battlefieldProps";
+import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { PermanentCard } from "./PermanentCard.tsx";
 
 interface GroupedPermanentProps {
@@ -9,6 +10,7 @@ interface GroupedPermanentProps {
 
 export function GroupedPermanentDisplay({ group }: GroupedPermanentProps) {
   const [expanded, setExpanded] = useState(false);
+  const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
 
   if (group.count === 1) {
     return <PermanentCard objectId={group.ids[0]} />;
@@ -57,9 +59,15 @@ export function GroupedPermanentDisplay({ group }: GroupedPermanentProps) {
       ))}
 
       {/* Invisible spacer sized to first card for layout */}
-      <div className="invisible">
-        <PermanentCard objectId={group.ids[0]} />
-      </div>
+      <div
+        aria-hidden="true"
+        className="pointer-events-none"
+        style={
+          battlefieldCardDisplay === "art_crop"
+            ? { width: "var(--art-crop-w)", height: "var(--art-crop-h)" }
+            : { width: "var(--card-w)", height: "var(--card-h)" }
+        }
+      />
 
       {/* Count badge */}
       <div className="absolute left-1 top-1 z-30 flex h-5 w-5 items-center justify-center rounded-full bg-black/80 text-[10px] font-bold text-white ring-1 ring-gray-500">

@@ -475,7 +475,7 @@ function GamePageContent({
         <GameBoard />
 
         {/* Player avatar centered with flanking phase indicators */}
-        <PlayerHud onSettingsClick={() => setShowPreferences(true)} />
+        <PlayerHud />
 
         {/* Player hand at bottom */}
         <PlayerHand />
