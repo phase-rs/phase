@@ -436,37 +436,74 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
 fn parse_typed_you_control(text: &str, lower: &str, _is_other: bool) -> Option<StaticDefinition> {
     // Try "X creatures you control get/have" first
     if let Some(creatures_pos) = lower.find(" creatures you control ") {
-        let subtype_str = &text[..creatures_pos];
-        if !subtype_str.trim().is_empty() && is_capitalized_words(subtype_str) {
+        let descriptor = text[..creatures_pos].trim();
+        if !descriptor.is_empty() {
             let after_prefix = &text[creatures_pos + 23..];
-            let filter = TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: Some(subtype_str.to_string()),
-                controller: Some(ControllerRef::You),
-                properties: vec![],
+            let typed_filter = if let Some(color) = parse_named_color(descriptor) {
+                TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    subtype: None,
+                    controller: Some(ControllerRef::You),
+                    properties: vec![FilterProp::HasColor {
+                        color: color.to_string(),
+                    }],
+                }
+            } else if is_capitalized_words(descriptor) {
+                TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    subtype: Some(descriptor.to_string()),
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                }
+            } else {
+                return None;
             };
-            return parse_continuous_gets_has(after_prefix, filter);
+            return parse_continuous_gets_has(after_prefix, typed_filter);
         }
     }
 
     // Try "Xs you control get/have" (e.g. "Zombies you control get +1/+1")
     if let Some(yc_pos) = lower.find(" you control ") {
-        let subtype_str = &text[..yc_pos];
-        if !subtype_str.trim().is_empty() && is_capitalized_words(subtype_str) {
-            // Strip trailing 's' for the subtype name (Zombies -> Zombie)
-            let subtype_name = subtype_str.trim_end_matches('s').to_string();
+        let descriptor = text[..yc_pos].trim();
+        if !descriptor.is_empty() {
             let after_prefix = &text[yc_pos + 13..];
-            let filter = TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: Some(subtype_name),
-                controller: Some(ControllerRef::You),
-                properties: vec![],
+            let typed_filter = if let Some(color) = parse_named_color(descriptor) {
+                TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    subtype: None,
+                    controller: Some(ControllerRef::You),
+                    properties: vec![FilterProp::HasColor {
+                        color: color.to_string(),
+                    }],
+                }
+            } else if is_capitalized_words(descriptor) {
+                // Strip trailing 's' for the subtype name (Zombies -> Zombie)
+                let subtype_name = descriptor.trim_end_matches('s').to_string();
+                TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Creature),
+                    subtype: Some(subtype_name),
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                }
+            } else {
+                return None;
             };
-            return parse_continuous_gets_has(after_prefix, filter);
+            return parse_continuous_gets_has(after_prefix, typed_filter);
         }
     }
 
     None
+}
+
+fn parse_named_color(text: &str) -> Option<&'static str> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "white" => Some("White"),
+        "blue" => Some("Blue"),
+        "black" => Some("Black"),
+        "red" => Some("Red"),
+        "green" => Some("Green"),
+        _ => None,
+    }
 }
 
 /// Check that a string is one or more capitalized words.
@@ -716,6 +753,23 @@ mod tests {
                 controller: Some(ControllerRef::You),
                 ..
             }) if s == "Elf"
+        ));
+    }
+
+    #[test]
+    fn static_color_creatures_you_control() {
+        let def = parse_static_line("White creatures you control get +1/+1.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed {
+                card_type: Some(TypeFilter::Creature),
+                subtype: None,
+                controller: Some(ControllerRef::You),
+                properties,
+            }) if properties == vec![FilterProp::HasColor {
+                color: "White".to_string(),
+            }]
         ));
     }
 
