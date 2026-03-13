@@ -15,7 +15,7 @@ pub fn resolve(
         Effect::Choose {
             choice_type,
             persist,
-        } => (*choice_type, *persist),
+        } => (choice_type.clone(), *persist),
         _ => {
             return Err(EffectError::InvalidParam(
                 "expected Choose effect".to_string(),
@@ -23,7 +23,7 @@ pub fn resolve(
         }
     };
 
-    let options = compute_options(state, choice_type);
+    let options = compute_options(state, &choice_type);
 
     state.waiting_for = WaitingFor::NamedChoice {
         player: ability.controller,
@@ -84,8 +84,23 @@ const CARD_TYPES: &[&str] = &[
     "Sorcery",
 ];
 
+const LAND_TYPES: &[&str] = &[
+    "Plains",
+    "Island",
+    "Swamp",
+    "Mountain",
+    "Forest",
+    "Desert",
+    "Gate",
+    "Lair",
+    "Locus",
+    "Mine",
+    "Power-Plant",
+    "Tower",
+];
+
 /// Compute the valid options for a given choice type.
-fn compute_options(state: &GameState, choice_type: ChoiceType) -> Vec<String> {
+fn compute_options(state: &GameState, choice_type: &ChoiceType) -> Vec<String> {
     match choice_type {
         ChoiceType::CreatureType => {
             if state.all_creature_types.is_empty() {
@@ -104,6 +119,9 @@ fn compute_options(state: &GameState, choice_type: ChoiceType) -> Vec<String> {
         // CardName options are provided by the frontend from its local card database.
         // The engine sends an empty list to avoid serializing 30k+ names every state update.
         ChoiceType::CardName => Vec::new(),
+        ChoiceType::NumberRange { min, max } => (*min..=*max).map(|n| n.to_string()).collect(),
+        ChoiceType::Labeled { options } => options.clone(),
+        ChoiceType::LandType => to_strings(LAND_TYPES),
     }
 }
 
@@ -273,6 +291,68 @@ mod tests {
                 assert_eq!(*source_id, ObjectId(100));
             }
             other => panic!("Expected EffectResolved, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn choose_number_range_generates_options() {
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::Choose {
+                choice_type: ChoiceType::NumberRange { min: 0, max: 5 },
+                persist: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => {
+                assert_eq!(options, &["0", "1", "2", "3", "4", "5"]);
+            }
+            other => panic!("Expected NamedChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn choose_labeled_uses_provided_options() {
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::Choose {
+                choice_type: ChoiceType::Labeled {
+                    options: vec!["Left".to_string(), "Right".to_string()],
+                },
+                persist: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => {
+                assert_eq!(options, &["Left", "Right"]);
+            }
+            other => panic!("Expected NamedChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn choose_land_type_offers_all_land_types() {
+        let mut state = GameState::new_two_player(42);
+        let ability = make_choose_ability(ChoiceType::LandType);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => {
+                assert!(options.contains(&"Plains".to_string()));
+                assert!(options.contains(&"Forest".to_string()));
+                assert!(options.len() > 5);
+            }
+            other => panic!("Expected NamedChoice, got {:?}", other),
         }
     }
 }

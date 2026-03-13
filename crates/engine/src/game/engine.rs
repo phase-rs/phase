@@ -663,7 +663,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
 
             // Store typed attribute on source object if this is a persisted choice
             if let Some(obj_id) = source_id {
-                if let Some(attr) = ChosenAttribute::from_choice(*choice_type, &choice) {
+                if let Some(attr) = ChosenAttribute::from_choice(choice_type.clone(), &choice) {
                     if let Some(obj) = state.objects.get_mut(obj_id) {
                         obj.chosen_attributes.push(attr);
                     }

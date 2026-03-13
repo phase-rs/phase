@@ -18,7 +18,7 @@ use super::zones::Zone;
 // ---------------------------------------------------------------------------
 
 /// What kind of named choice the player must make at resolution time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub enum ChoiceType {
     CreatureType,
     Color,
@@ -26,6 +26,17 @@ pub enum ChoiceType {
     BasicLandType,
     CardType,
     CardName,
+    /// "Choose a number between X and Y" — generates string options "0", "1", ..., "Y".
+    NumberRange {
+        min: u8,
+        max: u8,
+    },
+    /// "Choose left or right", "choose fame or fortune" — options come from the parser.
+    Labeled {
+        options: Vec<String>,
+    },
+    /// "Choose a land type" — includes basic + common nonbasic land types.
+    LandType,
 }
 
 /// The five basic land types (MTG Rule 305.6).
@@ -132,6 +143,9 @@ impl ChosenAttribute {
             ChoiceType::CardType => value.parse::<CoreType>().ok().map(Self::CardType),
             ChoiceType::OddOrEven => value.parse::<Parity>().ok().map(Self::OddOrEven),
             ChoiceType::CardName => Some(Self::CardName(value.to_string())),
+            ChoiceType::NumberRange { .. } | ChoiceType::Labeled { .. } | ChoiceType::LandType => {
+                None
+            }
         }
     }
 }
