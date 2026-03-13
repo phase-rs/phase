@@ -709,6 +709,8 @@ pub enum Effect {
     RevealHand {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        #[serde(default = "default_target_filter_any")]
+        card_filter: TargetFilter,
     },
     /// Semantic marker for effects the engine has not yet implemented a handler for.
     /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.
@@ -1098,23 +1100,49 @@ impl ReplacementDefinition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum ContinuousModification {
-    AddPower { value: i32 },
-    AddToughness { value: i32 },
-    SetPower { value: i32 },
-    SetToughness { value: i32 },
-    AddKeyword { keyword: Keyword },
-    RemoveKeyword { keyword: Keyword },
-    AddAbility { ability: String },
+    AddPower {
+        value: i32,
+    },
+    AddToughness {
+        value: i32,
+    },
+    SetPower {
+        value: i32,
+    },
+    SetToughness {
+        value: i32,
+    },
+    AddKeyword {
+        keyword: Keyword,
+    },
+    RemoveKeyword {
+        keyword: Keyword,
+    },
+    AddAbility {
+        ability: String,
+    },
     RemoveAllAbilities,
-    AddType { core_type: CoreType },
-    RemoveType { core_type: CoreType },
-    AddSubtype { subtype: String },
-    RemoveSubtype { subtype: String },
+    AddType {
+        core_type: CoreType,
+    },
+    RemoveType {
+        core_type: CoreType,
+    },
+    AddSubtype {
+        subtype: String,
+    },
+    RemoveSubtype {
+        subtype: String,
+    },
     /// Grants every creature type (Changeling CDA). Expanded at runtime
     /// using `GameState::all_creature_types`.
     AddAllCreatureTypes,
-    SetColor { colors: Vec<ManaColor> },
-    AddColor { color: ManaColor },
+    SetColor {
+        colors: Vec<ManaColor>,
+    },
+    AddColor {
+        color: ManaColor,
+    },
 }
 
 // ---------------------------------------------------------------------------

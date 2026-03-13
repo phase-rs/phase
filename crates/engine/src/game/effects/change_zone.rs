@@ -319,9 +319,6 @@ mod tests {
         resolve_all(&mut state, &ability, &mut events).unwrap();
 
         // All permanents bounced (filter is "Permanent" by default)
-        // Note: the original test used Valid="Creature.OppCtrl" which is
-        // string-based filtering; with typed TargetFilter this would need
-        // the filter module to support TargetFilter matching.
-        // For now, ChangeZoneAll uses string-based filter as before.
+        // ChangeZoneAll uses typed TargetFilter for filtering.
     }
 }

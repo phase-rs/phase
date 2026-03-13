@@ -54,10 +54,8 @@ A player can sit down, pick a Standard-legal deck, and play a full game of Magic
 - [x] MTGJSON integration — pull card metadata from MTGJSON's MIT-licensed JSON — v1.2
 - [x] Own ability format — typed JSON schema for abilities/triggers/effects mapping to Rust types — v1.2
 - [x] Card format migration — convert 78 curated Standard cards to new format — v1.2
-- [x] Remove Forge coupling — remove data/cardsfolder/, make Forge parser optional/dev-only — v1.2
 - [x] License change — relicense as MIT/Apache-2.0 dual license — v1.2
 - [ ] Test suite — comprehensive rules correctness tests using XMage MIT scenarios as reference
-- [x] Update project constraints — remove Forge format dependency from key decisions — v1.2
 
 ### Out of Scope
 
@@ -84,13 +82,13 @@ Shipped v1.1 with ~51,500 LOC (33.4k Rust + 18.1k TypeScript) across 5 Rust crat
 
 **Architecture:** Pure `apply(state, action) -> ActionResult` reducer pattern. Event-driven with discriminated unions across the WASM boundary via serde + tsify. Three Zustand stores (game, UI, animation) + preferences store. Transport-agnostic `EngineAdapter` interface (WASM, Tauri IPC, WebSocket). AudioManager singleton with Web Audio API.
 
-**Card format:** MTGJSON (MIT) for card metadata + own typed JSON ability definitions. Card file parser available behind `forge-compat` feature gate for development/migration use.
+**Card format:** MTGJSON (MIT) for card metadata + own typed ability definitions via oracle parser.
 
 **Standard coverage:** 100% of curated 78-card Standard-legal subset supported, enforced by CI gate.
 
 ## Constraints
 
-- **Card format**: MTGJSON (MIT) for card metadata + own typed JSON ability format — legacy card file parser behind `forge-compat` feature gate
+- **Card format**: MTGJSON (MIT) for card metadata + own typed ability definitions via oracle parser.
 - **Engine language**: Rust — compiles to both native (Tauri) and WASM (PWA) from same source
 - **Frontend**: React + TypeScript — rendered in Tauri webview (desktop) or browser (PWA)
 - **Desktop wrapper**: Tauri v2 — native performance, small binary, iOS/Android support planned
@@ -127,7 +125,7 @@ Shipped v1.1 with ~51,500 LOC (33.4k Rust + 18.1k TypeScript) across 5 Rust crat
 | Step-based animation queue with event normalizer | Groups related game events into visual steps for smooth playback | ✓ Good — configurable speed, VFX quality levels, death creature persistence |
 | BackFaceData for symmetric DFC transform | Both faces preserved for unlimited round-trip transforms | ✓ Good — reused for morph/manifest face-down mechanics |
 | Standard card curation by name (not set code) | Name-based matching works across printings | ✓ Good — 78 cards, 79 faces, CI gate prevents regressions |
-| MIT/Apache-2.0 dual license | Removes GPL coupling from Forge card data, follows Rust ecosystem convention | ✓ Good — clean IP with MTGJSON (MIT) as sole external data source |
+| MIT/Apache-2.0 dual license | ✓ Good — clean IP with MTGJSON (MIT) as sole external data source |
 
 ## Current Milestone: v1.2 Migrate Data Source & Add Tests
 
@@ -137,7 +135,6 @@ Shipped v1.1 with ~51,500 LOC (33.4k Rust + 18.1k TypeScript) across 5 Rust crat
 - MTGJSON integration for card metadata
 - Own typed JSON ability/trigger/effect schema
 - Migration of 78 curated Standard cards
-- Remove Forge data dependency (parser optional/dev-only)
 - MIT/Apache-2.0 relicensing
 - Comprehensive rules correctness test suite (XMage MIT reference)
 

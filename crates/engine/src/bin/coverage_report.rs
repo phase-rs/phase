@@ -5,12 +5,13 @@ use std::process;
 
 use engine::database::CardDatabase;
 use engine::game::coverage::{
-    analyze_standard_coverage, is_fully_covered, CardCoverageResult, CoverageSummary,
+    analyze_coverage, is_fully_covered, CardCoverageResult, CoverageSummary,
 };
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let ci_mode = args.iter().any(|a| a == "--ci");
+    let all_mode = args.iter().any(|a| a == "--all");
 
     let path = args
         .iter()
@@ -21,13 +22,14 @@ fn main() {
         .map(PathBuf::from);
 
     let Some(path) = path else {
-        eprintln!("Usage: coverage-report <data-root> [--ci]");
+        eprintln!("Usage: coverage-report <data-root> [--ci] [--all]");
         eprintln!("  Or set PHASE_CARDS_PATH environment variable");
         eprintln!();
         eprintln!("Loads cards from <data-root>/card-data.json (pre-processed export).");
         eprintln!();
         eprintln!("Flags:");
-        eprintln!("  --ci    Exit with code 1 if any cards are unsupported");
+        eprintln!("  --ci    Exit with code 1 if any Standard cards are unsupported");
+        eprintln!("  --all   Report coverage for all cards, not just Standard");
         eprintln!();
         eprintln!("Outputting empty coverage summary to stdout.");
         let empty = CoverageSummary {
@@ -63,19 +65,23 @@ fn main() {
         }
     };
 
-    let summary = analyze_standard_coverage(&db);
+    let summary = analyze_coverage(&db);
 
-    // Filter to only Standard manifest cards
-    let manifest_path = path.join("standard-cards.txt");
-    let summary = match load_manifest(&manifest_path) {
-        Ok(manifest_names) => filter_to_manifest(summary, &manifest_names),
-        Err(e) => {
-            eprintln!(
-                "Error loading manifest from {}: {}",
-                manifest_path.display(),
-                e
-            );
-            process::exit(1);
+    // Filter to Standard manifest cards unless --all is set
+    let summary = if all_mode {
+        summary
+    } else {
+        let manifest_path = path.join("standard-cards.txt");
+        match load_manifest(&manifest_path) {
+            Ok(manifest_names) => filter_to_manifest(summary, &manifest_names),
+            Err(e) => {
+                eprintln!(
+                    "Error loading manifest from {}: {}",
+                    manifest_path.display(),
+                    e
+                );
+                process::exit(1);
+            }
         }
     };
 

@@ -209,7 +209,12 @@ fn order_with_dependencies(
     // Start with timestamp ordering as fallback; CDAs sort first per CR 604.3
     let mut sorted: Vec<&ActiveContinuousEffect> = effects.to_vec();
     sorted.sort_by_key(|e| {
-        (!e.characteristic_defining, e.timestamp, e.source_id.0, e.def_index)
+        (
+            !e.characteristic_defining,
+            e.timestamp,
+            e.source_id.0,
+            e.def_index,
+        )
     });
 
     let mut graph = DiGraph::<usize, ()>::new();
@@ -300,7 +305,12 @@ fn filter_references_ability(filter: &TargetFilter) -> bool {
 fn order_by_timestamp(effects: &[&ActiveContinuousEffect]) -> Vec<ActiveContinuousEffect> {
     let mut sorted: Vec<ActiveContinuousEffect> = effects.iter().map(|e| (*e).clone()).collect();
     sorted.sort_by_key(|e| {
-        (!e.characteristic_defining, e.timestamp, e.source_id.0, e.def_index)
+        (
+            !e.characteristic_defining,
+            e.timestamp,
+            e.source_id.0,
+            e.def_index,
+        )
     });
     sorted
 }

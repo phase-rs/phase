@@ -108,7 +108,7 @@ Follow existing patterns:
 - **Never use boolean flags** as a substitute for a proper enum variant. Boolean flags create
   undefined combinations and obscure intent.
 - Mark optional fields `#[serde(default)]` so old card-data.json files are still deserializable.
-- Add the variant name to `effect_variant_name()` and `is_known_effect()`.
+- Add the variant name to `effect_variant_name()` and a dispatch arm to `resolve_effect()`.
 
 ```rust
 // Good: mutually exclusive cases in the type system

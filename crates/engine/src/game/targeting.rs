@@ -1,83 +1,47 @@
 use crate::types::ability::TargetRef;
-use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{Keyword, ProtectionTarget};
-use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
-
-/// Parse ValidTgts$ filter string and return all legal targets.
-pub fn find_legal_targets(
-    state: &GameState,
-    filter: &str,
-    source_controller: PlayerId,
-    source_id: ObjectId,
-) -> Vec<TargetRef> {
-    let mut targets = Vec::new();
-
-    match filter {
-        "Any" => {
-            // All creatures on battlefield + all players
-            add_creatures(state, &mut targets, None, source_controller, source_id);
-            add_players(state, &mut targets);
-        }
-        "Creature" => {
-            add_creatures(state, &mut targets, None, source_controller, source_id);
-        }
-        "Creature.YouCtrl" => {
-            add_creatures(
-                state,
-                &mut targets,
-                Some(ControlFilter::YouCtrl(source_controller)),
-                source_controller,
-                source_id,
-            );
-        }
-        "Creature.OppCtrl" => {
-            add_creatures(
-                state,
-                &mut targets,
-                Some(ControlFilter::OppCtrl(source_controller)),
-                source_controller,
-                source_id,
-            );
-        }
-        "Player" => {
-            add_players(state, &mut targets);
-        }
-        "Card" => {
-            // Target spells on the stack (for Counterspell etc.)
-            add_stack_spells(state, &mut targets);
-        }
-        _ if filter.starts_with("Creature.non") => {
-            let color_str = &filter["Creature.non".len()..];
-            let excluded = parse_color(color_str);
-            add_creatures_color_filter(state, &mut targets, excluded, source_controller, source_id);
-        }
-        _ => {
-            // Unknown filter -- return empty (no legal targets)
-        }
-    }
-
-    targets
-}
 
 /// Find legal targets using a typed TargetFilter.
 ///
 /// Evaluates battlefield objects against the filter using the typed filter system,
 /// and includes players/stack spells where appropriate.
-pub fn find_legal_targets_typed(
+pub fn find_legal_targets(
     state: &GameState,
     filter: &crate::types::ability::TargetFilter,
     source_controller: PlayerId,
     source_id: ObjectId,
 ) -> Vec<TargetRef> {
-    use crate::types::ability::{TargetFilter, TypeFilter};
+    use crate::types::ability::{ControllerRef, TargetFilter, TypeFilter};
     let mut targets = Vec::new();
 
     // Check if filter could match players
     if matches!(filter, TargetFilter::Any | TargetFilter::Player) {
         add_players(state, &mut targets);
+    }
+
+    // Typed filter with no card_type targets players, not permanents.
+    // e.g. "target opponent" → Typed { card_type: None, controller: Opponent }
+    if let TargetFilter::Typed {
+        card_type: None,
+        controller,
+        ..
+    } = filter
+    {
+        for player in &state.players {
+            let is_opponent = player.id != source_controller;
+            let include = match controller {
+                Some(ControllerRef::Opponent) => is_opponent,
+                Some(ControllerRef::You) => !is_opponent,
+                None => true,
+            };
+            if include {
+                targets.push(TargetRef::Player(player.id));
+            }
+        }
+        return targets;
     }
 
     // Check if filter could match stack spells (Card type or Any)
@@ -115,11 +79,11 @@ pub fn find_legal_targets_typed(
     targets
 }
 
-/// Recheck targets on resolution, returns only still-legal targets.
+/// Recheck targets on resolution using typed filter, returns only still-legal targets.
 pub fn validate_targets(
     state: &GameState,
     targets: &[TargetRef],
-    filter: &str,
+    filter: &crate::types::ability::TargetFilter,
     source_controller: PlayerId,
     source_id: ObjectId,
 ) -> Vec<TargetRef> {
@@ -140,74 +104,6 @@ pub fn check_fizzle(original_targets: &[TargetRef], legal_targets: &[TargetRef])
 }
 
 // --- Internal helpers ---
-
-enum ControlFilter {
-    YouCtrl(PlayerId),
-    OppCtrl(PlayerId),
-}
-
-fn add_creatures(
-    state: &GameState,
-    targets: &mut Vec<TargetRef>,
-    control: Option<ControlFilter>,
-    source_controller: PlayerId,
-    source_id: ObjectId,
-) {
-    for &obj_id in &state.battlefield {
-        let obj = match state.objects.get(&obj_id) {
-            Some(o) => o,
-            None => continue,
-        };
-        if !obj.card_types.core_types.contains(&CoreType::Creature) {
-            continue;
-        }
-        if let Some(ref cf) = control {
-            match cf {
-                ControlFilter::YouCtrl(controller) => {
-                    if obj.controller != *controller {
-                        continue;
-                    }
-                }
-                ControlFilter::OppCtrl(controller) => {
-                    if obj.controller == *controller {
-                        continue;
-                    }
-                }
-            }
-        }
-        if !can_target(obj, source_controller, source_id, state) {
-            continue;
-        }
-        targets.push(TargetRef::Object(obj_id));
-    }
-}
-
-fn add_creatures_color_filter(
-    state: &GameState,
-    targets: &mut Vec<TargetRef>,
-    excluded_color: Option<ManaColor>,
-    source_controller: PlayerId,
-    source_id: ObjectId,
-) {
-    for &obj_id in &state.battlefield {
-        let obj = match state.objects.get(&obj_id) {
-            Some(o) => o,
-            None => continue,
-        };
-        if !obj.card_types.core_types.contains(&CoreType::Creature) {
-            continue;
-        }
-        if let Some(color) = excluded_color {
-            if obj.color.contains(&color) {
-                continue;
-            }
-        }
-        if !can_target(obj, source_controller, source_id, state) {
-            continue;
-        }
-        targets.push(TargetRef::Object(obj_id));
-    }
-}
 
 fn add_stack_spells(state: &GameState, targets: &mut Vec<TargetRef>) {
     for entry in &state.stack {
@@ -264,21 +160,11 @@ fn can_target(
     true
 }
 
-fn parse_color(s: &str) -> Option<ManaColor> {
-    match s {
-        "White" => Some(ManaColor::White),
-        "Blue" => Some(ManaColor::Blue),
-        "Black" => Some(ManaColor::Black),
-        "Red" => Some(ManaColor::Red),
-        "Green" => Some(ManaColor::Green),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::zones::Zone;
 
@@ -314,21 +200,20 @@ mod tests {
         (state, c0, c1)
     }
 
-    #[test]
-    fn find_legal_targets_any_returns_creatures_and_players() {
-        let (state, c0, c1) = setup_with_creatures();
-        let targets = find_legal_targets(&state, "Any", PlayerId(0), ObjectId(99));
-        assert!(targets.contains(&TargetRef::Object(c0)));
-        assert!(targets.contains(&TargetRef::Object(c1)));
-        assert!(targets.contains(&TargetRef::Player(PlayerId(0))));
-        assert!(targets.contains(&TargetRef::Player(PlayerId(1))));
-        assert_eq!(targets.len(), 4);
+    fn creature_filter() -> TargetFilter {
+        TargetFilter::Typed {
+            card_type: Some(TypeFilter::Creature),
+            subtype: None,
+            controller: None,
+            properties: vec![],
+        }
     }
 
     #[test]
     fn find_legal_targets_creature_returns_only_creatures() {
         let (state, c0, c1) = setup_with_creatures();
-        let targets = find_legal_targets(&state, "Creature", PlayerId(0), ObjectId(99));
+        let targets =
+            find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(c0)));
         assert!(targets.contains(&TargetRef::Object(c1)));
         assert_eq!(targets.len(), 2);
@@ -344,8 +229,8 @@ mod tests {
             .keywords
             .push(Keyword::Hexproof);
 
-        // Player 0 tries to target player 1's hexproof creature
-        let targets = find_legal_targets(&state, "Creature", PlayerId(0), ObjectId(99));
+        let targets =
+            find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99));
         assert!(!targets.contains(&TargetRef::Object(c1)));
     }
 
@@ -359,8 +244,8 @@ mod tests {
             .keywords
             .push(Keyword::Hexproof);
 
-        // Player 1 (controller) can target their own hexproof creature
-        let targets = find_legal_targets(&state, "Creature", PlayerId(1), ObjectId(99));
+        let targets =
+            find_legal_targets(&state, &creature_filter(), PlayerId(1), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(c1)));
     }
 
@@ -374,9 +259,10 @@ mod tests {
             .keywords
             .push(Keyword::Shroud);
 
-        // Neither player can target a shroud creature
-        let targets_p0 = find_legal_targets(&state, "Creature", PlayerId(0), ObjectId(99));
-        let targets_p1 = find_legal_targets(&state, "Creature", PlayerId(1), ObjectId(99));
+        let targets_p0 =
+            find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99));
+        let targets_p1 =
+            find_legal_targets(&state, &creature_filter(), PlayerId(1), ObjectId(99));
         assert!(!targets_p0.contains(&TargetRef::Object(c1)));
         assert!(!targets_p1.contains(&TargetRef::Object(c1)));
     }
@@ -386,10 +272,10 @@ mod tests {
         let (mut state, c0, c1) = setup_with_creatures();
         let original = vec![TargetRef::Object(c0), TargetRef::Object(c1)];
 
-        // Remove c1 from battlefield
         state.battlefield.retain(|id| *id != c1);
 
-        let legal = validate_targets(&state, &original, "Creature", PlayerId(0), ObjectId(99));
+        let legal =
+            validate_targets(&state, &original, &creature_filter(), PlayerId(0), ObjectId(99));
         assert!(legal.contains(&TargetRef::Object(c0)));
         assert!(!legal.contains(&TargetRef::Object(c1)));
     }
@@ -452,7 +338,7 @@ mod tests {
             .push(ManaColor::Red);
 
         // Red source cannot target creature with protection from red
-        let targets = find_legal_targets(&state, "Creature", PlayerId(0), red_source);
+        let targets = find_legal_targets(&state, &creature_filter(), PlayerId(0), red_source);
         assert!(!targets.contains(&TargetRef::Object(c1)));
     }
 
@@ -487,7 +373,7 @@ mod tests {
             .push(ManaColor::Blue);
 
         // Blue source CAN target creature with protection from red
-        let targets = find_legal_targets(&state, "Creature", PlayerId(0), blue_source);
+        let targets = find_legal_targets(&state, &creature_filter(), PlayerId(0), blue_source);
         assert!(targets.contains(&TargetRef::Object(c1)));
     }
 
@@ -507,11 +393,11 @@ mod tests {
             }));
 
         // Ward creature can still be targeted (cost enforcement is separate)
-        let targets = find_legal_targets(&state, "Creature", PlayerId(0), ObjectId(99));
+        let targets = find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(c1)));
     }
 
-    // ---- find_legal_targets_typed tests ----
+    // ---- find_legal_targets tests ----
 
     use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter};
 
@@ -561,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn find_legal_targets_typed_creature_filter() {
+    fn find_legal_targets_creature_filter() {
         let (state, c0, c1, _land) = setup_with_typed_creatures();
         let filter = TargetFilter::Typed {
             card_type: Some(TypeFilter::Creature),
@@ -569,14 +455,14 @@ mod tests {
             controller: None,
             properties: vec![],
         };
-        let targets = find_legal_targets_typed(&state, &filter, PlayerId(0), ObjectId(99));
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(c0)));
         assert!(targets.contains(&TargetRef::Object(c1)));
         assert_eq!(targets.len(), 2);
     }
 
     #[test]
-    fn find_legal_targets_typed_permanent_opponent_nonland() {
+    fn find_legal_targets_permanent_opponent_nonland() {
         let (state, _c0, c1, _land) = setup_with_typed_creatures();
         let filter = TargetFilter::Typed {
             card_type: Some(TypeFilter::Permanent),
@@ -586,17 +472,17 @@ mod tests {
                 value: "Land".to_string(),
             }],
         };
-        let targets = find_legal_targets_typed(&state, &filter, PlayerId(0), ObjectId(99));
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
         // Should find opponent's creature but not their land
         assert!(targets.contains(&TargetRef::Object(c1)));
         assert_eq!(targets.len(), 1);
     }
 
     #[test]
-    fn find_legal_targets_typed_any_returns_creatures_and_players() {
+    fn find_legal_targets_any_returns_creatures_and_players() {
         let (state, c0, c1, land) = setup_with_typed_creatures();
         let targets =
-            find_legal_targets_typed(&state, &TargetFilter::Any, PlayerId(0), ObjectId(99));
+            find_legal_targets(&state, &TargetFilter::Any, PlayerId(0), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(c0)));
         assert!(targets.contains(&TargetRef::Object(c1)));
         assert!(targets.contains(&TargetRef::Object(land)));
@@ -605,17 +491,31 @@ mod tests {
     }
 
     #[test]
-    fn find_legal_targets_typed_player_returns_only_players() {
+    fn find_legal_targets_player_returns_only_players() {
         let (state, _c0, _c1, _land) = setup_with_typed_creatures();
         let targets =
-            find_legal_targets_typed(&state, &TargetFilter::Player, PlayerId(0), ObjectId(99));
+            find_legal_targets(&state, &TargetFilter::Player, PlayerId(0), ObjectId(99));
         assert_eq!(targets.len(), 2);
         assert!(targets.contains(&TargetRef::Player(PlayerId(0))));
         assert!(targets.contains(&TargetRef::Player(PlayerId(1))));
     }
 
     #[test]
-    fn find_legal_targets_typed_respects_hexproof() {
+    fn find_legal_targets_opponent_as_player() {
+        let (state, _c0, _c1, _land) = setup_with_typed_creatures();
+        let filter = TargetFilter::Typed {
+            card_type: None,
+            subtype: None,
+            controller: Some(ControllerRef::Opponent),
+            properties: vec![],
+        };
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
+        assert_eq!(targets.len(), 1);
+        assert!(targets.contains(&TargetRef::Player(PlayerId(1))));
+    }
+
+    #[test]
+    fn find_legal_targets_respects_hexproof() {
         let (mut state, _c0, c1, _land) = setup_with_typed_creatures();
         state
             .objects
@@ -630,12 +530,12 @@ mod tests {
             properties: vec![],
         };
         // Player 0 can't target hexproof creature controlled by player 1
-        let targets = find_legal_targets_typed(&state, &filter, PlayerId(0), ObjectId(99));
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
         assert!(!targets.contains(&TargetRef::Object(c1)));
     }
 
     #[test]
-    fn find_legal_targets_typed_card_returns_stack_spells() {
+    fn find_legal_targets_card_returns_stack_spells() {
         let (mut state, _c0, _c1, _land) = setup_with_typed_creatures();
         // Add a spell to the stack
         use crate::types::ability::{Effect, ResolvedAbility};
@@ -663,7 +563,7 @@ mod tests {
             controller: None,
             properties: vec![],
         };
-        let targets = find_legal_targets_typed(&state, &filter, PlayerId(0), ObjectId(99));
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(spell_id)));
     }
 }

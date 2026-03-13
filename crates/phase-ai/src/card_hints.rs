@@ -1,5 +1,5 @@
 use engine::game::players;
-use engine::types::ability::effect_variant_name;
+use engine::types::ability::Effect;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
@@ -46,19 +46,19 @@ pub fn should_play_now(state: &GameState, action: &GameAction, player: PlayerId)
             let has_destroy = obj
                 .abilities
                 .iter()
-                .any(|a| effect_variant_name(&a.effect) == "Destroy");
+                .any(|a| matches!(a.effect, Effect::Destroy { .. }));
             let has_damage = obj
                 .abilities
                 .iter()
-                .any(|a| effect_variant_name(&a.effect) == "DealDamage");
+                .any(|a| matches!(a.effect, Effect::DealDamage { .. }));
             let has_pump = obj
                 .abilities
                 .iter()
-                .any(|a| effect_variant_name(&a.effect) == "Pump");
+                .any(|a| matches!(a.effect, Effect::Pump { .. }));
             let has_counter = obj
                 .abilities
                 .iter()
-                .any(|a| effect_variant_name(&a.effect) == "Counter");
+                .any(|a| matches!(a.effect, Effect::Counter { .. }));
 
             // Removal: higher priority when opponents have high-value creatures.
             // In multiplayer, prefer targeting highest-threat opponent's best creature.

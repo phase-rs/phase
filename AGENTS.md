@@ -14,12 +14,15 @@ phase.rs is a Magic: The Gathering game engine written in Rust (compiling to nat
 - **The engine is the source of truth.** All game logic, validation, derived state, and rules live in the `engine` crate. Transport layers (WASM bridge, Tauri IPC, WebSocket server) are thin serialization boundaries — zero game logic allowed.
 - **Push logic down, not out.** If multiple consumers need the same behavior, it belongs in the engine. Never duplicate logic across adapters. When in doubt, put it in the engine.
 - **Extend, don't hack.** New features should slot cleanly into existing patterns (effect handlers, game modules, ability definitions). If a feature requires working around the architecture, the architecture should be extended first.
+- **Compose from building blocks.** Every new capability should be decomposed into reusable primitives that unlock future features. A one-off solution that handles one card is worse than a composable building block that handles fifty. Before writing specific logic, ask: "What is the general pattern here?" and build that instead. Examples: `contains_possessive`/`contains_object_pronoun` for Oracle text matching, `ChangeZone` + `Shuffle` composition for compound shuffles, the sub_ability chain for multi-step effects.
+- **Production quality, always.** Write code as if a professional team will audit every line. No "good enough for now." No tech debt IOUs. Every function should be clear, every abstraction should earn its keep, and every pattern should be consistent across the codebase. If you're about to write something that duplicates existing logic, stop and factor out the shared building block first.
 
 ### When in Doubt
 
 - Is this logic in the right crate? → It probably belongs in `engine`.
 - Am I fighting the type system? → Redesign the types, don't work around them.
 - Should I add a special case? → Extend the existing pattern instead.
+- Am I solving one card or a pattern? → Build the building block, not the special case.
 - Is this the Rust way? → Check how `std` and well-known crates solve similar problems.
 
 ## Setup
@@ -48,6 +51,7 @@ cargo test-all                      # cargo test --all
 cargo clippy-strict                 # clippy -D warnings
 cargo export-cards -- data/         # Run card-data-export binary
 cargo serve                         # Run phase-server (release)
+cargo coverage                      # Card support coverage report (reads data/card-data.json)
 ```
 
 ### WASM Build
@@ -78,7 +82,7 @@ pnpm tauri:build                    # Tauri desktop build
 
 ### Coverage Report
 ```bash
-cargo run --bin coverage-report -- data/        # Card support coverage (JSON report)
+cargo coverage                                  # Card support coverage (JSON report, alias)
 cargo run --bin coverage-report -- data/ --ci   # CI mode: exits 1 if gaps found
 ```
 
@@ -111,7 +115,6 @@ phase-server    — Axum WebSocket server for multiplayer
 ### Card Data Format (`data/`)
 
 - **`mtgjson/`** — MTGJSON atomic card data
-- **`cardsfolder/`** — Forge `.txt` card files (sparse-checked out via `gen-card-data.sh`)
 - **`card-data.json`** → symlinked to `client/public/card-data.json` for runtime use
 
 ### WASM Bridge (`crates/engine-wasm/`)
@@ -162,8 +165,19 @@ State is filtered per-player (`filter_state_for_player`) to hide opponent's hand
 ## Documentation (`docs/`)
 
 - **`docs/parser-instructions.md`** — Oracle parser architecture and contribution guide: how to add new effect types, when to intercept before subject stripping, enum patterns, and common pitfalls.
+- **`.claude/skills/add-engine-effect/SKILL.md`** — Complete checklist for adding a new effect to the engine: types → parser → resolver → targeting → multiplayer filter → frontend → AI → tests. Covers every registration point that must be updated in lockstep. **Use this as the authoritative guide for any new effect work.**
 
 ## Conventions
+
+### Rust Idioms — Write It Right the First Time
+
+These patterns must be used on first write, not fixed after clippy complains:
+
+- **`strip_prefix`/`strip_suffix`** over `starts_with` + manual slicing: `if let Some(rest) = s.strip_prefix("foo")` not `if s.starts_with("foo") { &s[3..] }`
+- **Iterator methods** over range-indexed loops: `for item in slice.iter().skip(1)` not `for i in 1..slice.len()`
+- **`rsplit(' ').next()`** to get the last word, not `rsplit().collect::<Vec>().first()`
+- **Exhaustive `match`** without wildcard fallbacks when the enum is known — let the compiler catch missing arms
+- **Reuse existing building blocks** before writing one-off string logic. Search the codebase for helpers like `contains_possessive`, `contains_object_pronoun`, `parse_target`, `parse_type_phrase`, `parse_number` in `oracle_util.rs` and `oracle_target.rs`
 
 - Rust: `cargo fmt` + `clippy -D warnings` enforced in CI
 - TypeScript: ESLint with `@typescript-eslint/recommended`, unused vars prefixed with `_`

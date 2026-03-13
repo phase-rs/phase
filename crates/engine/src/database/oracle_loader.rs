@@ -144,7 +144,11 @@ fn synthesize_equip(face: &mut CardFace) {
 /// static ability that grants all creature types (expanded at runtime via
 /// `GameState::all_creature_types`).
 fn synthesize_changeling_cda(face: &mut CardFace) {
-    if face.keywords.iter().any(|k| matches!(k, Keyword::Changeling)) {
+    if face
+        .keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Changeling))
+    {
         face.static_abilities.push(StaticDefinition {
             mode: crate::types::statics::StaticMode::Continuous,
             affected: Some(TargetFilter::SelfRef),

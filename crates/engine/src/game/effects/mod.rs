@@ -90,53 +90,10 @@ pub fn resolve_effect(
     }
 }
 
-/// Returns true if the given api_type string is a known effect handler.
-/// Used by coverage analysis to check card support.
-pub fn is_known_effect(api_type: &str) -> bool {
-    matches!(
-        api_type,
-        "DealDamage"
-            | "Draw"
-            | "Pump"
-            | "Destroy"
-            | "Counter"
-            | "Token"
-            | "GainLife"
-            | "LoseLife"
-            | "Tap"
-            | "Untap"
-            | "AddCounter"
-            | "RemoveCounter"
-            | "Sacrifice"
-            | "DiscardCard"
-            | "Mill"
-            | "Scry"
-            | "PumpAll"
-            | "DamageAll"
-            | "DestroyAll"
-            | "ChangeZone"
-            | "ChangeZoneAll"
-            | "Dig"
-            | "GainControl"
-            | "Attach"
-            | "Surveil"
-            | "Fight"
-            | "Bounce"
-            | "Explore"
-            | "Proliferate"
-            | "CopySpell"
-            | "ChooseCard"
-            | "PutCounter"
-            | "MultiplyCounter"
-            | "Animate"
-            | "Effect"
-            | "Cleanup"
-            | "Mana"
-            | "Discard"
-            | "Shuffle"
-            | "SearchLibrary"
-            | "RevealHand"
-    )
+/// Returns true if the given effect has a handler in the engine.
+/// `Unimplemented` effects are the only ones without handlers.
+pub fn is_known_effect(effect: &Effect) -> bool {
+    !matches!(effect, Effect::Unimplemented { .. })
 }
 
 /// Resolve an ability and follow its sub_ability chain using typed nested structs.
@@ -202,54 +159,18 @@ mod tests {
     use crate::types::zones::Zone;
 
     #[test]
-    fn is_known_effect_covers_39_types() {
-        let expected = [
-            "DealDamage",
-            "Draw",
-            "ChangeZone",
-            "Pump",
-            "Destroy",
-            "Counter",
-            "Token",
-            "GainLife",
-            "LoseLife",
-            "Tap",
-            "Untap",
-            "AddCounter",
-            "RemoveCounter",
-            "Sacrifice",
-            "DiscardCard",
-            "Mill",
-            "Scry",
-            "PumpAll",
-            "DamageAll",
-            "DestroyAll",
-            "ChangeZoneAll",
-            "Dig",
-            "GainControl",
-            "Attach",
-            "Surveil",
-            "Fight",
-            "Bounce",
-            "Explore",
-            "Proliferate",
-            "CopySpell",
-            "ChooseCard",
-            "PutCounter",
-            "MultiplyCounter",
-            "Animate",
-            "Effect",
-            "Cleanup",
-            "Mana",
-            "Discard",
-            "Shuffle",
-            "SearchLibrary",
-            "RevealHand",
-        ];
-        for name in &expected {
-            assert!(is_known_effect(name), "missing: {}", name);
-        }
-        assert_eq!(expected.len(), 41);
+    fn is_known_effect_rejects_unimplemented() {
+        let known = Effect::DealDamage {
+            amount: DamageAmount::Fixed(1),
+            target: TargetFilter::Any,
+        };
+        assert!(is_known_effect(&known));
+
+        let unknown = Effect::Unimplemented {
+            name: "Fateseal".to_string(),
+            description: None,
+        };
+        assert!(!is_known_effect(&unknown));
     }
 
     #[test]

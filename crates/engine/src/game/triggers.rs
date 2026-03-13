@@ -229,7 +229,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
     for trigger in pending {
         // Check if this trigger's ability has targeting requirements
         if let Some(target_filter) = extract_target_filter_from_effect(&trigger.ability.effect) {
-            let legal = targeting::find_legal_targets_typed(
+            let legal = targeting::find_legal_targets(
                 state,
                 target_filter,
                 trigger.controller,
@@ -423,7 +423,8 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
         | Effect::CopySpell { target, .. }
         | Effect::AddCounter { target, .. }
         | Effect::RemoveCounter { target, .. }
-        | Effect::PutCounter { target, .. } => {
+        | Effect::PutCounter { target, .. }
+        | Effect::RevealHand { target, .. } => {
             if matches!(
                 target,
                 TargetFilter::None | TargetFilter::SelfRef | TargetFilter::Controller
@@ -1645,8 +1646,8 @@ pub mod tests {
     use crate::game::filter::matches_target_filter;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityKind, ControllerRef, GainLifePlayer, LifeAmount, TargetFilter, TriggerDefinition,
-        TypeFilter,
+        AbilityKind, ControllerRef, FilterProp, GainLifePlayer, LifeAmount, TargetFilter,
+        TriggerDefinition, TypeFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
@@ -3286,5 +3287,109 @@ pub mod tests {
 
         // Should NOT be on the stack
         assert_eq!(state.stack.len(), 0);
+    }
+
+    #[test]
+    fn deep_cavern_bat_etb_trigger_fires() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // Create Deep-Cavern Bat on battlefield with RevealHand ETB trigger
+        let bat = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Deep-Cavern Bat".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bat).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            obj.trigger_definitions.push(TriggerDefinition {
+                mode: TriggerMode::ChangesZone,
+                execute: Some(Box::new(AbilityDefinition {
+                    kind: AbilityKind::Spell,
+                    effect: Effect::RevealHand {
+                        target: TargetFilter::Typed {
+                            card_type: None,
+                            subtype: None,
+                            controller: Some(ControllerRef::Opponent),
+                            properties: vec![],
+                        },
+                        card_filter: TargetFilter::Typed {
+                            card_type: Some(TypeFilter::Permanent),
+                            subtype: None,
+                            controller: None,
+                            properties: vec![FilterProp::NonType {
+                                value: "Land".to_string(),
+                            }],
+                        },
+                    },
+                    cost: None,
+                    sub_ability: Some(Box::new(AbilityDefinition {
+                        kind: AbilityKind::Spell,
+                        effect: Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Exile,
+                            target: TargetFilter::Any,
+                        },
+                        cost: None,
+                        sub_ability: None,
+                        duration: Some(crate::types::ability::Duration::UntilHostLeavesPlay),
+                        description: None,
+                        target_prompt: None,
+                        sorcery_speed: false,
+                    })),
+                    duration: None,
+                    description: None,
+                    target_prompt: None,
+                    sorcery_speed: false,
+                })),
+                valid_card: Some(TargetFilter::SelfRef),
+                origin: None,
+                destination: Some(Zone::Battlefield),
+                trigger_zones: vec![Zone::Battlefield],
+                phase: None,
+                optional: false,
+                combat_damage: false,
+                secondary: false,
+                valid_target: None,
+                valid_source: None,
+                description: None,
+                constraint: None,
+                condition: None,
+            });
+        }
+
+        // Simulate bat entering battlefield
+        let events = vec![GameEvent::ZoneChanged {
+            object_id: bat,
+            from: Zone::Stack,
+            to: Zone::Battlefield,
+        }];
+
+        process_triggers(&mut state, &events);
+
+        // In 2-player game, one opponent → auto-target → push to stack
+        assert!(
+            state.pending_trigger.is_none(),
+            "Should auto-target single opponent, not set pending"
+        );
+        assert_eq!(state.stack.len(), 1, "Trigger should be on the stack");
+
+        let entry = &state.stack[0];
+        assert_eq!(entry.source_id, bat);
+        match &entry.kind {
+            StackEntryKind::TriggeredAbility { ability, .. } => {
+                assert_eq!(ability.targets.len(), 1);
+                assert_eq!(
+                    ability.targets[0],
+                    crate::types::ability::TargetRef::Player(PlayerId(1))
+                );
+                assert!(matches!(ability.effect, Effect::RevealHand { .. }));
+            }
+            _ => panic!("Expected TriggeredAbility on stack"),
+        }
     }
 }

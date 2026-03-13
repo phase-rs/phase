@@ -1,11 +1,8 @@
 use crate::database::CardDatabase;
-use crate::game::effects::is_known_effect;
 use crate::game::game_object::GameObject;
 use crate::game::static_abilities::{build_static_registry, StaticAbilityHandler};
 use crate::game::triggers::build_trigger_registry;
-use crate::types::ability::{
-    effect_variant_name, AbilityDefinition, StaticDefinition, TriggerDefinition,
-};
+use crate::types::ability::{AbilityDefinition, Effect, StaticDefinition, TriggerDefinition};
 use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
@@ -46,9 +43,8 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
 
     // 2. Check abilities against known effect types
     for def in &obj.abilities {
-        let api = effect_variant_name(&def.effect);
-        if !api.is_empty() && !is_known_effect(api) {
-            missing.push(format!("Effect: {api}"));
+        if let Effect::Unimplemented { name, .. } = &def.effect {
+            missing.push(format!("Effect: {name}"));
         }
     }
 
@@ -73,10 +69,9 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
     missing
 }
 
-/// Analyze Standard-legal card coverage by checking which cards have
-/// all their abilities, triggers, keywords, and static abilities
-/// supported by the engine's registries.
-pub fn analyze_standard_coverage(card_db: &CardDatabase) -> CoverageSummary {
+/// Analyze card coverage by checking which cards have all their abilities,
+/// triggers, keywords, and static abilities supported by the engine's registries.
+pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
     let trigger_registry = build_trigger_registry();
     let static_registry = build_static_registry();
 
@@ -86,7 +81,7 @@ pub fn analyze_standard_coverage(card_db: &CardDatabase) -> CoverageSummary {
     for (_key, face) in card_db.face_iter() {
         let mut missing = Vec::new();
 
-        // Check abilities (SP$, AB$, DB$ lines)
+        // Check abilities
         check_abilities(&face.abilities, &mut missing);
 
         // Check triggers
@@ -134,9 +129,8 @@ pub fn analyze_standard_coverage(card_db: &CardDatabase) -> CoverageSummary {
 
 fn check_abilities(abilities: &[AbilityDefinition], missing: &mut Vec<String>) {
     for def in abilities {
-        let api = effect_variant_name(&def.effect);
-        if !api.is_empty() && !is_known_effect(api) {
-            let label = format!("Effect:{api}");
+        if let Effect::Unimplemented { name, .. } = &def.effect {
+            let label = format!("Effect:{name}");
             if !missing.contains(&label) {
                 missing.push(label);
             }

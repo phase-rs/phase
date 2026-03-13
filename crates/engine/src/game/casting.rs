@@ -213,7 +213,7 @@ pub fn handle_cast_spell(
             }
         });
         if let Some(filter) = enchant_filter {
-            let legal = targeting::find_legal_targets_typed(state, &filter, player, object_id);
+            let legal = targeting::find_legal_targets(state, &filter, player, object_id);
             if legal.is_empty() {
                 return Err(EngineError::ActionNotAllowed(
                     "No legal targets for Aura".to_string(),
@@ -240,13 +240,11 @@ pub fn handle_cast_spell(
         }
     }
 
-    // Targeting uses typed target_prompt or target filter from ability_def
-    // For now, use string-based targeting via the old filter system
-    // until the typed targeting infrastructure is complete
-    let has_targets = has_targeting_requirement(&ability_def);
-    if has_targets {
-        let valid_tgts = get_valid_tgts_string(&ability_def);
-        let legal = targeting::find_legal_targets(state, &valid_tgts, player, object_id);
+    // Targeting: use typed TargetFilter extracted from the effect
+    if let Some(filter) =
+        super::triggers::extract_target_filter_from_effect(&ability_def.effect)
+    {
+        let legal = targeting::find_legal_targets(state, filter, player, object_id);
         if legal.is_empty() {
             return Err(EngineError::ActionNotAllowed(
                 "No legal targets available".to_string(),
@@ -298,7 +296,7 @@ pub fn spell_has_legal_targets(
             }
         });
         return enchant_filter.is_some_and(|filter| {
-            !targeting::find_legal_targets_typed(state, &filter, player, obj.id).is_empty()
+            !targeting::find_legal_targets(state, &filter, player, obj.id).is_empty()
         });
     }
 
@@ -307,92 +305,9 @@ pub fn spell_has_legal_targets(
         None => return true, // Vanilla permanent needs no targets
     };
 
-    if !has_targeting_requirement(ability_def) {
-        return true;
-    }
-
-    let valid_tgts = get_valid_tgts_string(ability_def);
-    !targeting::find_legal_targets(state, &valid_tgts, player, obj.id).is_empty()
-}
-
-/// Check if an ability definition has a targeting requirement.
-fn has_targeting_requirement(def: &AbilityDefinition) -> bool {
-    use crate::types::ability::TargetFilter;
-    match &def.effect {
-        Effect::DealDamage { target, .. }
-        | Effect::Pump { target, .. }
-        | Effect::Destroy { target, .. }
-        | Effect::Counter { target, .. }
-        | Effect::Tap { target, .. }
-        | Effect::Untap { target, .. }
-        | Effect::Sacrifice { target, .. }
-        | Effect::GainControl { target, .. }
-        | Effect::Attach { target, .. }
-        | Effect::Fight { target, .. }
-        | Effect::Bounce { target, .. }
-        | Effect::CopySpell { target, .. } => !matches!(
-            target,
-            TargetFilter::None | TargetFilter::SelfRef | TargetFilter::Controller
-        ),
-        Effect::GenericEffect {
-            target: Some(target),
-            ..
-        } => !matches!(
-            target,
-            TargetFilter::None | TargetFilter::SelfRef | TargetFilter::Controller
-        ),
-        _ => false,
-    }
-}
-
-/// Extract a string-based filter for targeting compatibility.
-/// This bridges typed TargetFilter to the existing string-based targeting system.
-fn get_valid_tgts_string(def: &AbilityDefinition) -> String {
-    use crate::types::ability::TargetFilter;
-    let target = match &def.effect {
-        Effect::DealDamage { target, .. }
-        | Effect::Pump { target, .. }
-        | Effect::Destroy { target, .. }
-        | Effect::Counter { target, .. }
-        | Effect::Tap { target, .. }
-        | Effect::Untap { target, .. }
-        | Effect::Sacrifice { target, .. }
-        | Effect::GainControl { target, .. }
-        | Effect::Attach { target, .. }
-        | Effect::Fight { target, .. }
-        | Effect::Bounce { target, .. }
-        | Effect::CopySpell { target, .. } => target,
-        Effect::GenericEffect {
-            target: Some(target),
-            ..
-        } => target,
-        _ => return "Any".to_string(),
-    };
-    match target {
-        TargetFilter::Any => "Any".to_string(),
-        TargetFilter::Player => "Player".to_string(),
-        TargetFilter::Controller => "Player.You".to_string(),
-        TargetFilter::Typed {
-            card_type,
-            controller,
-            ..
-        } => {
-            let type_str = match card_type {
-                Some(crate::types::ability::TypeFilter::Creature) => "Creature",
-                Some(crate::types::ability::TypeFilter::Land) => "Land",
-                Some(crate::types::ability::TypeFilter::Artifact) => "Artifact",
-                Some(crate::types::ability::TypeFilter::Enchantment) => "Enchantment",
-                Some(crate::types::ability::TypeFilter::Card) => "Card",
-                _ => "Any",
-            };
-            let ctrl_str = match controller {
-                Some(crate::types::ability::ControllerRef::You) => ".YouCtrl",
-                Some(crate::types::ability::ControllerRef::Opponent) => ".OppCtrl",
-                None => "",
-            };
-            format!("{}{}", type_str, ctrl_str)
-        }
-        _ => "Any".to_string(),
+    match super::triggers::extract_target_filter_from_effect(&ability_def.effect) {
+        Some(filter) => !targeting::find_legal_targets(state, filter, player, obj.id).is_empty(),
+        None => true,
     }
 }
 
@@ -522,9 +437,10 @@ pub fn handle_activate_ability(
     };
 
     // Handle targeting
-    if has_targeting_requirement(&ability_def) {
-        let valid_tgts = get_valid_tgts_string(&ability_def);
-        let legal = targeting::find_legal_targets(state, &valid_tgts, player, source_id);
+    if let Some(filter) =
+        super::triggers::extract_target_filter_from_effect(&ability_def.effect)
+    {
+        let legal = targeting::find_legal_targets(state, filter, player, source_id);
         if legal.is_empty() {
             return Err(EngineError::ActionNotAllowed(
                 "No legal targets available".to_string(),

@@ -653,7 +653,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             if let Some(filter) =
                 triggers::extract_target_filter_from_effect(&trigger.ability.effect)
             {
-                let legal = super::targeting::find_legal_targets_typed(
+                let legal = super::targeting::find_legal_targets(
                     state,
                     filter,
                     trigger.controller,

@@ -15,8 +15,8 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let filter = match &ability.effect {
-        Effect::RevealHand { target } => target.clone(),
+    let card_filter = match &ability.effect {
+        Effect::RevealHand { card_filter, .. } => card_filter.clone(),
         _ => TargetFilter::Any,
     };
 
@@ -63,7 +63,7 @@ pub fn resolve(
     state.waiting_for = WaitingFor::RevealChoice {
         player: ability.controller,
         cards: hand,
-        filter,
+        filter: card_filter,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -86,6 +86,7 @@ mod tests {
         ResolvedAbility::new(
             Effect::RevealHand {
                 target: TargetFilter::Any,
+                card_filter: TargetFilter::Any,
             },
             vec![TargetRef::Player(target_player)],
             ObjectId(100),

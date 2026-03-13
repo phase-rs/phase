@@ -1,5 +1,6 @@
 ---
 source: crates/engine/tests/oracle_parser.rs
+assertion_line: 92
 expression: result
 ---
 {
@@ -113,9 +114,12 @@ expression: result
       "sub_ability": {
         "kind": "Activated",
         "effect": {
-          "type": "Unimplemented",
-          "name": "shuffle",
-          "description": "shuffle their hand into their library"
+          "type": "ChangeZoneAll",
+          "origin": "Hand",
+          "destination": "Library",
+          "target": {
+            "type": "Controller"
+          }
         },
         "cost": null,
         "sub_ability": null,

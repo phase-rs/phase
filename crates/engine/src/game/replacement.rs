@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use indexmap::IndexMap;
 
 use crate::types::ability::{ReplacementCondition, ReplacementMode};
@@ -24,15 +22,9 @@ pub enum ApplyResult {
     Prevented,
 }
 
-pub type ReplacementMatcher =
-    fn(&ProposedEvent, &HashMap<String, String>, ObjectId, &GameState) -> bool;
-pub type ReplacementApplier = fn(
-    ProposedEvent,
-    &HashMap<String, String>,
-    ObjectId,
-    &mut GameState,
-    &mut Vec<GameEvent>,
-) -> ApplyResult;
+pub type ReplacementMatcher = fn(&ProposedEvent, ObjectId, &GameState) -> bool;
+pub type ReplacementApplier =
+    fn(ProposedEvent, ObjectId, &mut GameState, &mut Vec<GameEvent>) -> ApplyResult;
 
 pub struct ReplacementHandlerEntry {
     pub matcher: ReplacementMatcher,
@@ -79,20 +71,14 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
     }
 }
 
-// --- Stub handlers (for 21 recognized-but-unimplemented types) ---
+// --- Stub handler for recognized-but-unimplemented replacement types ---
 
-fn stub_matcher(
-    _event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
+fn stub_matcher(_event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     false
 }
 
 fn stub_applier(
     event: ProposedEvent,
-    _params: &HashMap<String, String>,
     _source: ObjectId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
@@ -100,355 +86,99 @@ fn stub_applier(
     ApplyResult::Modified(event)
 }
 
-// --- Helper: parse zone from Forge param string ---
-
-fn parse_zone(s: &str) -> Option<Zone> {
-    match s {
-        "Battlefield" => Some(Zone::Battlefield),
-        "Graveyard" => Some(Zone::Graveyard),
-        "Hand" => Some(Zone::Hand),
-        "Library" => Some(Zone::Library),
-        "Exile" => Some(Zone::Exile),
-        "Stack" => Some(Zone::Stack),
-        "Command" => Some(Zone::Command),
-        _ => None,
-    }
-}
-
 // --- 1. Moved (ZoneChange) ---
 
-fn moved_matcher(
-    event: &ProposedEvent,
-    params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
-    if let ProposedEvent::ZoneChange { from, to, .. } = event {
-        // Check Origin$ param if present
-        if let Some(origin) = params.get("Origin$") {
-            if let Some(z) = parse_zone(origin) {
-                if *from != z {
-                    return false;
-                }
-            }
-        }
-        // Check Destination$ param if present
-        if let Some(dest) = params.get("Destination$") {
-            if let Some(z) = parse_zone(dest) {
-                if *to != z {
-                    return false;
-                }
-            }
-        }
-        true
-    } else {
-        false
-    }
+fn moved_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    matches!(event, ProposedEvent::ZoneChange { .. })
 }
 
 fn moved_applier(
     event: ProposedEvent,
-    params: &HashMap<String, String>,
     _source: ObjectId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    if let ProposedEvent::ZoneChange {
-        object_id,
-        from,
-        to,
-        cause,
-        enter_tapped,
-        applied,
-    } = event
-    {
-        // NewDestination$ specifies where to redirect
-        if let Some(new_dest) = params.get("NewDestination$") {
-            if let Some(z) = parse_zone(new_dest) {
-                return ApplyResult::Modified(ProposedEvent::ZoneChange {
-                    object_id,
-                    from,
-                    to: z,
-                    cause,
-                    enter_tapped,
-                    applied,
-                });
-            }
-        }
-        // No redirection — pass through unchanged
-        ApplyResult::Modified(ProposedEvent::ZoneChange {
-            object_id,
-            from,
-            to,
-            cause,
-            enter_tapped,
-            applied,
-        })
-    } else {
-        ApplyResult::Modified(event)
-    }
+    ApplyResult::Modified(event)
 }
 
 // --- 2. DamageDone ---
 
-fn damage_done_matcher(
-    event: &ProposedEvent,
-    params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
-    if let ProposedEvent::Damage { is_combat, .. } = event {
-        // DamageType$ filter: Combat or NonCombat
-        if let Some(dtype) = params.get("DamageType$") {
-            match dtype.as_str() {
-                "Combat" if !is_combat => return false,
-                "NonCombat" if *is_combat => return false,
-                _ => {}
-            }
-        }
-        true
-    } else {
-        false
-    }
+fn damage_done_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    matches!(event, ProposedEvent::Damage { .. })
 }
 
 fn damage_done_applier(
     event: ProposedEvent,
-    params: &HashMap<String, String>,
     _source: ObjectId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    if let ProposedEvent::Damage {
-        source_id,
-        target,
-        amount,
-        is_combat,
-        applied,
-    } = event
-    {
-        // Prevention: set amount to 0 or return Prevented
-        if params.get("Prevent").map(|v| v == "True").unwrap_or(false) {
-            return ApplyResult::Prevented;
-        }
-        // Modify amount if specified
-        if let Some(new_amount) = params.get("NewAmount$") {
-            if let Ok(n) = new_amount.parse::<u32>() {
-                return ApplyResult::Modified(ProposedEvent::Damage {
-                    source_id,
-                    target,
-                    amount: n,
-                    is_combat,
-                    applied,
-                });
-            }
-        }
-        ApplyResult::Modified(ProposedEvent::Damage {
-            source_id,
-            target,
-            amount,
-            is_combat,
-            applied,
-        })
-    } else {
-        ApplyResult::Modified(event)
-    }
+    ApplyResult::Modified(event)
 }
 
 // --- 3. Destroy ---
 
-fn destroy_matcher(
-    event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
+fn destroy_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(event, ProposedEvent::Destroy { .. })
 }
 
 fn destroy_applier(
     event: ProposedEvent,
-    params: &HashMap<String, String>,
     _source: ObjectId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    if let ProposedEvent::Destroy {
-        object_id,
-        source,
-        applied,
-    } = event
-    {
-        if params.get("Prevent").map(|v| v == "True").unwrap_or(false) {
-            return ApplyResult::Prevented;
-        }
-        // Redirect to exile instead of destroy
-        if params.get("Exile").map(|v| v == "True").unwrap_or(false) {
-            return ApplyResult::Modified(ProposedEvent::ZoneChange {
-                object_id,
-                from: Zone::Battlefield,
-                to: Zone::Exile,
-                cause: source,
-                enter_tapped: false,
-                applied,
-            });
-        }
-        ApplyResult::Modified(ProposedEvent::Destroy {
-            object_id,
-            source,
-            applied,
-        })
-    } else {
-        ApplyResult::Modified(event)
-    }
+    ApplyResult::Modified(event)
 }
 
 // --- 4. Draw ---
 
-fn draw_matcher(
-    event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
+fn draw_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(event, ProposedEvent::Draw { .. })
 }
 
 fn draw_applier(
     event: ProposedEvent,
-    params: &HashMap<String, String>,
     _source: ObjectId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    if let ProposedEvent::Draw {
-        player_id,
-        count,
-        applied,
-    } = event
-    {
-        if params.get("Prevent").map(|v| v == "True").unwrap_or(false) {
-            return ApplyResult::Prevented;
-        }
-        if let Some(new_count) = params.get("NewCount$") {
-            if let Ok(n) = new_count.parse::<u32>() {
-                return ApplyResult::Modified(ProposedEvent::Draw {
-                    player_id,
-                    count: n,
-                    applied,
-                });
-            }
-        }
-        ApplyResult::Modified(ProposedEvent::Draw {
-            player_id,
-            count,
-            applied,
-        })
-    } else {
-        ApplyResult::Modified(event)
-    }
+    ApplyResult::Modified(event)
 }
 
 // --- 5. GainLife ---
 
-fn gain_life_matcher(
-    event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
+fn gain_life_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(event, ProposedEvent::LifeGain { .. })
 }
 
 fn gain_life_applier(
     event: ProposedEvent,
-    params: &HashMap<String, String>,
     _source: ObjectId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    if let ProposedEvent::LifeGain {
-        player_id,
-        amount,
-        applied,
-    } = event
-    {
-        if params.get("Prevent").map(|v| v == "True").unwrap_or(false) {
-            return ApplyResult::Prevented;
-        }
-        if let Some(new_amount) = params.get("NewAmount$") {
-            if let Ok(n) = new_amount.parse::<u32>() {
-                return ApplyResult::Modified(ProposedEvent::LifeGain {
-                    player_id,
-                    amount: n,
-                    applied,
-                });
-            }
-        }
-        ApplyResult::Modified(ProposedEvent::LifeGain {
-            player_id,
-            amount,
-            applied,
-        })
-    } else {
-        ApplyResult::Modified(event)
-    }
+    ApplyResult::Modified(event)
 }
 
 // --- 6. LifeReduced ---
 
-fn life_reduced_matcher(
-    event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
+fn life_reduced_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(event, ProposedEvent::LifeLoss { .. })
 }
 
 fn life_reduced_applier(
     event: ProposedEvent,
-    params: &HashMap<String, String>,
     _source: ObjectId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    if let ProposedEvent::LifeLoss {
-        player_id,
-        amount,
-        applied,
-    } = event
-    {
-        if params.get("Prevent").map(|v| v == "True").unwrap_or(false) {
-            return ApplyResult::Prevented;
-        }
-        if let Some(new_amount) = params.get("NewAmount$") {
-            if let Ok(n) = new_amount.parse::<u32>() {
-                return ApplyResult::Modified(ProposedEvent::LifeLoss {
-                    player_id,
-                    amount: n,
-                    applied,
-                });
-            }
-        }
-        ApplyResult::Modified(ProposedEvent::LifeLoss {
-            player_id,
-            amount,
-            applied,
-        })
-    } else {
-        ApplyResult::Modified(event)
-    }
+    ApplyResult::Modified(event)
 }
 
 // --- 6b. LoseLife (oracle-parsed: e.g. Bloodletter of Aclazotz) ---
 
-fn lose_life_matcher(
-    event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    source: ObjectId,
-    state: &GameState,
-) -> bool {
+fn lose_life_matcher(event: &ProposedEvent, source: ObjectId, state: &GameState) -> bool {
     if let ProposedEvent::LifeLoss { player_id, .. } = event {
         // Match when opponent loses life during source controller's turn
         if let Some(obj) = state.objects.get(&source) {
@@ -463,7 +193,6 @@ fn lose_life_matcher(
 
 fn lose_life_applier(
     event: ProposedEvent,
-    _params: &HashMap<String, String>,
     _source: ObjectId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
@@ -486,207 +215,82 @@ fn lose_life_applier(
 
 // --- 7. AddCounter ---
 
-fn add_counter_matcher(
-    event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
+fn add_counter_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(event, ProposedEvent::AddCounter { .. })
 }
 
 fn add_counter_applier(
     event: ProposedEvent,
-    params: &HashMap<String, String>,
     _source: ObjectId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    if let ProposedEvent::AddCounter {
-        object_id,
-        counter_type,
-        count,
-        applied,
-    } = event
-    {
-        // Doubling: multiply count
-        if params.get("Double").map(|v| v == "True").unwrap_or(false) {
-            return ApplyResult::Modified(ProposedEvent::AddCounter {
-                object_id,
-                counter_type,
-                count: count * 2,
-                applied,
-            });
-        }
-        if let Some(new_count) = params.get("NewCount$") {
-            if let Ok(n) = new_count.parse::<u32>() {
-                return ApplyResult::Modified(ProposedEvent::AddCounter {
-                    object_id,
-                    counter_type,
-                    count: n,
-                    applied,
-                });
-            }
-        }
-        ApplyResult::Modified(ProposedEvent::AddCounter {
-            object_id,
-            counter_type,
-            count,
-            applied,
-        })
-    } else {
-        ApplyResult::Modified(event)
-    }
+    ApplyResult::Modified(event)
 }
 
 // --- 8. RemoveCounter ---
 
-fn remove_counter_matcher(
-    event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
+fn remove_counter_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(event, ProposedEvent::RemoveCounter { .. })
 }
 
 fn remove_counter_applier(
     event: ProposedEvent,
-    params: &HashMap<String, String>,
     _source: ObjectId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    if let ProposedEvent::RemoveCounter {
-        object_id,
-        counter_type,
-        count,
-        applied,
-    } = event
-    {
-        if let Some(new_count) = params.get("NewCount$") {
-            if let Ok(n) = new_count.parse::<u32>() {
-                return ApplyResult::Modified(ProposedEvent::RemoveCounter {
-                    object_id,
-                    counter_type,
-                    count: n,
-                    applied,
-                });
-            }
-        }
-        ApplyResult::Modified(ProposedEvent::RemoveCounter {
-            object_id,
-            counter_type,
-            count,
-            applied,
-        })
-    } else {
-        ApplyResult::Modified(event)
-    }
+    ApplyResult::Modified(event)
 }
 
 // --- 9. CreateToken ---
 
-fn create_token_matcher(
-    event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
+fn create_token_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(event, ProposedEvent::CreateToken { .. })
 }
 
 fn create_token_applier(
     event: ProposedEvent,
-    params: &HashMap<String, String>,
     _source: ObjectId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    if let ProposedEvent::CreateToken {
-        owner,
-        name,
-        applied,
-    } = event
-    {
-        if params.get("Prevent").map(|v| v == "True").unwrap_or(false) {
-            return ApplyResult::Prevented;
-        }
-        // Allow name override
-        if let Some(new_name) = params.get("NewName$") {
-            return ApplyResult::Modified(ProposedEvent::CreateToken {
-                owner,
-                name: new_name.clone(),
-                applied,
-            });
-        }
-        ApplyResult::Modified(ProposedEvent::CreateToken {
-            owner,
-            name,
-            applied,
-        })
-    } else {
-        ApplyResult::Modified(event)
-    }
+    ApplyResult::Modified(event)
 }
 
 // --- 11. Tap ---
 
-fn tap_matcher(
-    event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
+fn tap_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(event, ProposedEvent::Tap { .. })
 }
 
 fn tap_applier(
     event: ProposedEvent,
-    params: &HashMap<String, String>,
     _source: ObjectId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    if params.get("Prevent").map(|v| v == "True").unwrap_or(false) {
-        return ApplyResult::Prevented;
-    }
     ApplyResult::Modified(event)
 }
 
 // --- 12. Untap ---
 
-fn untap_matcher(
-    event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
+fn untap_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(event, ProposedEvent::Untap { .. })
 }
 
 fn untap_applier(
     event: ProposedEvent,
-    params: &HashMap<String, String>,
     _source: ObjectId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    if params.get("Prevent").map(|v| v == "True").unwrap_or(false) {
-        return ApplyResult::Prevented;
-    }
     ApplyResult::Modified(event)
 }
 
 // --- 14. Counter (spell countering) ---
 
-fn counter_matcher(
-    event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
-    // Match ZoneChange from Stack (countered spell going to graveyard)
+fn counter_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(
         event,
         ProposedEvent::ZoneChange {
@@ -698,76 +302,31 @@ fn counter_matcher(
 
 fn counter_applier(
     event: ProposedEvent,
-    params: &HashMap<String, String>,
     _source: ObjectId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    if let ProposedEvent::ZoneChange {
-        object_id,
-        from,
-        cause,
-        applied,
-        ..
-    } = event
-    {
-        // "Can't be countered" prevention
-        if params.get("Prevent").map(|v| v == "True").unwrap_or(false) {
-            return ApplyResult::Prevented;
-        }
-        // Redirect countered spell to exile instead of graveyard
-        if params.get("Exile").map(|v| v == "True").unwrap_or(false) {
-            return ApplyResult::Modified(ProposedEvent::ZoneChange {
-                object_id,
-                from,
-                to: Zone::Exile,
-                cause,
-                enter_tapped: false,
-                applied,
-            });
-        }
-        ApplyResult::Modified(ProposedEvent::ZoneChange {
-            object_id,
-            from,
-            to: Zone::Graveyard,
-            cause,
-            enter_tapped: false,
-            applied,
-        })
-    } else {
-        ApplyResult::Modified(event)
-    }
+    ApplyResult::Modified(event)
 }
 
 // --- 15. Attached (ZoneChange to Battlefield for attachments) ---
 
-fn attached_matcher(
-    event: &ProposedEvent,
-    params: &HashMap<String, String>,
-    _source: ObjectId,
-    state: &GameState,
-) -> bool {
+fn attached_matcher(event: &ProposedEvent, _source: ObjectId, state: &GameState) -> bool {
     if let ProposedEvent::ZoneChange { object_id, to, .. } = event {
         if *to != Zone::Battlefield {
             return false;
         }
         // Check if the entering object is an attachment (Aura or Equipment)
-        if let Some(obj) = state.objects.get(object_id) {
-            let is_attachment = obj
-                .card_types
-                .subtypes
-                .iter()
-                .any(|s| s == "Aura" || s == "Equipment");
-            if !is_attachment {
-                return false;
-            }
-        }
-        // Check ValidCard$ filter if present
-        if let Some(_valid) = params.get("ValidCard$") {
-            // For now, accept all matching attachments
-            return true;
-        }
-        true
+        state
+            .objects
+            .get(object_id)
+            .map(|obj| {
+                obj.card_types
+                    .subtypes
+                    .iter()
+                    .any(|s| s == "Aura" || s == "Equipment")
+            })
+            .unwrap_or(false)
     } else {
         false
     }
@@ -775,84 +334,26 @@ fn attached_matcher(
 
 fn attached_applier(
     event: ProposedEvent,
-    params: &HashMap<String, String>,
     _source: ObjectId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    if let ProposedEvent::ZoneChange {
-        object_id,
-        from,
-        cause,
-        applied,
-        ..
-    } = event
-    {
-        if params.get("Prevent").map(|v| v == "True").unwrap_or(false) {
-            return ApplyResult::Prevented;
-        }
-        // Redirect destination if specified
-        if let Some(new_dest) = params.get("NewDestination$") {
-            if let Some(z) = parse_zone(new_dest) {
-                return ApplyResult::Modified(ProposedEvent::ZoneChange {
-                    object_id,
-                    from,
-                    to: z,
-                    cause,
-                    enter_tapped: false,
-                    applied,
-                });
-            }
-        }
-        ApplyResult::Modified(ProposedEvent::ZoneChange {
-            object_id,
-            from,
-            to: Zone::Battlefield,
-            cause,
-            enter_tapped: false,
-            applied,
-        })
-    } else {
-        ApplyResult::Modified(event)
-    }
+    ApplyResult::Modified(event)
 }
 
 // --- 16. DealtDamage (from target's perspective) ---
 
-fn dealt_damage_matcher(
-    event: &ProposedEvent,
-    params: &HashMap<String, String>,
-    source: ObjectId,
-    state: &GameState,
-) -> bool {
-    if let ProposedEvent::Damage {
-        target, is_combat, ..
-    } = event
-    {
+fn dealt_damage_matcher(event: &ProposedEvent, source: ObjectId, state: &GameState) -> bool {
+    if let ProposedEvent::Damage { target, .. } = event {
         // Match if the source object of this replacement is the target of the damage
-        let is_target = match target {
+        match target {
             crate::types::ability::TargetRef::Object(oid) => *oid == source,
-            crate::types::ability::TargetRef::Player(pid) => {
-                // Check if the replacement source's controller matches the player
-                state
-                    .objects
-                    .get(&source)
-                    .map(|o| o.controller == *pid)
-                    .unwrap_or(false)
-            }
-        };
-        if !is_target {
-            return false;
+            crate::types::ability::TargetRef::Player(pid) => state
+                .objects
+                .get(&source)
+                .map(|o| o.controller == *pid)
+                .unwrap_or(false),
         }
-        // DamageType$ filter
-        if let Some(dtype) = params.get("DamageType$") {
-            match dtype.as_str() {
-                "Combat" if !is_combat => return false,
-                "NonCombat" if *is_combat => return false,
-                _ => {}
-            }
-        }
-        true
     } else {
         false
     }
@@ -860,53 +361,16 @@ fn dealt_damage_matcher(
 
 fn dealt_damage_applier(
     event: ProposedEvent,
-    params: &HashMap<String, String>,
     _source: ObjectId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    if let ProposedEvent::Damage {
-        source_id,
-        target,
-        amount,
-        is_combat,
-        applied,
-    } = event
-    {
-        if params.get("Prevent").map(|v| v == "True").unwrap_or(false) {
-            return ApplyResult::Prevented;
-        }
-        if let Some(new_amount) = params.get("NewAmount$") {
-            if let Ok(n) = new_amount.parse::<u32>() {
-                return ApplyResult::Modified(ProposedEvent::Damage {
-                    source_id,
-                    target,
-                    amount: n,
-                    is_combat,
-                    applied,
-                });
-            }
-        }
-        ApplyResult::Modified(ProposedEvent::Damage {
-            source_id,
-            target,
-            amount,
-            is_combat,
-            applied,
-        })
-    } else {
-        ApplyResult::Modified(event)
-    }
+    ApplyResult::Modified(event)
 }
 
 // --- 17. Mill (ZoneChange from Library to Graveyard) ---
 
-fn mill_matcher(
-    event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
+fn mill_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(
         event,
         ProposedEvent::ZoneChange {
@@ -919,134 +383,21 @@ fn mill_matcher(
 
 fn mill_applier(
     event: ProposedEvent,
-    params: &HashMap<String, String>,
     _source: ObjectId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    if let ProposedEvent::ZoneChange {
-        object_id,
-        from,
-        cause,
-        applied,
-        ..
-    } = event
-    {
-        if params.get("Prevent").map(|v| v == "True").unwrap_or(false) {
-            return ApplyResult::Prevented;
-        }
-        // Redirect milled cards to exile instead of graveyard
-        if let Some(new_dest) = params.get("NewDestination$") {
-            if let Some(z) = parse_zone(new_dest) {
-                return ApplyResult::Modified(ProposedEvent::ZoneChange {
-                    object_id,
-                    from,
-                    to: z,
-                    cause,
-                    enter_tapped: false,
-                    applied,
-                });
-            }
-        }
-        ApplyResult::Modified(ProposedEvent::ZoneChange {
-            object_id,
-            from,
-            to: Zone::Graveyard,
-            cause,
-            enter_tapped: false,
-            applied,
-        })
-    } else {
-        ApplyResult::Modified(event)
-    }
+    ApplyResult::Modified(event)
 }
 
 // --- 18. PayLife (matches LifeLoss) ---
 
-fn pay_life_matcher(
-    event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
+fn pay_life_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(event, ProposedEvent::LifeLoss { .. })
 }
 
 fn pay_life_applier(
     event: ProposedEvent,
-    params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &mut GameState,
-    _events: &mut Vec<GameEvent>,
-) -> ApplyResult {
-    if let ProposedEvent::LifeLoss {
-        player_id,
-        amount,
-        applied,
-    } = event
-    {
-        if params.get("Prevent").map(|v| v == "True").unwrap_or(false) {
-            return ApplyResult::Prevented;
-        }
-        if let Some(new_amount) = params.get("NewAmount$") {
-            if let Ok(n) = new_amount.parse::<u32>() {
-                return ApplyResult::Modified(ProposedEvent::LifeLoss {
-                    player_id,
-                    amount: n,
-                    applied,
-                });
-            }
-        }
-        ApplyResult::Modified(ProposedEvent::LifeLoss {
-            player_id,
-            amount,
-            applied,
-        })
-    } else {
-        ApplyResult::Modified(event)
-    }
-}
-
-// --- 19. ProduceMana (matches mana addition -- uses LifeGain as placeholder since
-//     there's no ProposedEvent::ManaProduction yet; currently a structural matcher) ---
-
-fn produce_mana_matcher(
-    _event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
-    // No ProposedEvent variant for mana production yet.
-    // When mana production goes through the replacement pipeline, this will match.
-    false
-}
-
-fn produce_mana_applier(
-    event: ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &mut GameState,
-    _events: &mut Vec<GameEvent>,
-) -> ApplyResult {
-    // Placeholder: pass through unchanged
-    ApplyResult::Modified(event)
-}
-
-// --- 20. Scry (no dedicated ProposedEvent -- structural placeholder) ---
-
-fn scry_matcher(
-    _event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
-    // Scry doesn't go through replacement pipeline via ProposedEvent yet.
-    false
-}
-
-fn scry_applier(
-    event: ProposedEvent,
-    _params: &HashMap<String, String>,
     _source: ObjectId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
@@ -1054,69 +405,14 @@ fn scry_applier(
     ApplyResult::Modified(event)
 }
 
-// --- 21. Transform (no dedicated ProposedEvent -- structural placeholder) ---
+// --- Placeholder handlers (no ProposedEvent variant yet) ---
 
-fn transform_matcher(
-    _event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
-    // Transform events don't go through replacement pipeline via ProposedEvent yet.
+fn placeholder_matcher(_event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     false
 }
 
-fn transform_applier(
+fn placeholder_applier(
     event: ProposedEvent,
-    params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &mut GameState,
-    _events: &mut Vec<GameEvent>,
-) -> ApplyResult {
-    if params.get("Prevent").map(|v| v == "True").unwrap_or(false) {
-        return ApplyResult::Prevented;
-    }
-    ApplyResult::Modified(event)
-}
-
-// --- 22. TurnFaceUp (no dedicated ProposedEvent -- structural placeholder) ---
-
-fn turn_face_up_matcher(
-    _event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
-    false
-}
-
-fn turn_face_up_applier(
-    event: ProposedEvent,
-    params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &mut GameState,
-    _events: &mut Vec<GameEvent>,
-) -> ApplyResult {
-    if params.get("Prevent").map(|v| v == "True").unwrap_or(false) {
-        return ApplyResult::Prevented;
-    }
-    ApplyResult::Modified(event)
-}
-
-// --- 23. Explore (no dedicated ProposedEvent -- structural placeholder) ---
-
-fn explore_matcher(
-    _event: &ProposedEvent,
-    _params: &HashMap<String, String>,
-    _source: ObjectId,
-    _state: &GameState,
-) -> bool {
-    false
-}
-
-fn explore_applier(
-    event: ProposedEvent,
-    _params: &HashMap<String, String>,
     _source: ObjectId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
@@ -1257,41 +553,15 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
             applier: pay_life_applier,
         },
     );
-    registry.insert(
-        ReplacementEvent::Other("ProduceMana".into()),
-        ReplacementHandlerEntry {
-            matcher: produce_mana_matcher,
-            applier: produce_mana_applier,
-        },
-    );
-    registry.insert(
-        ReplacementEvent::Other("Scry".into()),
-        ReplacementHandlerEntry {
-            matcher: scry_matcher,
-            applier: scry_applier,
-        },
-    );
-    registry.insert(
-        ReplacementEvent::Other("Transform".into()),
-        ReplacementHandlerEntry {
-            matcher: transform_matcher,
-            applier: transform_applier,
-        },
-    );
-    registry.insert(
-        ReplacementEvent::TurnFaceUp,
-        ReplacementHandlerEntry {
-            matcher: turn_face_up_matcher,
-            applier: turn_face_up_applier,
-        },
-    );
-    registry.insert(
-        ReplacementEvent::Other("Explore".into()),
-        ReplacementHandlerEntry {
-            matcher: explore_matcher,
-            applier: explore_applier,
-        },
-    );
+    let placeholder = || ReplacementHandlerEntry {
+        matcher: placeholder_matcher,
+        applier: placeholder_applier,
+    };
+    registry.insert(ReplacementEvent::Other("ProduceMana".into()), placeholder());
+    registry.insert(ReplacementEvent::Other("Scry".into()), placeholder());
+    registry.insert(ReplacementEvent::Other("Transform".into()), placeholder());
+    registry.insert(ReplacementEvent::TurnFaceUp, placeholder());
+    registry.insert(ReplacementEvent::Other("Explore".into()), placeholder());
 
     // 12 remaining Forge types (stubs -- recognized but no-op)
     let stub_events = [
@@ -1393,8 +663,7 @@ pub fn find_applicable_replacements(
             }
 
             if let Some(handler) = registry.get(&repl_def.event) {
-                let empty_params = HashMap::new();
-                if (handler.matcher)(event, &empty_params, obj.id, state) {
+                if (handler.matcher)(event, obj.id, state) {
                     // Enforce valid_card filter: if set, the event's affected object
                     // must match the filter (e.g., SelfRef means only this card's own events)
                     if let Some(ref filter) = repl_def.valid_card {
@@ -1452,10 +721,9 @@ fn apply_single_replacement(
         None => return Ok(proposed),
     };
 
-    let params = HashMap::new();
     if let Some(handler) = registry.get(&event_key) {
         let event_type = event_key.to_string();
-        match (handler.applier)(proposed, &params, rid.source, state, events) {
+        match (handler.applier)(proposed, rid.source, state, events) {
             ApplyResult::Modified(mut new_event) => {
                 // If the replacement carries a Tap execute (ETB tapped), mark the zone change.
                 if enters_tapped {

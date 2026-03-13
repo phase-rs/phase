@@ -97,7 +97,12 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
         return parse_effect_clause(&stripped);
     }
 
-    parsed_clause(parse_imperative_effect(text))
+    let (stripped, duration) = strip_trailing_duration(text);
+    let mut clause = parsed_clause(parse_imperative_effect(stripped));
+    if clause.duration.is_none() {
+        clause.duration = duration;
+    }
+    clause
 }
 
 fn parse_imperative_effect(text: &str) -> Effect {
@@ -345,12 +350,31 @@ fn parse_imperative_effect(text: &str) -> Effect {
         };
     }
 
+    // --- Look at hand: "look at target opponent's hand" / "look at your hand" → RevealHand ---
+    if lower.starts_with("look at ") && lower.contains("hand") {
+        // Possessive form: "look at your/their hand" → no targeting needed
+        if contains_possessive(&lower, "look at", "hand") {
+            return Effect::RevealHand {
+                target: TargetFilter::Any,
+                card_filter: TargetFilter::Any,
+            };
+        }
+        // Targeting form: "look at target opponent's hand"
+        let after_look_at = &text[8..]; // skip "look at "
+        let (target, _) = parse_target(after_look_at);
+        return Effect::RevealHand {
+            target,
+            card_filter: TargetFilter::Any,
+        };
+    }
+
     // --- Reveal ---
     if lower.starts_with("reveal ") {
         // "reveal their/your hand" → RevealHand
         if lower.contains("hand") {
             return Effect::RevealHand {
                 target: TargetFilter::Any,
+                card_filter: TargetFilter::Any,
             };
         }
         // "reveal the top N cards of your library" → Dig
@@ -437,7 +461,10 @@ fn parse_imperative_effect(text: &str) -> Effect {
     // --- Choose card from revealed hand (absorbed into RevealHand filter) ---
     if lower.starts_with("choose ") && lower.contains("card from it") {
         let filter = parse_choose_filter(&lower);
-        return Effect::RevealHand { target: filter };
+        return Effect::RevealHand {
+            target: TargetFilter::Any,
+            card_filter: filter,
+        };
     }
 
     // --- Fallback ---
@@ -494,6 +521,30 @@ fn type_str_to_target_filter(s: &str) -> Option<TargetFilter> {
         controller: None,
         properties: vec![],
     })
+}
+
+/// Extract card type filter from a sub-ability sentence containing "card from it/among".
+/// Handles forms like "exile a nonland card from it", "discard a creature card from it".
+fn parse_choose_filter_from_sentence(lower: &str) -> TargetFilter {
+    let card_pos = match lower.find("card from") {
+        Some(pos) => pos,
+        None => return TargetFilter::Any,
+    };
+    // The word immediately before "card from" is the type descriptor
+    let word = lower[..card_pos].trim().rsplit(' ').next().unwrap_or("");
+    if let Some(negated) = word.strip_prefix("non") {
+        if let Some(TargetFilter::Typed { card_type, .. }) = type_str_to_target_filter(negated) {
+            return TargetFilter::Typed {
+                card_type: Some(TypeFilter::Permanent),
+                subtype: None,
+                controller: None,
+                properties: vec![FilterProp::NonType {
+                    value: card_type.map(|ct| format!("{ct:?}")).unwrap_or_default(),
+                }],
+            };
+        }
+    }
+    type_str_to_target_filter(word).unwrap_or(TargetFilter::Any)
 }
 
 fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
@@ -864,6 +915,26 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
         defs.insert(1, change_zone);
     }
 
+    // For RevealHand: extract card_filter from the exile/discard sub-ability sentence.
+    // "look at target opponent's hand. You may exile a nonland card from it" →
+    //   RevealHand gets card_filter: nonland, ChangeZone stays as sub_ability.
+    if !defs.is_empty() && matches!(defs[0].effect, Effect::RevealHand { .. }) {
+        for sentence in sentences.iter().skip(1) {
+            let sub_lower = sentence.to_lowercase();
+            if sub_lower.contains("card from it") || sub_lower.contains("card from among") {
+                let card_filter = parse_choose_filter_from_sentence(&sub_lower);
+                if let Effect::RevealHand {
+                    card_filter: ref mut cf,
+                    ..
+                } = defs[0].effect
+                {
+                    *cf = card_filter;
+                }
+                break;
+            }
+        }
+    }
+
     // Chain: last has no sub_ability, each earlier one chains to next
     if defs.len() > 1 {
         let last = defs.pop().unwrap();
@@ -1146,6 +1217,14 @@ fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
         (" this turn", Duration::UntilEndOfTurn),
         (" until end of turn", Duration::UntilEndOfTurn),
         (" until your next turn", Duration::UntilYourNextTurn),
+        (
+            " until ~ leaves the battlefield",
+            Duration::UntilHostLeavesPlay,
+        ),
+        (
+            " until this creature leaves the battlefield",
+            Duration::UntilHostLeavesPlay,
+        ),
     ] {
         if lower.ends_with(suffix) {
             let end = text.len() - suffix.len();
@@ -3773,5 +3852,116 @@ mod tests {
                 description: Some(_),
             } if name == "activate"
         ));
+    }
+
+    // --- RevealHand / "look at" tests ---
+
+    #[test]
+    fn parse_look_at_target_opponent_hand() {
+        let e = parse_effect("look at target opponent's hand");
+        match e {
+            Effect::RevealHand {
+                target,
+                card_filter,
+            } => {
+                assert!(matches!(
+                    target,
+                    TargetFilter::Typed {
+                        card_type: None,
+                        controller: Some(ControllerRef::Opponent),
+                        ..
+                    }
+                ));
+                assert_eq!(card_filter, TargetFilter::Any);
+            }
+            other => panic!("Expected RevealHand, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_look_at_possessive_hand() {
+        let e = parse_effect("look at your hand");
+        assert!(matches!(
+            e,
+            Effect::RevealHand {
+                target: TargetFilter::Any,
+                card_filter: TargetFilter::Any,
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_deep_cavern_bat_chain() {
+        let def = parse_effect_chain(
+            "look at target opponent's hand. You may exile a nonland card from it until this creature leaves the battlefield",
+            AbilityKind::Spell,
+        );
+        // First effect: RevealHand with opponent target and nonland card_filter
+        match &def.effect {
+            Effect::RevealHand {
+                target,
+                card_filter,
+            } => {
+                assert!(matches!(
+                    target,
+                    TargetFilter::Typed {
+                        card_type: None,
+                        controller: Some(ControllerRef::Opponent),
+                        ..
+                    }
+                ));
+                assert!(matches!(
+                    card_filter,
+                    TargetFilter::Typed {
+                        properties,
+                        ..
+                    } if !properties.is_empty()
+                ));
+            }
+            other => panic!("Expected RevealHand, got {:?}", other),
+        }
+        // Sub-ability: ChangeZone to Exile with duration
+        let sub = def.sub_ability.as_ref().expect("should have sub_ability");
+        assert!(matches!(
+            sub.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ));
+        assert_eq!(sub.duration, Some(Duration::UntilHostLeavesPlay));
+    }
+
+    #[test]
+    fn parse_choose_filter_nonland() {
+        let filter = parse_choose_filter_from_sentence("exile a nonland card from it");
+        assert!(matches!(
+            filter,
+            TargetFilter::Typed {
+                card_type: Some(TypeFilter::Permanent),
+                properties,
+                ..
+            } if properties.iter().any(|p| matches!(p, FilterProp::NonType { value } if value == "Land"))
+        ));
+    }
+
+    #[test]
+    fn parse_choose_filter_creature() {
+        let filter = parse_choose_filter_from_sentence("exile a creature card from it");
+        assert!(matches!(
+            filter,
+            TargetFilter::Typed {
+                card_type: Some(TypeFilter::Creature),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn trailing_duration_until_leaves() {
+        let (rest, duration) =
+            strip_trailing_duration("exile a card until ~ leaves the battlefield");
+        assert_eq!(duration, Some(Duration::UntilHostLeavesPlay));
+        assert_eq!(rest, "exile a card");
     }
 }
