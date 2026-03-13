@@ -256,6 +256,15 @@ export interface PendingCast {
   cost: ManaCost;
 }
 
+// ── Additional Costs (kicker, blight, "or pay") ─────────────────────────
+
+export type AdditionalCost =
+  | { type: "Optional"; data: SerializedAbilityCost }
+  | { type: "Choice"; data: [SerializedAbilityCost, SerializedAbilityCost] };
+
+/** Mirrors Rust AbilityCost serialization (serde tag = "type"). */
+export type SerializedAbilityCost = { type: string; [key: string]: unknown };
+
 // ── Modal Choice metadata ─────────────────────────────────────────────
 
 export interface ModalChoice {
@@ -288,7 +297,8 @@ export type WaitingFor =
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string; options: string[] } }
   | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast } }
-  | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } };
+  | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
+  | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; pending_cast: PendingCast } };
 
 // ── Action Result ────────────────────────────────────────────────────────
 
@@ -319,7 +329,8 @@ export type GameAction =
   | { type: "SubmitSideboard"; data: { main: DeckCardCount[]; sideboard: DeckCardCount[] } }
   | { type: "ChoosePlayDraw"; data: { play_first: boolean } }
   | { type: "ChooseOption"; data: { choice: string } }
-  | { type: "SelectModes"; data: { indices: number[] } };
+  | { type: "SelectModes"; data: { indices: number[] } }
+  | { type: "DecideOptionalCost"; data: { pay: boolean } };
 
 // ── Game Events (discriminated union, tag="type", content="data") ────────
 

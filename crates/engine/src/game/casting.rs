@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, AdditionalCost, Effect, ResolvedAbility, SpellContext,
-    TargetFilter, TargetRef,
+    AbilityDefinition, AbilityKind, AdditionalCost, Effect, ResolvedAbility, TargetFilter,
+    TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;

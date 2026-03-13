@@ -58,7 +58,7 @@ import {
 } from "../stores/multiplayerStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { usePlayerId } from "../hooks/usePlayerId.ts";
-import { abilityChoiceLabel } from "../viewmodel/costLabel.ts";
+import { abilityChoiceLabel, additionalCostChoices } from "../viewmodel/costLabel.ts";
 
 export function GamePage() {
   const navigate = useNavigate();
@@ -660,6 +660,12 @@ function GamePageContent({
       {/* Ability choice picker (planeswalkers, multi-ability permanents) */}
       <AbilityChoiceModal />
 
+      {/* Optional additional cost choice (kicker, blight, "or pay") */}
+      {waitingFor?.type === "OptionalCostChoice" &&
+        waitingFor.data.player === playerId && (
+          <OptionalCostModal />
+        )}
+
       {waitingFor?.type === "MulliganDecision" &&
         waitingFor.data.player === playerId && (
           <MulliganDecisionPrompt
@@ -1257,6 +1263,32 @@ function AbilityChoiceModal() {
         setPending(null);
       }}
       onClose={() => setPending(null)}
+    />
+  );
+}
+
+// ── Optional Cost Choice Modal ──────────────────────────────────────────
+
+function OptionalCostModal() {
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+
+  if (waitingFor?.type !== "OptionalCostChoice") return null;
+
+  const { cost } = waitingFor.data;
+  const { title, payLabel, skipLabel } = additionalCostChoices(cost);
+
+  return (
+    <ChoiceModal
+      title={title}
+      options={[
+        { id: "pay", label: payLabel },
+        { id: "skip", label: skipLabel },
+      ]}
+      onChoose={(id) =>
+        dispatch({ type: "DecideOptionalCost", data: { pay: id === "pay" } })
+      }
+      onClose={() => dispatch({ type: "CancelCast" })}
     />
   );
 }

@@ -10,8 +10,8 @@ use crate::game::engine::{apply, EngineError};
 use crate::game::game_object::GameObject;
 use crate::game::zones::create_object;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, DamageAmount, Effect, StaticDefinition, TargetFilter,
-    TriggerDefinition,
+    AbilityDefinition, AbilityKind, AdditionalCost, DamageAmount, Effect, StaticDefinition,
+    TargetFilter, TriggerDefinition,
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::{CoreType, Supertype};
@@ -439,6 +439,12 @@ impl<'a> CardBuilder<'a> {
     pub fn with_minus_counters(&mut self, count: u32) -> &mut Self {
         let counter = crate::game::game_object::CounterType::Minus1Minus1;
         *self.obj().counters.entry(counter).or_insert(0) += count;
+        self
+    }
+
+    /// Set an additional cost on this card (kicker, blight, "or pay").
+    pub fn with_additional_cost(&mut self, cost: AdditionalCost) -> &mut Self {
+        self.obj().additional_cost = Some(cost);
         self
     }
 }
