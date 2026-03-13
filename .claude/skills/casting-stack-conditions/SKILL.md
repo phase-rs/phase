@@ -182,6 +182,75 @@ The `apply()` function in `engine.rs` matches `(WaitingFor, GameAction)` pairs t
 
 ---
 
+## Modal System — Cast-Time vs Resolution-Time
+
+### Cast-time modals (currently supported)
+
+The existing modal system is **tightly coupled to spell casting**. The data flow:
+
+```
+CardFace.modal (parsed from "Choose one —" Oracle text)
+  → GameObject.modal (copied at deck load)
+  → casting::handle_cast_spell() detects obj.modal.is_some()
+  → WaitingFor::ModeChoice { modal, pending_cast: Box<PendingCast> }
+  → GameAction::SelectModes { indices }
+  → casting::handle_select_modes() builds chained ResolvedAbility
+  → build_chained_resolved(card.abilities, indices) — indexes card's abilities array
+  → ResolvedAbility with nested sub_abilities pushed to stack
+  → resolve_ability_chain() walks the chain at resolution
+```
+
+**Key coupling points:**
+1. `ModalChoice` only lives on `CardFace` / `GameObject` — no per-ability modal metadata
+2. `WaitingFor::ModeChoice` requires `Box<PendingCast>` — casting-specific state
+3. `build_chained_resolved()` directly indexes `card.abilities[]` — modes = card abilities
+4. `handle_select_modes()` routes back into the casting pipeline (`check_additional_cost_or_pay`)
+5. Parser only generates `ModalChoice` for spell lines (oracle.rs:107), not triggered/activated abilities
+
+**ModalChoice struct** (`types/ability.rs:1214`):
+```rust
+pub struct ModalChoice {
+    pub min_choices: usize,
+    pub max_choices: usize,
+    pub mode_count: usize,
+    pub mode_descriptions: Vec<String>,
+}
+```
+
+**Mode selection algorithm** (`casting.rs:474`): `build_chained_resolved()` takes an `abilities: &[AbilityDefinition]` slice and `indices: &[usize]`. Builds from last to first, nesting each as `sub_ability` of the previous. The chaining logic itself is reusable — the coupling is in how the abilities slice is sourced (from `card.abilities`).
+
+**AI mode handling** (`legal_actions.rs:197`): Generates all valid combinations of k modes where `k ∈ [min_choices, max_choices]` using `index_combinations()`.
+
+**Frontend** (`ModeChoiceModal.tsx`): Renders `mode_descriptions` as clickable buttons, tracks selected indices, enforces min/max constraints. Single-choice modals auto-submit on click.
+
+### Resolution-time modals (NOT YET SUPPORTED)
+
+~37 permanent-based cards have "Choose one —" on activated/triggered abilities (Bow of Nylea, Cankerbloom, Breya, Disciple of the Ring, etc.) plus ~48 spell modals with complex patterns the parser doesn't yet handle. These all fall to `Unimplemented("choose")`.
+
+**Why they don't work today:**
+- Activated/triggered abilities have no `modal` field — only `CardFace`/`GameObject` do
+- `WaitingFor::ModeChoice` requires `PendingCast` — inapplicable to resolution-time
+- No mechanism to associate mode definitions with a specific ability on a permanent
+- Parser doesn't extract modal metadata from activated/triggered ability lines
+
+**To support resolution-time modals, needed changes:**
+1. **Store modal metadata on ability definitions** — `AbilityDefinition` needs an optional `ModalChoice`
+2. **New WaitingFor variant** — decouple from `PendingCast`:
+   ```rust
+   // Possible design:
+   WaitingFor::AbilityModeChoice {
+       player: PlayerId,
+       modal: ModalChoice,
+       source_id: ObjectId,
+       mode_abilities: Vec<AbilityDefinition>,  // the mode options
+   }
+   ```
+3. **Reuse `build_chained_resolved()`** — it already accepts `&[AbilityDefinition]` + `&[usize]`; just need to supply mode abilities from the ability definition instead of `card.abilities`
+4. **Route resolution differently** — instead of returning to casting pipeline, push directly to stack or resolve inline depending on context (activated ability vs trigger)
+5. **Parser changes** — detect modal patterns in activated/triggered ability text, store as ability-level modal metadata
+
+---
+
 ## "You May" in Parser
 
 Currently in `oracle_effect.rs`, "you may" is stripped naively:

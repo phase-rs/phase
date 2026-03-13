@@ -14,12 +14,12 @@ class ResizeObserverMock {
   unobserve(): void {}
 }
 
-function makeCard(name: string, typeLine: string): ScryfallCard {
+function makeCard(name: string, typeLine: string, cmc = 0): ScryfallCard {
   return {
     id: name.toLowerCase(),
     name,
     mana_cost: "",
-    cmc: 0,
+    cmc,
     type_line: typeLine,
     color_identity: [],
     legalities: {},
@@ -105,7 +105,7 @@ describe("DeckStack", () => {
     expect(banishingTile.textContent).not.toContain("Forest");
   });
 
-  it("sorts by type first, then count, with lands after spells", () => {
+  it("sorts by type first, then cmc, then name, with lands after spells", () => {
     render(
       <DeckStack
         deck={{
@@ -115,6 +115,7 @@ describe("DeckStack", () => {
             { name: "Leyline of Hope", count: 3 },
             { name: "Banishing Light", count: 2 },
             { name: "Healer's Hawk", count: 4 },
+            { name: "Angel of Vitality", count: 1 },
           ],
           sideboard: [],
         }}
@@ -122,10 +123,11 @@ describe("DeckStack", () => {
         cardDataCache={
           new Map([
             ["Plains", makeCard("Plains", "Basic Land — Plains")],
-            ["Ajani's Pridemate", makeCard("Ajani's Pridemate", "Creature")],
-            ["Leyline of Hope", makeCard("Leyline of Hope", "Enchantment")],
-            ["Banishing Light", makeCard("Banishing Light", "Enchantment")],
-            ["Healer's Hawk", makeCard("Healer's Hawk", "Creature")],
+            ["Ajani's Pridemate", makeCard("Ajani's Pridemate", "Creature", 2)],
+            ["Angel of Vitality", makeCard("Angel of Vitality", "Creature", 2)],
+            ["Leyline of Hope", makeCard("Leyline of Hope", "Enchantment", 4)],
+            ["Banishing Light", makeCard("Banishing Light", "Enchantment", 3)],
+            ["Healer's Hawk", makeCard("Healer's Hawk", "Creature", 1)],
           ])
         }
         onAddCard={vi.fn()}
@@ -135,6 +137,7 @@ describe("DeckStack", () => {
     );
 
     const ajaniTile = getTileByRemoveTitle("Ajani's Pridemate");
+    const angelTile = getTileByRemoveTitle("Angel of Vitality");
     const hawkTile = getTileByRemoveTitle("Healer's Hawk");
     const leylineTile = getTileByRemoveTitle("Leyline of Hope");
     const banishingTile = getTileByRemoveTitle("Banishing Light");
@@ -149,9 +152,10 @@ describe("DeckStack", () => {
     expect(screen.queryByText("MD")).not.toBeInTheDocument();
     expect(screen.queryByText("SB")).not.toBeInTheDocument();
 
-    expectDocumentOrder(ajaniTile, leylineTile);
-    expectDocumentOrder(hawkTile, leylineTile);
-    expectDocumentOrder(leylineTile, banishingTile);
+    expectDocumentOrder(hawkTile, ajaniTile);
+    expectDocumentOrder(ajaniTile, angelTile);
+    expectDocumentOrder(angelTile, banishingTile);
+    expectDocumentOrder(banishingTile, leylineTile);
     expectDocumentOrder(banishingTile, plainsTile);
   });
 });
