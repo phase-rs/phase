@@ -121,6 +121,7 @@ fn filter_inner(
             .all(|f| filter_inner(state, object_id, f, source_id, source_controller)),
         // StackAbility targeting is handled directly in find_legal_targets, not via filter
         TargetFilter::StackAbility => false,
+        TargetFilter::SpecificObject(target_id) => object_id == *target_id,
     }
 }
 

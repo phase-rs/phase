@@ -24,6 +24,11 @@ pub fn find_legal_targets(
         return targets;
     }
 
+    // SpecificObject is runtime-bound (not used for target selection)
+    if matches!(filter, TargetFilter::SpecificObject(_)) {
+        return targets;
+    }
+
     // Check if filter could match players
     if matches!(filter, TargetFilter::Any | TargetFilter::Player) {
         add_players(state, &mut targets);

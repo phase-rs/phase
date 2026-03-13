@@ -166,6 +166,7 @@ fn parse_imperative_effect(text: &str) -> Effect {
         if rest.contains("activated or triggered ability") {
             return Effect::Counter {
                 target: TargetFilter::StackAbility,
+                source_static: None,
             };
         }
         let (target, _) = parse_target(&text[8..]);
@@ -174,7 +175,10 @@ fn parse_imperative_effect(text: &str) -> Effect {
         } else {
             target
         };
-        return Effect::Counter { target };
+        return Effect::Counter {
+            target,
+            source_static: None,
+        };
     }
 
     // --- Life: "gain N life" / "you gain N life" ---
@@ -1099,6 +1103,36 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
             }
         }
         // Remove absorbed defs in reverse order to preserve indices
+        for idx in absorbed_indices.into_iter().rev() {
+            if idx < defs.len() {
+                defs.remove(idx);
+            }
+        }
+    }
+
+    // For Counter effects: absorb "if...countered this way, that permanent loses all
+    // abilities for as long as ~" as a source_static on the Counter effect.
+    if !defs.is_empty() && matches!(defs[0].effect, Effect::Counter { .. }) {
+        let mut absorbed_indices = Vec::new();
+        for (idx, sentence) in sentences.iter().enumerate().skip(1) {
+            let sub_lower = sentence.to_lowercase();
+            if sub_lower.contains("countered this way")
+                && sub_lower.contains("loses all abilities")
+            {
+                if let Effect::Counter {
+                    ref mut source_static,
+                    ..
+                } = defs[0].effect
+                {
+                    *source_static = Some(
+                        StaticDefinition::continuous().modifications(vec![
+                            crate::types::ability::ContinuousModification::RemoveAllAbilities,
+                        ]),
+                    );
+                }
+                absorbed_indices.push(idx);
+            }
+        }
         for idx in absorbed_indices.into_iter().rev() {
             if idx < defs.len() {
                 defs.remove(idx);
@@ -2879,7 +2913,8 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Counter {
-                target: TargetFilter::Typed(TypedFilter { properties, .. })
+                target: TargetFilter::Typed(TypedFilter { properties, .. }),
+                ..
             } if properties
                 .iter()
                 .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))
@@ -2892,7 +2927,8 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Counter {
-                target: TargetFilter::Or { filters }
+                target: TargetFilter::Or { filters },
+                ..
             } if filters.iter().all(|f| {
                 matches!(
                     f,
@@ -2909,10 +2945,35 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Counter {
-                target: TargetFilter::Typed(TypedFilter { properties, .. })
+                target: TargetFilter::Typed(TypedFilter { properties, .. }),
+                ..
             } if properties.iter().any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))
                 && properties.iter().any(|p| matches!(p, FilterProp::CmcGE { value: 4 }))
         ));
+    }
+
+    #[test]
+    fn effect_counter_ability_with_source_static_absorption() {
+        use crate::types::ability::{ContinuousModification, StaticDefinition};
+        use crate::types::statics::StaticMode;
+
+        let ability = parse_effect_chain(
+            "counter up to one target activated or triggered ability. If an ability of an artifact, creature, or planeswalker is countered this way, that permanent loses all abilities for as long as ~ remains on the battlefield",
+            AbilityKind::Spell,
+        );
+        // The "if...countered this way...loses all abilities" sentence should be absorbed
+        // into the Counter effect's source_static, not left as a sub_ability.
+        assert!(ability.sub_ability.is_none(), "sub_ability should be absorbed");
+        if let Effect::Counter { source_static, .. } = &ability.effect {
+            let static_def = source_static.as_ref().expect("should have source_static");
+            assert_eq!(static_def.mode, StaticMode::Continuous);
+            assert_eq!(
+                static_def.modifications,
+                vec![ContinuousModification::RemoveAllAbilities]
+            );
+        } else {
+            panic!("expected Counter effect");
+        }
     }
 
     #[test]

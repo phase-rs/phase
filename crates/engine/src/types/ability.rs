@@ -568,6 +568,10 @@ pub enum TargetFilter {
     /// Matches non-mana activated or triggered abilities on the stack.
     /// Used by "counter target activated or triggered ability" effects.
     StackAbility,
+    /// Matches a specific permanent by ObjectId.
+    /// Used for duration-based statics that target a specific object
+    /// (e.g., "that permanent loses all abilities for as long as ~").
+    SpecificObject(ObjectId),
 }
 
 /// Condition for static ability applicability.
@@ -692,6 +696,11 @@ pub enum Effect {
     Counter {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        /// Static applied to counter's source, affecting the countered ability's source permanent.
+        /// The `affected` filter is bound at resolution time to `SpecificObject(source_permanent_id)`.
+        /// Used by cards like Tishana's Tidebinder ("loses all abilities for as long as ~").
+        #[serde(default)]
+        source_static: Option<StaticDefinition>,
     },
     Token {
         name: String,

@@ -19,7 +19,8 @@ expression: result
               "zone": "Stack"
             }
           ]
-        }
+        },
+        "source_static": null
       },
       "cost": null,
       "sub_ability": null,

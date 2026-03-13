@@ -885,6 +885,7 @@ fn target_filter_matches_object(
             .all(|f| target_filter_matches_object(state, object_id, f, source_id)),
         // StackAbility targeting is handled directly in find_legal_targets
         TargetFilter::StackAbility => false,
+        TargetFilter::SpecificObject(target_id) => object_id == *target_id,
     }
 }
 

@@ -1,8 +1,11 @@
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
 use crate::game::zones;
-use crate::types::ability::{EffectError, EffectKind, ResolvedAbility, TargetRef};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, StackEntryKind};
+use crate::types::identifiers::ObjectId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
@@ -10,11 +13,21 @@ use crate::types::zones::Zone;
 /// Spells are removed from the stack and moved to graveyard.
 /// Abilities are simply removed from the stack (they aren't cards).
 /// Respects CantBeCountered static ability.
+///
+/// If the effect carries a `source_static`, it is applied to the counter's source
+/// (e.g., Tidebinder) with `affected: SpecificObject(source_permanent_id)` after
+/// successfully countering a permanent's ability. This implements "that permanent
+/// loses all abilities for as long as ~" patterns.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    let source_static = match &ability.effect {
+        Effect::Counter { source_static, .. } => source_static.clone(),
+        _ => None,
+    };
+
     for target in &ability.targets {
         if let TargetRef::Object(obj_id) = target {
             // Check if the target has CantBeCountered
@@ -44,13 +57,16 @@ pub fn resolve(
             let stack_idx = state.stack.iter().position(|e| e.id == *obj_id);
             if let Some(idx) = stack_idx {
                 let is_spell = matches!(state.stack[idx].kind, StackEntryKind::Spell { .. });
+                let source_permanent_id = state.stack[idx].source_id;
                 state.stack.remove(idx);
 
                 if is_spell {
                     // Spells are cards — move to graveyard
                     zones::move_to_zone(state, *obj_id, Zone::Graveyard, events);
+                } else {
+                    // Ability was countered — apply source_static if present
+                    apply_source_static(state, ability.source_id, source_permanent_id, &source_static);
                 }
-                // Abilities just cease to exist when countered (source stays on battlefield)
 
                 events.push(GameEvent::SpellCountered {
                     object_id: *obj_id,
@@ -68,11 +84,41 @@ pub fn resolve(
     Ok(())
 }
 
+/// Apply a source_static to the counter's source, targeting the countered ability's
+/// source permanent. The static is bound with `SpecificObject(source_permanent_id)`
+/// so it naturally stops applying when the counter's source leaves the battlefield.
+fn apply_source_static(
+    state: &mut GameState,
+    counter_source_id: ObjectId,
+    source_permanent_id: ObjectId,
+    source_static: &Option<StaticDefinition>,
+) {
+    let static_def = match source_static {
+        Some(def) => def,
+        None => return,
+    };
+
+    // Only apply if the source permanent is still on the battlefield
+    if !state.battlefield.contains(&source_permanent_id) {
+        return;
+    }
+
+    let mut bound = static_def.clone();
+    bound.affected = Some(TargetFilter::SpecificObject(source_permanent_id));
+
+    if let Some(obj) = state.objects.get_mut(&counter_source_id) {
+        if !obj.static_definitions.contains(&bound) {
+            obj.static_definitions.push(bound);
+            state.layers_dirty = true;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, TargetFilter};
+    use crate::types::ability::{Effect, TargetFilter, TriggerCondition};
     use crate::types::game_state::{StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -112,6 +158,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Counter {
                 target: TargetFilter::Any,
+                source_static: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -163,6 +210,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Counter {
                 target: TargetFilter::Any,
+                source_static: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -177,5 +225,137 @@ mod tests {
         assert!(!events
             .iter()
             .any(|e| matches!(e, GameEvent::SpellCountered { .. })));
+    }
+
+    #[test]
+    fn counter_ability_applies_source_static_to_counter_source() {
+        use crate::types::ability::{ContinuousModification, StaticDefinition};
+
+        let mut state = GameState::new_two_player(42);
+
+        // Source permanent on the battlefield (e.g., a creature whose ability was activated)
+        let source_permanent = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(1),
+            "Source Creature".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Tidebinder on the battlefield (the counter source)
+        let tidebinder = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Tidebinder".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Triggered ability on the stack (from the source creature)
+        let ability_on_stack = ObjectId(999);
+        state.stack.push(StackEntry {
+            id: ability_on_stack,
+            source_id: source_permanent,
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source_permanent,
+                ability: make_dummy_ability(source_permanent, PlayerId(1)),
+                condition: None,
+            },
+        });
+
+        let source_static = StaticDefinition::continuous()
+            .modifications(vec![ContinuousModification::RemoveAllAbilities]);
+
+        let counter_ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::StackAbility,
+                source_static: Some(source_static),
+            },
+            vec![TargetRef::Object(ability_on_stack)],
+            tidebinder,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &counter_ability, &mut events).unwrap();
+
+        // Ability should be removed from stack
+        assert!(state.stack.is_empty(), "ability should be countered");
+
+        // Tidebinder should now have a static definition targeting the source permanent
+        let tidebinder_obj = state.objects.get(&tidebinder).unwrap();
+        assert_eq!(
+            tidebinder_obj.static_definitions.len(),
+            1,
+            "Tidebinder should have one static definition"
+        );
+        let bound_static = &tidebinder_obj.static_definitions[0];
+        assert_eq!(
+            bound_static.affected,
+            Some(TargetFilter::SpecificObject(source_permanent)),
+            "static should target the source permanent"
+        );
+        assert_eq!(
+            bound_static.modifications,
+            vec![ContinuousModification::RemoveAllAbilities],
+            "should remove all abilities"
+        );
+    }
+
+    #[test]
+    fn counter_spell_does_not_apply_source_static() {
+        use crate::types::ability::{ContinuousModification, StaticDefinition};
+
+        let mut state = GameState::new_two_player(42);
+
+        let tidebinder = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Tidebinder".to_string(),
+            Zone::Battlefield,
+        );
+
+        // A spell on the stack (not an ability)
+        let spell_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: make_dummy_ability(spell_id, PlayerId(1)),
+            },
+        });
+
+        let source_static = StaticDefinition::continuous()
+            .modifications(vec![ContinuousModification::RemoveAllAbilities]);
+
+        let counter_ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::Any,
+                source_static: Some(source_static),
+            },
+            vec![TargetRef::Object(spell_id)],
+            tidebinder,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &counter_ability, &mut events).unwrap();
+
+        // Spell countered, but source_static should NOT be applied (it's a spell, not an ability)
+        let tidebinder_obj = state.objects.get(&tidebinder).unwrap();
+        assert!(
+            tidebinder_obj.static_definitions.is_empty(),
+            "source_static should not apply when countering a spell"
+        );
     }
 }

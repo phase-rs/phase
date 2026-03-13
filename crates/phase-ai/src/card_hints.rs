@@ -233,6 +233,7 @@ mod tests {
             CoreType::Instant,
             vec![make_ability(Effect::Counter {
                 target: TargetFilter::Any,
+                source_static: None,
             })],
         );
 
@@ -280,6 +281,7 @@ mod tests {
             CoreType::Instant,
             vec![make_ability(Effect::Counter {
                 target: TargetFilter::Any,
+                source_static: None,
             })],
         );
 
@@ -308,6 +310,7 @@ mod tests {
             CoreType::Instant,
             vec![make_ability(Effect::Counter {
                 target: TargetFilter::Any,
+                source_static: None,
             })],
         );
 
