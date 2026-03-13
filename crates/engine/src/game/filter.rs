@@ -4,7 +4,7 @@
 //! All filter logic works against the TargetFilter enum hierarchy from types/ability.rs.
 
 use crate::game::game_object::GameObject;
-use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter};
+use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypedFilter, TypeFilter};
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -51,12 +51,12 @@ fn filter_inner(
         TargetFilter::Player => false,     // Players are not objects
         TargetFilter::Controller => false, // Controller is a player, not an object
         TargetFilter::SelfRef => object_id == source_id,
-        TargetFilter::Typed {
+        TargetFilter::Typed(TypedFilter {
             card_type,
             subtype,
             controller,
             properties,
-        } => {
+        }) => {
             let obj = match state.objects.get(&object_id) {
                 Some(o) => o,
                 None => return false,
@@ -342,24 +342,9 @@ mod tests {
     fn type_filter_matches_correct_type() {
         let mut state = setup();
         let id = add_creature(&mut state, PlayerId(0), "Bear");
-        let creature_filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Creature),
-            subtype: None,
-            controller: None,
-            properties: vec![],
-        };
-        let land_filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Land),
-            subtype: None,
-            controller: None,
-            properties: vec![],
-        };
-        let card_filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Card),
-            subtype: None,
-            controller: None,
-            properties: vec![],
-        };
+        let creature_filter = TargetFilter::Typed(TypedFilter::creature());
+        let land_filter = TargetFilter::Typed(TypedFilter::land());
+        let card_filter = TargetFilter::Typed(TypedFilter::card());
         assert!(matches_target_filter(&state, id, &creature_filter, id));
         assert!(!matches_target_filter(&state, id, &land_filter, id));
         assert!(matches_target_filter(&state, id, &card_filter, id));
@@ -383,12 +368,7 @@ mod tests {
         // "Creature.Other+YouCtrl" = And(Typed{creature, You}, Not(SelfRef))
         let filter = TargetFilter::And {
             filters: vec![
-                TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Creature),
-                    subtype: None,
-                    controller: Some(ControllerRef::You),
-                    properties: vec![],
-                },
+                TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
                 TargetFilter::Not {
                     filter: Box::new(TargetFilter::SelfRef),
                 },
@@ -407,12 +387,7 @@ mod tests {
         let mine = add_creature(&mut state, PlayerId(0), "Mine");
         let theirs = add_creature(&mut state, PlayerId(1), "Theirs");
 
-        let filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Creature),
-            subtype: None,
-            controller: Some(ControllerRef::You),
-            properties: vec![],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
 
         assert!(matches_target_filter(&state, mine, &filter, mine));
         assert!(!matches_target_filter(&state, theirs, &filter, mine));
@@ -424,12 +399,7 @@ mod tests {
         let mine = add_creature(&mut state, PlayerId(0), "Mine");
         let theirs = add_creature(&mut state, PlayerId(1), "Theirs");
 
-        let filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Creature),
-            subtype: None,
-            controller: Some(ControllerRef::Opponent),
-            properties: vec![],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
 
         assert!(!matches_target_filter(&state, mine, &filter, mine));
         assert!(matches_target_filter(&state, theirs, &filter, mine));
@@ -445,12 +415,7 @@ mod tests {
         // "Creature.Other+YouCtrl"
         let filter = TargetFilter::And {
             filters: vec![
-                TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Creature),
-                    subtype: None,
-                    controller: Some(ControllerRef::You),
-                    properties: vec![],
-                },
+                TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
                 TargetFilter::Not {
                     filter: Box::new(TargetFilter::SelfRef),
                 },
@@ -466,12 +431,7 @@ mod tests {
     fn permanent_matches_multiple_types() {
         let mut state = setup();
         let id = add_creature(&mut state, PlayerId(0), "Bear");
-        let filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Permanent),
-            subtype: None,
-            controller: None,
-            properties: vec![],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::permanent());
         assert!(matches_target_filter(&state, id, &filter, id));
     }
 
@@ -499,12 +459,7 @@ mod tests {
             .push(CoreType::Enchantment);
         state.objects.get_mut(&aura).unwrap().attached_to = Some(creature_a);
 
-        let filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Creature),
-            subtype: None,
-            controller: None,
-            properties: vec![FilterProp::EnchantedBy],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
 
         assert!(matches_target_filter(&state, creature_a, &filter, aura));
         assert!(
@@ -535,12 +490,7 @@ mod tests {
             .core_types
             .push(CoreType::Enchantment);
 
-        let filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Creature),
-            subtype: None,
-            controller: None,
-            properties: vec![FilterProp::EnchantedBy],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
 
         assert!(
             !matches_target_filter(&state, creature, &filter, aura),
@@ -584,18 +534,8 @@ mod tests {
         let id = add_creature(&mut state, PlayerId(0), "Bear");
         let filter = TargetFilter::Or {
             filters: vec![
-                TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Land),
-                    subtype: None,
-                    controller: None,
-                    properties: vec![],
-                },
-                TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Creature),
-                    subtype: None,
-                    controller: None,
-                    properties: vec![],
-                },
+                TargetFilter::Typed(TypedFilter::land()),
+                TargetFilter::Typed(TypedFilter::creature()),
             ],
         };
         assert!(matches_target_filter(&state, id, &filter, id));
@@ -607,12 +547,7 @@ mod tests {
         let id = add_creature(&mut state, PlayerId(0), "Bear");
         state.objects.get_mut(&id).unwrap().tapped = true;
 
-        let filter = TargetFilter::Typed {
-            card_type: None,
-            subtype: None,
-            controller: None,
-            properties: vec![FilterProp::Tapped],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Tapped]));
         assert!(matches_target_filter(&state, id, &filter, id));
     }
 
@@ -629,14 +564,9 @@ mod tests {
             .push(crate::types::card_type::Supertype::Basic);
         state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Land];
 
-        let filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Land),
-            subtype: None,
-            controller: None,
-            properties: vec![FilterProp::HasSupertype {
-                value: "Basic".to_string(),
-            }],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::HasSupertype {
+            value: "Basic".to_string(),
+        }]));
         assert!(matches_target_filter(&state, id, &filter, id));
     }
 
@@ -646,14 +576,9 @@ mod tests {
         let id = add_creature(&mut state, PlayerId(0), "Stomping Ground");
         state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Land];
 
-        let filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Land),
-            subtype: None,
-            controller: None,
-            properties: vec![FilterProp::HasSupertype {
-                value: "Basic".to_string(),
-            }],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::HasSupertype {
+            value: "Basic".to_string(),
+        }]));
         assert!(!matches_target_filter(&state, id, &filter, id));
     }
 
@@ -662,12 +587,7 @@ mod tests {
         let mut state = setup();
         let obj = add_creature(&mut state, PlayerId(1), "Theirs");
 
-        let filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Creature),
-            subtype: None,
-            controller: Some(ControllerRef::Opponent),
-            properties: vec![],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
 
         // Source doesn't exist, but we pass controller explicitly
         let fake_source = ObjectId(9999);
@@ -711,12 +631,7 @@ mod tests {
             .subtypes
             .push("Goblin".to_string());
 
-        let filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Creature),
-            subtype: None,
-            controller: None,
-            properties: vec![FilterProp::IsChosenCreatureType],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::IsChosenCreatureType]));
 
         assert!(
             matches_target_filter(&state, elf, &filter, source),

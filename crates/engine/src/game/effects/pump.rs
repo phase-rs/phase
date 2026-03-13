@@ -108,7 +108,7 @@ fn resolve_pt_value(value: &PtValue) -> i32 {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{PtValue, TargetFilter};
+    use crate::types::ability::{PtValue, TargetFilter, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -236,12 +236,9 @@ mod tests {
             Effect::PumpAll {
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
-                target: TargetFilter::Typed {
-                    card_type: Some(crate::types::ability::TypeFilter::Creature),
-                    subtype: None,
-                    controller: Some(crate::types::ability::ControllerRef::You),
-                    properties: vec![],
-                },
+                target: TypedFilter::creature()
+                    .controller(crate::types::ability::ControllerRef::You)
+                    .into(),
             },
             vec![],
             ObjectId(100),

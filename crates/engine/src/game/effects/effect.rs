@@ -90,7 +90,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ContinuousModification, ControllerRef, Duration, SpellContext, StaticDefinition, TypeFilter,
+        ContinuousModification, ControllerRef, Duration, StaticDefinition, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
@@ -115,20 +115,17 @@ mod tests {
                 keyword: Keyword::Flying,
             }]);
 
-        let ability = ResolvedAbility {
-            effect: Effect::GenericEffect {
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
                 static_abilities: vec![static_def.clone()],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
             },
-            targets: vec![],
-            source_id: source,
-            controller: PlayerId(0),
-            sub_ability: None,
-            duration: Some(Duration::UntilEndOfTurn),
-            condition: None,
-            context: SpellContext::default(),
-        };
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
 
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -179,30 +176,22 @@ mod tests {
             .push(CoreType::Creature);
 
         let static_def = StaticDefinition::continuous()
-            .affected(TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: Some(ControllerRef::You),
-                properties: vec![],
-            })
+            .affected(TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)))
             .modifications(vec![ContinuousModification::AddKeyword {
                 keyword: Keyword::Trample,
             }]);
 
-        let ability = ResolvedAbility {
-            effect: Effect::GenericEffect {
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
                 static_abilities: vec![static_def.clone()],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
             },
-            targets: vec![],
-            source_id: source,
-            controller: PlayerId(0),
-            sub_ability: None,
-            duration: Some(Duration::UntilEndOfTurn),
-            condition: None,
-            context: SpellContext::default(),
-        };
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
 
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -256,35 +245,22 @@ mod tests {
             .push(CoreType::Creature);
 
         let static_def = StaticDefinition::continuous()
-            .affected(TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: None,
-                properties: vec![],
-            })
+            .affected(TargetFilter::Typed(TypedFilter::creature()))
             .modifications(vec![ContinuousModification::AddKeyword {
                 keyword: Keyword::Flying,
             }]);
 
-        let ability = ResolvedAbility {
-            effect: Effect::GenericEffect {
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
                 static_abilities: vec![static_def],
                 duration: Some(Duration::UntilEndOfTurn),
-                target: Some(TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Creature),
-                    subtype: None,
-                    controller: None,
-                    properties: vec![],
-                }),
+                target: Some(TargetFilter::Typed(TypedFilter::creature())),
             },
-            targets: vec![TargetRef::Object(target_creature)],
-            source_id: source,
-            controller: PlayerId(0),
-            sub_ability: None,
-            duration: Some(Duration::UntilEndOfTurn),
-            condition: None,
-            context: SpellContext::default(),
-        };
+            vec![TargetRef::Object(target_creature)],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
 
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();

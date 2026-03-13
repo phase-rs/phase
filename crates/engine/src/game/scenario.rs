@@ -148,9 +148,8 @@ impl GameScenario {
         obj.card_types.supertypes.push(Supertype::Basic);
         obj.entered_battlefield_turn = Some(self.state.turn_number.saturating_sub(1));
         // Add mana ability
-        obj.abilities.push(AbilityDefinition {
-            cost: Some(crate::types::ability::AbilityCost::Tap),
-            ..AbilityDefinition::new(
+        obj.abilities.push(
+            AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::Mana {
                     produced: crate::types::ability::ManaProduction::Fixed {
@@ -159,7 +158,8 @@ impl GameScenario {
                     restrictions: vec![],
                 },
             )
-        });
+            .cost(crate::types::ability::AbilityCost::Tap),
+        );
         id
     }
 

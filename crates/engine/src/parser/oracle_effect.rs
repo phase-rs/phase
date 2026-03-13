@@ -9,7 +9,7 @@ use super::oracle_util::{
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, CountValue,
     DamageAmount, Duration, Effect, FilterProp, GainLifePlayer, LifeAmount, ManaProduction,
-    ManaSpendRestriction, PtValue, StaticDefinition, TargetFilter, TypeFilter,
+    ManaSpendRestriction, PtValue, StaticDefinition, TargetFilter, TypedFilter, TypeFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -630,12 +630,7 @@ fn type_str_to_target_filter(s: &str) -> Option<TargetFilter> {
         "land" => Some(TypeFilter::Land),
         _ => None,
     };
-    card_type.map(|ct| TargetFilter::Typed {
-        card_type: Some(ct),
-        subtype: None,
-        controller: None,
-        properties: vec![],
-    })
+    card_type.map(|ct| TargetFilter::Typed(TypedFilter::new(ct)))
 }
 
 /// Extract card type filter from a sub-ability sentence containing "card from it/among".
@@ -648,15 +643,10 @@ fn parse_choose_filter_from_sentence(lower: &str) -> TargetFilter {
     // The word immediately before "card from" is the type descriptor
     let word = lower[..card_pos].trim().rsplit(' ').next().unwrap_or("");
     if let Some(negated) = word.strip_prefix("non") {
-        if let Some(TargetFilter::Typed { card_type, .. }) = type_str_to_target_filter(negated) {
-            return TargetFilter::Typed {
-                card_type: Some(TypeFilter::Card),
-                subtype: None,
-                controller: None,
-                properties: vec![FilterProp::NonType {
-                    value: card_type.map(|ct| format!("{ct:?}")).unwrap_or_default(),
-                }],
-            };
+        if let Some(TargetFilter::Typed(TypedFilter { card_type, .. })) = type_str_to_target_filter(negated) {
+            return TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::NonType {
+                value: card_type.map(|ct| format!("{ct:?}")).unwrap_or_default(),
+            }]));
         }
     }
     type_str_to_target_filter(word).unwrap_or(TargetFilter::Any)
@@ -1004,10 +994,15 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
         .flat_map(|s| {
             let (condition, text) = strip_additional_cost_conditional(s);
             let clause = parse_effect_clause(&text);
-            let mut def = AbilityDefinition {
-                duration: clause.duration,
-                condition,
-                ..AbilityDefinition::new(kind, clause.effect)
+            let mut def = {
+                let mut d = AbilityDefinition::new(kind, clause.effect);
+                if let Some(dur) = clause.duration {
+                    d = d.duration(dur);
+                }
+                if let Some(cond) = condition {
+                    d = d.condition(cond);
+                }
+                d
             };
             // If the clause produced a compound sub_ability (e.g., pump "and" life gain),
             // emit both as separate defs so they chain properly.
@@ -1246,18 +1241,8 @@ fn parse_search_filter(text: &str) -> TargetFilter {
             }
             return TargetFilter::Or {
                 filters: vec![
-                    TargetFilter::Typed {
-                        card_type: Some(TypeFilter::Instant),
-                        subtype: None,
-                        controller: None,
-                        properties: properties.clone(),
-                    },
-                    TargetFilter::Typed {
-                        card_type: Some(TypeFilter::Sorcery),
-                        subtype: None,
-                        controller: None,
-                        properties,
-                    },
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant).properties(properties.clone())),
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery).properties(properties)),
                 ],
             };
         }
@@ -1271,28 +1256,13 @@ fn parse_search_filter(text: &str) -> TargetFilter {
                         value: "Basic".to_string(),
                     });
                 }
-                return TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Land),
-                    subtype: Some(capitalize(other)),
-                    controller: None,
-                    properties,
-                };
+                return TargetFilter::Typed(TypedFilter::land().subtype(capitalize(other)).properties(properties));
             }
             if other == "equipment" {
-                return TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Artifact),
-                    subtype: Some("Equipment".to_string()),
-                    controller: None,
-                    properties: vec![],
-                };
+                return TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).subtype("Equipment".to_string()));
             }
             if other == "aura" {
-                return TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Enchantment),
-                    subtype: Some("Aura".to_string()),
-                    controller: None,
-                    properties: vec![],
-                };
+                return TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment).subtype("Aura".to_string()));
             }
             // Fallback: treat as Any
             return TargetFilter::Any;
@@ -1306,12 +1276,12 @@ fn parse_search_filter(text: &str) -> TargetFilter {
         });
     }
 
-    TargetFilter::Typed {
+    TargetFilter::Typed(TypedFilter {
         card_type,
         subtype: None,
         controller: None,
         properties,
-    }
+    })
 }
 
 /// Parse the destination zone from search Oracle text.
@@ -1501,12 +1471,7 @@ fn parse_subject_application(subject: &str) -> Option<SubjectApplication> {
     }
     if lower == "creatures you control" || lower == "other creatures you control" {
         return Some(SubjectApplication {
-            affected: TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: Some(ControllerRef::You),
-                properties: vec![],
-            },
+            affected: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
             target: None,
         });
     }
@@ -2828,24 +2793,24 @@ fn extract_number_before(text: &str, before_word: &str) -> Option<u32> {
 
 fn constrain_filter_to_stack(filter: TargetFilter) -> TargetFilter {
     match filter {
-        TargetFilter::Typed {
+        TargetFilter::Typed(TypedFilter {
             card_type,
             subtype,
             controller,
             mut properties,
-        } => {
+        }) => {
             if !properties
                 .iter()
                 .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))
             {
                 properties.push(FilterProp::InZone { zone: Zone::Stack });
             }
-            TargetFilter::Typed {
+            TargetFilter::Typed(TypedFilter {
                 card_type,
                 subtype,
                 controller,
                 properties,
-            }
+            })
         }
         TargetFilter::Or { filters } => TargetFilter::Or {
             filters: filters.into_iter().map(constrain_filter_to_stack).collect(),
@@ -2881,10 +2846,10 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Destroy {
-                target: TargetFilter::Typed {
+                target: TargetFilter::Typed(TypedFilter {
                     card_type: Some(TypeFilter::Creature),
                     ..
-                }
+                })
             }
         ));
     }
@@ -2908,7 +2873,7 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Counter {
-                target: TargetFilter::Typed { properties, .. }
+                target: TargetFilter::Typed(TypedFilter { properties, .. })
             } if properties
                 .iter()
                 .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))
@@ -2925,7 +2890,7 @@ mod tests {
             } if filters.iter().all(|f| {
                 matches!(
                     f,
-                    TargetFilter::Typed { properties, .. }
+                    TargetFilter::Typed(TypedFilter { properties, .. })
                         if properties.iter().any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))
                 )
             })
@@ -2938,7 +2903,7 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Counter {
-                target: TargetFilter::Typed { properties, .. }
+                target: TargetFilter::Typed(TypedFilter { properties, .. })
             } if properties.iter().any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))
                 && properties.iter().any(|p| matches!(p, FilterProp::CmcGE { value: 4 }))
         ));
@@ -3126,11 +3091,11 @@ mod tests {
                 assert_eq!(count, 1);
                 assert!(reveal);
                 match filter {
-                    TargetFilter::Typed {
+                    TargetFilter::Typed(TypedFilter {
                         card_type,
                         properties,
                         ..
-                    } => {
+                    }) => {
                         assert_eq!(card_type, Some(TypeFilter::Land));
                         assert!(properties.iter().any(|p| matches!(
                             p,
@@ -3159,10 +3124,10 @@ mod tests {
                 assert!(reveal);
                 assert!(matches!(
                     filter,
-                    TargetFilter::Typed {
+                    TargetFilter::Typed(TypedFilter {
                         card_type: Some(TypeFilter::Creature),
                         ..
-                    }
+                    })
                 ));
             }
             other => panic!("Expected SearchLibrary, got {:?}", other),
@@ -3699,10 +3664,10 @@ mod tests {
             Effect::Pump {
                 power: PtValue::Variable(ref value),
                 toughness: PtValue::Fixed(0),
-                target: TargetFilter::Typed {
+                target: TargetFilter::Typed(TypedFilter {
                     card_type: Some(TypeFilter::Creature),
                     ..
-                },
+                }),
             } if value == "X"
         ));
     }
@@ -3717,10 +3682,10 @@ mod tests {
             Effect::Pump {
                 power: PtValue::Variable(ref value),
                 toughness: PtValue::Variable(ref value2),
-                target: TargetFilter::Typed {
+                target: TargetFilter::Typed(TypedFilter {
                     card_type: Some(TypeFilter::Creature),
                     ..
-                },
+                }),
             } if value == "-(the number of Elves you control)"
                 && value2 == "-(the number of Elves you control)"
         ));
@@ -3736,11 +3701,11 @@ mod tests {
             Effect::PumpAll {
                 power: PtValue::Variable(ref value),
                 toughness: PtValue::Variable(ref value2),
-                target: TargetFilter::Typed {
+                target: TargetFilter::Typed(TypedFilter {
                     card_type: Some(TypeFilter::Creature),
                     controller: Some(ControllerRef::You),
                     ..
-                },
+                }),
             } if value == "the number of cards in your hand"
                 && value2 == "the number of cards in your hand"
         ));
@@ -3769,7 +3734,7 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Destroy {
-                target: TargetFilter::Typed { .. }
+                target: TargetFilter::Typed(TypedFilter { .. })
             }
         ));
     }
@@ -3780,10 +3745,10 @@ mod tests {
         assert!(matches!(
             e,
             Effect::GenericEffect {
-                target: Some(TargetFilter::Typed {
+                target: Some(TargetFilter::Typed(TypedFilter {
                     card_type: Some(TypeFilter::Creature),
                     ..
-                }),
+                })),
                 ..
             }
         ));
@@ -3801,10 +3766,10 @@ mod tests {
         assert!(matches!(
             e,
             Effect::GenericEffect {
-                target: Some(TargetFilter::Typed {
+                target: Some(TargetFilter::Typed(TypedFilter {
                     card_type: Some(TypeFilter::Creature),
                     ..
-                }),
+                })),
                 static_abilities,
                 ..
             } if static_abilities.len() == 1
@@ -3932,20 +3897,15 @@ mod tests {
         assert!(matches!(
             e,
             Effect::GenericEffect {
-                target: Some(TargetFilter::Typed {
+                target: Some(TargetFilter::Typed(TypedFilter {
                     card_type: Some(TypeFilter::Creature),
                     ..
-                }),
+                })),
                 static_abilities,
                 ..
             } if static_abilities.len() == 1
                 && static_abilities[0].mode == StaticMode::CantBlock
-                && static_abilities[0].affected == Some(TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Creature),
-                    subtype: None,
-                    controller: None,
-                    properties: vec![],
-                })
+                && static_abilities[0].affected == Some(TargetFilter::Typed(TypedFilter::creature()))
         ));
     }
 
@@ -3955,10 +3915,10 @@ mod tests {
         assert!(matches!(
             e,
             Effect::GenericEffect {
-                target: Some(TargetFilter::Typed {
+                target: Some(TargetFilter::Typed(TypedFilter {
                     card_type: Some(TypeFilter::Creature),
                     ..
-                }),
+                })),
                 static_abilities,
                 ..
             } if static_abilities.len() == 1
@@ -4097,10 +4057,10 @@ mod tests {
         assert!(matches!(
             e,
             Effect::PutCounter {
-                target: TargetFilter::Typed {
+                target: TargetFilter::Typed(TypedFilter {
                     card_type: Some(TypeFilter::Creature),
                     ..
-                },
+                }),
                 ..
             }
         ));
@@ -4169,11 +4129,11 @@ mod tests {
             } => {
                 assert!(matches!(
                     target,
-                    TargetFilter::Typed {
+                    TargetFilter::Typed(TypedFilter {
                         card_type: None,
                         controller: Some(ControllerRef::Opponent),
                         ..
-                    }
+                    })
                 ));
                 assert_eq!(card_filter, TargetFilter::Any);
             }
@@ -4207,18 +4167,18 @@ mod tests {
             } => {
                 assert!(matches!(
                     target,
-                    TargetFilter::Typed {
+                    TargetFilter::Typed(TypedFilter {
                         card_type: None,
                         controller: Some(ControllerRef::Opponent),
                         ..
-                    }
+                    })
                 ));
                 assert!(matches!(
                     card_filter,
-                    TargetFilter::Typed {
+                    TargetFilter::Typed(TypedFilter {
                         properties,
                         ..
-                    } if !properties.is_empty()
+                    }) if !properties.is_empty()
                 ));
             }
             other => panic!("Expected RevealHand, got {:?}", other),
@@ -4240,11 +4200,11 @@ mod tests {
         let filter = parse_choose_filter_from_sentence("exile a nonland card from it");
         assert!(matches!(
             filter,
-            TargetFilter::Typed {
+            TargetFilter::Typed(TypedFilter {
                 card_type: Some(TypeFilter::Card),
                 properties,
                 ..
-            } if properties.iter().any(|p| matches!(p, FilterProp::NonType { value } if value == "Land"))
+            }) if properties.iter().any(|p| matches!(p, FilterProp::NonType { value } if value == "Land"))
         ));
     }
 
@@ -4253,10 +4213,10 @@ mod tests {
         let filter = parse_choose_filter_from_sentence("exile a creature card from it");
         assert!(matches!(
             filter,
-            TargetFilter::Typed {
+            TargetFilter::Typed(TypedFilter {
                 card_type: Some(TypeFilter::Creature),
                 ..
-            }
+            })
         ));
     }
 

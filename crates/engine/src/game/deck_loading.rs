@@ -387,17 +387,15 @@ mod tests {
             non_ability_text: None,
             flavor_name: None,
             keywords: vec![Keyword::Trample],
-            abilities: vec![AbilityDefinition {
-                cost: Some(crate::types::ability::AbilityCost::Tap),
-                ..AbilityDefinition::new(
-                    AbilityKind::Activated,
-                    Effect::Pump {
-                        power: PtValue::Fixed(0),
-                        toughness: PtValue::Fixed(0),
-                        target: TargetFilter::Any,
-                    },
-                )
-            }],
+            abilities: vec![AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Pump {
+                    power: PtValue::Fixed(0),
+                    toughness: PtValue::Fixed(0),
+                    target: TargetFilter::Any,
+                },
+            )
+            .cost(crate::types::ability::AbilityCost::Tap)],
             triggers: vec![],
             static_abilities: vec![],
             replacements: vec![],

@@ -278,18 +278,16 @@ mod tests {
     use crate::types::identifiers::CardId;
 
     fn verge_ability(color: ManaColor) -> AbilityDefinition {
-        AbilityDefinition {
-            cost: Some(AbilityCost::Tap),
-            ..AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::Mana {
-                    produced: ManaProduction::Fixed {
-                        colors: vec![color],
-                    },
-                    restrictions: vec![],
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![color],
                 },
-            )
-        }
+                restrictions: vec![],
+            },
+        )
+        .cost(AbilityCost::Tap)
     }
 
     fn add_gloomlake_verge(state: &mut GameState, controller: PlayerId) -> ObjectId {
@@ -303,18 +301,8 @@ mod tests {
         let obj = state.objects.get_mut(&verge).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
         obj.abilities.push(verge_ability(ManaColor::Blue));
-        obj.abilities.push(AbilityDefinition {
-            cost: Some(AbilityCost::Tap),
-            sub_ability: Some(Box::new(AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::Unimplemented {
-                    name: "activate".to_string(),
-                    description: Some(
-                        "Activate only if you control an Island or a Swamp".to_string(),
-                    ),
-                },
-            ))),
-            ..AbilityDefinition::new(
+        obj.abilities.push(
+            AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::Mana {
                     produced: ManaProduction::Fixed {
@@ -323,7 +311,17 @@ mod tests {
                     restrictions: vec![],
                 },
             )
-        });
+            .cost(AbilityCost::Tap)
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Unimplemented {
+                    name: "activate".to_string(),
+                    description: Some(
+                        "Activate only if you control an Island or a Swamp".to_string(),
+                    ),
+                },
+            )),
+        );
         verge
     }
 
@@ -382,25 +380,23 @@ mod tests {
 
     #[test]
     fn parse_canonical_condition_payload() {
-        let def = AbilityDefinition {
-            cost: Some(AbilityCost::Tap),
-            sub_ability: Some(Box::new(AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::Unimplemented {
-                    name: "activate_only_if_controls_land_subtype_any".to_string(),
-                    description: Some("Island|Swamp".to_string()),
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Blue],
                 },
-            ))),
-            ..AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::Mana {
-                    produced: ManaProduction::Fixed {
-                        colors: vec![ManaColor::Blue],
-                    },
-                    restrictions: vec![],
-                },
-            )
-        };
+                restrictions: vec![],
+            },
+        )
+        .cost(AbilityCost::Tap)
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Unimplemented {
+                name: "activate_only_if_controls_land_subtype_any".to_string(),
+                description: Some("Island|Swamp".to_string()),
+            },
+        ));
 
         let parsed = extract_land_subtype_activation_condition(&def).unwrap();
         assert_eq!(parsed, vec!["Island".to_string(), "Swamp".to_string()]);

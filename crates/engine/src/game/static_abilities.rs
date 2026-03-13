@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::game::filter::matches_target_filter;
-use crate::types::ability::TargetFilter;
+use crate::types::ability::{TargetFilter, TypedFilter};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -390,7 +390,7 @@ fn static_filter_matches(
                 // All players match
                 return true;
             }
-            TargetFilter::Typed { controller, .. } => {
+            TargetFilter::Typed(TypedFilter { controller, .. }) => {
                 if let Some(ctrl) = controller {
                     return match ctrl {
                         crate::types::ability::ControllerRef::You => {
@@ -462,12 +462,7 @@ mod tests {
             .push(CoreType::Creature);
 
         // Add CantAttack static targeting opponent's creatures
-        let affected = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Creature),
-            subtype: None,
-            controller: Some(ControllerRef::Opponent),
-            properties: vec![],
-        };
+        let affected = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
         state
             .objects
             .get_mut(&source)

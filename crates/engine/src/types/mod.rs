@@ -23,7 +23,7 @@ pub use ability::{
     ContinuousModification, ControllerRef, DamageAmount, Duration, Effect, EffectError, FilterProp,
     ManaProduction, ManaSpendRestriction, Parity, PtValue, ReplacementDefinition, ResolvedAbility,
     StaticCondition, StaticDefinition, TargetFilter, TargetRef, TriggerCondition,
-    TriggerDefinition, TypeFilter,
+    TriggerDefinition, TypeFilter, TypedFilter,
 };
 pub use actions::GameAction;
 pub use card::{CardFace, CardLayout, CardRules};

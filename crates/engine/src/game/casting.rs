@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ResolvedAbility, SpellContext, TargetFilter, TargetRef,
+    AbilityDefinition, AbilityKind, Effect, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -202,18 +202,16 @@ pub fn handle_cast_spell(
         });
     }
 
-    let resolved = ResolvedAbility {
-        effect: ability_def.effect.clone(),
-        targets: Vec::new(),
-        source_id: object_id,
-        controller: player,
-        sub_ability: ability_def
-            .sub_ability
-            .as_ref()
-            .map(|sub| Box::new(build_resolved_from_def(sub, object_id, player))),
-        duration: None,
-        condition: ability_def.condition.clone(),
-        context: SpellContext::default(),
+    let resolved = {
+        let mut r =
+            ResolvedAbility::new(ability_def.effect.clone(), Vec::new(), object_id, player);
+        if let Some(sub) = &ability_def.sub_ability {
+            r = r.sub_ability(build_resolved_from_def(sub, object_id, player));
+        }
+        if let Some(c) = ability_def.condition.clone() {
+            r = r.condition(c);
+        }
+        r
     };
 
     // 5. Handle targeting -- ensure layers evaluated before target legality
@@ -341,19 +339,17 @@ fn build_resolved_from_def(
     source_id: ObjectId,
     controller: PlayerId,
 ) -> ResolvedAbility {
-    ResolvedAbility {
-        effect: def.effect.clone(),
-        targets: Vec::new(),
-        source_id,
-        controller,
-        sub_ability: def
-            .sub_ability
-            .as_ref()
-            .map(|sub| Box::new(build_resolved_from_def(sub, source_id, controller))),
-        duration: def.duration.clone(),
-        condition: def.condition.clone(),
-        context: SpellContext::default(),
+    let mut resolved = ResolvedAbility::new(def.effect.clone(), Vec::new(), source_id, controller);
+    if let Some(sub) = &def.sub_ability {
+        resolved = resolved.sub_ability(build_resolved_from_def(sub, source_id, controller));
     }
+    if let Some(d) = def.duration.clone() {
+        resolved = resolved.duration(d);
+    }
+    if let Some(c) = def.condition.clone() {
+        resolved = resolved.condition(c);
+    }
+    resolved
 }
 
 /// Handle mode selection for a modal spell.
@@ -607,18 +603,16 @@ pub fn handle_activate_ability(
         });
     }
 
-    let resolved = ResolvedAbility {
-        effect: ability_def.effect.clone(),
-        targets: Vec::new(),
-        source_id,
-        controller: player,
-        sub_ability: ability_def
-            .sub_ability
-            .as_ref()
-            .map(|sub| Box::new(build_resolved_from_def(sub, source_id, player))),
-        duration: None,
-        condition: ability_def.condition.clone(),
-        context: SpellContext::default(),
+    let resolved = {
+        let mut r =
+            ResolvedAbility::new(ability_def.effect.clone(), Vec::new(), source_id, player);
+        if let Some(sub) = &ability_def.sub_ability {
+            r = r.sub_ability(build_resolved_from_def(sub, source_id, player));
+        }
+        if let Some(c) = ability_def.condition.clone() {
+            r = r.condition(c);
+        }
+        r
     };
 
     // Handle targeting
@@ -1058,9 +1052,8 @@ mod tests {
         );
         let obj = state.objects.get_mut(&obj_id).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
-        obj.abilities.push(AbilityDefinition {
-            cost: Some(crate::types::ability::AbilityCost::Tap),
-            ..AbilityDefinition::new(
+        obj.abilities.push(
+            AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::Mana {
                     produced: crate::types::ability::ManaProduction::Fixed {
@@ -1069,17 +1062,10 @@ mod tests {
                     restrictions: vec![],
                 },
             )
-        });
-        obj.abilities.push(AbilityDefinition {
-            cost: Some(crate::types::ability::AbilityCost::Tap),
-            sub_ability: Some(Box::new(AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::Unimplemented {
-                    name: "activate_only_if_controls_land_subtype_any".to_string(),
-                    description: Some("Island|Swamp".to_string()),
-                },
-            ))),
-            ..AbilityDefinition::new(
+            .cost(crate::types::ability::AbilityCost::Tap),
+        );
+        obj.abilities.push(
+            AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::Mana {
                     produced: crate::types::ability::ManaProduction::Fixed {
@@ -1088,7 +1074,15 @@ mod tests {
                     restrictions: vec![],
                 },
             )
-        });
+            .cost(crate::types::ability::AbilityCost::Tap)
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Unimplemented {
+                    name: "activate_only_if_controls_land_subtype_any".to_string(),
+                    description: Some("Island|Swamp".to_string()),
+                },
+            )),
+        );
         obj_id
     }
 
@@ -1337,7 +1331,7 @@ mod tests {
 
     // --- Aura casting tests ---
 
-    use crate::types::ability::TargetFilter;
+    use crate::types::ability::{TargetFilter, TypedFilter};
     use crate::types::keywords::Keyword;
 
     /// Create an Aura enchantment in hand with Enchant creature keyword.
@@ -1353,12 +1347,7 @@ mod tests {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
             obj.card_types.subtypes.push("Aura".to_string());
-            obj.keywords.push(Keyword::Enchant(TargetFilter::Typed {
-                card_type: Some(crate::types::ability::TypeFilter::Creature),
-                subtype: None,
-                controller: None,
-                properties: vec![],
-            }));
+            obj.keywords.push(Keyword::Enchant(TargetFilter::Typed(TypedFilter::creature())));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::White],
                 generic: 0,

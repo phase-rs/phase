@@ -70,16 +70,14 @@ mod tests {
     use crate::types::zones::Zone;
 
     fn make_mana_ability(produced: ManaProduction) -> AbilityDefinition {
-        AbilityDefinition {
-            cost: Some(AbilityCost::Tap),
-            ..AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::Mana {
-                    produced,
-                    restrictions: vec![],
-                },
-            )
-        }
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced,
+                restrictions: vec![],
+            },
+        )
+        .cost(AbilityCost::Tap)
     }
 
     #[test]
@@ -92,25 +90,21 @@ mod tests {
 
     #[test]
     fn non_mana_api_type_not_detected() {
-        let def = AbilityDefinition {
-            cost: Some(AbilityCost::Tap),
-            ..AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::DealDamage {
-                    amount: DamageAmount::Fixed(1),
-                    target: TargetFilter::Any,
-                },
-            )
-        };
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::DealDamage {
+                amount: DamageAmount::Fixed(1),
+                target: TargetFilter::Any,
+            },
+        )
+        .cost(AbilityCost::Tap);
         assert!(!is_mana_ability(&def));
     }
 
     #[test]
     fn draw_ability_is_not_mana_ability() {
-        let def = AbilityDefinition {
-            cost: Some(AbilityCost::Tap),
-            ..AbilityDefinition::new(AbilityKind::Activated, Effect::Draw { count: 1 })
-        };
+        let def = AbilityDefinition::new(AbilityKind::Activated, Effect::Draw { count: 1 })
+            .cost(AbilityCost::Tap);
         assert!(!is_mana_ability(&def));
     }
 
@@ -173,18 +167,16 @@ mod tests {
             Zone::Battlefield,
         );
 
-        let def = AbilityDefinition {
-            cost: Some(AbilityCost::Tap),
-            ..AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::Mana {
-                    produced: ManaProduction::Colorless {
-                        count: CountValue::Fixed(1),
-                    },
-                    restrictions: vec![],
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: CountValue::Fixed(1),
                 },
-            )
-        };
+                restrictions: vec![],
+            },
+        )
+        .cost(AbilityCost::Tap);
         let mut events = Vec::new();
         resolve_mana_ability(&mut state, obj_id, PlayerId(0), &def, &mut events).unwrap();
 

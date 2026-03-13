@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef, TypedFilter};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::proposed_event::ProposedEvent;
@@ -113,12 +113,12 @@ pub fn resolve_all(
 
     // Use a creature filter as default if the effect's target is None
     let effective_filter = if matches!(target_filter, crate::types::ability::TargetFilter::None) {
-        crate::types::ability::TargetFilter::Typed {
+        crate::types::ability::TargetFilter::Typed(TypedFilter {
             card_type: Some(crate::types::ability::TypeFilter::Creature),
             subtype: None,
             controller: None,
             properties: vec![],
-        }
+        })
     } else {
         target_filter
     };
@@ -163,7 +163,7 @@ pub fn resolve_all(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::TargetFilter;
+    use crate::types::ability::{TargetFilter, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;

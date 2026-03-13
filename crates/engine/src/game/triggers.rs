@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    AbilityDefinition, Effect, EffectKind, ResolvedAbility, SpellContext, TargetFilter, TargetRef,
+    AbilityDefinition, Effect, EffectKind, ResolvedAbility, TargetFilter, TypedFilter, TargetRef,
     TriggerCondition, TriggerDefinition,
 };
 use crate::types::card_type::CoreType;
@@ -140,16 +140,8 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             toughness: crate::types::ability::PtValue::Fixed(1),
                             target: TargetFilter::SelfRef,
                         };
-                        let prowess_ability = ResolvedAbility {
-                            effect: prowess_effect,
-                            targets: Vec::new(),
-                            source_id: obj_id,
-                            controller,
-                            sub_ability: None,
-                            duration: None,
-                            condition: None,
-                            context: SpellContext::default(),
-                        };
+                        let prowess_ability =
+                            ResolvedAbility::new(prowess_effect, Vec::new(), obj_id, controller);
                         let prowess_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
                             .description("Prowess".to_string());
                         pending.push(PendingTrigger {
@@ -370,19 +362,15 @@ fn build_triggered_ability(
         build_resolved_from_def(execute, source_id, controller)
     } else {
         // Trigger with no execute -- use Unimplemented as no-op marker
-        ResolvedAbility {
-            effect: Effect::Unimplemented {
+        ResolvedAbility::new(
+            Effect::Unimplemented {
                 name: "TriggerNoExecute".to_string(),
                 description: None,
             },
-            targets: Vec::new(),
+            Vec::new(),
             source_id,
             controller,
-            sub_ability: None,
-            duration: None,
-            condition: None,
-            context: SpellContext::default(),
-        }
+        )
     }
 }
 
@@ -392,19 +380,18 @@ fn build_resolved_from_def(
     source_id: ObjectId,
     controller: PlayerId,
 ) -> ResolvedAbility {
-    ResolvedAbility {
-        effect: def.effect.clone(),
-        targets: Vec::new(),
-        source_id,
-        controller,
-        sub_ability: def
-            .sub_ability
-            .as_ref()
-            .map(|sub| Box::new(build_resolved_from_def(sub, source_id, controller))),
-        duration: def.duration.clone(),
-        condition: def.condition.clone(),
-        context: SpellContext::default(),
+    let mut resolved =
+        ResolvedAbility::new(def.effect.clone(), Vec::new(), source_id, controller);
+    if let Some(sub) = &def.sub_ability {
+        resolved = resolved.sub_ability(build_resolved_from_def(sub, source_id, controller));
     }
+    if let Some(d) = def.duration.clone() {
+        resolved = resolved.duration(d);
+    }
+    if let Some(c) = def.condition.clone() {
+        resolved = resolved.condition(c);
+    }
+    resolved
 }
 
 /// Extract the TargetFilter from an effect, if it has targeting requirements.
@@ -705,12 +692,12 @@ fn target_filter_matches_object(
         TargetFilter::Player => false, // Players are not objects
         TargetFilter::Controller => false,
         TargetFilter::SelfRef => object_id == source_id,
-        TargetFilter::Typed {
+        TargetFilter::Typed(TypedFilter {
             card_type,
             subtype,
             controller,
             properties,
-        } => {
+        }) => {
             // Check card type
             if let Some(type_filter) = card_type {
                 let type_match = match type_filter {
@@ -989,18 +976,18 @@ fn match_spell_cast(
                         return false;
                     }
                 }
-                TargetFilter::Typed {
+                TargetFilter::Typed(TypedFilter {
                     controller: Some(crate::types::ability::ControllerRef::You),
                     ..
-                } => {
+                }) => {
                     if trigger_controller != Some(*controller) {
                         return false;
                     }
                 }
-                TargetFilter::Typed {
+                TargetFilter::Typed(TypedFilter {
                     controller: Some(crate::types::ability::ControllerRef::Opponent),
                     ..
-                } => {
+                }) => {
                     if trigger_controller == Some(*controller) {
                         return false;
                     }
@@ -1991,18 +1978,8 @@ pub mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        let creature_filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Creature),
-            subtype: None,
-            controller: None,
-            properties: vec![],
-        };
-        let land_filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Land),
-            subtype: None,
-            controller: None,
-            properties: vec![],
-        };
+        let creature_filter = TargetFilter::Typed(TypedFilter::creature());
+        let land_filter = TargetFilter::Typed(TypedFilter::land());
         assert!(matches_target_filter(
             &state,
             id,
@@ -2062,12 +2039,7 @@ pub mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        let creature_you_ctrl = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Creature),
-            subtype: None,
-            controller: Some(ControllerRef::You),
-            properties: vec![],
-        };
+        let creature_you_ctrl = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
         assert!(matches_target_filter(
             &state,
             target,
@@ -2295,12 +2267,7 @@ pub mod tests {
                         AbilityKind::Database,
                         Effect::Draw { count: 1 },
                     ))
-                    .valid_card(TargetFilter::Typed {
-                        card_type: Some(crate::types::ability::TypeFilter::Creature),
-                        subtype: None,
-                        controller: None,
-                        properties: vec![],
-                    })
+                    .valid_card(TargetFilter::Typed(TypedFilter::creature()))
                     .destination(Zone::Battlefield),
             );
         }
@@ -2690,17 +2657,17 @@ pub mod tests {
 
     #[test]
     fn build_triggered_ability_from_typed_execute() {
-        let trig_def =
-            TriggerDefinition::new(TriggerMode::ChangesZone).execute(AbilityDefinition {
-                sub_ability: Some(Box::new(AbilityDefinition::new(
+        let trig_def = TriggerDefinition::new(TriggerMode::ChangesZone).execute(
+            AbilityDefinition::new(AbilityKind::Database, Effect::Draw { count: 2 }).sub_ability(
+                AbilityDefinition::new(
                     AbilityKind::Database,
                     Effect::GainLife {
                         amount: LifeAmount::Fixed(3),
                         player: GainLifePlayer::Controller,
                     },
-                ))),
-                ..AbilityDefinition::new(AbilityKind::Database, Effect::Draw { count: 2 })
-            });
+                ),
+            ),
+        );
 
         let ability = build_triggered_ability(&trig_def, ObjectId(1), PlayerId(0));
         assert_eq!(
@@ -2740,12 +2707,7 @@ pub mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        let filter = TargetFilter::Typed {
-            card_type: Some(crate::types::ability::TypeFilter::Creature),
-            subtype: None,
-            controller: None,
-            properties: vec![],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::creature());
         assert!(target_filter_matches_object(
             &state,
             creature,
@@ -2753,12 +2715,7 @@ pub mod tests {
             ObjectId(99)
         ));
 
-        let land_filter = TargetFilter::Typed {
-            card_type: Some(crate::types::ability::TypeFilter::Land),
-            subtype: None,
-            controller: None,
-            properties: vec![],
-        };
+        let land_filter = TargetFilter::Typed(TypedFilter::land());
         assert!(!target_filter_matches_object(
             &state,
             creature,
@@ -2846,22 +2803,17 @@ pub mod tests {
             obj.entered_battlefield_turn = Some(1);
             obj.trigger_definitions.push(
                 TriggerDefinition::new(TriggerMode::ChangesZone)
-                    .execute(AbilityDefinition {
-                        duration: Some(crate::types::ability::Duration::UntilHostLeavesPlay),
-                        ..AbilityDefinition::new(
+                    .execute(
+                        AbilityDefinition::new(
                             AbilityKind::Database,
                             Effect::ChangeZone {
                                 origin: Some(Zone::Battlefield),
                                 destination: Zone::Exile,
-                                target: TargetFilter::Typed {
-                                    card_type: Some(TypeFilter::Creature),
-                                    subtype: None,
-                                    controller: Some(ControllerRef::Opponent),
-                                    properties: vec![],
-                                },
+                                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent)),
                             },
                         )
-                    })
+                        .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
+                    )
                     .valid_card(TargetFilter::SelfRef)
                     .destination(Zone::Battlefield),
             );
@@ -2924,22 +2876,17 @@ pub mod tests {
             obj.entered_battlefield_turn = Some(1);
             obj.trigger_definitions.push(
                 TriggerDefinition::new(TriggerMode::ChangesZone)
-                    .execute(AbilityDefinition {
-                        duration: Some(crate::types::ability::Duration::UntilHostLeavesPlay),
-                        ..AbilityDefinition::new(
+                    .execute(
+                        AbilityDefinition::new(
                             AbilityKind::Database,
                             Effect::ChangeZone {
                                 origin: Some(Zone::Battlefield),
                                 destination: Zone::Exile,
-                                target: TargetFilter::Typed {
-                                    card_type: Some(TypeFilter::Creature),
-                                    subtype: None,
-                                    controller: Some(ControllerRef::Opponent),
-                                    properties: vec![],
-                                },
+                                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent)),
                             },
                         )
-                    })
+                        .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
+                    )
                     .valid_card(TargetFilter::SelfRef)
                     .destination(Zone::Battlefield),
             );
@@ -2998,12 +2945,7 @@ pub mod tests {
                         Effect::ChangeZone {
                             origin: Some(Zone::Battlefield),
                             destination: Zone::Exile,
-                            target: TargetFilter::Typed {
-                                card_type: Some(TypeFilter::Creature),
-                                subtype: None,
-                                controller: Some(ControllerRef::Opponent),
-                                properties: vec![],
-                            },
+                            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent)),
                         },
                     ))
                     .valid_card(TargetFilter::SelfRef)
@@ -3222,10 +3164,18 @@ pub mod tests {
             obj.entered_battlefield_turn = Some(1);
             obj.trigger_definitions.push(
                 TriggerDefinition::new(TriggerMode::ChangesZone)
-                    .execute(AbilityDefinition {
-                        sub_ability: Some(Box::new(AbilityDefinition {
-                            duration: Some(crate::types::ability::Duration::UntilHostLeavesPlay),
-                            ..AbilityDefinition::new(
+                    .execute(
+                        AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::RevealHand {
+                                target: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                                card_filter: TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::NonType {
+                                    value: "Land".to_string(),
+                                }])),
+                            },
+                        )
+                        .sub_ability(
+                            AbilityDefinition::new(
                                 AbilityKind::Spell,
                                 Effect::ChangeZone {
                                     origin: None,
@@ -3233,27 +3183,9 @@ pub mod tests {
                                     target: TargetFilter::Any,
                                 },
                             )
-                        })),
-                        ..AbilityDefinition::new(
-                            AbilityKind::Spell,
-                            Effect::RevealHand {
-                                target: TargetFilter::Typed {
-                                    card_type: None,
-                                    subtype: None,
-                                    controller: Some(ControllerRef::Opponent),
-                                    properties: vec![],
-                                },
-                                card_filter: TargetFilter::Typed {
-                                    card_type: Some(TypeFilter::Permanent),
-                                    subtype: None,
-                                    controller: None,
-                                    properties: vec![FilterProp::NonType {
-                                        value: "Land".to_string(),
-                                    }],
-                                },
-                            },
-                        )
-                    })
+                            .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
+                        ),
+                    )
                     .valid_card(TargetFilter::SelfRef)
                     .destination(Zone::Battlefield)
                     .trigger_zones(vec![Zone::Battlefield]),
@@ -3344,12 +3276,7 @@ pub mod tests {
             obj.card_types.subtypes.push("Goblin".to_string());
         }
 
-        let filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Creature),
-            subtype: None,
-            controller: None,
-            properties: vec![FilterProp::Another, FilterProp::IsChosenCreatureType],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Another, FilterProp::IsChosenCreatureType]));
 
         // Elf matches (is chosen type and is another creature)
         assert!(target_filter_matches_object(&state, elf, &filter, mimic));
@@ -3391,12 +3318,7 @@ pub mod tests {
             obj.card_types.subtypes.push("Elf".to_string());
         }
 
-        let filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Creature),
-            subtype: None,
-            controller: None,
-            properties: vec![FilterProp::IsChosenCreatureType],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::IsChosenCreatureType]));
 
         // No chosen type → always rejects
         assert!(!target_filter_matches_object(&state, elf, &filter, source));

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, Effect, ModalChoice, ReplacementDefinition,
-    StaticDefinition, TriggerDefinition,
+    StaticDefinition, TriggerDefinition, TypedFilter,
 };
 use crate::types::keywords::Keyword;
 
@@ -531,22 +531,17 @@ fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
     }
 
     let cost = parse_oracle_cost(cost_text);
-    Some(AbilityDefinition {
-        cost: Some(cost),
-        description: Some(line.to_string()),
-        sorcery_speed: true,
-        ..AbilityDefinition::new(
+    Some(
+        AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Attach {
-                target: crate::types::ability::TargetFilter::Typed {
-                    card_type: Some(crate::types::ability::TypeFilter::Creature),
-                    subtype: None,
-                    controller: Some(crate::types::ability::ControllerRef::You),
-                    properties: vec![],
-                },
+                target: crate::types::ability::TargetFilter::Typed(TypedFilter::creature().controller(crate::types::ability::ControllerRef::You)),
             },
         )
-    })
+        .cost(cost)
+        .description(line.to_string())
+        .sorcery_speed(),
+    )
 }
 
 /// Try to parse a planeswalker loyalty line: "+N:", "−N:", "0:", "[+N]:", "[−N]:", "[0]:"
@@ -563,6 +558,7 @@ fn try_parse_loyalty_line(line: &str) -> Option<AbilityDefinition> {
                     let effect_text = effect_text.trim();
                     let mut def = parse_effect_chain(effect_text, AbilityKind::Activated);
                     def.cost = Some(AbilityCost::Loyalty { amount });
+                    def.description = Some(trimmed.to_string());
                     return Some(def);
                 }
             }
@@ -584,6 +580,7 @@ fn try_parse_loyalty_line(line: &str) -> Option<AbilityDefinition> {
                 let effect_text = trimmed[colon_pos + 1..].trim();
                 let mut def = parse_effect_chain(effect_text, AbilityKind::Activated);
                 def.cost = Some(AbilityCost::Loyalty { amount });
+                def.description = Some(trimmed.to_string());
                 return Some(def);
             }
         }
@@ -876,16 +873,14 @@ fn parse_modal_choose_count(lower: &str) -> (usize, usize) {
 
 /// Create an Unimplemented fallback ability.
 fn make_unimplemented(line: &str) -> AbilityDefinition {
-    AbilityDefinition {
-        description: Some(line.to_string()),
-        ..AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::Unimplemented {
-                name: "unknown".to_string(),
-                description: Some(line.to_string()),
-            },
-        )
-    }
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Unimplemented {
+            name: "unknown".to_string(),
+            description: Some(line.to_string()),
+        },
+    )
+    .description(line.to_string())
 }
 
 #[cfg(test)]

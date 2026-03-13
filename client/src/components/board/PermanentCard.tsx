@@ -50,16 +50,18 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   const waitingFor = useGameStore((s) => s.waitingFor);
   const undo = useGameStore((s) => s.undo);
 
-  // Single selector: returns the matching legal action (or null) — used for both glow and click
-  const activatableAction = useGameStore((s) => {
+  // Primitive count — stable reference for glow ring, no infinite loop
+  const activatableCount = useGameStore((s) => {
     const wf = s.waitingFor;
-    if (!wf || wf.type !== "Priority" || wf.data.player !== playerId) return null;
-    return s.legalActions.find((a) =>
+    if (!wf || wf.type !== "Priority" || wf.data.player !== playerId) return 0;
+    return s.legalActions.filter((a) =>
       (a.type === "ActivateAbility" && a.data.source_id === objectId) ||
       (a.type === "TapLandForMana" && a.data.object_id === objectId),
-    ) ?? null;
+    ).length;
   });
-  const isActivatable = activatableAction !== null;
+  const isActivatable = activatableCount > 0;
+
+  const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
 
   const allExileLinks = useGameStore((s) => s.gameState?.exile_links);
   const exileLinks = useMemo(
@@ -156,8 +158,16 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
     } else if (targetingMode && isValidTarget) {
       dispatchAction({ type: "SelectTargets", data: { targets: [{ Object: objectId }] } });
       clearTargets();
-    } else if (activatableAction) {
-      dispatchAction(activatableAction);
+    } else if (isActivatable) {
+      const actions = useGameStore.getState().legalActions.filter((a) =>
+        (a.type === "ActivateAbility" && a.data.source_id === objectId) ||
+        (a.type === "TapLandForMana" && a.data.object_id === objectId),
+      );
+      if (actions.length === 1) {
+        dispatchAction(actions[0]);
+      } else {
+        setPendingAbilityChoice({ objectId, actions });
+      }
     } else if (isUndoableTap) {
       undo();
     } else {
@@ -260,6 +270,7 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
           )}
         </>
       )}
+
     </motion.div>
   );
 }
