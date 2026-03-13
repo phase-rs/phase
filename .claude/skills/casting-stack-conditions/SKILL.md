@@ -57,7 +57,8 @@ CastSpell action
   ▼
 8. pay_and_push()
    ├─ X in cost → WaitingFor::ManaPayment
-   ├─ auto_tap_lands() → can_pay() → pay_cost_with_demand()
+   ├─ Build `SpellMeta` from spell's types/subtypes (for restriction-aware mana spending)
+   ├─ auto_tap_lands() → can_pay_for_spell() → pay_cost_with_demand(pool, cost, demand, spell)
    ├─ Move card to Zone::Stack
    ├─ Record commander cast if applicable
    └─ stack::push_to_stack() creates StackEntry

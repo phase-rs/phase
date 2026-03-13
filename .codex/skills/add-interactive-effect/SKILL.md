@@ -57,6 +57,7 @@ if matches!(state.waiting_for,
     | WaitingFor::SurveilChoice { .. }
     | WaitingFor::RevealChoice { .. }
     | WaitingFor::SearchChoice { .. }
+    | WaitingFor::NamedChoice { .. }
     // ← ADD YOUR NEW VARIANT HERE
 ) {
     // Stash remaining chain as continuation
@@ -247,8 +248,9 @@ For interactive replacements, you need to:
 | **RevealHand** | `RevealChoice { player, cards, filter }` | `SelectCards { cards }` | Medium — select from filtered set, clears revealed state after |
 | **SearchLibrary** | `SearchChoice { player, cards, count }` | `SelectCards { cards }` | Complex — filter library, "fail to find" rule, multi-card select |
 | **Replacement** | `ReplacementChoice { player, count, descriptions }` | `ChooseReplacement { index }` | Different pattern — index-based selection |
+| **NamedChoice** | `NamedChoice { player, choice_type, options }` | `ChooseOption { choice }` | Medium — choose from named options (creature type, color, etc.). Stores result in `state.last_named_choice` for continuations. |
 
-Note how Scry, Dig, Surveil, RevealHand, and SearchLibrary all reuse `GameAction::SelectCards`. Only create a new `GameAction` variant if the response shape is genuinely different from card selection.
+Note how Scry, Dig, Surveil, RevealHand, and SearchLibrary all reuse `GameAction::SelectCards`. `NamedChoice` uses `ChooseOption` because the response is a string name, not a card selection. Only create a new `GameAction` variant if the response shape is genuinely different.
 
 ---
 

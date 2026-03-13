@@ -92,6 +92,7 @@ ChangeZone { ..., sub_ability: Some(GainLife { ... }) }
 **Special compositional logic:**
 - **SearchLibrary**: Injects `ChangeZone` sub_ability for the destination ("put it into your hand")
 - **RevealHand**: Extracts card filter from follow-up sentence ("you may choose a nonland card")
+- **Mana restrictions**: Absorbs "Spend this mana only to cast..." sentences as `ManaSpendRestriction` on the preceding `Effect::Mana` (e.g., Cavern of Souls, Unclaimed Territory). Uses `parse_mana_spend_restriction()` helper.
 - **Shuffle**: Detected from ", then shuffle" suffix and appended to chain
 
 ### `parse_effect_clause()` — same file

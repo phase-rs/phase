@@ -92,6 +92,7 @@ ChangeZone { ..., sub_ability: Some(GainLife { ... }) }
 **Special compositional logic:**
 - **SearchLibrary**: Injects `ChangeZone` sub_ability for the destination ("put it into your hand")
 - **RevealHand**: Extracts card filter from follow-up sentence ("you may choose a nonland card")
+- **Mana restrictions**: Absorbs "Spend this mana only to cast..." sentences as `ManaSpendRestriction` on the preceding `Effect::Mana` (e.g., Cavern of Souls, Unclaimed Territory). Uses `parse_mana_spend_restriction()` helper.
 - **Shuffle**: Detected from ", then shuffle" suffix and appended to chain
 
 ### `parse_effect_clause()` — same file
@@ -182,6 +183,10 @@ Parses complex type descriptions without the "target" prefix.
 - "non" prefixes: "nonland permanent"
 - "or" combinations: "creature or artifact" → distributes controller
 - Power/toughness constraints: "with power 2 or less"
+- Zone suffixes: "card from a graveyard" → `FilterProp::InZone { Graveyard }`, "card in your graveyard" → `InZone { Graveyard }` + `controller: You`
+
+**`parse_zone_suffix(text) → Option<(FilterProp, Option<ControllerRef>, usize)>`**
+Detects zone qualifiers after a type phrase. Handles possessive ("from your graveyard"), indefinite ("from a graveyard"), and direct ("from exile") forms for all non-battlefield zones. Skips optional "card"/"cards" before zone prepositions. When `InZone` is present in the filter, `find_legal_targets` searches ONLY that zone exclusively.
 
 ### `oracle_util.rs` — Shared Utilities
 

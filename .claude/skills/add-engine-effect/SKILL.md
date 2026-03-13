@@ -115,6 +115,8 @@ Only needed if the effect has a `target: TargetFilter` field that isn't `None`/`
 - [ ] **`crates/engine/src/parser/oracle_effect.rs` — `parse_effect_chain()` integration**
   If the effect commonly appears as part of a multi-sentence ability (e.g., "Look at target opponent's hand. You may choose a nonland card from it. Exile that card."), ensure the sentence splitting and `sub_ability` chaining produces the right structure. The engine composes effects via `sub_ability` chains — don't create mega-effects that do multiple things.
 
+  **Absorption pattern:** Some sentences modify a preceding effect rather than creating a new sub_ability. Examples: RevealHand absorbs card filters, SearchLibrary absorbs destinations, and `Effect::Mana` absorbs "Spend this mana only to cast..." clauses as `ManaSpendRestriction` on its `restrictions` field (via `parse_mana_spend_restriction()`). If your new effect has modifier sentences, add absorption logic in `parse_effect_chain()` — don't emit them as separate sub_abilities.
+
 - [ ] **`crates/engine/src/parser/oracle_effect.rs` — parser tests**
   Every new pattern **must** have a `#[test]` in the inline test module:
   ```rust

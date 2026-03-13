@@ -24,6 +24,12 @@ CastSpell action
   ▼
 2. Get ability: obj.abilities[0].clone()
    (vanilla permanents get placeholder Unimplemented)
+   NOTE: Modal spells (obj.modal.is_some()) skip to step 2b
+  │
+  ▼
+2b. Modal detection → WaitingFor::ModeChoice
+   Player selects modes → handle_select_modes() builds chained ResolvedAbility
+   → proceeds to targeting (walks sub_ability chain for first target filter)
   │
   ▼
 3. Validate timing
@@ -51,7 +57,8 @@ CastSpell action
   ▼
 8. pay_and_push()
    ├─ X in cost → WaitingFor::ManaPayment
-   ├─ auto_tap_lands() → can_pay() → pay_cost_with_demand()
+   ├─ Build `SpellMeta` from spell's types/subtypes (for restriction-aware mana spending)
+   ├─ auto_tap_lands() → can_pay_for_spell() → pay_cost_with_demand(pool, cost, demand, spell)
    ├─ Move card to Zone::Stack
    ├─ Record commander cast if applicable
    └─ stack::push_to_stack() creates StackEntry
@@ -160,6 +167,7 @@ Casting-relevant states:
 |------------|-------------|---------------|
 | `Priority { player }` | Normal priority | `CastSpell`, `ActivateAbility`, `PassPriority` |
 | `TargetSelection { player, pending_cast, legal_targets }` | Multiple legal targets during cast | `SelectTargets { targets }` |
+| `ModeChoice { player, modal, pending_cast }` | Modal spell ("Choose one —") detected via `obj.modal` | `SelectModes { indices }` |
 | `ManaPayment { player }` | X in mana cost | Mana declaration |
 
 The `apply()` function in `engine.rs` matches `(WaitingFor, GameAction)` pairs to route to handlers.
@@ -199,6 +207,7 @@ if lower.starts_with("you may ") {
 | Condition check only at resolution, not at trigger time | Violates MTG intervening-if rules (triggers only) |
 | New interactive state without `pending_continuation` support | Sub_ability chain breaks when player choice interrupts resolution |
 | Modifying `abilities[0]` selection in casting.rs | Changes which ability goes on stack for ALL spells |
+| Modal spell targeting only checks first mode | Modes after the first with targets will skip targeting — use `find_first_target_filter_in_chain()` |
 
 ---
 
