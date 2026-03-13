@@ -110,12 +110,23 @@ pub fn get_legal_actions(state: &GameState) -> Vec<GameAction> {
                 .map(|combo| GameAction::SelectCards { cards: combo })
                 .collect()
         }
-        WaitingFor::TriggerTargetSelection { legal_targets, .. } => legal_targets
-            .iter()
-            .map(|t| GameAction::SelectTargets {
-                targets: vec![t.clone()],
-            })
-            .collect(),
+        WaitingFor::TriggerTargetSelection {
+            legal_targets,
+            optional,
+            ..
+        } => {
+            let mut actions: Vec<GameAction> = legal_targets
+                .iter()
+                .map(|t| GameAction::SelectTargets {
+                    targets: vec![t.clone()],
+                })
+                .collect();
+            if *optional {
+                // "Up to one" — AI can also decline targeting
+                actions.push(GameAction::SelectTargets { targets: vec![] });
+            }
+            actions
+        }
         WaitingFor::ModeChoice { modal, .. } => mode_choice_actions(modal),
         WaitingFor::BetweenGamesSideboard { player, .. } => sideboard_actions(state, *player),
         WaitingFor::BetweenGamesChoosePlayDraw { .. } => {
@@ -1134,53 +1145,37 @@ mod tests {
         );
         let obj = state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
-        obj.abilities
-            .push(engine::types::ability::AbilityDefinition {
-                kind: engine::types::ability::AbilityKind::Activated,
-                effect: engine::types::ability::Effect::Mana {
+        obj.abilities.push(
+            engine::types::ability::AbilityDefinition::new(
+                engine::types::ability::AbilityKind::Activated,
+                engine::types::ability::Effect::Mana {
                     produced: engine::types::ability::ManaProduction::Fixed {
                         colors: vec![engine::types::mana::ManaColor::Blue],
                     },
                     restrictions: vec![],
                 },
-                cost: Some(engine::types::ability::AbilityCost::Tap),
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            });
-        obj.abilities
-            .push(engine::types::ability::AbilityDefinition {
-                kind: engine::types::ability::AbilityKind::Activated,
-                effect: engine::types::ability::Effect::Mana {
+            )
+            .cost(engine::types::ability::AbilityCost::Tap),
+        );
+        obj.abilities.push(
+            engine::types::ability::AbilityDefinition::new(
+                engine::types::ability::AbilityKind::Activated,
+                engine::types::ability::Effect::Mana {
                     produced: engine::types::ability::ManaProduction::Fixed {
                         colors: vec![engine::types::mana::ManaColor::Black],
                     },
                     restrictions: vec![],
                 },
-                cost: Some(engine::types::ability::AbilityCost::Tap),
-                sub_ability: Some(Box::new(engine::types::ability::AbilityDefinition {
-                    kind: engine::types::ability::AbilityKind::Activated,
-                    effect: engine::types::ability::Effect::Unimplemented {
-                        name: "activate_only_if_controls_land_subtype_any".to_string(),
-                        description: Some("Island|Swamp".to_string()),
-                    },
-                    cost: None,
-                    sub_ability: None,
-                    duration: None,
-                    description: None,
-                    target_prompt: None,
-                    sorcery_speed: false,
-                    condition: None,
-                })),
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            });
+            )
+            .cost(engine::types::ability::AbilityCost::Tap)
+            .sub_ability(engine::types::ability::AbilityDefinition::new(
+                engine::types::ability::AbilityKind::Activated,
+                engine::types::ability::Effect::Unimplemented {
+                    name: "activate_only_if_controls_land_subtype_any".to_string(),
+                    description: Some("Island|Swamp".to_string()),
+                },
+            )),
+        );
         id
     }
 
@@ -1402,22 +1397,16 @@ mod tests {
         let land_id = add_land_to_battlefield(&mut state, PlayerId(0), "Forest", "Forest");
         // Add the mana ability that json_loader synthesizes for basic lands
         state.objects.get_mut(&land_id).unwrap().abilities.push(
-            engine::types::ability::AbilityDefinition {
-                kind: engine::types::ability::AbilityKind::Activated,
-                effect: engine::types::ability::Effect::Mana {
+            engine::types::ability::AbilityDefinition::new(
+                engine::types::ability::AbilityKind::Activated,
+                engine::types::ability::Effect::Mana {
                     produced: engine::types::ability::ManaProduction::Fixed {
                         colors: vec![engine::types::mana::ManaColor::Green],
                     },
                     restrictions: vec![],
                 },
-                cost: Some(engine::types::ability::AbilityCost::Tap),
-                sub_ability: None,
-                target_prompt: None,
-                description: None,
-                duration: None,
-                sorcery_speed: false,
-                condition: None,
-            },
+            )
+            .cost(engine::types::ability::AbilityCost::Tap),
         );
 
         let actions = get_legal_actions(&state);

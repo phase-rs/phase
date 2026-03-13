@@ -208,6 +208,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
     for trigger in pending {
         // Check if this trigger's ability has targeting requirements
         if let Some(target_filter) = extract_target_filter_from_effect(&trigger.ability.effect) {
+            let optional = trigger.ability.optional_targeting;
             let legal = targeting::find_legal_targets(
                 state,
                 target_filter,
@@ -215,10 +216,27 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 trigger.source_id,
             );
             if legal.is_empty() {
-                // No legal targets -- skip this trigger entirely
-                continue;
-            }
-            if legal.len() == 1 {
+                if optional {
+                    // "Up to one" with no legal targets — put on stack with 0 targets
+                    let entry_id = ObjectId(state.next_object_id);
+                    state.next_object_id += 1;
+                    let condition = trigger.trigger_def.condition.clone();
+                    let entry = StackEntry {
+                        id: entry_id,
+                        source_id: trigger.source_id,
+                        controller: trigger.controller,
+                        kind: StackEntryKind::TriggeredAbility {
+                            source_id: trigger.source_id,
+                            ability: trigger.ability,
+                            condition,
+                        },
+                    };
+                    stack::push_to_stack(state, entry, &mut events_out);
+                } else {
+                    // No legal targets -- skip this trigger entirely
+                    continue;
+                }
+            } else if legal.len() == 1 && !optional {
                 // Auto-target: set the target and push to stack
                 let mut ability = trigger.ability;
                 ability.targets = legal;
@@ -244,7 +262,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 };
                 stack::push_to_stack(state, entry, &mut events_out);
             } else {
-                // Multiple targets -- store as pending, return to engine for player choice
+                // Multiple targets or optional targeting -- prompt player for choice
                 state.pending_trigger = Some(trigger);
                 return;
             }
@@ -391,6 +409,7 @@ fn build_resolved_from_def(
     if let Some(c) = def.condition.clone() {
         resolved = resolved.condition(c);
     }
+    resolved.optional_targeting = def.optional_targeting;
     resolved
 }
 
@@ -864,6 +883,8 @@ fn target_filter_matches_object(
         TargetFilter::And { filters } => filters
             .iter()
             .all(|f| target_filter_matches_object(state, object_id, f, source_id)),
+        // StackAbility targeting is handled directly in find_legal_targets
+        TargetFilter::StackAbility => false,
     }
 }
 

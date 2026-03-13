@@ -17,10 +17,24 @@ export function PlayerHud({ onSettingsClick }: PlayerHudProps = {}) {
   const isMyTurn = useGameStore((s) => s.gameState?.active_player === playerId);
 
   return (
-    <div data-player-hud={playerId} className="relative z-20 flex shrink-0 items-center justify-center gap-3 py-1">
-      <PhaseIndicatorLeft />
-      <div className={`flex items-center gap-2 rounded-full px-3 py-1 transition-all duration-300 ${isMyTurn ? "bg-black/50 ring-[3px] ring-emerald-400 shadow-[0_0_20px_rgba(52,211,153,0.5),0_0_6px_rgba(52,211,153,0.4)]" : "bg-black/50"}`}>
-        <LifeTotal playerId={playerId} size="lg" />
+    <div
+      data-player-hud={playerId}
+      className="relative z-20 flex shrink-0 max-w-[calc(100vw-0.75rem)] flex-col items-center justify-center gap-2 px-2 py-1 sm:max-w-none sm:flex-row sm:flex-nowrap sm:gap-3"
+    >
+      <div className="hidden sm:block">
+        <PhaseIndicatorLeft />
+      </div>
+      <div
+        className={`flex min-w-0 flex-wrap items-center justify-center gap-1.5 rounded-full px-2.5 py-1 transition-all duration-300 sm:flex-nowrap sm:gap-2 sm:px-3 ${
+          isMyTurn
+            ? "bg-black/50 ring-[3px] ring-emerald-400 shadow-[0_0_20px_rgba(52,211,153,0.5),0_0_6px_rgba(52,211,153,0.4)]"
+            : "bg-black/50"
+        }`}
+      >
+        <LifeTotal playerId={playerId} size="lg" hideLabel />
+        <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-gray-500">
+          P{playerId + 1}
+        </span>
         <ManaPoolSummary playerId={playerId} />
         <button
           onClick={() => {
@@ -28,7 +42,7 @@ export function PlayerHud({ onSettingsClick }: PlayerHudProps = {}) {
             setMasterMuted(!masterMuted);
             if (willUnmute) audioManager.ensurePlayback();
           }}
-          className={`rounded p-1 transition-colors hover:bg-white/10 hover:text-gray-300 ${
+          className={`rounded-full p-1.5 transition-colors hover:bg-white/10 hover:text-gray-300 ${
             masterMuted ? "text-red-400" : "text-gray-500"
           }`}
           aria-label={masterMuted ? "Unmute audio" : "Mute audio"}
@@ -56,7 +70,7 @@ export function PlayerHud({ onSettingsClick }: PlayerHudProps = {}) {
         </button>
         <button
           onClick={onSettingsClick}
-          className="rounded p-1 text-gray-500 transition-colors hover:bg-white/10 hover:text-gray-300"
+          className="rounded-full p-1.5 text-gray-500 transition-colors hover:bg-white/10 hover:text-gray-300"
           aria-label="Settings"
         >
           <svg
@@ -73,7 +87,13 @@ export function PlayerHud({ onSettingsClick }: PlayerHudProps = {}) {
           </svg>
         </button>
       </div>
-      <PhaseIndicatorRight />
+      <div className="hidden sm:block">
+        <PhaseIndicatorRight />
+      </div>
+      <div className="flex items-center justify-center gap-2 sm:hidden">
+        <PhaseIndicatorLeft />
+        <PhaseIndicatorRight />
+      </div>
     </div>
   );
 }

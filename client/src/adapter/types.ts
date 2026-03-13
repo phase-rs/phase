@@ -292,7 +292,7 @@ export type WaitingFor =
   | { type: "SurveilChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown } }
   | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number } }
-  | { type: "TriggerTargetSelection"; data: { player: PlayerId; legal_targets: TargetRef[] } }
+  | { type: "TriggerTargetSelection"; data: { player: PlayerId; legal_targets: TargetRef[]; optional?: boolean } }
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string; options: string[] } }

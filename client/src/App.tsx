@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { BrowserRouter, Routes, Route } from "react-router";
+import { BrowserRouter, Routes, Route, useLocation } from "react-router";
 
 import { BuildBadge } from "./components/chrome/BuildBadge";
 import { SplashScreen } from "./components/splash/SplashScreen";
@@ -12,10 +12,19 @@ import { DeckBuilderPage } from "./pages/DeckBuilderPage";
 import { MyDecksPage } from "./pages/MyDecksPage";
 
 export function App() {
+  return (
+    <BrowserRouter>
+      <AppContent />
+    </BrowserRouter>
+  );
+}
+
+function AppContent() {
   const [showSplash, setShowSplash] = useState(true);
   const [progress, setProgress] = useState(0);
   const rafRef = useRef<number>(0);
   const startRef = useRef<number>(0);
+  const location = useLocation();
 
   // Simulate loading progress over ~1.5 seconds
   useEffect(() => {
@@ -42,22 +51,20 @@ export function App() {
   }, []);
 
   return (
-    <BrowserRouter>
-      <div className="min-h-screen bg-gray-950 text-white">
-        {showSplash && (
-          <SplashScreen progress={progress} onComplete={handleSplashComplete} />
-        )}
-        <Routes>
-          <Route path="/" element={<MenuPage />} />
-          <Route path="/setup" element={<GameSetupPage />} />
-          <Route path="/play" element={<PlayPage />} />
-          <Route path="/multiplayer" element={<MultiplayerPage />} />
-          <Route path="/my-decks" element={<MyDecksPage />} />
-          <Route path="/deck-builder" element={<DeckBuilderPage />} />
-          <Route path="/game/:id" element={<GamePage />} />
-        </Routes>
-        <BuildBadge />
-      </div>
-    </BrowserRouter>
+    <div className="min-h-screen bg-gray-950 text-white">
+      {showSplash && (
+        <SplashScreen progress={progress} onComplete={handleSplashComplete} />
+      )}
+      <Routes>
+        <Route path="/" element={<MenuPage />} />
+        <Route path="/setup" element={<GameSetupPage />} />
+        <Route path="/play" element={<PlayPage />} />
+        <Route path="/multiplayer" element={<MultiplayerPage />} />
+        <Route path="/my-decks" element={<MyDecksPage />} />
+        <Route path="/deck-builder" element={<DeckBuilderPage />} />
+        <Route path="/game/:id" element={<GamePage />} />
+      </Routes>
+      {!location.pathname.startsWith("/game/") && <BuildBadge />}
+    </div>
   );
 }

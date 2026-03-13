@@ -146,6 +146,9 @@ pub enum WaitingFor {
     TriggerTargetSelection {
         player: PlayerId,
         legal_targets: Vec<TargetRef>,
+        /// When true, the player may decline (choose zero targets). Used for "up to one" effects.
+        #[serde(default)]
+        optional: bool,
     },
     BetweenGamesSideboard {
         player: PlayerId,
@@ -636,6 +639,7 @@ mod tests {
             WaitingFor::TriggerTargetSelection {
                 player: PlayerId(0),
                 legal_targets: vec![TargetRef::Object(ObjectId(1))],
+                optional: false,
             },
             WaitingFor::ModeChoice {
                 player: PlayerId(0),
@@ -781,6 +785,7 @@ mod tests {
                 TargetRef::Object(ObjectId(1)),
                 TargetRef::Object(ObjectId(2)),
             ],
+            optional: false,
         };
         let json = serde_json::to_string(&wf).unwrap();
         let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();

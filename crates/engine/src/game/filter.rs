@@ -119,6 +119,8 @@ fn filter_inner(
         TargetFilter::And { filters } => filters
             .iter()
             .all(|f| filter_inner(state, object_id, f, source_id, source_controller)),
+        // StackAbility targeting is handled directly in find_legal_targets, not via filter
+        TargetFilter::StackAbility => false,
     }
 }
 

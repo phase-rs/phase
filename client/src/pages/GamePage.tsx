@@ -60,6 +60,11 @@ import { GameProvider } from "../providers/GameProvider.tsx";
 import { usePlayerId } from "../hooks/usePlayerId.ts";
 import { abilityChoiceLabel, additionalCostChoices } from "../viewmodel/costLabel.ts";
 
+type ZoneRailStyle = CSSProperties & {
+  "--card-w": string;
+  "--card-h": string;
+};
+
 export function GamePage() {
   const navigate = useNavigate();
   const { id: gameId } = useParams<{ id: string }>();
@@ -416,6 +421,12 @@ function GamePageContent({
   const gamePageStyle = {
     "--game-top-overlay-offset": `${topOverlayOffsetPx}px`,
   } as CSSProperties;
+  const playerZoneRailStyle: ZoneRailStyle = {
+    bottom: "calc(env(safe-area-inset-bottom) + 1rem)",
+    left: "calc(env(safe-area-inset-left) + 1rem)",
+    "--card-w": "clamp(82px, 10vw, 126px)",
+    "--card-h": "clamp(115px, 14vw, 176px)",
+  };
 
   return (
     <div
@@ -472,11 +483,8 @@ function GamePageContent({
 
       {/* Player zones — bottom-left: graveyard pile, library pile, exile badge */}
       <div
-        className="fixed z-30 flex items-end gap-2"
-        style={{
-          bottom: "calc(env(safe-area-inset-bottom) + 1rem)",
-          left: "calc(env(safe-area-inset-left) + 1rem)",
-        }}
+        className="fixed z-30 flex items-end gap-3 px-1 py-1"
+        style={playerZoneRailStyle}
       >
         <GraveyardPile
           playerId={playerId}
@@ -516,9 +524,8 @@ function GamePageContent({
 
       {/* Combat phase indicator — above action buttons to avoid overlap */}
       <div
-        className="fixed z-30"
+        className="fixed z-30 bottom-[calc(env(safe-area-inset-bottom)+14rem)] sm:bottom-[calc(env(safe-area-inset-bottom)+11rem)]"
         style={{
-          bottom: "calc(env(safe-area-inset-bottom) + 11rem)",
           right:
             "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
         }}
@@ -552,7 +559,7 @@ function GamePageContent({
       {waitingForOpponent && hostGameCode && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/70" />
-          <div className="relative z-10 rounded-xl bg-gray-900 p-8 text-center shadow-2xl ring-1 ring-gray-700">
+          <div className="relative z-10 w-full max-w-md rounded-[24px] border border-white/10 bg-[#0b1020]/96 p-8 text-center shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md">
             <h2 className="mb-2 text-xl font-bold text-white">
               Waiting for Opponent
             </h2>
@@ -573,7 +580,7 @@ function GamePageContent({
       {waitingForOpponent && !hostGameCode && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/70" />
-          <div className="relative z-10 rounded-xl bg-gray-900 p-6 text-center shadow-2xl ring-1 ring-gray-700">
+          <div className="relative z-10 w-full max-w-sm rounded-[24px] border border-white/10 bg-[#0b1020]/96 p-6 text-center shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md">
             <h2 className="text-lg font-bold text-white">Joining Game...</h2>
             <p className="mt-2 text-sm text-gray-400">Connecting to game</p>
           </div>
@@ -584,7 +591,7 @@ function GamePageContent({
       {opponentDisconnected && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/60" />
-          <div className="relative z-10 rounded-xl bg-gray-900 p-6 text-center shadow-2xl ring-1 ring-yellow-700">
+          <div className="relative z-10 w-full max-w-sm rounded-[24px] border border-yellow-400/30 bg-[#0b1020]/96 p-6 text-center shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md">
             <h2 className="mb-2 text-lg font-bold text-yellow-400">
               Opponent Disconnected
             </h2>
@@ -795,6 +802,56 @@ interface MulliganDecisionPromptProps {
   onChoose: (id: string) => void;
 }
 
+interface MulliganPanelProps {
+  eyebrow: string;
+  title: string;
+  subtitle: string;
+  children: React.ReactNode;
+  footer?: React.ReactNode;
+}
+
+function MulliganPanel({
+  eyebrow,
+  title,
+  subtitle,
+  children,
+  footer,
+}: MulliganPanelProps) {
+  return (
+    <div className="fixed inset-0 z-50 overflow-y-auto px-3 py-4 sm:px-4 sm:py-6">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
+      <div className="relative flex min-h-full items-center justify-center pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
+        <motion.div
+          className="relative z-10 flex w-full max-w-6xl flex-col overflow-hidden rounded-[28px] border border-white/10 bg-[#0b1020]/94 shadow-[0_32px_90px_rgba(0,0,0,0.48)] backdrop-blur-md"
+          initial={{ opacity: 0, y: 18, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={{ duration: 0.24, ease: "easeOut" }}
+        >
+          <div className="border-b border-white/10 px-5 py-5 sm:px-7 sm:py-6">
+            <div className="text-[0.68rem] uppercase tracking-[0.24em] text-slate-500">
+              {eyebrow}
+            </div>
+            <h2 className="mt-2 text-2xl font-semibold text-white sm:text-3xl">
+              {title}
+            </h2>
+            <p className="mt-2 max-w-2xl text-sm text-slate-400 sm:text-[0.95rem]">
+              {subtitle}
+            </p>
+          </div>
+
+          <div className="flex-1 px-3 py-4 sm:px-5 sm:py-5">{children}</div>
+
+          {footer && (
+            <div className="border-t border-white/10 bg-black/15 px-4 py-4 sm:px-6">
+              {footer}
+            </div>
+          )}
+        </motion.div>
+      </div>
+    </div>
+  );
+}
+
 function MulliganDecisionPrompt({
   playerId,
   mulliganCount,
@@ -825,45 +882,55 @@ function MulliganDecisionPrompt({
   const handObjects = player.hand.map((id) => objects[id]).filter(Boolean);
   const nextHandSize = 7 - mulliganCount - 1;
   return (
-    <div
-      className="fixed inset-0 z-50 overflow-y-auto px-3 py-4 sm:px-4 sm:py-6"
-      style={
-        {
-          background:
-            "radial-gradient(ellipse at center, rgba(30,30,50,0.95) 0%, rgba(0,0,0,0.98) 70%)",
-          "--card-w": "clamp(100px, 14vw, 180px)",
-          "--card-h": "clamp(140px, 19.6vw, 252px)",
-        } as React.CSSProperties
+    <MulliganPanel
+      eyebrow={mulliganCount > 0 ? `Mulligan ${mulliganCount}` : "Opening Hand"}
+      title="Review your opening hand"
+      subtitle={
+        mulliganCount > 0
+          ? `Choose whether to keep this ${handObjects.length}-card hand or mulligan down to ${nextHandSize}.`
+          : "Take a final look before the game starts."
+      }
+      footer={
+        <AnimatePresence>
+          {buttonsVisible && (
+            <motion.div
+              className="flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:justify-end"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.22 }}
+            >
+              <button
+                onClick={() => onChoose("mulligan")}
+                className="min-h-11 rounded-[16px] border border-white/12 bg-white/5 px-5 py-3 text-sm font-semibold text-slate-200 transition hover:bg-white/8 hover:text-white sm:text-base"
+              >
+                Mulligan to {nextHandSize}
+              </button>
+              <button
+                onClick={() => onChoose("keep")}
+                className="min-h-11 rounded-[16px] bg-cyan-500 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_14px_34px_rgba(6,182,212,0.28)] transition hover:bg-cyan-400 sm:text-base"
+              >
+                Keep Hand
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
       }
     >
-      <div className="flex min-h-full flex-col items-center justify-center pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
-        {/* Title */}
-        <motion.div
-          className="mb-6 text-center sm:mb-8"
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5 }}
-        >
-          <h2
-            className="text-2xl font-black tracking-wide text-white sm:text-3xl"
-            style={{ textShadow: "0 0 20px rgba(200,200,255,0.3)" }}
-          >
-            Opening Hand
-          </h2>
-          {mulliganCount > 0 && (
-            <p className="mt-1 text-sm text-gray-400">
-              Mulligan {mulliganCount}
-            </p>
-          )}
-        </motion.div>
-
-        {/* Card display */}
-        <div className="mb-8 w-full overflow-x-auto pb-4">
+      <div
+        className="rounded-[22px] border border-white/8 bg-black/18 px-2 py-4 sm:px-4"
+        style={
+          {
+            "--card-w": "clamp(100px, 14vw, 180px)",
+            "--card-h": "clamp(140px, 19.6vw, 252px)",
+          } as React.CSSProperties
+        }
+      >
+        <div className="overflow-x-auto pb-3">
           <div className="mx-auto flex w-max min-w-full items-center justify-center px-2 sm:px-4">
             {handObjects.map((obj, index) => (
               <motion.div
                 key={obj.id}
-                className="cursor-pointer flex-shrink-0 rounded-lg transition-shadow duration-200 hover:z-50 hover:shadow-[0_0_20px_rgba(200,200,255,0.3)]"
+                className="cursor-pointer flex-shrink-0 rounded-[18px] transition-shadow duration-200 hover:z-50 hover:shadow-[0_0_24px_rgba(56,189,248,0.22)]"
                 style={{
                   marginLeft: index === 0 ? 0 : "clamp(-26px, -3vw, -16px)",
                 }}
@@ -890,33 +957,8 @@ function MulliganDecisionPrompt({
             ))}
           </div>
         </div>
-
-        {/* Buttons */}
-        <AnimatePresence>
-          {buttonsVisible && (
-            <motion.div
-              className="flex w-full max-w-sm flex-col gap-3 px-2 sm:max-w-none sm:flex-row sm:flex-wrap sm:justify-center sm:px-4"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.3 }}
-            >
-              <button
-                onClick={() => onChoose("keep")}
-                className="min-h-11 rounded-lg bg-emerald-600 px-6 py-3 text-base font-bold text-white shadow-lg transition hover:bg-emerald-500 hover:shadow-emerald-500/30 sm:px-8 sm:text-lg"
-              >
-                Keep Hand
-              </button>
-              <button
-                onClick={() => onChoose("mulligan")}
-                className="min-h-11 rounded-lg border border-gray-500 bg-transparent px-6 py-3 text-base font-semibold text-gray-200 transition hover:border-gray-300 hover:text-white sm:px-8 sm:text-lg"
-              >
-                Mulligan ({nextHandSize} cards)
-              </button>
-            </motion.div>
-          )}
-        </AnimatePresence>
       </div>
-    </div>
+    </MulliganPanel>
   );
 }
 
@@ -941,39 +983,44 @@ function MulliganBottomCardsPrompt({
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 overflow-y-auto px-3 py-4 sm:px-4 sm:py-6"
-      style={
-        {
-          background:
-            "radial-gradient(ellipse at center, rgba(30,30,50,0.95) 0%, rgba(0,0,0,0.98) 70%)",
-          "--card-w": "clamp(100px, 14vw, 180px)",
-          "--card-h": "clamp(140px, 19.6vw, 252px)",
-        } as React.CSSProperties
+    <MulliganPanel
+      eyebrow="London Mulligan"
+      title={`Put ${count} card${count > 1 ? "s" : ""} on the bottom`}
+      subtitle={`Select ${count} card${count > 1 ? "s" : ""} from your hand. They will be returned to the bottom of your library in the order you choose here.`}
+      footer={
+        <motion.div
+          className="flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.12, duration: 0.22 }}
+        >
+          <div className="text-sm text-slate-400">
+            Selected {selectedTargets.length} of {count}
+          </div>
+          <button
+            onClick={handleConfirm}
+            disabled={!isReady}
+            className={`min-h-11 rounded-[16px] px-5 py-3 text-sm font-semibold transition sm:text-base ${
+              isReady
+                ? "bg-cyan-500 text-slate-950 shadow-[0_14px_34px_rgba(6,182,212,0.28)] hover:bg-cyan-400"
+                : "cursor-not-allowed border border-white/8 bg-white/5 text-slate-500"
+            }`}
+          >
+            Confirm Selection
+          </button>
+        </motion.div>
       }
     >
-      <div className="flex min-h-full flex-col items-center justify-center pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
-        {/* Title */}
-        <motion.div
-          className="mb-6 text-center sm:mb-8"
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5 }}
-        >
-          <h2
-            className="text-2xl font-black tracking-wide text-white sm:text-3xl"
-            style={{ textShadow: "0 0 20px rgba(200,200,255,0.3)" }}
-          >
-            Put {count} card{count > 1 ? "s" : ""} on bottom
-          </h2>
-          <p className="mt-2 text-sm text-gray-400">
-            Select {count} card{count > 1 ? "s" : ""} to put on the bottom of
-            your library
-          </p>
-        </motion.div>
-
-        {/* Card display */}
-        <div className="mb-8 w-full overflow-x-auto pb-4">
+      <div
+        className="rounded-[22px] border border-white/8 bg-black/18 px-2 py-4 sm:px-4"
+        style={
+          {
+            "--card-w": "clamp(100px, 14vw, 180px)",
+            "--card-h": "clamp(140px, 19.6vw, 252px)",
+          } as React.CSSProperties
+        }
+      >
+        <div className="overflow-x-auto pb-3">
           <div className="mx-auto flex w-max min-w-full items-center justify-center px-2 sm:px-4">
             {handObjects.map((obj, index) => {
               const isSelected = selectedTargets.includes(obj.id);
@@ -985,16 +1032,16 @@ function MulliganBottomCardsPrompt({
                       addTarget(obj.id);
                     }
                   }}
-                  className={`flex-shrink-0 rounded-lg p-1 transition hover:z-50 ${
+                  className={`flex-shrink-0 rounded-[18px] p-1 transition hover:z-50 ${
                     isSelected
-                      ? "z-40 ring-3 ring-cyan-400 opacity-70"
-                      : "hover:shadow-[0_0_20px_rgba(200,200,255,0.3)]"
+                      ? "z-40 ring-2 ring-cyan-300 shadow-[0_0_0_1px_rgba(103,232,249,0.55)] opacity-75"
+                      : "hover:shadow-[0_0_24px_rgba(56,189,248,0.22)]"
                   }`}
                   style={{
                     marginLeft: index === 0 ? 0 : "clamp(-26px, -3vw, -16px)",
                   }}
                   initial={{ opacity: 0, y: 80, scale: 0.8 }}
-                  animate={{ opacity: isSelected ? 0.7 : 1, y: 0, scale: 1 }}
+                  animate={{ opacity: isSelected ? 0.75 : 1, y: 0, scale: 1 }}
                   transition={{
                     delay: 0.1 + index * 0.08,
                     duration: 0.4,
@@ -1014,28 +1061,8 @@ function MulliganBottomCardsPrompt({
             })}
           </div>
         </div>
-
-        {/* Confirm button */}
-        <motion.div
-          className="w-full max-w-sm px-2"
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.5, duration: 0.3 }}
-        >
-          <button
-            onClick={handleConfirm}
-            disabled={!isReady}
-            className={`min-h-11 w-full rounded-lg px-8 py-3 text-lg font-bold transition ${
-              isReady
-                ? "bg-cyan-600 text-white shadow-lg hover:bg-cyan-500 hover:shadow-cyan-500/30"
-                : "cursor-not-allowed bg-gray-700 text-gray-500"
-            }`}
-          >
-            Confirm ({selectedTargets.length}/{count})
-          </button>
-        </motion.div>
       </div>
-    </div>
+    </MulliganPanel>
   );
 }
 
@@ -1255,7 +1282,10 @@ function AbilityChoiceModal() {
       title={obj.name}
       subtitle="Choose an ability to activate"
       options={pending.actions.map((action, i) => {
-        const { label, description } = abilityChoiceLabel(action, obj.abilities);
+        const { label, description } = abilityChoiceLabel(
+          action,
+          obj.abilities,
+        );
         return { id: String(i), label, description };
       })}
       onChoose={(id) => {

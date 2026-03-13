@@ -79,8 +79,8 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
 }
 
 const cardStyle = {
-  width: "calc(var(--card-w) * 0.6)",
-  height: "calc(var(--card-h) * 0.6)",
+  width: "calc(var(--card-w) * 0.78)",
+  height: "calc(var(--card-h) * 0.78)",
   transform: "rotate(180deg)",
 } as const;
 

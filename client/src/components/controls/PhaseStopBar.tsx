@@ -115,7 +115,7 @@ function PhaseDot({ phase }: { phase: Phase }) {
     <button
       onClick={togglePhase}
       title={phase}
-      className={`relative flex items-center justify-center rounded-full p-1 transition-colors ${
+      className={`relative flex h-8 w-8 items-center justify-center rounded-full transition-colors sm:h-auto sm:w-auto sm:p-1 ${
         isActive
           ? "text-white shadow-[0_0_6px_rgba(34,211,238,0.5)]"
           : hasStop
@@ -134,7 +134,7 @@ function PhaseDot({ phase }: { phase: Phase }) {
 /** Upkeep, Draw, Main1 — placed to the left of the player avatar */
 export function PhaseIndicatorLeft() {
   return (
-    <div className="flex items-center gap-0.5 rounded-full bg-black/40 px-1.5 py-0.5">
+    <div className="flex items-center gap-0.5 rounded-full bg-black/40 px-1 py-0.5 sm:px-1.5">
       {LEFT_PHASES.map((phase) => (
         <PhaseDot key={phase} phase={phase} />
       ))}
@@ -145,7 +145,7 @@ export function PhaseIndicatorLeft() {
 /** Main2, End — placed to the right of the player avatar */
 export function PhaseIndicatorRight() {
   return (
-    <div className="flex items-center gap-0.5 rounded-full bg-black/40 px-1.5 py-0.5">
+    <div className="flex items-center gap-0.5 rounded-full bg-black/40 px-1 py-0.5 sm:px-1.5">
       {RIGHT_PHASES.map((phase) => (
         <PhaseDot key={phase} phase={phase} />
       ))}
@@ -156,7 +156,7 @@ export function PhaseIndicatorRight() {
 /** BeginCombat through EndCombat — placed near ActionButton on the right side */
 export function CombatPhaseIndicator() {
   return (
-    <div className="flex items-center gap-0.5 rounded-full bg-black/40 px-1.5 py-0.5">
+    <div className="flex items-center gap-0.5 rounded-full bg-black/40 px-1 py-0.5 sm:px-1.5">
       {COMBAT_PHASES.map((phase) => (
         <PhaseDot key={phase} phase={phase} />
       ))}

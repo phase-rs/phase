@@ -36,11 +36,13 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     let effect_final = strip_constraint_sentences(&effect_without_if);
 
     // Parse the effect
+    let has_up_to = effect_final.contains("up to one");
     let execute = if !effect_final.is_empty() {
-        Some(Box::new(parse_effect_chain(
-            &effect_final,
-            AbilityKind::Spell,
-        )))
+        let mut ability = parse_effect_chain(&effect_final, AbilityKind::Spell);
+        if has_up_to {
+            ability.optional_targeting = true;
+        }
+        Some(Box::new(ability))
     } else {
         None
     };

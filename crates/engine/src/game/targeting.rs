@@ -18,6 +18,12 @@ pub fn find_legal_targets(
     use crate::types::ability::ControllerRef;
     let mut targets = Vec::new();
 
+    // StackAbility: only match non-mana activated/triggered abilities on the stack
+    if matches!(filter, TargetFilter::StackAbility) {
+        add_stack_abilities(state, source_id, &mut targets);
+        return targets;
+    }
+
     // Check if filter could match players
     if matches!(filter, TargetFilter::Any | TargetFilter::Player) {
         add_players(state, &mut targets);
@@ -129,6 +135,28 @@ pub fn check_fizzle(original_targets: &[TargetRef], legal_targets: &[TargetRef])
 }
 
 // --- Internal helpers ---
+
+/// Find activated/triggered (non-mana) abilities on the stack as legal targets.
+/// Mana abilities never go on the stack, so all ActivatedAbility/TriggeredAbility
+/// entries are valid. Excludes the source ability itself.
+fn add_stack_abilities(
+    state: &GameState,
+    source_id: ObjectId,
+    targets: &mut Vec<TargetRef>,
+) {
+    use crate::types::game_state::StackEntryKind;
+    for entry in &state.stack {
+        if entry.id == source_id {
+            continue; // Don't target yourself
+        }
+        match &entry.kind {
+            StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. } => {
+                targets.push(TargetRef::Object(entry.id));
+            }
+            StackEntryKind::Spell { .. } => {}
+        }
+    }
+}
 
 fn add_stack_spells(
     state: &GameState,

@@ -29,7 +29,8 @@ expression: result
         "description": null,
         "target_prompt": null,
         "sorcery_speed": false,
-        "condition": null
+        "condition": null,
+        "optional_targeting": false
       },
       "valid_card": {
         "type": "SelfRef"

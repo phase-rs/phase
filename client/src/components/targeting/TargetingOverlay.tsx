@@ -19,6 +19,7 @@ export function TargetingOverlay() {
   const pendingCast = waitingFor?.type === "TargetSelection" ? waitingFor.data.pending_cast : null;
   const legalTargets = isTargetSelection ? waitingFor!.data.legal_targets : null;
   const isTriggerTargeting = waitingFor?.type === "TriggerTargetSelection";
+  const isOptionalTrigger = isTriggerTargeting && waitingFor?.data?.optional === true;
 
   // Activate targeting mode when engine requests target selection
   useEffect(() => {
@@ -39,6 +40,11 @@ export function TargetingOverlay() {
   const handleCancel = useCallback(() => {
     clearTargets();
     dispatch({ type: "CancelCast" });
+  }, [clearTargets, dispatch]);
+
+  const handleDecline = useCallback(() => {
+    clearTargets();
+    dispatch({ type: "SelectTargets", targets: [] });
   }, [clearTargets, dispatch]);
 
   if (!targetingMode || !isTargetSelection) return null;
@@ -65,7 +71,7 @@ export function TargetingOverlay() {
           </div>
         </div>
 
-        {/* Cancel button (only for voluntary casts, not triggers) */}
+        {/* Cancel button (voluntary casts) or Decline button (optional triggers) */}
         {!isTriggerTargeting && (
           <div className="pointer-events-auto absolute bottom-6 left-0 right-0 flex justify-center gap-4">
             <button
@@ -73,6 +79,16 @@ export function TargetingOverlay() {
               className="rounded-lg bg-gray-700 px-6 py-2 font-semibold text-gray-200 shadow-lg transition hover:bg-gray-600"
             >
               Cancel
+            </button>
+          </div>
+        )}
+        {isOptionalTrigger && (
+          <div className="pointer-events-auto absolute bottom-6 left-0 right-0 flex justify-center gap-4">
+            <button
+              onClick={handleDecline}
+              className="rounded-lg bg-amber-700 px-6 py-2 font-semibold text-gray-100 shadow-lg transition hover:bg-amber-600"
+            >
+              Decline
             </button>
           </div>
         )}

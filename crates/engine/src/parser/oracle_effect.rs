@@ -160,10 +160,16 @@ fn parse_imperative_effect(text: &str) -> Effect {
         return Effect::Draw { count };
     }
 
-    // --- Counter: "counter target spell" ---
-    if lower.starts_with("counter ") {
+    // --- Counter: "counter target spell" / "counter up to one target activated or triggered ability" ---
+    if let Some(rest) = lower.strip_prefix("counter ") {
+        // "counter up to one target activated or triggered ability"
+        if rest.contains("activated or triggered ability") {
+            return Effect::Counter {
+                target: TargetFilter::StackAbility,
+            };
+        }
         let (target, _) = parse_target(&text[8..]);
-        let target = if text[8..].to_ascii_lowercase().contains("spell") {
+        let target = if rest.contains("spell") {
             constrain_filter_to_stack(target)
         } else {
             target
