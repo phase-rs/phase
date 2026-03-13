@@ -191,6 +191,15 @@ fn matches_filter_prop(
             };
             cmc >= *value
         }
+        FilterProp::CmcLE { value } => {
+            let cmc = match &obj.mana_cost {
+                crate::types::mana::ManaCost::NoCost => 0u32,
+                crate::types::mana::ManaCost::Cost { shards, generic } => {
+                    *generic + shards.len() as u32
+                }
+            };
+            cmc <= *value
+        }
         FilterProp::InZone { zone } => obj.zone == *zone,
         FilterProp::Owned { controller } => match controller {
             ControllerRef::You => source_controller == Some(obj.owner),

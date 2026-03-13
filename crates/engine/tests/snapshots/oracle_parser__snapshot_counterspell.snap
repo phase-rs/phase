@@ -1,5 +1,6 @@
 ---
 source: crates/engine/tests/oracle_parser.rs
+assertion_line: 44
 expression: result
 ---
 {
@@ -10,10 +11,15 @@ expression: result
         "type": "Counter",
         "target": {
           "type": "Typed",
-          "card_type": "Any",
+          "card_type": "Card",
           "subtype": null,
           "controller": null,
-          "properties": []
+          "properties": [
+            {
+              "type": "InZone",
+              "zone": "Stack"
+            }
+          ]
         }
       },
       "cost": null,

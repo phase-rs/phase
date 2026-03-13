@@ -304,6 +304,10 @@ pub enum FilterProp {
     CmcGE {
         value: u32,
     },
+    /// Matches objects with converted mana cost <= N (for "mana value N or less").
+    CmcLE {
+        value: u32,
+    },
     InZone {
         zone: Zone,
     },

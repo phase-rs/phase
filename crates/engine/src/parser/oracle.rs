@@ -166,6 +166,12 @@ pub fn parse_oracle_text(
             }
         }
 
+        // Priority 8b: "As an additional cost to cast this spell" — skip (casting modifier, not ability)
+        if lower.starts_with("as an additional cost") {
+            i += 1;
+            continue;
+        }
+
         // Priority 9: Imperative verb for instants/sorceries
         if is_spell {
             let def = parse_effect_chain(&line, AbilityKind::Spell);

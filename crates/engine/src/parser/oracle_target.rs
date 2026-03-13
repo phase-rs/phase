@@ -319,6 +319,8 @@ fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)> {
 
     let (prop, after) = if let Some(a) = after_num.strip_prefix("or greater") {
         (FilterProp::CmcGE { value }, a)
+    } else if let Some(a) = after_num.strip_prefix("or less") {
+        (FilterProp::CmcLE { value }, a)
     } else {
         return None;
     };
