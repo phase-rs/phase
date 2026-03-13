@@ -280,6 +280,10 @@ export function ActionButton() {
   }
 
   const visible = mode !== "hidden" || endTurnMode;
+  const panelClassName =
+    "fixed z-30 flex max-w-[min(25rem,calc(100vw-1.25rem))] flex-col items-stretch gap-1.5 rounded-[20px] border border-white/10 bg-[#0b1020]/88 p-1.5 shadow-[0_20px_48px_rgba(0,0,0,0.44)] backdrop-blur-md sm:max-w-none sm:flex-row sm:items-center";
+  const primaryButtonClass = "w-full sm:w-auto sm:min-w-[10rem]";
+  const secondaryButtonClass = "w-full sm:w-auto";
 
   return (
     <AnimatePresence>
@@ -290,7 +294,7 @@ export function ActionButton() {
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: 20 }}
           transition={{ duration: 0.15 }}
-          className="fixed z-30 flex items-center gap-2"
+          className={panelClassName}
           style={{
             bottom: "calc(env(safe-area-inset-bottom) + 7rem)",
             right: "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
@@ -306,21 +310,21 @@ export function ActionButton() {
                     selectAllAttackers(validAttackerIds);
                   }
                 }}
-                className={gameButtonClass({ tone: "amber", size: "md" })}
+                className={gameButtonClass({ tone: "amber", size: "md", className: secondaryButtonClass })}
               >
                 {selectedAttackers.length > 0 ? "Clear Attackers" : "All Attack"}
               </button>
               {selectedAttackers.length > 0 ? (
                 <button
                   onClick={handleConfirmAttackers}
-                  className={gameButtonClass({ tone: "emerald", size: "md" })}
+                  className={gameButtonClass({ tone: "emerald", size: "md", className: primaryButtonClass })}
                 >
                   Confirm Attackers ({selectedAttackers.length})
                 </button>
               ) : (
                 <button
                   onClick={() => handleSkipConfirm("attackers")}
-                  className={gameButtonClass({ tone: "slate", size: "md" })}
+                  className={gameButtonClass({ tone: "slate", size: "md", className: primaryButtonClass })}
                 >
                   {skipArmed === "attackers"
                     ? "Tap again: No Attacks"
@@ -336,13 +340,13 @@ export function ActionButton() {
                 <>
                   <button
                     onClick={handleConfirmBlockers}
-                    className={gameButtonClass({ tone: "emerald", size: "md" })}
+                    className={gameButtonClass({ tone: "emerald", size: "md", className: primaryButtonClass })}
                   >
                     Confirm Blockers ({blockerAssignments.size})
                   </button>
                   <button
                     onClick={handleClearBlockers}
-                    className={gameButtonClass({ tone: "neutral", size: "md" })}
+                    className={gameButtonClass({ tone: "neutral", size: "md", className: secondaryButtonClass })}
                   >
                     Clear Blocks
                   </button>
@@ -350,7 +354,7 @@ export function ActionButton() {
               ) : (
                 <button
                   onClick={() => handleSkipConfirm("blockers")}
-                  className={gameButtonClass({ tone: "slate", size: "md" })}
+                  className={gameButtonClass({ tone: "slate", size: "md", className: primaryButtonClass })}
                 >
                   {skipArmed === "blockers"
                     ? "Tap again: No Blocks"
@@ -369,13 +373,13 @@ export function ActionButton() {
             <>
               <button
                 onClick={() => dispatchAction({ type: "PassPriority" })}
-                className={gameButtonClass({ tone: "blue", size: "md" })}
+                className={gameButtonClass({ tone: "blue", size: "md", className: primaryButtonClass })}
               >
                 Resolve
               </button>
               <button
                 onClick={resolveAll}
-                className={gameButtonClass({ tone: "slate", size: "md" })}
+                className={gameButtonClass({ tone: "slate", size: "md", className: secondaryButtonClass })}
               >
                 Resolve All
               </button>
@@ -389,13 +393,14 @@ export function ActionButton() {
                 className={gameButtonClass({
                   tone: "emerald",
                   size: "md",
+                  className: primaryButtonClass,
                 })}
               >
                 {advanceLabel}
               </button>
               <button
                 onClick={() => toggleEndTurnMode(turnNumber)}
-                className={gameButtonClass({ tone: "slate", size: "md" })}
+                className={gameButtonClass({ tone: "slate", size: "md", className: secondaryButtonClass })}
               >
                 <span className="flex items-center gap-1">
                   End Turn
@@ -410,7 +415,7 @@ export function ActionButton() {
           {endTurnMode && (
             <button
               onClick={clearEndTurnMode}
-              className={gameButtonClass({ tone: "amber", size: "md", className: "animate-pulse" })}
+              className={gameButtonClass({ tone: "amber", size: "md", className: `${primaryButtonClass} animate-pulse` })}
             >
               <span className="flex items-center gap-1.5">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4 animate-spin">

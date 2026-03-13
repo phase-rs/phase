@@ -1,28 +1,42 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 
 import { StackEntry } from "./StackEntry.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
 import type { StackEntry as StackEntryType } from "../../adapter/types.ts";
+import { getStackCardSize } from "../board/boardSizing.ts";
 
 const EMPTY_STACK: StackEntryType[] = [];
 
-const STAGGER_Y = 24;
-const STAGGER_X = 2;
-const BASE_WIDTH = 140;
-const MIN_WIDTH = 90;
-const ASPECT_RATIO = 1.4;
+const STAGGER_Y = 28;
+const STAGGER_X = 8;
+const PANEL_PADDING_X = 16;
+const PANEL_PADDING_Y = 14;
+const PANEL_HEADER_HEIGHT = 36;
+const COLLAPSED_PEEK_PX = 28;
+const STACK_RIGHT_OFFSET_PX = 112;
 
-function computeCardSize(stackCount: number) {
-  const scale = Math.max(0.55, 1 - Math.max(0, stackCount - 2) * 0.08);
-  const width = Math.max(MIN_WIDTH, Math.round(BASE_WIDTH * scale));
-  const height = Math.round(width * ASPECT_RATIO);
-  return { width, height };
+function getViewportSize() {
+  if (typeof window === "undefined") {
+    return { width: 1440, height: 900 };
+  }
+  return { width: window.innerWidth, height: window.innerHeight };
 }
 
 export function StackDisplay() {
   const stack = useGameStore((s) => s.gameState?.stack ?? EMPTY_STACK);
   const waitingFor = useGameStore((s) => s.waitingFor);
+  const [isCollapsed, setIsCollapsed] = useState(false);
+  const [viewport, setViewport] = useState(getViewportSize);
+
+  useEffect(() => {
+    function handleResize() {
+      setViewport(getViewportSize());
+    }
+
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
   // During TargetSelection, show the pending spell as a preview on top of the stack
   const pendingEntry: StackEntryType | null = useMemo(() => {
@@ -46,10 +60,35 @@ export function StackDisplay() {
   if (fullStack.length === 0) return null;
 
   const displayStack = [...fullStack].reverse();
-  const cardSize = computeCardSize(fullStack.length);
+  const rawCardSize = getStackCardSize(fullStack.length);
+  const widthScale =
+    viewport.width < 640 ? 0.58 :
+      viewport.width < 1024 ? 0.72 :
+        viewport.width < 1440 ? 0.86 : 1;
+  const heightScale = viewport.height < 820 ? 0.9 : 1;
+  const responsiveScale = widthScale * heightScale;
+  const cardSize = {
+    width: Math.max(112, Math.round(rawCardSize.width * responsiveScale)),
+    height: Math.max(156, Math.round(rawCardSize.height * responsiveScale)),
+  };
+  const staggerX = viewport.width < 768 ? 5 : STAGGER_X;
+  const staggerY = viewport.width < 768 ? 20 : viewport.width < 1024 ? 24 : STAGGER_Y;
+  const panelPaddingX = viewport.width < 768 ? 12 : PANEL_PADDING_X;
+  const panelPaddingY = viewport.width < 768 ? 10 : PANEL_PADDING_Y;
+  const rightOffsetPx =
+    viewport.width < 640 ? 12 :
+      viewport.width < 1024 ? 28 :
+        viewport.width < 1440 ? 56 : STACK_RIGHT_OFFSET_PX;
+  const topPosition =
+    viewport.width < 640 ? "38%" :
+      viewport.width < 1024 ? "43%" : "50%";
+  const collapsedPeekPx = viewport.width < 768 ? 24 : COLLAPSED_PEEK_PX;
 
-  const pileWidth = cardSize.width + STAGGER_X * (displayStack.length - 1);
-  const pileHeight = cardSize.height + STAGGER_Y * (displayStack.length - 1);
+  const pileWidth = cardSize.width + staggerX * (displayStack.length - 1);
+  const pileHeight = cardSize.height + staggerY * (displayStack.length - 1);
+  const panelWidth = pileWidth + panelPaddingX * 2;
+  const panelHeight = pileHeight + panelPaddingY * 2 + PANEL_HEADER_HEIGHT;
+  const collapsedOffset = Math.max(0, panelWidth - collapsedPeekPx);
 
   return (
     <AnimatePresence>
@@ -61,33 +100,89 @@ export function StackDisplay() {
         transition={{ type: "spring", stiffness: 300, damping: 30 }}
         className="fixed top-1/2 z-30 -translate-y-1/2"
         style={{
-          right: "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
+          top: topPosition,
+          right: `calc(env(safe-area-inset-right) + ${rightOffsetPx}px + var(--game-right-rail-offset, 0px))`,
         }}
       >
-        {/* Staggered pile — no wrapper chrome, just cards */}
-        <div
+        <motion.div
+          animate={{ x: isCollapsed ? collapsedOffset : 0 }}
+          transition={{ type: "spring", stiffness: 340, damping: 34 }}
           className="relative"
-          style={{ width: pileWidth, height: pileHeight }}
+          style={{ width: panelWidth, height: panelHeight }}
         >
-          <AnimatePresence mode="popLayout">
-            {displayStack.map((entry, index) => (
-              <StackEntry
-                key={entry.id}
-                entry={entry}
-                index={index}
-                isTop={index === 0}
-                isPending={pendingEntry != null && entry.id === pendingEntry.id}
-                cardSize={cardSize}
-                style={{
-                  position: "absolute",
-                  top: index * STAGGER_Y,
-                  left: index * STAGGER_X,
-                  zIndex: displayStack.length - index,
-                }}
-              />
-            ))}
-          </AnimatePresence>
-        </div>
+          {isCollapsed && (
+            <button
+              type="button"
+              onClick={() => setIsCollapsed(false)}
+              className="absolute left-0 top-1/2 z-20 flex h-20 w-7 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-l-xl rounded-r-md border border-white/10 bg-gray-950/95 text-gray-300 shadow-[0_18px_36px_rgba(0,0,0,0.45)] transition-colors hover:bg-gray-900 hover:text-white"
+              aria-label="Expand stack panel"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5">
+                <path
+                  fillRule="evenodd"
+                  d="M12.78 4.22a.75.75 0 0 1 0 1.06L8.06 10l4.72 4.72a.75.75 0 1 1-1.06 1.06l-5.25-5.25a.75.75 0 0 1 0-1.06l5.25-5.25a.75.75 0 0 1 1.06 0Z"
+                  clipRule="evenodd"
+                />
+              </svg>
+            </button>
+          )}
+
+          <div className="relative h-full overflow-hidden rounded-2xl border border-white/10 bg-gray-950/88 shadow-[0_24px_60px_rgba(0,0,0,0.55)] backdrop-blur-md">
+            <div className="flex h-9 items-center justify-between border-b border-white/10 px-3">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-gray-400">
+                  Stack
+                </span>
+                <span className="rounded-full bg-cyan-500/15 px-2 py-0.5 text-[10px] font-semibold text-cyan-200">
+                  {fullStack.length}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsCollapsed(true)}
+                className="rounded-md p-1 text-gray-400 transition-colors hover:bg-white/8 hover:text-white"
+                aria-label="Collapse stack panel"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+                  <path
+                    fillRule="evenodd"
+                    d="M7.22 4.22a.75.75 0 0 1 1.06 0l5.25 5.25a.75.75 0 0 1 0 1.06l-5.25 5.25a.75.75 0 1 1-1.06-1.06L11.94 10 7.22 5.28a.75.75 0 0 1 0-1.06Z"
+                    clipRule="evenodd"
+                  />
+                </svg>
+              </button>
+            </div>
+
+            <div
+              className="relative"
+              style={{
+                width: pileWidth,
+                height: pileHeight,
+                marginLeft: panelPaddingX,
+                marginTop: panelPaddingY,
+              }}
+            >
+              <AnimatePresence mode="popLayout">
+                {displayStack.map((entry, index) => (
+                  <StackEntry
+                    key={entry.id}
+                    entry={entry}
+                    index={index}
+                    isTop={index === 0}
+                    isPending={pendingEntry != null && entry.id === pendingEntry.id}
+                    cardSize={cardSize}
+                    style={{
+                      position: "absolute",
+                      top: index * staggerY,
+                      left: index * staggerX,
+                      zIndex: displayStack.length - index,
+                    }}
+                  />
+                ))}
+              </AnimatePresence>
+            </div>
+          </div>
+        </motion.div>
       </motion.div>
     </AnimatePresence>
   );

@@ -65,62 +65,69 @@ export function ModeChoiceModal() {
         <div className="absolute inset-0 bg-black/60" />
 
         <motion.div
-          className="relative z-10 max-h-[calc(100vh_-_2rem)] w-full max-w-md overflow-y-auto rounded-[20px] bg-gray-900 p-4 shadow-2xl ring-1 ring-gray-700 sm:p-6"
-          initial={{ scale: 0.9, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          exit={{ scale: 0.9, opacity: 0 }}
+          className="relative z-10 max-h-[calc(100vh_-_2rem)] w-full max-w-md overflow-y-auto rounded-[24px] border border-white/10 bg-[#0b1020]/96 shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md"
+          initial={{ scale: 0.95, opacity: 0, y: 10 }}
+          animate={{ scale: 1, opacity: 1, y: 0 }}
+          exit={{ scale: 0.95, opacity: 0, y: 10 }}
           transition={{ duration: 0.2, ease: "easeOut" }}
         >
-          <h2 className="mb-4 text-center text-base font-bold text-white sm:text-lg">
-            {chooseLabel}
-          </h2>
+          <div className="border-b border-white/10 px-4 py-4 sm:px-5 sm:py-5">
+            <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
+              Spell Modes
+            </div>
+            <h2 className="mt-1 text-lg font-semibold text-white sm:text-xl">{chooseLabel}</h2>
+            <p className="mt-1 text-xs text-slate-400 sm:text-sm">
+              Select the mode or modes to apply.
+            </p>
+          </div>
+          <div className="px-4 py-4 sm:px-5 sm:py-5">
+            <div className="flex flex-col gap-2">
+              {modal.mode_descriptions.map((desc, index) => {
+                const isSelected = selected.has(index);
+                return (
+                  <button
+                    key={index}
+                    onClick={() => {
+                      if (isSingleChoice) {
+                        dispatch({ type: "SelectModes", data: { indices: [index] } });
+                        setSelected(new Set());
+                      } else {
+                        toggleMode(index);
+                      }
+                    }}
+                    className={`rounded-[16px] border px-4 py-3 text-left transition ${
+                      isSelected
+                        ? "border-cyan-300/60 bg-cyan-500/12 ring-1 ring-cyan-400/40"
+                        : "border-white/8 bg-white/5 hover:bg-white/8 hover:ring-1 hover:ring-cyan-400/30"
+                    }`}
+                  >
+                    <span className="font-semibold text-white">{desc}</span>
+                  </button>
+                );
+              })}
+            </div>
 
-          <div className="flex flex-col gap-2">
-            {modal.mode_descriptions.map((desc, index) => {
-              const isSelected = selected.has(index);
-              return (
+            <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:justify-end">
+              {!isSingleChoice && (
                 <button
-                  key={index}
-                  onClick={() => {
-                    if (isSingleChoice) {
-                      dispatch({ type: "SelectModes", data: { indices: [index] } });
-                      setSelected(new Set());
-                    } else {
-                      toggleMode(index);
-                    }
-                  }}
-                  className={`rounded-lg px-4 py-3 text-left transition ${
-                    isSelected
-                      ? "bg-cyan-900/50 ring-1 ring-cyan-400"
-                      : "bg-gray-800 hover:bg-gray-700 hover:ring-1 hover:ring-cyan-400/50"
+                  onClick={handleConfirm}
+                  disabled={!canConfirm}
+                  className={`min-h-11 rounded-[16px] px-6 py-2 font-semibold transition ${
+                    canConfirm
+                      ? "bg-cyan-500 text-slate-950 shadow-[0_14px_34px_rgba(6,182,212,0.28)] hover:bg-cyan-400"
+                      : "cursor-not-allowed border border-white/8 bg-white/5 text-slate-500"
                   }`}
                 >
-                  <span className="font-semibold text-white">{desc}</span>
+                  Confirm ({selected.size}/{modal.max_choices})
                 </button>
-              );
-            })}
-          </div>
-
-          <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:justify-center">
-            {!isSingleChoice && (
+              )}
               <button
-                onClick={handleConfirm}
-                disabled={!canConfirm}
-                className={`min-h-11 rounded-lg px-6 py-2 font-semibold shadow-lg transition ${
-                  canConfirm
-                    ? "bg-cyan-600 text-white hover:bg-cyan-500"
-                    : "cursor-not-allowed bg-gray-700 text-gray-500"
-                }`}
+                onClick={handleCancel}
+                className="min-h-11 rounded-[16px] border border-white/8 bg-white/5 px-6 py-2 font-semibold text-slate-200 transition hover:bg-white/8"
               >
-                Confirm ({selected.size}/{modal.max_choices})
+                Cancel
               </button>
-            )}
-            <button
-              onClick={handleCancel}
-              className="min-h-11 rounded-lg bg-gray-700 px-6 py-2 font-semibold text-gray-200 shadow-lg transition hover:bg-gray-600"
-            >
-              Cancel
-            </button>
+            </div>
           </div>
         </motion.div>
       </motion.div>

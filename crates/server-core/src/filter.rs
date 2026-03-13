@@ -86,20 +86,13 @@ mod tests {
             "Lightning Bolt".to_string(),
             Zone::Hand,
         );
-        state.objects.get_mut(&id0).unwrap().abilities = vec![AbilityDefinition {
-            kind: AbilityKind::Spell,
-            effect: Effect::DealDamage {
+        state.objects.get_mut(&id0).unwrap().abilities = vec![AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
                 amount: DamageAmount::Fixed(3),
                 target: TargetFilter::Any,
             },
-            cost: None,
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
-        }];
+        )];
 
         // Add cards to player 1's hand
         let id1 = create_object(
@@ -109,19 +102,12 @@ mod tests {
             "Counterspell".to_string(),
             Zone::Hand,
         );
-        state.objects.get_mut(&id1).unwrap().abilities = vec![AbilityDefinition {
-            kind: AbilityKind::Spell,
-            effect: Effect::Counter {
+        state.objects.get_mut(&id1).unwrap().abilities = vec![AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Counter {
                 target: TargetFilter::Any,
             },
-            cost: None,
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
-        }];
+        )];
 
         // Add cards to libraries
         create_object(

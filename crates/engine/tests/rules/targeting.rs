@@ -127,19 +127,12 @@ fn no_legal_targets_prevents_casting() {
             .core_types
             .push(engine::types::card_type::CoreType::Instant);
         obj.abilities
-            .push(engine::types::ability::AbilityDefinition {
-                kind: engine::types::ability::AbilityKind::Spell,
-                effect: Effect::Destroy {
+            .push(engine::types::ability::AbilityDefinition::new(
+                engine::types::ability::AbilityKind::Spell,
+                Effect::Destroy {
                     target: TargetFilter::Typed(TypedFilter::creature()),
                 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            });
+            ));
     }
 
     // Try to cast with no creatures on the battlefield

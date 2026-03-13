@@ -684,9 +684,16 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             WaitingFor::TriggerTargetSelection {
                 player,
                 legal_targets,
+                optional,
             },
             GameAction::SelectTargets { targets },
         ) => {
+            // Empty targets is only valid for optional targeting ("up to one")
+            if targets.is_empty() && !optional {
+                return Err(EngineError::InvalidAction(
+                    "Must select at least one target".to_string(),
+                ));
+            }
             // Validate targets are legal
             for t in &targets {
                 if !legal_targets.contains(t) {
@@ -795,9 +802,11 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                     trigger.source_id,
                 );
                 let player = trigger.controller;
+                let optional = trigger.ability.optional_targeting;
                 let wf = WaitingFor::TriggerTargetSelection {
                     player,
                     legal_targets: legal,
+                    optional,
                 };
                 state.waiting_for = wf.clone();
                 derive_display_state(state);
@@ -3155,6 +3164,7 @@ mod trigger_target_tests {
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
             legal_targets: legal_targets.clone(),
+            optional: false,
         };
 
         // Player selects target1
@@ -3216,6 +3226,7 @@ mod trigger_target_tests {
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
             legal_targets: vec![TargetRef::Object(legal_target)],
+            optional: false,
         };
 
         // Try to select an illegal target

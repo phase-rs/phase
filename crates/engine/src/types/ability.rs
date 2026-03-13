@@ -565,6 +565,9 @@ pub enum TargetFilter {
     And {
         filters: Vec<TargetFilter>,
     },
+    /// Matches non-mana activated or triggered abilities on the stack.
+    /// Used by "counter target activated or triggered ability" effects.
+    StackAbility,
 }
 
 /// Condition for static ability applicability.
@@ -1208,6 +1211,9 @@ pub struct AbilityDefinition {
     /// Condition that must be met for this ability to execute during resolution.
     #[serde(default)]
     pub condition: Option<AbilityCondition>,
+    /// When true, targeting is optional ("up to one"). Player may choose zero targets.
+    #[serde(default)]
+    pub optional_targeting: bool,
 }
 
 impl AbilityDefinition {
@@ -1224,6 +1230,7 @@ impl AbilityDefinition {
             target_prompt: None,
             sorcery_speed: false,
             condition: None,
+            optional_targeting: false,
         }
     }
 
@@ -1259,6 +1266,11 @@ impl AbilityDefinition {
 
     pub fn condition(mut self, condition: AbilityCondition) -> Self {
         self.condition = Some(condition);
+        self
+    }
+
+    pub fn optional_targeting(mut self) -> Self {
+        self.optional_targeting = true;
         self
     }
 }
@@ -1686,6 +1698,9 @@ pub struct ResolvedAbility {
     /// Casting-time facts for evaluating conditions during resolution.
     #[serde(default)]
     pub context: SpellContext,
+    /// When true, targeting is optional ("up to one"). Player may choose zero targets.
+    #[serde(default)]
+    pub optional_targeting: bool,
 }
 
 impl ResolvedAbility {
@@ -1705,6 +1720,7 @@ impl ResolvedAbility {
             duration: None,
             condition: None,
             context: SpellContext::default(),
+            optional_targeting: false,
         }
     }
 

@@ -2,12 +2,13 @@ use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
 use crate::game::zones;
 use crate::types::ability::{EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, StackEntryKind};
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
-/// Counter target spells on the stack.
-/// Removes them from the stack and moves to graveyard.
+/// Counter target spells or abilities on the stack.
+/// Spells are removed from the stack and moved to graveyard.
+/// Abilities are simply removed from the stack (they aren't cards).
 /// Respects CantBeCountered static ability.
 pub fn resolve(
     state: &mut GameState,
@@ -16,18 +17,16 @@ pub fn resolve(
 ) -> Result<(), EffectError> {
     for target in &ability.targets {
         if let TargetRef::Object(obj_id) = target {
-            // Check if the spell has CantBeCountered
+            // Check if the target has CantBeCountered
             let ctx = StaticCheckContext {
                 source_id: Some(*obj_id),
                 target_id: Some(*obj_id),
                 ..Default::default()
             };
             if check_static_ability(state, "CantBeCountered", &ctx) {
-                // Spell cannot be countered -- skip it
                 continue;
             }
 
-            // Also check if the object itself has a CantBeCountered static definition
             let has_cant_be_countered = state
                 .objects
                 .get(obj_id)
@@ -44,9 +43,15 @@ pub fn resolve(
             // Remove from stack
             let stack_idx = state.stack.iter().position(|e| e.id == *obj_id);
             if let Some(idx) = stack_idx {
+                let is_spell = matches!(state.stack[idx].kind, StackEntryKind::Spell { .. });
                 state.stack.remove(idx);
-                // Move to graveyard
-                zones::move_to_zone(state, *obj_id, Zone::Graveyard, events);
+
+                if is_spell {
+                    // Spells are cards — move to graveyard
+                    zones::move_to_zone(state, *obj_id, Zone::Graveyard, events);
+                }
+                // Abilities just cease to exist when countered (source stays on battlefield)
+
                 events.push(GameEvent::SpellCountered {
                     object_id: *obj_id,
                     countered_by: ability.source_id,

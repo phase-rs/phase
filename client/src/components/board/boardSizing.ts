@@ -34,21 +34,21 @@ export function getCardSize(
 }
 
 export function getStackCardSize(stackCount: number): CardSize {
-  const baseWidth = 160;
-  const minWidth = 80;
+  const baseWidth = 240;
+  const minWidth = 140;
 
   if (stackCount <= 1) {
     return {
       width: baseWidth,
       height: Math.round(baseWidth / CARD_ASPECT_RATIO),
-      gap: 8,
+      gap: 10,
     };
   }
 
   // Shrink curve: exponential decay from 2+ items
-  const shrinkFactor = Math.max(minWidth / baseWidth, 1 / Math.sqrt(stackCount));
+  const shrinkFactor = Math.max(minWidth / baseWidth, 1.2 / Math.sqrt(stackCount));
   const width = Math.round(baseWidth * shrinkFactor);
   const height = Math.round(width / CARD_ASPECT_RATIO);
 
-  return { width, height, gap: 4 };
+  return { width, height, gap: 6 };
 }

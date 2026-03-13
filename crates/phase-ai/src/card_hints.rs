@@ -135,17 +135,7 @@ mod tests {
     }
 
     fn make_ability(effect: Effect) -> AbilityDefinition {
-        AbilityDefinition {
-            kind: AbilityKind::Spell,
-            effect,
-            cost: None,
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
-        }
+        AbilityDefinition::new(AbilityKind::Spell, effect)
     }
 
     fn add_spell_to_hand(

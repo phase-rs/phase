@@ -78,15 +78,16 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style }: 
       {/* Ability badge overlay (non-spell entries: triggered/activated) */}
       {!isSpell && (
         <div className="absolute inset-x-0 bottom-0 rounded-b-lg bg-gradient-to-t from-black/80 to-transparent px-1.5 py-1">
-          <div className="truncate text-[10px] font-medium text-gray-100">
-            {sourceName}
-          </div>
-          <div className="text-[9px] text-purple-300">{abilityLabel}</div>
+          <div className="pr-8 text-[9px] text-purple-300">{abilityLabel}</div>
         </div>
       )}
 
       {/* Controller badge */}
-      <span className="absolute bottom-1 left-1 rounded bg-black/60 px-1 py-0.5 text-[9px] font-semibold text-gray-300">
+      <span
+        className={`absolute rounded bg-black/60 px-1 py-0.5 text-[9px] font-semibold text-gray-300 ${
+          isSpell ? "bottom-1 left-1" : "bottom-1 right-1"
+        }`}
+      >
         {controllerLabel}
       </span>
     </motion.div>

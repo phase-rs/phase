@@ -2,7 +2,12 @@ import { useCallback, useState } from "react";
 
 type UpdateStatus = "idle" | "checking" | "up-to-date" | "error";
 
-export function BuildBadge() {
+interface BuildBadgeProps {
+  className?: string;
+  inline?: boolean;
+}
+
+export function BuildBadge({ className = "", inline = false }: BuildBadgeProps = {}) {
   const [status, setStatus] = useState<UpdateStatus>("idle");
 
   const checkForUpdates = useCallback(async () => {
@@ -24,7 +29,9 @@ export function BuildBadge() {
   }, [status]);
 
   return (
-    <div className="fixed left-2 bottom-[calc(env(safe-area-inset-bottom)+0.5rem)] z-20">
+    <div
+      className={inline ? className : `fixed left-2 bottom-[calc(env(safe-area-inset-bottom)+0.5rem)] z-20 ${className}`.trim()}
+    >
       <div className="flex items-center gap-1 rounded-full border border-white/10 bg-black/18 px-2.5 py-1.5 text-[10px] text-slate-400 shadow-lg shadow-black/30 backdrop-blur-md">
         <span>v{__APP_VERSION__}</span>
         <span className="text-slate-600">{__BUILD_HASH__}</span>

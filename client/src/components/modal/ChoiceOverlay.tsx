@@ -12,29 +12,30 @@ export function ChoiceOverlay({
   children: React.ReactNode;
 }) {
   return (
-    <div
-      className="fixed inset-0 z-50 overflow-y-auto px-3 py-4 sm:px-4 sm:py-6"
-      style={{
-        background:
-          "radial-gradient(ellipse at center, rgba(30,30,50,0.95) 0%, rgba(0,0,0,0.98) 70%)",
-      }}
-    >
-      <div className="flex min-h-full flex-col items-center justify-center pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
+    <div className="fixed inset-0 z-50 overflow-y-auto px-3 py-4 sm:px-4 sm:py-6">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
+      <div className="relative flex min-h-full flex-col items-center justify-center pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
         <motion.div
-          className="mb-4 text-center sm:mb-8"
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5 }}
+          className="w-full max-w-6xl overflow-hidden rounded-[28px] border border-white/10 bg-[#0b1020]/94 shadow-[0_32px_90px_rgba(0,0,0,0.48)] backdrop-blur-md"
+          initial={{ opacity: 0, y: 18, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={{ duration: 0.24, ease: "easeOut" }}
         >
-          <h2
-            className="text-xl font-black tracking-wide text-white sm:text-3xl"
-            style={{ textShadow: "0 0 20px rgba(200,200,255,0.3)" }}
-          >
-            {title}
-          </h2>
-          <p className="mt-2 max-w-xl text-xs text-gray-400 sm:text-sm">{subtitle}</p>
+          <div className="border-b border-white/10 px-5 py-5 sm:px-7 sm:py-6">
+            <div className="text-[0.68rem] uppercase tracking-[0.24em] text-slate-500">
+              Game Choice
+            </div>
+            <h2 className="mt-2 text-2xl font-semibold text-white sm:text-3xl">
+              {title}
+            </h2>
+            <p className="mt-2 max-w-3xl text-sm text-slate-400 sm:text-[0.95rem]">
+              {subtitle}
+            </p>
+          </div>
+          <div className="px-3 py-4 sm:px-5 sm:py-5">
+            {children}
+          </div>
         </motion.div>
-        {children}
       </div>
     </div>
   );

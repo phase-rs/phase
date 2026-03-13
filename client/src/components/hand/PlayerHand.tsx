@@ -271,7 +271,7 @@ function HandCard({
         cardName={cardName}
         size="normal"
         unimplementedMechanics={unimplementedMechanics}
-        className="!w-[calc(var(--card-w)*1.1)] !h-[calc(var(--card-h)*1.1)] sm:!w-[calc(var(--card-w)*1.3)] sm:!h-[calc(var(--card-h)*1.3)]"
+        className="!w-[calc(var(--card-w)*1.14)] !h-[calc(var(--card-h)*1.14)] sm:!w-[calc(var(--card-w)*1.34)] sm:!h-[calc(var(--card-h)*1.34)] md:!w-[calc(var(--card-w)*1.4)] md:!h-[calc(var(--card-h)*1.4)]"
       />
     </motion.div>
   );
