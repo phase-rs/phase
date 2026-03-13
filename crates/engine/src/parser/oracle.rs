@@ -148,6 +148,56 @@ pub fn parse_oracle_text(
             let cost_text = line[..colon_pos].trim();
             let effect_text = line[colon_pos + 1..].trim();
             let cost = parse_oracle_cost(cost_text);
+            let effect_lower = effect_text.to_lowercase();
+
+            // Modal activated ability: effect text starts with "Choose one —" etc.
+            if effect_lower.starts_with("choose ")
+                && (effect_lower.contains(" —") || effect_lower.contains(" -"))
+            {
+                let (min_choices, max_choices) = parse_modal_choose_count(&effect_lower);
+                let mut bullets = Vec::new();
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let bullet = lines[j].trim();
+                    if let Some(stripped) = bullet.strip_prefix('•') {
+                        bullets.push(stripped.trim().to_string());
+                        j += 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                if bullets.is_empty() {
+                    let mut def = make_unimplemented(effect_text);
+                    def.cost = Some(cost);
+                    result.abilities.push(def);
+                } else {
+                    let mode_abilities: Vec<AbilityDefinition> = bullets
+                        .iter()
+                        .map(|b| parse_effect_chain(b, AbilityKind::Activated))
+                        .collect();
+                    let modal = ModalChoice {
+                        min_choices,
+                        max_choices: max_choices.min(bullets.len()),
+                        mode_count: bullets.len(),
+                        mode_descriptions: bullets,
+                    };
+                    // Primary effect is Unimplemented — actual effects live in mode_abilities
+                    let mut def = AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::Unimplemented {
+                            name: "modal".to_string(),
+                            description: Some(effect_text.to_string()),
+                        },
+                    )
+                    .with_modal(modal, mode_abilities);
+                    def.cost = Some(cost);
+                    result.abilities.push(def);
+                }
+                i = j;
+                continue;
+            }
+
             let mut def = parse_effect_chain(effect_text, AbilityKind::Activated);
             def.cost = Some(cost);
             result.abilities.push(def);
@@ -1294,6 +1344,47 @@ mod tests {
             parse_modal_choose_count("choose any number of —"),
             (1, usize::MAX)
         );
+    }
+
+    #[test]
+    fn modal_activated_ability_bow_of_nylea() {
+        let r = parse(
+            "Attacking creatures you control have deathtouch.\n{1}{G}, {T}: Choose one —\n• Put a +1/+1 counter on target creature.\n• Bow of Nylea deals 2 damage to target creature with flying.\n• You gain 3 life.\n• Put up to four target cards from your graveyard on the bottom of your library in any order.",
+            "Bow of Nylea",
+            &[],
+            &["Enchantment", "Artifact"],
+            &[],
+        );
+        // First ability is the static deathtouch line, parsed as a regular ability
+        // Second ability is the modal activated ability
+        let modal_def = r.abilities.iter().find(|a| a.modal.is_some());
+        assert!(modal_def.is_some(), "should have a modal activated ability");
+        let modal_def = modal_def.unwrap();
+        let modal = modal_def.modal.as_ref().unwrap();
+        assert_eq!(modal.min_choices, 1);
+        assert_eq!(modal.max_choices, 1);
+        assert_eq!(modal.mode_count, 4);
+        assert_eq!(modal_def.mode_abilities.len(), 4);
+        assert!(modal_def.cost.is_some(), "should have a cost");
+    }
+
+    #[test]
+    fn modal_activated_ability_cankerbloom() {
+        let r = parse(
+            "{1}, Sacrifice Cankerbloom: Choose one —\n• Destroy target artifact.\n• Destroy target enchantment.",
+            "Cankerbloom",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        let modal_def = r.abilities.iter().find(|a| a.modal.is_some());
+        assert!(modal_def.is_some(), "should have a modal activated ability");
+        let modal = modal_def.unwrap().modal.as_ref().unwrap();
+        assert_eq!(modal.min_choices, 1);
+        assert_eq!(modal.max_choices, 1);
+        assert_eq!(modal.mode_count, 2);
+        // Spell-level modal should NOT be set (this is an activated ability modal)
+        assert!(r.modal.is_none(), "spell-level modal should be None");
     }
 
     #[test]

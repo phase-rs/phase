@@ -471,7 +471,7 @@ pub fn handle_select_modes(
 /// The first mode becomes the primary effect; subsequent modes are chained
 /// as sub_abilities in order. This lets resolve_ability_chain execute them
 /// sequentially during resolution.
-fn build_chained_resolved(
+pub(crate) fn build_chained_resolved(
     abilities: &[AbilityDefinition],
     indices: &[usize],
     source_id: ObjectId,
@@ -497,7 +497,9 @@ fn build_chained_resolved(
 
 /// Walk a ResolvedAbility chain (via sub_ability links) to find the first
 /// effect that requires targeting. Returns the TargetFilter if found.
-fn find_first_target_filter_in_chain(ability: &ResolvedAbility) -> Option<&TargetFilter> {
+pub(crate) fn find_first_target_filter_in_chain(
+    ability: &ResolvedAbility,
+) -> Option<&TargetFilter> {
     // Check this level
     if let Some(filter) = super::triggers::extract_target_filter_from_effect(&ability.effect) {
         return Some(filter);
@@ -582,6 +584,30 @@ pub fn handle_activate_ability(
     }
 
     let ability_def = obj.abilities[ability_index].clone();
+
+    // Per MTG CR 602.2a: announce → choose modes → choose targets → pay costs.
+    // Modal detection must happen BEFORE cost payment.
+    if let Some(ref modal) = ability_def.modal {
+        if matches!(
+            ability_def.cost,
+            Some(crate::types::ability::AbilityCost::Tap)
+        ) {
+            let obj = state.objects.get(&source_id).unwrap();
+            if obj.tapped {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot activate tap ability: permanent is tapped".to_string(),
+                ));
+            }
+        }
+        return Ok(WaitingFor::AbilityModeChoice {
+            player,
+            modal: modal.clone(),
+            source_id,
+            mode_abilities: ability_def.mode_abilities.clone(),
+            is_activated: true,
+            ability_cost: ability_def.cost.clone(),
+        });
+    }
 
     // Handle tap cost
     let has_tap_cost = matches!(

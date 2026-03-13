@@ -11,7 +11,8 @@ export function ModeChoiceModal() {
   const dispatch = useGameStore((s) => s.dispatch);
   const [selected, setSelected] = useState<Set<number>>(new Set());
 
-  const isModeChoice = waitingFor?.type === "ModeChoice";
+  const isModeChoice = waitingFor?.type === "ModeChoice" || waitingFor?.type === "AbilityModeChoice";
+  const isAbilityMode = waitingFor?.type === "AbilityModeChoice";
   const modal: ModalChoice | null = isModeChoice ? waitingFor.data.modal : null;
   const isMyChoice = isModeChoice && waitingFor.data.player === playerId;
 
@@ -73,7 +74,7 @@ export function ModeChoiceModal() {
         >
           <div className="border-b border-white/10 px-4 py-4 sm:px-5 sm:py-5">
             <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
-              Spell Modes
+              {isAbilityMode ? "Ability Modes" : "Spell Modes"}
             </div>
             <h2 className="mt-1 text-lg font-semibold text-white sm:text-xl">{chooseLabel}</h2>
             <p className="mt-1 text-xs text-slate-400 sm:text-sm">
@@ -121,12 +122,14 @@ export function ModeChoiceModal() {
                   Confirm ({selected.size}/{modal.max_choices})
                 </button>
               )}
-              <button
-                onClick={handleCancel}
-                className="min-h-11 rounded-[16px] border border-white/8 bg-white/5 px-6 py-2 font-semibold text-slate-200 transition hover:bg-white/8"
-              >
-                Cancel
-              </button>
+              {!isAbilityMode && (
+                <button
+                  onClick={handleCancel}
+                  className="min-h-11 rounded-[16px] border border-white/8 bg-white/5 px-6 py-2 font-semibold text-slate-200 transition hover:bg-white/8"
+                >
+                  Cancel
+                </button>
+              )}
             </div>
           </div>
         </motion.div>

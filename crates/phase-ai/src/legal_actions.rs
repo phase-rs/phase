@@ -141,7 +141,7 @@ pub fn get_legal_actions(state: &GameState) -> Vec<GameAction> {
                 GameAction::DecideOptionalCost { pay: false },
             ]
         }
-        WaitingFor::AbilityModeChoice { .. } => vec![],
+        WaitingFor::AbilityModeChoice { modal, .. } => mode_choice_actions(modal),
         WaitingFor::NamedChoice {
             options,
             choice_type,

@@ -1337,7 +1337,11 @@ impl AbilityDefinition {
         self
     }
 
-    pub fn with_modal(mut self, modal: ModalChoice, mode_abilities: Vec<AbilityDefinition>) -> Self {
+    pub fn with_modal(
+        mut self,
+        modal: ModalChoice,
+        mode_abilities: Vec<AbilityDefinition>,
+    ) -> Self {
         self.modal = Some(modal);
         self.mode_abilities = mode_abilities;
         self
@@ -2364,20 +2368,26 @@ mod modal_ability_tests {
     #[test]
     fn ability_definition_supports_modal() {
         let mode1 = AbilityDefinition::new(AbilityKind::Spell, Effect::Draw { count: 1 });
-        let mode2 = AbilityDefinition::new(AbilityKind::Spell, Effect::GainLife {
-            amount: LifeAmount::Fixed(3),
-            player: GainLifePlayer::Controller,
-        });
+        let mode2 = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: LifeAmount::Fixed(3),
+                player: GainLifePlayer::Controller,
+            },
+        );
         let modal = ModalChoice {
             min_choices: 1,
             max_choices: 1,
             mode_count: 2,
             mode_descriptions: vec!["Draw a card.".to_string(), "Gain 3 life.".to_string()],
         };
-        let def = AbilityDefinition::new(AbilityKind::Activated, Effect::Unimplemented {
-            name: "modal_placeholder".to_string(),
-            description: None,
-        })
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Unimplemented {
+                name: "modal_placeholder".to_string(),
+                description: None,
+            },
+        )
         .with_modal(modal.clone(), vec![mode1, mode2]);
 
         assert!(def.modal.is_some());
