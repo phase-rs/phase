@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
 
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
@@ -9,6 +8,7 @@ import type {
   LogDefaultState,
 } from "../../stores/preferencesStore.ts";
 import { BATTLEFIELDS } from "../board/battlefields.ts";
+import { ModalPanelShell } from "../ui/ModalPanelShell";
 
 interface PreferencesModalProps {
   onClose: () => void;
@@ -68,49 +68,23 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
   const [connTest, setConnTest] = useState<"idle" | "testing" | "ok" | "fail">("idle");
 
   return (
-    <AnimatePresence>
-      <motion.div
-        className="fixed inset-0 z-50 flex items-center justify-center"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={{ duration: 0.2 }}
-      >
-        {/* Backdrop */}
-        <div className="absolute inset-0 bg-black/60" onClick={onClose} />
-
-        {/* Modal content */}
-        <motion.div
-          className="relative z-10 max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700"
-          initial={{ scale: 0.9, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          exit={{ scale: 0.9, opacity: 0 }}
-          transition={{ duration: 0.2, ease: "easeOut" }}
-        >
-          {/* Header */}
-          <div className="mb-5 flex items-center justify-between">
-            <h2 className="text-lg font-bold text-white">Preferences</h2>
-            <button
-              onClick={onClose}
-              className="rounded p-1 text-gray-500 transition-colors hover:bg-gray-800 hover:text-gray-300"
-              aria-label="Close preferences"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5">
-                <path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" />
-              </svg>
-            </button>
-          </div>
-
-          <div className="grid gap-4 md:grid-cols-[180px_minmax(0,1fr)]">
-            <nav className="flex gap-2 overflow-x-auto pb-1 md:flex-col md:overflow-visible md:pb-0">
+    <ModalPanelShell
+      title="Settings"
+      subtitle="Tune gameplay, visuals, audio, and multiplayer defaults."
+      onClose={onClose}
+      maxWidthClassName="max-w-5xl"
+      bodyClassName="overflow-y-auto p-4 sm:p-6"
+    >
+      <div className="grid gap-4 md:grid-cols-[200px_minmax(0,1fr)]">
+            <nav className="flex snap-x gap-2 overflow-x-auto pb-1 md:flex-col md:overflow-visible md:pb-0">
               {SETTINGS_TABS.map((tab) => (
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
-                  className={`shrink-0 rounded-md border px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide transition-colors md:w-full ${
+                  className={`min-h-11 shrink-0 snap-start rounded-[16px] border px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.16em] transition-colors md:w-full md:px-4 md:text-xs md:tracking-[0.18em] ${
                     activeTab === tab.id
-                      ? "border-cyan-500/80 bg-cyan-600/20 text-cyan-200"
-                      : "border-gray-800 bg-gray-950/50 text-gray-400 hover:border-gray-700 hover:text-gray-200"
+                      ? "border-sky-400/60 bg-sky-500/14 text-sky-100"
+                      : "border-white/8 bg-black/20 text-slate-400 hover:border-white/14 hover:text-slate-100"
                   }`}
                 >
                   {tab.label}
@@ -141,7 +115,7 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
                     <select
                       value={boardBackground}
                       onChange={(e) => setBoardBackground(e.target.value)}
-                      className="w-full rounded bg-gray-800 px-3 py-1.5 text-sm text-gray-200 ring-1 ring-gray-700 focus:outline-none focus:ring-cyan-500"
+                      className="w-full rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-slate-100 focus:border-sky-400/40 focus:outline-none"
                     >
                       {BOARD_BACKGROUNDS.map((bg) => (
                         <option key={bg.value} value={bg.value}>
@@ -182,7 +156,7 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
                       onChange={setCombatPacing}
                     />
                   </SettingGroup>
-                  <p className="text-xs text-gray-500">
+                  <p className="text-xs text-slate-500">
                     Controls the pause before damage after blockers and between combat engagements.
                   </p>
                 </SettingsSection>
@@ -191,7 +165,7 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
               {activeTab === "audio" && (
                 <SettingsSection title="Audio">
                   <SettingGroup label="Global Volume">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                       <input
                         type="range"
                         min={0}
@@ -200,20 +174,20 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
                         onChange={(e) => setMasterVolume(Number(e.target.value))}
                         className="flex-1 accent-cyan-500"
                       />
-                      <span className="w-10 text-right text-xs text-gray-400">{masterVolume}%</span>
+                      <span className="text-xs text-slate-400 sm:w-10 sm:text-right">{masterVolume}%</span>
                     </div>
                   </SettingGroup>
 
                   <SettingGroup label="SFX Volume">
-                    <div className={`flex items-center gap-2 ${sfxMuted ? "opacity-50" : ""}`}>
-                      <label className="flex items-center gap-1">
+                    <div className={`flex flex-col gap-2 sm:flex-row sm:items-center ${sfxMuted ? "opacity-50" : ""}`}>
+                      <label className="flex min-h-11 items-center gap-2">
                         <input
                           type="checkbox"
                           checked={sfxMuted}
                           onChange={(e) => setSfxMuted(e.target.checked)}
                           className="accent-cyan-500"
                         />
-                        <span className="text-xs text-gray-400">Mute</span>
+                        <span className="text-xs text-slate-400">Mute</span>
                       </label>
                       <input
                         type="range"
@@ -223,20 +197,20 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
                         onChange={(e) => setSfxVolume(Number(e.target.value))}
                         className="flex-1 accent-cyan-500"
                       />
-                      <span className="w-10 text-right text-xs text-gray-400">{sfxVolume}%</span>
+                      <span className="text-xs text-slate-400 sm:w-10 sm:text-right">{sfxVolume}%</span>
                     </div>
                   </SettingGroup>
 
                   <SettingGroup label="Music Volume">
-                    <div className={`flex items-center gap-2 ${musicMuted ? "opacity-50" : ""}`}>
-                      <label className="flex items-center gap-1">
+                    <div className={`flex flex-col gap-2 sm:flex-row sm:items-center ${musicMuted ? "opacity-50" : ""}`}>
+                      <label className="flex min-h-11 items-center gap-2">
                         <input
                           type="checkbox"
                           checked={musicMuted}
                           onChange={(e) => setMusicMuted(e.target.checked)}
                           className="accent-cyan-500"
                         />
-                        <span className="text-xs text-gray-400">Mute</span>
+                        <span className="text-xs text-slate-400">Mute</span>
                       </label>
                       <input
                         type="range"
@@ -246,7 +220,7 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
                         onChange={(e) => setMusicVolume(Number(e.target.value))}
                         className="flex-1 accent-cyan-500"
                       />
-                      <span className="w-10 text-right text-xs text-gray-400">{musicVolume}%</span>
+                      <span className="text-xs text-slate-400 sm:w-10 sm:text-right">{musicVolume}%</span>
                     </div>
                   </SettingGroup>
                 </SettingsSection>
@@ -255,24 +229,24 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
               {activeTab === "multiplayer" && (
                 <SettingsSection title="Multiplayer">
                   <SettingGroup label="Display Name">
-                    <input
-                      type="text"
-                      value={displayName}
-                      onChange={(e) => setDisplayName(e.target.value)}
-                      placeholder="Enter your name"
-                      maxLength={20}
-                      className="w-full rounded bg-gray-800 px-3 py-1.5 text-sm text-gray-200 ring-1 ring-gray-700 focus:outline-none focus:ring-cyan-500"
-                    />
+                      <input
+                        type="text"
+                        value={displayName}
+                        onChange={(e) => setDisplayName(e.target.value)}
+                        placeholder="Enter your name"
+                        maxLength={20}
+                        className="w-full rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-sky-400/40 focus:outline-none"
+                      />
                   </SettingGroup>
 
                   <SettingGroup label="Server Address">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                       <input
                         type="text"
                         value={serverAddress}
                         onChange={(e) => setServerAddress(e.target.value)}
                         placeholder="ws://localhost:9374/ws"
-                        className="flex-1 rounded bg-gray-800 px-3 py-1.5 text-sm text-gray-200 ring-1 ring-gray-700 focus:outline-none focus:ring-cyan-500"
+                        className="min-h-11 flex-1 rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-sky-400/40 focus:outline-none"
                       />
                       <button
                         onClick={() => {
@@ -292,7 +266,7 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
                             setConnTest("fail");
                           };
                         }}
-                        className="rounded bg-gray-700 px-2 py-1 text-xs text-gray-300 transition-colors hover:bg-gray-600"
+                        className="min-h-11 rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-200 transition hover:bg-white/6 sm:self-auto"
                       >
                         Test
                       </button>
@@ -311,9 +285,7 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
               )}
             </div>
           </div>
-        </motion.div>
-      </motion.div>
-    </AnimatePresence>
+    </ModalPanelShell>
   );
 }
 
@@ -325,8 +297,8 @@ function SettingsSection({
   children: React.ReactNode;
 }) {
   return (
-    <section className="rounded-lg border border-gray-800 bg-gray-950/50 p-4">
-      <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-gray-300">{title}</h3>
+    <section className="rounded-[20px] border border-white/10 bg-black/18 p-4 shadow-[0_18px_54px_rgba(0,0,0,0.18)] backdrop-blur-md sm:p-5">
+      <h3 className="mb-4 text-[0.68rem] font-semibold uppercase tracking-[0.22em] text-slate-500">{title}</h3>
       <div className="flex flex-col gap-4">{children}</div>
     </section>
   );
@@ -335,7 +307,7 @@ function SettingsSection({
 function SettingGroup({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-gray-400">
+      <label className="mb-2 block text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
         {label}
       </label>
       {children}
@@ -353,15 +325,15 @@ function SegmentedControl<T extends string>({
   onChange: (v: T) => void;
 }) {
   return (
-    <div className="flex rounded bg-gray-800 p-0.5 ring-1 ring-gray-700">
+    <div className="flex min-h-11 flex-wrap rounded-[16px] border border-white/10 bg-black/18 p-1">
       {options.map((opt) => (
         <button
           key={opt}
           onClick={() => onChange(opt)}
-          className={`flex-1 rounded px-3 py-1 text-xs font-medium capitalize transition-colors ${
+          className={`min-h-9 flex-1 rounded-[12px] px-3 py-2 text-xs font-semibold capitalize transition-colors ${
             value === opt
-              ? "bg-cyan-600 text-white"
-              : "text-gray-400 hover:text-gray-200"
+              ? "bg-sky-500/80 text-white"
+              : "text-slate-400 hover:text-slate-200"
           }`}
         >
           {opt}

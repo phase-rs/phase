@@ -154,7 +154,7 @@ export function LobbyView({
     : games;
 
   return (
-    <MenuPanel className="relative z-10 flex w-full max-w-xl flex-col gap-6 px-4 py-5">
+    <MenuPanel className="relative z-10 mx-auto flex w-full max-w-xl flex-col gap-6 px-4 py-5">
       <div className="flex w-full items-center justify-between gap-3">
         <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
           {isP2P ? "Direct Connection" : "Online Lobby"}

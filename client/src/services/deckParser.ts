@@ -10,6 +10,35 @@ export interface ParsedDeck {
 }
 
 type DeckSection = "main" | "sideboard" | "commander";
+const SIMPLE_DECK_LINE_PATTERN = /^\d+x?\s+.+$/;
+
+function getNamedSection(line: string): DeckSection | null {
+  const normalized = line.trim().toLowerCase();
+  if (normalized === "deck" || normalized === "[main]") return "main";
+  if (normalized === "sideboard" || normalized === "[sideboard]") return "sideboard";
+  if (normalized === "commander" || normalized === "[commander]") return "commander";
+  return null;
+}
+
+function parseDeckEntryLine(line: string): DeckEntry | null {
+  const mtgaMatch = line.match(/^(\d+)\s+(.+?)\s+\([A-Z0-9]+\)\s+\d+$/);
+  if (mtgaMatch) {
+    return {
+      count: parseInt(mtgaMatch[1], 10),
+      name: mtgaMatch[2].trim(),
+    };
+  }
+
+  const simpleMatch = line.match(/^(\d+)x?\s+(.+)$/);
+  if (simpleMatch) {
+    return {
+      count: parseInt(simpleMatch[1], 10),
+      name: simpleMatch[2].trim(),
+    };
+  }
+
+  return null;
+}
 
 export function deduplicateEntries(entries: DeckEntry[]): DeckEntry[] {
   const map = new Map<string, number>();
@@ -38,25 +67,14 @@ export function parseDeckFile(content: string): ParsedDeck {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
 
-    const sectionMatch = line.match(/^\[(\w+)\]$/i);
-    if (sectionMatch) {
-      const sectionName = sectionMatch[1].toLowerCase();
-      if (sectionName === "sideboard") {
-        currentSection = "sideboard";
-      } else if (sectionName === "commander") {
-        currentSection = "commander";
-      } else {
-        currentSection = "main";
-      }
+    const namedSection = getNamedSection(line);
+    if (namedSection) {
+      currentSection = namedSection;
       continue;
     }
 
-    const cardMatch = line.match(/^(\d+)x?\s+(.+)$/);
-    if (cardMatch) {
-      const entry = {
-        count: parseInt(cardMatch[1], 10),
-        name: cardMatch[2].trim(),
-      };
+    const entry = parseDeckEntryLine(line);
+    if (entry) {
       if (currentSection === "commander") {
         commanderEntries.push(entry);
       } else {
@@ -96,18 +114,9 @@ export function parseMtgaDeck(content: string): ParsedDeck {
 
     if (line.startsWith("#")) continue;
 
-    if (line.toLowerCase() === "sideboard") {
-      currentSection = "sideboard";
-      continue;
-    }
-
-    if (line.toLowerCase() === "commander") {
-      currentSection = "commander";
-      continue;
-    }
-
-    if (line.toLowerCase() === "deck") {
-      currentSection = "main";
+    const namedSection = getNamedSection(line);
+    if (namedSection) {
+      currentSection = namedSection;
       continue;
     }
 
@@ -122,12 +131,8 @@ export function parseMtgaDeck(content: string): ParsedDeck {
       continue;
     }
 
-    const match = line.match(/^(\d+)\s+(.+?)\s+\([A-Z0-9]+\)\s+\d+$/);
-    if (match) {
-      const entry = {
-        count: parseInt(match[1], 10),
-        name: match[2].trim(),
-      };
+    const entry = parseDeckEntryLine(line);
+    if (entry) {
       if (currentSection === "commander") {
         commanderEntries.push(entry);
       } else {
@@ -158,7 +163,21 @@ export function detectAndParseDeck(content: string): ParsedDeck {
     return trimmed && !trimmed.startsWith("#") && MTGA_LINE_PATTERN.test(trimmed);
   });
 
-  return isMtga ? parseMtgaDeck(content) : parseDeckFile(content);
+  const hasNamedSections = lines.some((line) => {
+    const trimmed = line.trim();
+    return getNamedSection(trimmed) !== null;
+  });
+
+  const hasSimpleDeckLines = lines.some((line) => {
+    const trimmed = line.trim();
+    return trimmed && !trimmed.startsWith("#") && SIMPLE_DECK_LINE_PATTERN.test(trimmed);
+  });
+
+  if (isMtga || (hasNamedSections && hasSimpleDeckLines)) {
+    return parseMtgaDeck(content);
+  }
+
+  return parseDeckFile(content);
 }
 
 /**

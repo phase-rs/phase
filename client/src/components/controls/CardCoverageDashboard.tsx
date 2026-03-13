@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { ModalPanelShell } from "../ui/ModalPanelShell";
 
 /** Known effect API types supported by the engine. */
 const SUPPORTED_EFFECTS = [
@@ -89,38 +90,30 @@ export function CardCoverageDashboard({ onClose }: CardCoverageDashboardProps) {
   const [mainView, setMainView] = useState<MainView>("card-coverage");
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
-      <div className="relative z-10 flex max-h-[80vh] w-full max-w-2xl flex-col rounded-xl bg-gray-900 shadow-2xl ring-1 ring-gray-700">
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-gray-800 p-4">
-          <h2 className="text-lg font-bold text-white">Card Coverage Dashboard</h2>
-          <button
-            onClick={onClose}
-            className="rounded-lg p-1 text-gray-400 transition hover:bg-gray-800 hover:text-white"
-          >
-            <span className="text-xl leading-none">&times;</span>
-          </button>
-        </div>
-
-        {/* Main view tabs */}
-        <div className="flex gap-2 border-b border-gray-800 px-4 py-2">
+    <ModalPanelShell
+      title="Card Coverage"
+      subtitle="Inspect implementation coverage and supported engine handlers."
+      onClose={onClose}
+      maxWidthClassName="max-w-5xl"
+      bodyClassName="flex flex-col overflow-hidden"
+    >
+        <div className="flex flex-wrap gap-2 border-b border-white/10 px-4 py-4 sm:px-6">
           <button
             onClick={() => setMainView("card-coverage")}
-            className={`rounded-lg px-4 py-1.5 text-sm font-medium transition ${
+            className={`min-h-11 rounded-[16px] border px-4 py-2 text-sm font-semibold transition ${
               mainView === "card-coverage"
-                ? "bg-indigo-600 text-white"
-                : "text-gray-400 hover:bg-gray-800 hover:text-white"
+                ? "border-sky-400/60 bg-sky-500/14 text-sky-100"
+                : "border-white/8 bg-black/20 text-slate-400 hover:border-white/14 hover:text-slate-100"
             }`}
           >
             Card Coverage
           </button>
           <button
             onClick={() => setMainView("supported-handlers")}
-            className={`rounded-lg px-4 py-1.5 text-sm font-medium transition ${
+            className={`min-h-11 rounded-[16px] border px-4 py-2 text-sm font-semibold transition ${
               mainView === "supported-handlers"
-                ? "bg-indigo-600 text-white"
-                : "text-gray-400 hover:bg-gray-800 hover:text-white"
+                ? "border-sky-400/60 bg-sky-500/14 text-sky-100"
+                : "border-white/8 bg-black/20 text-slate-400 hover:border-white/14 hover:text-slate-100"
             }`}
           >
             Supported Handlers
@@ -128,8 +121,7 @@ export function CardCoverageDashboard({ onClose }: CardCoverageDashboardProps) {
         </div>
 
         {mainView === "card-coverage" ? <CardCoverageView /> : <SupportedHandlersView />}
-      </div>
-    </div>
+    </ModalPanelShell>
   );
 }
 
@@ -167,16 +159,16 @@ function CardCoverageView() {
   if (loading) {
     return (
       <div className="flex flex-1 items-center justify-center p-8">
-        <div className="h-8 w-8 animate-spin rounded-full border-2 border-gray-600 border-t-indigo-400" />
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-sky-300" />
       </div>
     );
   }
 
   if (error || !coverage) {
     return (
-      <div className="flex-1 p-6 text-center text-sm text-gray-400">
+      <div className="flex-1 p-8 text-center text-sm text-slate-400">
         <p className="mb-2">No coverage data available.</p>
-        <p className="font-mono text-xs text-gray-500">
+        <p className="font-mono text-xs text-slate-500">
           Generate it with: cargo run --bin coverage-report -- /path/to/cards &gt; client/public/coverage-data.json
         </p>
       </div>
@@ -185,9 +177,9 @@ function CardCoverageView() {
 
   if (coverage.total_cards === 0) {
     return (
-      <div className="flex-1 p-6 text-center text-sm text-gray-400">
+      <div className="flex-1 p-8 text-center text-sm text-slate-400">
         <p className="mb-2">Coverage data is empty (0 cards analyzed).</p>
-        <p className="font-mono text-xs text-gray-500">
+        <p className="font-mono text-xs text-slate-500">
           Run: cargo run --bin coverage-report -- /path/to/cards &gt; client/public/coverage-data.json
         </p>
       </div>
@@ -204,16 +196,16 @@ function CardCoverageView() {
   return (
     <>
       {/* Summary bar */}
-      <div className="border-b border-gray-800 px-4 py-3">
+      <div className="border-b border-white/10 px-4 py-4 sm:px-6">
         <div className="mb-2 flex items-center justify-between text-sm">
-          <span className="text-gray-300">
+          <span className="text-slate-300">
             {coverage.supported_cards} / {coverage.total_cards} cards supported
           </span>
-          <span className="font-mono text-emerald-400">
+          <span className="font-mono text-emerald-300">
             {coverage.coverage_pct.toFixed(1)}%
           </span>
         </div>
-        <div className="h-2 w-full overflow-hidden rounded-full bg-gray-800">
+        <div className="h-2.5 w-full overflow-hidden rounded-full bg-black/30">
           <div
             className={`h-full rounded-full bg-gradient-to-r ${progressColor}`}
             style={{ width: `${Math.min(coverage.coverage_pct, 100)}%` }}
@@ -222,18 +214,18 @@ function CardCoverageView() {
       </div>
 
       {/* Filters */}
-      <div className="flex gap-3 border-b border-gray-800 px-4 py-2">
+      <div className="flex flex-col gap-3 border-b border-white/10 px-4 py-4 sm:flex-row sm:px-6">
         <input
           type="text"
           placeholder="Search by card name..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="flex-1 rounded-lg bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none ring-1 ring-gray-700 focus:ring-indigo-500"
+          className="min-h-11 flex-1 rounded-[16px] border border-white/10 bg-black/18 px-4 py-2 text-sm text-white placeholder-slate-500 outline-none focus:border-sky-400/40"
         />
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-          className="rounded-lg bg-gray-800 px-3 py-2 text-sm text-white outline-none ring-1 ring-gray-700 focus:ring-indigo-500"
+          className="min-h-11 rounded-[16px] border border-white/10 bg-black/18 px-4 py-2 text-sm text-white outline-none focus:border-sky-400/40"
         >
           <option value="all">All</option>
           <option value="supported">Supported</option>
@@ -242,49 +234,92 @@ function CardCoverageView() {
       </div>
 
       {/* Card list */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="hidden flex-1 overflow-y-auto md:block">
         <table className="w-full text-sm">
-          <thead className="sticky top-0 bg-gray-900 text-left text-gray-400">
+          <thead className="sticky top-0 bg-[#0b1020]/98 text-left text-slate-500 backdrop-blur-md">
             <tr>
-              <th className="px-4 py-2">Name</th>
-              <th className="px-4 py-2">Status</th>
-              <th className="px-4 py-2">Missing Handlers</th>
+              <th className="px-6 py-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em]">Name</th>
+              <th className="px-6 py-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em]">Status</th>
+              <th className="px-6 py-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em]">Missing Handlers</th>
             </tr>
           </thead>
           <tbody>
             {filteredCards.map((card, i) => (
-              <tr key={i} className="border-t border-gray-800/50 text-gray-300">
-                <td className="px-4 py-1.5">{card.card_name}</td>
-                <td className="px-4 py-1.5">
+              <tr key={i} className="border-t border-white/6 text-slate-200 transition hover:bg-white/[0.03]">
+                <td className="px-6 py-3">{card.card_name}</td>
+                <td className="px-6 py-3">
                   {card.supported ? (
-                    <span className="text-emerald-400">&#10003;</span>
+                    <span className="rounded-full border border-emerald-400/30 bg-emerald-500/12 px-2 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-emerald-300">
+                      Supported
+                    </span>
                   ) : (
-                    <span className="text-red-400">&#10007;</span>
+                    <span className="rounded-full border border-rose-400/30 bg-rose-500/12 px-2 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-rose-300">
+                      Missing
+                    </span>
                   )}
                 </td>
-                <td className="px-4 py-1.5 text-xs text-gray-500">
-                  {card.missing_handlers.join(", ")}
+                <td className="px-6 py-3 text-xs text-slate-500">
+                  {card.missing_handlers.length > 0 ? card.missing_handlers.join(", ") : "Fully covered"}
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
         {filteredCards.length === 0 && (
-          <p className="py-8 text-center text-sm text-gray-500">No cards match the current filters.</p>
+          <p className="py-10 text-center text-sm text-slate-500">No cards match the current filters.</p>
+        )}
+      </div>
+      <div className="flex-1 overflow-y-auto px-4 py-3 md:hidden">
+        <div className="space-y-3">
+          {filteredCards.map((card, i) => (
+            <article
+              key={`${card.card_name}-${i}`}
+              className="rounded-[18px] border border-white/8 bg-black/16 p-4"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-slate-100">{card.card_name}</div>
+                  <div className="mt-1 text-[11px] uppercase tracking-[0.16em] text-slate-500">
+                    {card.set_code || "Unknown Set"}
+                  </div>
+                </div>
+                {card.supported ? (
+                  <span className="shrink-0 rounded-full border border-emerald-400/30 bg-emerald-500/12 px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-emerald-300">
+                    Supported
+                  </span>
+                ) : (
+                  <span className="shrink-0 rounded-full border border-rose-400/30 bg-rose-500/12 px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-rose-300">
+                    Missing
+                  </span>
+                )}
+              </div>
+              <div className="mt-3">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                  Missing Handlers
+                </div>
+                <div className="mt-1 text-xs text-slate-400">
+                  {card.missing_handlers.length > 0 ? card.missing_handlers.join(", ") : "Fully covered"}
+                </div>
+              </div>
+            </article>
+          ))}
+        </div>
+        {filteredCards.length === 0 && (
+          <p className="py-10 text-center text-sm text-slate-500">No cards match the current filters.</p>
         )}
       </div>
 
       {/* Missing handler frequency */}
       {coverage.missing_handler_frequency.length > 0 && (
-        <div className="border-t border-gray-800 px-4 py-3">
-          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">
+        <div className="border-t border-white/10 px-4 py-4 sm:px-6">
+          <h3 className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
             Missing Handler Frequency
           </h3>
-          <div className="max-h-32 overflow-y-auto">
+          <div className="max-h-36 space-y-1 overflow-y-auto">
             {coverage.missing_handler_frequency.map(([handler, count]) => (
-              <div key={handler} className="flex items-center justify-between py-0.5 text-sm">
-                <span className="text-gray-300">{handler}</span>
-                <span className="rounded bg-gray-800 px-2 py-0.5 text-xs font-mono text-yellow-400">
+              <div key={handler} className="flex items-center justify-between rounded-[14px] border border-white/6 bg-black/16 px-3 py-2 text-sm">
+                <span className="text-slate-200">{handler}</span>
+                <span className="rounded-full border border-amber-400/20 bg-amber-500/10 px-2.5 py-1 text-xs font-mono text-amber-300">
                   {count}
                 </span>
               </div>
@@ -294,7 +329,7 @@ function CardCoverageView() {
       )}
 
       {/* Footer */}
-      <div className="border-t border-gray-800 px-4 py-2 text-center text-xs text-gray-500">
+      <div className="border-t border-white/10 px-4 py-3 text-center text-xs text-slate-500 sm:px-6">
         Showing {filteredCards.length} of {coverage.total_cards} cards
       </div>
     </>
@@ -342,16 +377,16 @@ function SupportedHandlersView() {
   return (
     <>
       {/* Summary bar */}
-      <div className="border-b border-gray-800 px-4 py-3">
+      <div className="border-b border-white/10 px-4 py-4 sm:px-6">
         <div className="mb-2 flex items-center justify-between text-sm">
-          <span className="text-gray-300">
+          <span className="text-slate-300">
             {totalHandlers} total handlers implemented
           </span>
-          <span className="font-mono text-emerald-400">
+          <span className="font-mono text-emerald-300">
             {SUPPORTED_EFFECTS.length} effects / {SUPPORTED_TRIGGERS.length} triggers / {SUPPORTED_KEYWORDS.length} keywords
           </span>
         </div>
-        <div className="h-2 w-full overflow-hidden rounded-full bg-gray-800">
+        <div className="h-2.5 w-full overflow-hidden rounded-full bg-black/30">
           <div
             className="h-full rounded-full bg-gradient-to-r from-emerald-600 to-emerald-400"
             style={{ width: "100%" }}
@@ -360,15 +395,15 @@ function SupportedHandlersView() {
       </div>
 
       {/* Tabs */}
-      <div className="flex flex-wrap gap-2 border-b border-gray-800 px-4 py-3">
+      <div className="flex flex-wrap gap-2 border-b border-white/10 px-4 py-4 sm:px-6">
         {tabs.map((tab) => (
           <button
             key={tab.key}
             onClick={() => setActiveTab(tab.key)}
-            className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${
+            className={`min-h-11 rounded-[16px] border px-4 py-2 text-sm font-semibold transition ${
               activeTab === tab.key
-                ? "bg-indigo-600 text-white"
-                : "text-gray-400 hover:bg-gray-800 hover:text-white"
+                ? "border-sky-400/60 bg-sky-500/14 text-sky-100"
+                : "border-white/8 bg-black/20 text-slate-400 hover:border-white/14 hover:text-slate-100"
             }`}
           >
             {tab.label} ({tab.count})
@@ -377,25 +412,25 @@ function SupportedHandlersView() {
       </div>
 
       {/* Search */}
-      <div className="border-b border-gray-800 px-4 py-2">
+      <div className="border-b border-white/10 px-4 py-4 sm:px-6">
         <input
           type="text"
           placeholder="Search..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="w-full rounded-lg bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none ring-1 ring-gray-700 focus:ring-indigo-500"
+          className="min-h-11 w-full rounded-[16px] border border-white/10 bg-black/18 px-4 py-2 text-sm text-white placeholder-slate-500 outline-none focus:border-sky-400/40"
         />
       </div>
 
       {/* List */}
-      <div className="flex-1 overflow-y-auto p-4">
-        <div className="grid grid-cols-2 gap-1 sm:grid-cols-3">
+      <div className="flex-1 overflow-y-auto p-4 sm:p-6">
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
           {filteredItems.map((item) => (
             <div
               key={item}
-              className="flex items-center gap-2 rounded px-2 py-1 text-sm text-gray-300"
+              className="flex min-h-11 items-center gap-2 rounded-[16px] border border-white/8 bg-black/16 px-3 py-2 text-sm text-slate-200"
             >
-              <span className="text-emerald-400">&#10003;</span>
+              <span className="text-emerald-300">&#10003;</span>
               {item}
             </div>
           ))}
@@ -408,7 +443,7 @@ function SupportedHandlersView() {
       </div>
 
       {/* Footer */}
-      <div className="border-t border-gray-800 px-4 py-3 text-center text-xs text-gray-500">
+      <div className="border-t border-white/10 px-4 py-3 text-center text-xs text-slate-500 sm:px-6">
         {totalHandlers} total handlers across {tabs.length} categories
       </div>
     </>

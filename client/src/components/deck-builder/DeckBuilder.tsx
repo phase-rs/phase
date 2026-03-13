@@ -4,8 +4,10 @@ import type { ScryfallCard } from "../../services/scryfall";
 import type { ParsedDeck } from "../../services/deckParser";
 import { deduplicateEntries } from "../../services/deckParser";
 import { STORAGE_KEY_PREFIX } from "../../constants/storage";
+import { useDeckCardData } from "../../hooks/useDeckCardData";
 import { CardSearch } from "./CardSearch";
 import { CardGrid } from "./CardGrid";
+import { DeckStack } from "./DeckStack";
 import { DeckList } from "./DeckList";
 import { ManaCurve } from "./ManaCurve";
 import { FormatFilter, type DeckFormat } from "./FormatFilter";
@@ -57,11 +59,12 @@ export function DeckBuilder({
   const [deckName, setDeckName] = useState("");
   const [savedDecks, setSavedDecks] = useState(listSavedDecks);
   const [commanders, setCommanders] = useState<string[]>([]);
-
-  // Track Scryfall card data for CMC/color stats
-  const [cardDataCache, setCardDataCache] = useState<Map<string, ScryfallCard>>(
-    new Map(),
-  );
+  const [isDeckViewExpanded, setIsDeckViewExpanded] = useState(false);
+  const { cardDataCache, cacheCards } = useDeckCardData([
+    ...deck.main.map((entry) => entry.name),
+    ...deck.sideboard.map((entry) => entry.name),
+    ...commanders,
+  ]);
 
   const isCommander = format === "commander";
   const maxCopies = isCommander ? 1 : 4;
@@ -69,21 +72,13 @@ export function DeckBuilder({
   const handleSearchResults = useCallback(
     (cards: ScryfallCard[], _total: number) => {
       setSearchResults(cards);
-      // Cache card data for stats
-      setCardDataCache((prev) => {
-        const next = new Map(prev);
-        for (const card of cards) {
-          next.set(card.name, card);
-        }
-        return next;
-      });
+      cacheCards(cards);
     },
-    [],
+    [cacheCards],
   );
 
   const handleAddCard = useCallback((card: ScryfallCard) => {
-    // Cache the card data
-    setCardDataCache((prev) => new Map(prev).set(card.name, card));
+    cacheCards([card]);
 
     setDeck((prev) => {
       const existing = prev.main.find((e) => e.name === card.name);
@@ -104,7 +99,7 @@ export function DeckBuilder({
         main: [...prev.main, { count: 1, name: card.name }],
       };
     });
-  }, [maxCopies]);
+  }, [cacheCards, maxCopies]);
 
   const handleRemoveCard = useCallback(
     (name: string, section: "main" | "sideboard") => {
@@ -201,6 +196,11 @@ export function DeckBuilder({
     }
   }
 
+  const cardCounts = new Map(deck.main.map((entry) => [entry.name, entry.count]));
+  for (const commander of commanders) {
+    cardCounts.set(commander, (cardCounts.get(commander) ?? 0) + 1);
+  }
+
   // Compute validation warnings
   const warnings: string[] = [];
   if (isCommander) {
@@ -281,13 +281,38 @@ export function DeckBuilder({
           <CardSearch onResults={handleSearchResults} format={format} />
         </div>
 
-        <div className="min-w-0 flex-1 overflow-y-auto">
-          <CardGrid
-            cards={searchResults}
-            onAddCard={handleAddCard}
-            onCardHover={onCardHover}
-            format={format}
-          />
+        <div className="flex min-w-0 flex-1 flex-col">
+          {!isDeckViewExpanded && (
+            <div className="min-h-0 flex-1 overflow-y-auto border-b border-white/8">
+              <CardGrid
+                cards={searchResults}
+                onAddCard={handleAddCard}
+                onCardHover={onCardHover}
+                cardCounts={cardCounts}
+                format={format}
+              />
+            </div>
+          )}
+
+          <div className="flex items-center justify-end border-b border-white/8 bg-black/12 px-3 py-2">
+            <button
+              onClick={() => setIsDeckViewExpanded((prev) => !prev)}
+              className="rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-white/6"
+            >
+              {isDeckViewExpanded ? "Show Browser" : "Expand Deck View"}
+            </button>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-hidden bg-black/8">
+            <DeckStack
+              deck={deck}
+              commanders={commanders}
+              cardDataCache={cardDataCache}
+              onRemoveCard={handleRemoveCard}
+              onRemoveCommander={handleRemoveCommander}
+              onCardHover={onCardHover}
+            />
+          </div>
         </div>
 
         <div className="w-64 shrink-0 overflow-y-auto border-l border-white/8 bg-black/12 p-3 backdrop-blur-sm">
@@ -310,7 +335,7 @@ export function DeckBuilder({
             warnings={warnings}
             format={format}
           />
-          <div className="mt-3 border-t border-white/8 pt-3">
+          <div className="sticky bottom-0 mt-3 border-t border-white/8 bg-black/80 pt-3 backdrop-blur-md">
             <ManaCurve cmcValues={cmcValues} colorValues={colorValues} />
           </div>
         </div>

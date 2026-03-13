@@ -6,6 +6,9 @@ interface ManaCurveProps {
 }
 
 const CMC_LABELS = ["0", "1", "2", "3", "4", "5", "6+"];
+const CHART_HEIGHT = 96;
+const MAX_BAR_HEIGHT = 72;
+const MIN_BAR_HEIGHT = 8;
 
 const COLOR_MAP: Record<string, { bg: string; label: string }> = {
   W: { bg: "bg-amber-200", label: "W" },
@@ -43,9 +46,14 @@ export function ManaCurve({ cmcValues, colorValues }: ManaCurveProps) {
         <h4 className="mb-1 text-xs font-semibold uppercase text-gray-500">
           Mana Curve
         </h4>
-        <div className="flex items-end gap-1" style={{ height: 80 }}>
+        <div className="flex items-end gap-2" style={{ height: CHART_HEIGHT }}>
           {buckets.map((count, i) => {
-            const heightPct = maxCount > 0 ? (count / maxCount) * 100 : 0;
+            const barHeight = count === 0
+              ? 0
+              : Math.max(
+                Math.round((count / maxCount) * MAX_BAR_HEIGHT),
+                MIN_BAR_HEIGHT,
+              );
             return (
               <div
                 key={i}
@@ -54,10 +62,12 @@ export function ManaCurve({ cmcValues, colorValues }: ManaCurveProps) {
                 <span className="mb-0.5 text-[10px] text-gray-400">
                   {count > 0 ? count : ""}
                 </span>
-                <div
-                  className="w-full rounded-t bg-blue-500 transition-all"
-                  style={{ height: `${heightPct}%`, minHeight: count > 0 ? 4 : 0 }}
-                />
+                <div className="flex w-full items-end rounded-t bg-white/5">
+                  <div
+                    className="w-full rounded-t bg-blue-500 transition-all duration-200"
+                    style={{ height: barHeight }}
+                  />
+                </div>
                 <span className="mt-0.5 text-[10px] text-gray-500">
                   {CMC_LABELS[i]}
                 </span>

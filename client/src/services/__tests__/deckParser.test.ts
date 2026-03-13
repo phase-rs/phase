@@ -149,6 +149,22 @@ Sideboard
     ]);
   });
 
+  it('handles MTGA-style Deck and Sideboard headers with simple card lines', () => {
+    const content = `Deck
+4 Lightning Bolt
+2 Mountain
+Sideboard
+3 Red Elemental Blast`;
+    const result = detectAndParseDeck(content);
+    expect(result.main).toEqual([
+      { count: 4, name: 'Lightning Bolt' },
+      { count: 2, name: 'Mountain' },
+    ]);
+    expect(result.sideboard).toEqual([
+      { count: 3, name: 'Red Elemental Blast' },
+    ]);
+  });
+
   it('handles "Companion" header label', () => {
     const content = `Companion
 1 Lurrus of the Dream-Den (IKO) 226
@@ -196,6 +212,21 @@ describe('detectAndParseDeck', () => {
     expect(result.main).toEqual([
       { count: 4, name: 'Lightning Bolt' },
       { count: 2, name: 'Mountain' },
+    ]);
+  });
+
+  it('detects simple Deck/Sideboard sections and preserves sideboard cards', () => {
+    const content = `Deck
+4 Lightning Bolt
+
+Sideboard
+3 Red Elemental Blast`;
+    const result = detectAndParseDeck(content);
+    expect(result.main).toEqual([
+      { count: 4, name: 'Lightning Bolt' },
+    ]);
+    expect(result.sideboard).toEqual([
+      { count: 3, name: 'Red Elemental Blast' },
     ]);
   });
 });

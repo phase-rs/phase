@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import type { ParsedDeck, DeckEntry } from "../../services/deckParser";
-import { parseDeckFile, detectAndParseDeck, exportDeck } from "../../services/deckParser";
+import { detectAndParseDeck, exportDeck } from "../../services/deckParser";
 import type { ExportFormat } from "../../services/deckParser";
 
 interface DeckListProps {
@@ -123,7 +123,7 @@ export function DeckList({
     const file = e.target.files?.[0];
     if (!file) return;
     const content = await file.text();
-    const parsed = parseDeckFile(content);
+    const parsed = detectAndParseDeck(content);
     onImport(parsed);
     // Reset file input so same file can be re-imported
     if (fileInputRef.current) fileInputRef.current.value = "";

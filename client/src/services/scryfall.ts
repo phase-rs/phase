@@ -42,7 +42,7 @@ async function rateLimitedFetch(url: string): Promise<Response> {
   return fetch(url);
 }
 
-async function fetchCardData(cardName: string): Promise<ScryfallCard> {
+export async function fetchCardData(cardName: string): Promise<ScryfallCard> {
   const exactUrl = `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(cardName)}`;
   const exactResponse = await rateLimitedFetch(exactUrl);
   if (exactResponse.ok) {
