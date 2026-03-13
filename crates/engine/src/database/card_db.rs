@@ -92,6 +92,17 @@ impl CardDatabase {
     pub fn face_iter(&self) -> impl Iterator<Item = (&str, &CardFace)> {
         self.face_index.iter().map(|(k, v)| (k.as_str(), v))
     }
+
+    /// Returns all card names (title-cased as stored in face data), sorted.
+    pub fn card_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .face_index
+            .values()
+            .map(|face| face.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

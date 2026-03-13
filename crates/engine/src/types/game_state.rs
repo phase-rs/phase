@@ -316,6 +316,11 @@ pub struct GameState {
     /// to grant every creature type at runtime.
     #[serde(default)]
     pub all_creature_types: Vec<String>,
+
+    /// All card names from the loaded card database, used to validate
+    /// "name a card" choices. Skipped in serialization to avoid sending 30k+ names.
+    #[serde(skip)]
+    pub all_card_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -389,6 +394,7 @@ impl GameState {
             pending_continuation: None,
             last_named_choice: None,
             all_creature_types: Vec::new(),
+            all_card_names: Vec::new(),
         }
     }
 

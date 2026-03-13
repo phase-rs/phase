@@ -230,6 +230,13 @@ impl SessionManager {
         Ok((player_token, filtered))
     }
 
+    /// Set the full list of card names on a game session for "name a card" validation.
+    pub fn set_card_names(&mut self, game_code: &str, names: Vec<String>) {
+        if let Some(session) = self.sessions.get_mut(game_code) {
+            session.state.all_card_names = names;
+        }
+    }
+
     /// Handle a game action from a player.
     /// Returns (filtered_states_per_player, events, legal_actions_for_next_actor) on success.
     #[allow(clippy::type_complexity)]

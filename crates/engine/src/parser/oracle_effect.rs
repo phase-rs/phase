@@ -538,10 +538,7 @@ fn is_choose_as_targeting(rest: &str) -> bool {
     // "choose a/an {type} ... you control / an opponent controls"
     if let Some(after_article) = rest.strip_prefix("a ").or_else(|| rest.strip_prefix("an ")) {
         // Exclude patterns not yet in try_parse_named_choice but still not targeting
-        if after_article.starts_with("card name")
-            || after_article.starts_with("nonland card name")
-            || after_article.starts_with("creature card name")
-            || after_article.starts_with("nonbasic land type")
+        if after_article.starts_with("nonbasic land type")
             || after_article.starts_with("number")
         {
             return false;
@@ -575,6 +572,11 @@ fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
         Some(ChoiceType::BasicLandType)
     } else if rest.starts_with("a card type") {
         Some(ChoiceType::CardType)
+    } else if rest.starts_with("a card name")
+        || rest.starts_with("a nonland card name")
+        || rest.starts_with("a creature card name")
+    {
+        Some(ChoiceType::CardName)
     } else {
         None
     }
@@ -4296,6 +4298,39 @@ mod tests {
             e,
             Effect::Choose {
                 choice_type: ChoiceType::CardType
+            }
+        );
+    }
+
+    #[test]
+    fn choose_a_card_name() {
+        let e = parse_effect("Choose a card name");
+        assert_eq!(
+            e,
+            Effect::Choose {
+                choice_type: ChoiceType::CardName
+            }
+        );
+    }
+
+    #[test]
+    fn choose_a_nonland_card_name() {
+        let e = parse_effect("Choose a nonland card name");
+        assert_eq!(
+            e,
+            Effect::Choose {
+                choice_type: ChoiceType::CardName
+            }
+        );
+    }
+
+    #[test]
+    fn choose_a_creature_card_name() {
+        let e = parse_effect("Choose a creature card name");
+        assert_eq!(
+            e,
+            Effect::Choose {
+                choice_type: ChoiceType::CardName
             }
         );
     }

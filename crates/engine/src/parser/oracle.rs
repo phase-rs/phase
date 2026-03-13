@@ -123,7 +123,7 @@ pub fn parse_oracle_text(
             } else {
                 result.modal = Some(ModalChoice {
                     min_choices,
-                    max_choices,
+                    max_choices: max_choices.min(bullets.len()),
                     mode_count: bullets.len(),
                     mode_descriptions: bullets.clone(),
                 });
@@ -848,7 +848,7 @@ fn is_effect_sentence_candidate(lower: &str) -> bool {
 /// - "choose one —" → (1, 1)
 /// - "choose two —" → (2, 2)
 /// - "choose one or both —" → (1, 2)
-/// - "choose one or more —" → (1, usize::MAX) (capped to mode_count by caller)
+/// - "choose one or more —" → (1, usize::MAX) (capped to mode_count at construction)
 /// - "choose any number of —" → (1, usize::MAX)
 fn parse_modal_choose_count(lower: &str) -> (usize, usize) {
     if lower.contains("one or both") {

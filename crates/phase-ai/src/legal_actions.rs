@@ -5,6 +5,7 @@ use engine::game::combat::AttackTarget;
 use engine::game::deck_loading::DeckEntry;
 use engine::game::game_object::GameObject;
 use engine::game::mana_sources;
+use engine::types::ability::ChoiceType;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -115,12 +116,31 @@ pub fn get_legal_actions(state: &GameState) -> Vec<GameAction> {
                 GameAction::ChoosePlayDraw { play_first: false },
             ]
         }
-        WaitingFor::NamedChoice { options, .. } => options
-            .iter()
-            .map(|choice| GameAction::ChooseOption {
-                choice: choice.clone(),
-            })
-            .collect(),
+        WaitingFor::NamedChoice {
+            options,
+            choice_type,
+            ..
+        } => {
+            if options.is_empty() && matches!(choice_type, ChoiceType::CardName) {
+                // For card name choices, name cards visible on the battlefield
+                let mut seen = std::collections::HashSet::new();
+                state
+                    .objects
+                    .values()
+                    .filter(|obj| obj.zone == engine::types::zones::Zone::Battlefield)
+                    .map(|obj| obj.name.clone())
+                    .filter(|name: &String| seen.insert(name.clone()))
+                    .map(|name| GameAction::ChooseOption { choice: name })
+                    .collect()
+            } else {
+                options
+                    .iter()
+                    .map(|choice| GameAction::ChooseOption {
+                        choice: choice.clone(),
+                    })
+                    .collect()
+            }
+        }
     }
 }
 

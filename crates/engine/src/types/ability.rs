@@ -25,6 +25,7 @@ pub enum ChoiceType {
     OddOrEven,
     BasicLandType,
     CardType,
+    CardName,
 }
 
 /// How to specify a damage amount -- either a fixed integer or a variable reference.

@@ -363,6 +363,7 @@ async fn handle_client_message(
             let mut mgr = state.lock().await;
             match mgr.join_game(&game_code, resolved) {
                 Ok((player_token, filtered_state)) => {
+                    mgr.set_card_names(&game_code, db.card_names());
                     let session = mgr.sessions.get(&game_code).unwrap();
                     let joiner = session.player_for_token(&player_token).unwrap();
                     info!(game = %game_code, player = ?joiner, "player joined");
@@ -719,6 +720,7 @@ async fn handle_client_message(
             let mut mgr = state.lock().await;
             match mgr.join_game_with_name(&game_code, resolved, display_name) {
                 Ok((player_token, filtered_state)) => {
+                    mgr.set_card_names(&game_code, db.card_names());
                     let session = mgr.sessions.get(&game_code).unwrap();
                     let joiner = session.player_for_token(&player_token).unwrap();
                     info!(game = %game_code, player = ?joiner, "player joined via lobby");

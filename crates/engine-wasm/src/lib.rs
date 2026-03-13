@@ -122,6 +122,7 @@ pub fn initialize_game(
                     }
 
                     load_deck_into_state(&mut state, &payload);
+                    state.all_card_names = db.card_names();
                 }
             });
         }

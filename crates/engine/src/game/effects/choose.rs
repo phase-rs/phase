@@ -75,6 +75,9 @@ fn compute_options(state: &GameState, choice_type: ChoiceType) -> Vec<String> {
         ChoiceType::OddOrEven => to_strings(ODD_OR_EVEN),
         ChoiceType::BasicLandType => to_strings(BASIC_LAND_TYPES),
         ChoiceType::CardType => to_strings(CARD_TYPES),
+        // CardName options are provided by the frontend from its local card database.
+        // The engine sends an empty list to avoid serializing 30k+ names every state update.
+        ChoiceType::CardName => Vec::new(),
     }
 }
 
@@ -201,6 +204,26 @@ mod tests {
             WaitingFor::NamedChoice { options, .. } => {
                 assert!(!options.is_empty());
                 assert!(options.contains(&"Human".to_string()));
+            }
+            other => panic!("Expected NamedChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn choose_card_name_sends_empty_options() {
+        let mut state = GameState::new_two_player(42);
+        let ability = make_choose_ability(ChoiceType::CardName);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::NamedChoice {
+                choice_type,
+                options,
+                ..
+            } => {
+                assert_eq!(*choice_type, ChoiceType::CardName);
+                assert!(options.is_empty());
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }

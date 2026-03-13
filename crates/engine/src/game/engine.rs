@@ -1,7 +1,7 @@
 use rand::Rng;
 use thiserror::Error;
 
-use crate::types::ability::EffectKind;
+use crate::types::ability::{ChoiceType, EffectKind};
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ActionResult, GameState, WaitingFor};
@@ -540,18 +540,29 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
         // Stores the chosen value in last_named_choice and resumes any pending continuation.
         (
             WaitingFor::NamedChoice {
-                player, options, ..
+                player,
+                options,
+                choice_type,
             },
             GameAction::ChooseOption { choice },
         ) => {
             let p = *player;
-            let valid_options = options.clone();
 
-            // Validate the chosen option
-            if !valid_options.contains(&choice) {
+            // CardName validates against the full card database (stored on GameState,
+            // not in WaitingFor options, to avoid serializing 30k+ names every update).
+            // All other choice types validate against the provided options list.
+            if matches!(choice_type, ChoiceType::CardName) {
+                let lower = choice.to_lowercase();
+                if !state.all_card_names.iter().any(|n| n.to_lowercase() == lower) {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Invalid card name '{}'",
+                        choice
+                    )));
+                }
+            } else if !options.contains(&choice) {
                 return Err(EngineError::InvalidAction(format!(
                     "Invalid choice '{}', must be one of: {:?}",
-                    choice, valid_options
+                    choice, options
                 )));
             }
 
@@ -3485,5 +3496,60 @@ mod phase_trigger_regression_tests {
             "No pending trigger should exist for a skipped phase"
         );
         assert!(matches!(result2.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    #[test]
+    fn card_name_choice_validates_against_all_card_names() {
+        let mut state = GameState::new_two_player(42);
+        state.all_card_names = vec!["Lightning Bolt".to_string(), "Counterspell".to_string()];
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(0),
+            choice_type: ChoiceType::CardName,
+            options: Vec::new(),
+        };
+
+        // Valid card name succeeds
+        let result = apply(
+            &mut state,
+            GameAction::ChooseOption {
+                choice: "Lightning Bolt".to_string(),
+            },
+        );
+        assert!(result.is_ok());
+
+        // Reset state for invalid test
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(0),
+            choice_type: ChoiceType::CardName,
+            options: Vec::new(),
+        };
+
+        // Invalid card name fails
+        let result = apply(
+            &mut state,
+            GameAction::ChooseOption {
+                choice: "Not A Real Card".to_string(),
+            },
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn card_name_choice_is_case_insensitive() {
+        let mut state = GameState::new_two_player(42);
+        state.all_card_names = vec!["Lightning Bolt".to_string()];
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(0),
+            choice_type: ChoiceType::CardName,
+            options: Vec::new(),
+        };
+
+        let result = apply(
+            &mut state,
+            GameAction::ChooseOption {
+                choice: "lightning bolt".to_string(),
+            },
+        );
+        assert!(result.is_ok());
     }
 }
