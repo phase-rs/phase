@@ -463,6 +463,24 @@ fn parse_imperative_effect(text: &str) -> Effect {
         return parse_effect(&text[8..]);
     }
 
+    // --- "Choose target X" / "Choose up to N target X" — synonym for targeting ---
+    // Strips "choose " prefix and either re-parses (if the remainder has a verb) or
+    // produces a TargetOnly effect (if it's a bare target designation).
+    if let Some(rest) = lower.strip_prefix("choose ") {
+        if is_choose_as_targeting(rest) {
+            let stripped = &text["choose ".len()..];
+            let inner = parse_effect(stripped);
+            // If re-parsing produced a real effect (e.g. "choose target creature.
+            // Untap it" where parse_effect handles the verb), return it directly.
+            // Otherwise the remainder is a bare target phrase — extract the target.
+            if !matches!(inner, Effect::Unimplemented { .. }) {
+                return inner;
+            }
+            let (target, _) = parse_target(stripped);
+            return Effect::TargetOnly { target };
+        }
+    }
+
     // --- Choose card from revealed hand (absorbed into RevealHand filter) ---
     if lower.starts_with("choose ") && lower.contains("card from it") {
         let filter = parse_choose_filter(&lower);
@@ -478,6 +496,58 @@ fn parse_imperative_effect(text: &str) -> Effect {
         name: verb.to_string(),
         description: Some(text.to_string()),
     }
+}
+
+/// Determines if text after "choose " is a targeting synonym rather than
+/// a modal choice ("choose one —"), color choice, or creature type choice.
+///
+/// Returns true when the text contains "target" (indicating a targeting phrase)
+/// or uses "a/an {type} you/opponent control(s)" (selection-as-targeting).
+///
+/// Returns false for:
+///   - "card from it" — handled separately as RevealHand filter
+///   - "a color" / "a creature type" / "a card type" / "a card name" — different mechanics
+fn is_choose_as_targeting(rest: &str) -> bool {
+    // Already handled elsewhere
+    if rest.contains("card from it") {
+        return false;
+    }
+
+    // Any phrase containing "target" is a targeting synonym
+    if rest.contains("target") {
+        return true;
+    }
+
+    // "choose up to N" without "target" (e.g. "choose up to two creatures")
+    if rest.starts_with("up to ") {
+        return true;
+    }
+
+    // "choose a/an {type} ... you control / an opponent controls"
+    // Excludes: "choose a color", "choose a creature type", "choose a card type"
+    if let Some(after_article) = rest.strip_prefix("a ").or_else(|| rest.strip_prefix("an ")) {
+        let excluded = [
+            "color",
+            "creature type",
+            "card type",
+            "card name",
+            "nonland card name",
+            "nonbasic land type",
+            "number",
+        ];
+        if excluded.iter().any(|e| after_article.starts_with(e)) {
+            return false;
+        }
+        // Must reference controller to be targeting-like
+        if after_article.contains("you control")
+            || after_article.contains("opponent controls")
+            || after_article.contains("an opponent controls")
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn parse_choose_filter(lower: &str) -> TargetFilter {
@@ -4056,5 +4126,89 @@ mod tests {
             strip_trailing_duration("exile a card until ~ leaves the battlefield");
         assert_eq!(duration, Some(Duration::UntilHostLeavesPlay));
         assert_eq!(rest, "exile a card");
+    }
+
+    // --- "Choose" as targeting synonym ---
+
+    #[test]
+    fn choose_target_creature_parses_as_targeting() {
+        // "Choose target creature" (Grave Strength first sentence)
+        let e = parse_effect("Choose target creature");
+        assert!(
+            !matches!(e, Effect::Unimplemented { .. }),
+            "expected parsed effect, got Unimplemented: {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn choose_two_target_creatures() {
+        // "Choose two target creatures controlled by the same player" (Incriminate)
+        let e = parse_effect("Choose two target creatures controlled by the same player");
+        assert!(
+            !matches!(e, Effect::Unimplemented { .. }),
+            "expected parsed effect, got Unimplemented: {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn choose_up_to_two_target_permanent_cards() {
+        // "Choose up to two target permanent cards in your graveyard" (Brought Back)
+        let e =
+            parse_effect("Choose up to two target permanent cards in your graveyard that were put there from the battlefield this turn");
+        assert!(
+            !matches!(e, Effect::Unimplemented { .. }),
+            "expected parsed effect, got Unimplemented: {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn choose_a_type_you_control() {
+        // "Choose a Giant creature you control" (Crush Underfoot)
+        let e = parse_effect("Choose a Giant creature you control");
+        assert!(
+            !matches!(e, Effect::Unimplemented { .. }),
+            "expected parsed effect, got Unimplemented: {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn choose_does_not_match_modal() {
+        // "Choose a color" should remain Unimplemented (different mechanic)
+        let e = parse_effect("Choose a color");
+        assert!(matches!(e, Effect::Unimplemented { .. }));
+    }
+
+    #[test]
+    fn choose_does_not_match_creature_type() {
+        // "Choose a creature type" should remain Unimplemented (different mechanic)
+        let e = parse_effect("Choose a creature type");
+        assert!(matches!(e, Effect::Unimplemented { .. }));
+    }
+
+    #[test]
+    fn choose_card_from_it_still_works() {
+        // "Choose a creature card from it" should still produce RevealHand
+        let e = parse_effect("Choose a creature card from it");
+        assert!(matches!(e, Effect::RevealHand { .. }));
+    }
+
+    #[test]
+    fn is_choose_as_targeting_helper() {
+        assert!(is_choose_as_targeting("target creature"));
+        assert!(is_choose_as_targeting("target creature you control"));
+        assert!(is_choose_as_targeting("up to two target creatures"));
+        assert!(is_choose_as_targeting(
+            "two target creatures controlled by the same player"
+        ));
+        assert!(is_choose_as_targeting("a giant creature you control"));
+        assert!(!is_choose_as_targeting("a color"));
+        assert!(!is_choose_as_targeting("a creature type"));
+        assert!(!is_choose_as_targeting("a card type"));
+        assert!(!is_choose_as_targeting("one —"));
+        assert!(!is_choose_as_targeting("a creature card from it"));
     }
 }

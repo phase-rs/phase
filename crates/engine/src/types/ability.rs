@@ -716,6 +716,13 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         card_filter: TargetFilter,
     },
+    /// No-op effect that only establishes targeting for sub-abilities in the chain.
+    /// Produced by Oracle text like "Choose target creature" where the sentence exists
+    /// solely to designate a target referenced by subsequent sentences via "that creature".
+    TargetOnly {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
     /// Semantic marker for effects the engine has not yet implemented a handler for.
     /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.
     Unimplemented {
@@ -816,6 +823,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Shuffle { .. } => "Shuffle",
         Effect::SearchLibrary { .. } => "SearchLibrary",
         Effect::RevealHand { .. } => "RevealHand",
+        Effect::TargetOnly { .. } => "TargetOnly",
         Effect::Unimplemented { name, .. } => name,
     }
 }
@@ -871,6 +879,7 @@ pub enum EffectKind {
     Discard,
     Shuffle,
     SearchLibrary,
+    TargetOnly,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
     Equip,
@@ -925,6 +934,7 @@ impl From<&Effect> for EffectKind {
             Effect::Shuffle { .. } => EffectKind::Shuffle,
             Effect::SearchLibrary { .. } => EffectKind::SearchLibrary,
             Effect::RevealHand { .. } => EffectKind::Reveal,
+            Effect::TargetOnly { .. } => EffectKind::TargetOnly,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,
         }
     }

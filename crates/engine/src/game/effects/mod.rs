@@ -82,6 +82,7 @@ pub fn resolve_effect(
         Effect::Shuffle { .. } => shuffle::resolve(state, ability, events),
         Effect::SearchLibrary { .. } => search_library::resolve(state, ability, events),
         Effect::RevealHand { .. } => reveal_hand::resolve(state, ability, events),
+        Effect::TargetOnly { .. } => Ok(()), // no-op: targeting is established at cast time
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);
