@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 
-use crate::types::ability::{ReplacementCondition, ReplacementMode};
+use crate::types::ability::{AbilityDefinition, Effect, ReplacementCondition, ReplacementMode};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingReplacement, WaitingFor};
 use crate::types::identifiers::ObjectId;
@@ -694,6 +694,28 @@ pub fn find_applicable_replacements(
 
 const MAX_REPLACEMENT_DEPTH: u16 = 16;
 
+/// Extract ETB counter data from a replacement's execute effect.
+/// Handles `PutCounter` and `AddCounter` effects, returning (counter_type, count) pairs.
+fn extract_etb_counters(execute: Option<&AbilityDefinition>) -> Vec<(String, u32)> {
+    let exec = match execute {
+        Some(e) => e,
+        None => return Vec::new(),
+    };
+    match &exec.effect {
+        Effect::PutCounter {
+            counter_type,
+            count,
+            ..
+        }
+        | Effect::AddCounter {
+            counter_type,
+            count,
+            ..
+        } => vec![(counter_type.clone(), *count as u32)],
+        _ => Vec::new(),
+    }
+}
+
 fn apply_single_replacement(
     state: &mut GameState,
     proposed: ProposedEvent,
@@ -702,7 +724,7 @@ fn apply_single_replacement(
     events: &mut Vec<GameEvent>,
 ) -> Result<ProposedEvent, ApplyResult> {
     // Extract replacement metadata before mutably borrowing state for the applier.
-    let (event_key, enters_tapped) = match state
+    let (event_key, enters_tapped, etb_counters) = match state
         .objects
         .get(&rid.source)
         .and_then(|obj| obj.replacement_definitions.get(rid.index))
@@ -716,7 +738,8 @@ fn apply_single_replacement(
                     }
                 )
             });
-            (repl_def.event.clone(), tapped)
+            let counters = extract_etb_counters(repl_def.execute.as_deref());
+            (repl_def.event.clone(), tapped, counters)
         }
         None => return Ok(proposed),
     };
@@ -733,6 +756,16 @@ fn apply_single_replacement(
                     } = new_event
                     {
                         *enter_tapped = true;
+                    }
+                }
+                // If the replacement carries counter data, add to the zone change.
+                if !etb_counters.is_empty() {
+                    if let ProposedEvent::ZoneChange {
+                        ref mut enter_with_counters,
+                        ..
+                    } = new_event
+                    {
+                        enter_with_counters.extend(etb_counters.iter().cloned());
                     }
                 }
                 events.push(GameEvent::ReplacementApplied {
@@ -1021,6 +1054,7 @@ mod tests {
             to: Zone::Graveyard,
             cause: None,
             enter_tapped: false,
+            enter_with_counters: Vec::new(),
             applied: HashSet::new(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
@@ -1115,6 +1149,7 @@ mod tests {
             to: Zone::Graveyard,
             cause: None,
             enter_tapped: false,
+            enter_with_counters: Vec::new(),
             applied: HashSet::new(),
         };
 

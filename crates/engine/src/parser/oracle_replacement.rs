@@ -1,8 +1,8 @@
 use super::oracle_effect::{parse_effect_chain, try_parse_named_choice};
-use super::oracle_util::strip_reminder_text;
+use super::oracle_util::{parse_number, strip_reminder_text};
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChoiceType, Effect, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, TargetFilter,
+    AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, FilterProp,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, TargetFilter, TypeFilter,
 };
 use crate::types::replacements::ReplacementEvent;
 
@@ -104,6 +104,13 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
             description: Some(text.to_string()),
             ..ReplacementDefinition::new(ReplacementEvent::LoseLife)
         });
+    }
+
+    // --- "[Subject] enters with N [type] counter(s)" ---
+    if lower.contains("enters") && lower.contains("counter") {
+        if let Some(def) = parse_enters_with_counters(&norm_lower, &text) {
+            return Some(def);
+        }
     }
 
     None
@@ -300,6 +307,71 @@ fn extract_life_payment(text: &str) -> Option<i32> {
     let end = after_pay.find(' ').unwrap_or(after_pay.len());
     let num_str = &after_pay[..end];
     num_str.parse().ok()
+}
+
+/// Parse "enters with N [type] counter(s)" patterns into a Moved replacement.
+/// Handles both self ("~ enters with") and other ("each other creature ... enters with").
+fn parse_enters_with_counters(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    // Find "with [N] [type] counter" to extract count and counter type
+    let with_pos = norm_lower.find("with ")?;
+    let after_with = &norm_lower[with_pos + 5..];
+    // Skip "an additional" if present
+    let after_additional = after_with
+        .strip_prefix("an additional ")
+        .or_else(|| after_with.strip_prefix("additional "))
+        .unwrap_or(after_with);
+    let (count, rest) = parse_number(after_additional).unwrap_or((1, after_additional));
+    // Next word(s) before "counter" are the counter type
+    let counter_pos = rest.find("counter")?;
+    let counter_type_raw = rest[..counter_pos].trim();
+    let counter_type = match counter_type_raw {
+        "+1/+1" => "P1P1".to_string(),
+        "-1/-1" => "M1M1".to_string(),
+        other => other.to_uppercase(),
+    };
+
+    let put_counter = Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type,
+            count: count as i32,
+            target: TargetFilter::SelfRef,
+        },
+    ));
+
+    // Determine valid_card filter: self vs other creatures
+    let valid_card = if norm_lower.starts_with("each other creature")
+        || norm_lower.starts_with("other creature")
+    {
+        // "each other creature you control of the chosen type"
+        let mut properties = vec![FilterProp::Another];
+        if norm_lower.contains("chosen type") {
+            properties.push(FilterProp::IsChosenCreatureType);
+        }
+        let controller = if norm_lower.contains("you control") {
+            Some(ControllerRef::You)
+        } else {
+            None
+        };
+        Some(TargetFilter::Typed {
+            card_type: Some(TypeFilter::Creature),
+            subtype: None,
+            controller,
+            properties,
+        })
+    } else {
+        Some(TargetFilter::SelfRef)
+    };
+
+    Some(ReplacementDefinition {
+        execute: Some(put_counter),
+        valid_card,
+        description: Some(original_text.to_string()),
+        ..ReplacementDefinition::new(ReplacementEvent::Moved)
+    })
 }
 
 fn extract_replacement_effect(text: &str) -> Option<String> {
@@ -552,5 +624,57 @@ mod tests {
                 target: TargetFilter::SelfRef
             }
         ));
+    }
+
+    #[test]
+    fn self_enters_with_counters() {
+        let def = parse_replacement_line(
+            "Polukranos enters the battlefield with twelve +1/+1 counters on it.",
+            "Polukranos",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(
+            def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: 12,
+                ..
+            } if counter_type == "P1P1"
+        ));
+    }
+
+    #[test]
+    fn other_creature_enters_with_counter_chosen_type() {
+        let def = parse_replacement_line(
+            "Each other creature you control of the chosen type enters with an additional +1/+1 counter on it.",
+            "Metallic Mimic",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(
+            def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: 1,
+                ..
+            } if counter_type == "P1P1"
+        ));
+        // valid_card should filter for other creatures you control of chosen type
+        match &def.valid_card {
+            Some(TargetFilter::Typed {
+                card_type,
+                controller,
+                properties,
+                ..
+            }) => {
+                assert_eq!(*card_type, Some(TypeFilter::Creature));
+                assert_eq!(*controller, Some(ControllerRef::You));
+                assert!(properties.contains(&FilterProp::Another));
+                assert!(properties.contains(&FilterProp::IsChosenCreatureType));
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
+        }
     }
 }

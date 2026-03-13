@@ -22,6 +22,10 @@ pub enum ProposedEvent {
         cause: Option<ObjectId>,
         /// Whether this permanent enters the battlefield tapped (set by ETB-tapped replacements).
         enter_tapped: bool,
+        /// Counters to place on this permanent as it enters the battlefield.
+        /// Each entry is (counter_type_string, count). Set by ETB-counter replacements.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(String, u32)>,
         applied: HashSet<ReplacementId>,
     },
     Damage {
@@ -97,6 +101,7 @@ impl ProposedEvent {
             to,
             cause,
             enter_tapped: false,
+            enter_with_counters: Vec::new(),
             applied: HashSet::new(),
         }
     }

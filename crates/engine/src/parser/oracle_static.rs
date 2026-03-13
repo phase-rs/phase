@@ -363,32 +363,8 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         });
     }
 
-    // --- "~ enters with N [type] counters" or "~ enters the battlefield with N [type] counters" ---
-    if lower.contains("enters") && lower.contains("counter") {
-        if let Some(_etb) = parse_etb_counters(&lower) {
-            return Some(StaticDefinition {
-                mode: StaticMode::Continuous,
-                affected: Some(TargetFilter::SelfRef),
-                modifications: vec![],
-                condition: None,
-                affected_zone: None,
-                effect_zone: None,
-                characteristic_defining: false,
-                description: Some(text.to_string()),
-            });
-        }
-        // Even if we can't parse the exact count, capture it
-        return Some(StaticDefinition {
-            mode: StaticMode::Continuous,
-            affected: Some(TargetFilter::SelfRef),
-            modifications: vec![],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: Some(text.to_string()),
-        });
-    }
+    // NOTE: "enters with N counters" patterns are now handled by oracle_replacement.rs
+    // as proper Moved replacement effects (paralleling the "enters tapped" pattern).
 
     // --- "Spells you cast cost {N} less" ---
     if lower.contains("cost") && lower.contains("less") && lower.contains("spell") {
@@ -655,17 +631,6 @@ fn map_keyword(text: &str) -> Option<Keyword> {
     }
 }
 
-/// Parse "enters with N [type] counters" pattern, returning (count, counter_type).
-fn parse_etb_counters(lower: &str) -> Option<(u32, String)> {
-    // Look for pattern: "with N type counter(s)"
-    let with_pos = lower.find("with ")?;
-    let after_with = &lower[with_pos + 5..];
-    let mut words = after_with.split_whitespace();
-    let count_str = words.next()?;
-    let count: u32 = count_str.parse().ok()?;
-    let counter_type = words.next()?;
-    Some((count, counter_type.to_string()))
-}
 
 #[cfg(test)]
 mod tests {
@@ -837,15 +802,8 @@ mod tests {
         assert_eq!(def.mode, StaticMode::RaiseCost);
     }
 
-    #[test]
-    fn static_enters_with_counters() {
-        let def = parse_static_line(
-            "Polukranos enters the battlefield with twelve +1/+1 counters on it.",
-        )
-        .unwrap();
-        assert_eq!(def.mode, StaticMode::Continuous);
-        assert!(def.description.is_some());
-    }
+    // NOTE: static_enters_with_counters test moved to oracle_replacement tests —
+    // "enters with counters" is now parsed as a Moved replacement effect.
 
     #[test]
     fn static_as_long_as() {

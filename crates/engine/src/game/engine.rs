@@ -260,6 +260,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                         to,
                         from,
                         enter_tapped,
+                        enter_with_counters,
                         ..
                     } = event
                     {
@@ -268,6 +269,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                             if let Some(obj) = state.objects.get_mut(&object_id) {
                                 obj.tapped = enter_tapped;
                                 obj.entered_battlefield_turn = Some(state.turn_number);
+                                apply_etb_counters(obj, &enter_with_counters, &mut events);
                             }
                         }
                         if to == Zone::Battlefield || from == Zone::Battlefield {
@@ -791,6 +793,29 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
     })
 }
 
+/// Apply ETB counters from replacement effects to an object entering the battlefield.
+fn apply_etb_counters(
+    obj: &mut super::game_object::GameObject,
+    counters: &[(String, u32)],
+    events: &mut Vec<GameEvent>,
+) {
+    use super::game_object::CounterType;
+    for (counter_type_str, count) in counters {
+        let ct = match counter_type_str.as_str() {
+            "P1P1" | "+1/+1" => CounterType::Plus1Plus1,
+            "M1M1" | "-1/-1" => CounterType::Minus1Minus1,
+            "LOYALTY" => CounterType::Loyalty,
+            other => CounterType::Generic(other.to_string()),
+        };
+        *obj.counters.entry(ct).or_insert(0) += count;
+        events.push(GameEvent::CounterAdded {
+            object_id: obj.id,
+            counter_type: counter_type_str.clone(),
+            count: *count,
+        });
+    }
+}
+
 /// Apply a post-replacement side effect after a zone change has been executed.
 /// Used by Optional replacements (e.g., shock lands: pay life on accept, tap on decline).
 fn apply_post_replacement_effect(
@@ -902,6 +927,7 @@ fn handle_play_land(
                 object_id,
                 to,
                 enter_tapped,
+                enter_with_counters,
                 ..
             } = event
             {
@@ -909,6 +935,7 @@ fn handle_play_land(
                 if let Some(obj) = state.objects.get_mut(&object_id) {
                     obj.tapped = enter_tapped;
                     obj.entered_battlefield_turn = Some(state.turn_number);
+                    apply_etb_counters(obj, &enter_with_counters, events);
                 }
             }
         }

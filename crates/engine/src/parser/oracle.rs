@@ -658,7 +658,7 @@ fn is_static_pattern(lower: &str) -> bool {
         || lower.starts_with("creatures your opponents control ")
         || lower.starts_with("spells you cast ")
         || lower.starts_with("spells your opponents cast ")
-        || lower.contains("enters with ")
+        || (lower.contains("enters with ") && !lower.contains("counter"))
         || lower.contains("cost {")
         || lower.contains("costs {")
         || lower.contains("cost less")
@@ -676,6 +676,7 @@ fn is_replacement_pattern(lower: &str) -> bool {
         || lower.contains("enters the battlefield tapped")
         || lower.contains("enters tapped")
         || (lower.contains("as ") && lower.contains("enters") && lower.contains("choose a"))
+        || (lower.contains("enters") && lower.contains("counter"))
 }
 
 /// Check if a line is a saga chapter (e.g. "I —", "II —", "III —").
