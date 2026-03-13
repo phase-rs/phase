@@ -47,7 +47,7 @@ export function GameListItem({ game, onJoin }: GameListItemProps) {
   return (
     <button
       onClick={() => onJoin(game.game_code)}
-      className="flex w-full items-center gap-3 rounded-lg border border-gray-700 bg-gray-800/60 px-4 py-3 text-left transition-colors hover:border-gray-500 hover:bg-gray-800"
+      className="flex w-full items-center gap-3 rounded-[18px] border border-white/10 bg-black/18 px-4 py-3 text-left transition-colors hover:border-white/18 hover:bg-white/6"
     >
       {/* Format badge */}
       <span className={`flex-shrink-0 rounded px-1.5 py-0.5 text-xs font-semibold ${badgeClass}`}>
@@ -87,7 +87,7 @@ export function GameListItem({ game, onJoin }: GameListItemProps) {
       )}
 
       {/* Game code badge */}
-      <span className="flex-shrink-0 rounded bg-gray-700 px-2 py-0.5 font-mono text-xs tracking-wider text-emerald-400">
+      <span className="flex-shrink-0 rounded-full border border-white/10 bg-black/18 px-2 py-0.5 font-mono text-xs tracking-wider text-emerald-400">
         {game.game_code}
       </span>
     </button>

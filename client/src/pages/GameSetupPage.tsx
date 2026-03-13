@@ -9,6 +9,7 @@ import { WaitingScreen } from "../components/lobby/WaitingScreen";
 import { FormatPicker } from "../components/menu/FormatPicker";
 import { GamePresets } from "../components/menu/GamePresets";
 import { MenuParticles } from "../components/menu/MenuParticles";
+import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import { MyDecks } from "../components/menu/MyDecks";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX, listSavedDeckNames } from "../constants/storage";
@@ -62,6 +63,29 @@ const DIFFICULTIES = [
   { id: "Hard", label: "Hard" },
   { id: "VeryHard", label: "Very Hard" },
 ] as const;
+
+interface SetupSummaryButtonProps {
+  label: string;
+  value: string;
+  helper: string;
+  onClick: () => void;
+}
+
+function SetupSummaryButton({ label, value, helper, onClick }: SetupSummaryButtonProps) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex min-w-0 flex-1 items-center justify-between gap-4 rounded-[18px] border border-white/10 bg-black/14 px-4 py-3 text-left transition-colors hover:border-white/18 hover:bg-white/[0.04]"
+    >
+      <div className="min-w-0">
+        <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">{label}</div>
+        <div className="mt-1 truncate text-sm font-medium text-white">{value}</div>
+      </div>
+      <div className="shrink-0 text-xs text-slate-400">{helper}</div>
+    </button>
+  );
+}
 
 export function GameSetupPage() {
   const navigate = useNavigate();
@@ -302,25 +326,70 @@ export function GameSetupPage() {
   };
 
   const needsServer = playerCount > 2;
+  const title = step === "format"
+    ? "Set up a match."
+    : step === "config"
+      ? "Adjust the rules."
+      : step === "deck-select"
+        ? "Choose a deck."
+        : step === "mode"
+          ? "Choose how to play."
+          : step === "lobby"
+            ? "Connect the table."
+            : step === "host-setup"
+              ? "Finalize hosted play."
+              : "Waiting for players.";
+
+  const description = step === "format"
+    ? "Pick a format or start from a saved preset."
+    : step === "config"
+      ? "Set life totals, player count, and match structure."
+      : step === "deck-select"
+        ? "Select the deck you want to bring into the match."
+        : step === "mode"
+          ? "Start locally or continue into multiplayer."
+          : step === "lobby"
+            ? "Join by code or host a new room."
+    : step === "host-setup"
+      ? "Adjust room settings before it opens."
+      : "Share the code and wait for the room to fill.";
 
   return (
-    <div className="relative flex min-h-screen flex-col items-center justify-center">
+    <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
       <MenuParticles />
       <ScreenChrome onBack={handleBack} />
+      <div className="menu-scene__vignette" />
+      <div className="menu-scene__sigil menu-scene__sigil--left" />
+      <div className="menu-scene__sigil menu-scene__sigil--right" />
+      <div className="menu-scene__haze" />
 
-      <div className="relative z-10 flex w-full justify-center py-8">
+      <MenuShell
+        eyebrow="Match Setup"
+        title={title}
+        description={description}
+        layout="stacked"
+      >
         {step === "format" && (
           <div className="flex flex-col items-center gap-8">
             <FormatPicker onFormatSelect={handleFormatSelect} />
-            <div className="w-full max-w-2xl border-t border-gray-800 pt-6">
+            <div className="w-full max-w-2xl border-t border-white/10 pt-6">
               <GamePresets onSelectPreset={handlePresetSelect} />
             </div>
           </div>
         )}
 
         {step === "config" && formatConfig && (
-          <div className="flex w-full max-w-md flex-col items-center gap-6 px-4">
-            <h2 className="text-2xl font-bold tracking-tight">
+          <MenuPanel className="mx-auto flex w-full max-w-md flex-col gap-6 px-4 py-5">
+            {selectedFormat && (
+              <SetupSummaryButton
+                label="Format"
+                value={selectedFormat === "TwoHeadedGiant" ? "Two-Headed Giant" : selectedFormat}
+                helper="Change"
+                onClick={() => setStep("format")}
+              />
+            )}
+
+            <h2 className="menu-display text-[1.9rem] leading-tight text-white">
               {selectedFormat === "TwoHeadedGiant" ? "Two-Headed Giant" : selectedFormat} Settings
             </h2>
 
@@ -403,27 +472,59 @@ export function GameSetupPage() {
             >
               Choose Deck
             </button>
-          </div>
+          </MenuPanel>
         )}
 
         {step === "deck-select" && (
-          <MyDecks
-            mode="select"
-            onSelectDeck={handleSelectDeck}
-            activeDeckName={activeDeckName}
-            onConfirmSelection={handleDeckConfirm}
-            confirmLabel="Continue"
-            selectedFormat={selectedFormat ?? undefined}
-            selectedMatchType={matchType}
-            showDifficultySelector
-            difficulty={difficulty}
-            onDifficultyChange={setDifficulty}
-          />
+          <div className="mx-auto flex w-full max-w-5xl flex-col gap-4">
+            {selectedFormat && (
+              <div className="mx-auto flex w-full max-w-5xl flex-wrap gap-3">
+                <SetupSummaryButton
+                  label="Format"
+                  value={selectedFormat === "TwoHeadedGiant" ? "Two-Headed Giant" : selectedFormat}
+                  helper="Change"
+                  onClick={() => setStep("format")}
+                />
+              </div>
+            )}
+
+            <MyDecks
+              mode="select"
+              onSelectDeck={handleSelectDeck}
+              activeDeckName={activeDeckName}
+              onConfirmSelection={handleDeckConfirm}
+              confirmLabel="Continue"
+              selectedFormat={selectedFormat ?? undefined}
+              selectedMatchType={matchType}
+              showDifficultySelector
+              difficulty={difficulty}
+              onDifficultyChange={setDifficulty}
+            />
+          </div>
         )}
 
         {step === "mode" && (
-          <div className="flex w-full max-w-md flex-col items-center gap-6 px-4">
-            <h2 className="text-2xl font-bold tracking-tight">Game Mode</h2>
+          <MenuPanel className="mx-auto flex w-full max-w-md flex-col gap-6 px-4 py-5">
+            <div className="flex flex-col gap-3 sm:flex-row">
+              {selectedFormat && (
+                <SetupSummaryButton
+                  label="Format"
+                  value={selectedFormat === "TwoHeadedGiant" ? "Two-Headed Giant" : selectedFormat}
+                  helper="Change"
+                  onClick={() => setStep("format")}
+                />
+              )}
+              {activeDeckName && (
+                <SetupSummaryButton
+                  label="Deck"
+                  value={activeDeckName}
+                  helper="Change"
+                  onClick={() => setStep("deck-select")}
+                />
+              )}
+            </div>
+
+            <h2 className="menu-display text-[1.9rem] leading-tight text-white">Game Mode</h2>
 
             <div className="flex w-full flex-col gap-3">
               <div className="flex w-full flex-col gap-2">
@@ -488,7 +589,7 @@ export function GameSetupPage() {
                 Save as Preset
               </button>
             </div>
-          </div>
+          </MenuPanel>
         )}
 
         {step === "lobby" && (
@@ -517,7 +618,7 @@ export function GameSetupPage() {
             onCancel={handleCancelHost}
           />
         )}
-      </div>
+      </MenuShell>
     </div>
   );
 }

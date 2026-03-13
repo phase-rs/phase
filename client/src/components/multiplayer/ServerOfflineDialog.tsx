@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
 
+import { MenuPanel } from "../menu/MenuShell";
 import { menuButtonClass } from "../menu/buttonStyles";
 
 interface ServerOfflineDialogProps {
@@ -28,12 +29,13 @@ export function ServerOfflineDialog({
           />
 
           <motion.div
-            className="relative z-10 w-full max-w-sm rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700"
+            className="relative z-10 w-full max-w-sm"
             initial={{ opacity: 0, scale: 0.92 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.92 }}
             transition={{ type: "spring", stiffness: 320, damping: 26 }}
           >
+            <MenuPanel className="p-6">
             <h2 className="mb-2 text-xl font-bold text-white">Server Offline</h2>
             <p className="mb-3 text-sm text-gray-300">
               Couldn&apos;t connect to the dedicated multiplayer server.
@@ -63,6 +65,7 @@ export function ServerOfflineDialog({
                 Open Settings
               </button>
             </div>
+            </MenuPanel>
           </motion.div>
         </div>
       )}

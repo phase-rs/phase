@@ -157,15 +157,17 @@ export function DeckList({
 
   return (
     <div className="flex h-full flex-col">
-      {/* Header with total */}
-      <div className="mb-2 flex items-center justify-between border-b border-gray-700 pb-2">
-        <h3 className="text-sm font-bold text-white">
-          Deck ({mainTotal} cards)
-        </h3>
+      <div className="mb-2 flex items-center justify-between border-b border-white/8 pb-2">
+        <div>
+          <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Current List</div>
+          <h3 className="mt-1 text-sm font-bold text-white">
+            Main Deck ({mainTotal} cards)
+          </h3>
+        </div>
         <div className="flex gap-1">
           <button
             onClick={() => setShowPasteModal(true)}
-            className="rounded bg-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-600"
+            className="rounded-xl border border-white/8 bg-black/18 px-2 py-1 text-xs text-gray-300 hover:bg-white/6"
             title="Import deck from text (MTGA or .dck format)"
           >
             Import
@@ -173,7 +175,7 @@ export function DeckList({
           <button
             onClick={() => setShowExportModal(true)}
             disabled={mainTotal === 0}
-            className="rounded bg-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-600 disabled:opacity-40"
+            className="rounded-xl border border-white/8 bg-black/18 px-2 py-1 text-xs text-gray-300 hover:bg-white/6 disabled:opacity-40"
             title="Export deck"
           >
             Export
@@ -194,7 +196,7 @@ export function DeckList({
           {warnings.map((w) => (
             <div
               key={w}
-              className="rounded bg-yellow-900/30 px-2 py-1 text-xs text-yellow-400"
+            className="rounded-xl border border-amber-300/18 bg-amber-400/8 px-2 py-1 text-xs text-amber-200"
             >
               {w}
             </div>
@@ -217,7 +219,7 @@ export function DeckList({
 
         {/* Sideboard */}
         {deck.sideboard.length > 0 && (
-          <div className="mt-3 border-t border-gray-700 pt-2">
+          <div className="mt-3 border-t border-white/8 pt-2">
             <SectionList
               title={`Sideboard (${sideTotal})`}
               entries={deck.sideboard}
@@ -236,20 +238,20 @@ export function DeckList({
             className="absolute inset-0 bg-black/60"
             onClick={() => setShowPasteModal(false)}
           />
-          <div className="relative z-10 w-full max-w-md rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700">
+          <div className="relative z-10 w-full max-w-md rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-6 shadow-2xl backdrop-blur-md">
             <h3 className="mb-3 text-sm font-bold text-white">Import Deck</h3>
             <textarea
               value={pasteText}
               onChange={(e) => setPasteText(e.target.value)}
               placeholder="Paste deck list (MTGA or .dck format)..."
               rows={10}
-              className="mb-3 w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              className="mb-3 w-full rounded-[16px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-white/20 focus:outline-none"
               autoFocus
             />
             <div className="flex justify-between">
               <button
                 onClick={() => fileInputRef.current?.click()}
-                className="rounded bg-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-600"
+                className="rounded-xl border border-white/8 bg-black/18 px-3 py-1.5 text-xs text-gray-300 hover:bg-white/6"
               >
                 From File
               </button>
@@ -343,5 +345,3 @@ export function DeckList({
     </div>
   );
 }
-
-

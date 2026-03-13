@@ -146,15 +146,19 @@ export function CardSearch({ onResults, format = "standard" }: CardSearchProps) 
 
   return (
     <div className="flex flex-col gap-3 p-3">
+      <div>
+        <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Search</div>
+        <div className="mt-1 text-sm text-slate-300">Add cards to the current list.</div>
+      </div>
+
       <input
         type="text"
         value={text}
         onChange={(e) => handleTextChange(e.target.value)}
         placeholder="Search cards..."
-        className="w-full rounded-md border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+        className="w-full rounded-[16px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-white/20 focus:outline-none"
       />
 
-      {/* Color identity filters */}
       <div className="flex gap-1">
         {MANA_COLORS.map((c) => (
           <button
@@ -162,7 +166,7 @@ export function CardSearch({ onResults, format = "standard" }: CardSearchProps) 
             onClick={() => toggleColor(c)}
             title={COLOR_LABELS[c]}
             className={`h-8 w-8 rounded-full text-xs font-bold transition-opacity ${COLOR_STYLES[c]} ${
-              selectedColors.includes(c) ? "opacity-100 ring-2 ring-white" : "opacity-40"
+              selectedColors.includes(c) ? "opacity-100 ring-2 ring-white/50" : "opacity-45"
             }`}
           >
             {c}
@@ -170,11 +174,10 @@ export function CardSearch({ onResults, format = "standard" }: CardSearchProps) 
         ))}
       </div>
 
-      {/* Type dropdown */}
       <select
         value={selectedType}
         onChange={(e) => handleTypeChange(e.target.value)}
-        className="rounded-md border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white focus:border-blue-500 focus:outline-none"
+        className="rounded-[16px] border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white focus:border-white/20 focus:outline-none"
       >
         <option value="">All types</option>
         {CARD_TYPES.map((t) => (
@@ -184,7 +187,6 @@ export function CardSearch({ onResults, format = "standard" }: CardSearchProps) 
         ))}
       </select>
 
-      {/* CMC max */}
       <div className="flex items-center gap-2">
         <label className="text-xs text-gray-400">CMC max:</label>
         <input
@@ -193,11 +195,10 @@ export function CardSearch({ onResults, format = "standard" }: CardSearchProps) 
           max={16}
           value={cmcMax ?? ""}
           onChange={(e) => handleCmcChange(e.target.value)}
-          className="w-16 rounded-md border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-white focus:border-blue-500 focus:outline-none"
+          className="w-16 rounded-[12px] border border-white/10 bg-black/18 px-2 py-1 text-sm text-white focus:border-white/20 focus:outline-none"
         />
       </div>
 
-      {/* Status */}
       <div className="text-xs text-gray-400">
         {loading && "Searching..."}
         {!loading && resultCount !== null && `${resultCount} results`}

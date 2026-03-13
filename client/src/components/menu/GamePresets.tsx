@@ -31,13 +31,13 @@ export function GamePresets({ onSelectPreset }: GamePresetsProps) {
 
   return (
     <div className="flex flex-col items-center gap-3">
-      <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wider">Quick Start</h3>
+      <h3 className="text-sm font-medium text-slate-500">Quick Start</h3>
       <div className="flex flex-wrap justify-center gap-3">
         {presets.map((preset) => (
           <button
             key={preset.id}
             onClick={() => onSelectPreset(preset)}
-            className="group relative flex items-center gap-2 rounded-lg border border-gray-700 bg-gray-800/40 px-4 py-2.5 text-sm text-gray-300 transition-colors hover:border-gray-500 hover:bg-gray-800/60 hover:text-white"
+            className="group relative flex items-center gap-2 rounded-full border border-white/10 bg-black/18 px-4 py-2.5 text-sm text-slate-300 transition-colors hover:border-white/20 hover:bg-white/6 hover:text-white"
           >
             <span>{FORMAT_ICONS[preset.format] ?? ""}</span>
             <span>{preset.name}</span>

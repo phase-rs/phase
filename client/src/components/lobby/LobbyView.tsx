@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { GameFormat } from "../../adapter/types";
 import { parseJoinCode } from "../../services/serverDetection";
 import { useMultiplayerStore } from "../../stores/multiplayerStore";
+import { MenuPanel } from "../menu/MenuShell";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { GameListItem } from "./GameListItem";
 import type { LobbyGame } from "./GameListItem";
@@ -153,12 +154,11 @@ export function LobbyView({
     : games;
 
   return (
-    <div className="relative z-10 flex w-full max-w-lg flex-col items-center gap-6 px-4">
-      {/* Header */}
-      <div className="flex items-center gap-3">
-        <h2 className="text-2xl font-bold tracking-tight text-white">
-          {isP2P ? "Peer-to-Peer" : "Online Lobby"}
-        </h2>
+    <MenuPanel className="relative z-10 flex w-full max-w-xl flex-col gap-6 px-4 py-5">
+      <div className="flex w-full items-center justify-between gap-3">
+        <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
+          {isP2P ? "Direct Connection" : "Online Lobby"}
+        </div>
         {isServer && playerCount > 0 && (
           <span className="rounded-full bg-emerald-500/20 px-2.5 py-0.5 text-xs font-medium text-emerald-300">
             {playerCount} online
@@ -166,30 +166,30 @@ export function LobbyView({
         )}
       </div>
 
-      {/* Current deck */}
-      <div className="flex items-center gap-2 text-sm">
-        <span className="text-gray-400">Deck:</span>
-        <span className="font-medium text-gray-200">
-          {activeDeckName ?? "No deck selected"}
-        </span>
+      <div className="flex w-full items-center justify-between gap-4 rounded-[18px] border border-white/10 bg-black/14 px-4 py-3">
+        <div className="min-w-0">
+          <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Selected Deck</div>
+          <div className="mt-1 truncate text-sm font-medium text-white">
+            {activeDeckName ?? "Choose a deck"}
+          </div>
+        </div>
         <button
           onClick={onChangeDeck}
-          className="text-cyan-400 transition-colors hover:text-cyan-300"
+          className={menuButtonClass({ tone: "neutral", size: "sm" })}
         >
           Change
         </button>
       </div>
 
-      {/* Format filter — server only */}
       {isServer && (
-        <div className="flex rounded bg-gray-800 p-0.5 ring-1 ring-gray-700">
+        <div className="flex rounded-[16px] bg-black/18 p-0.5 ring-1 ring-white/10">
           {FORMAT_FILTERS.map((opt) => (
             <button
               key={opt.label}
               onClick={() => setFormatFilter(opt.value)}
               className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
                 formatFilter === opt.value
-                  ? "bg-cyan-600 text-white"
+                  ? "bg-white/10 text-white"
                   : "text-gray-400 hover:text-gray-200"
               }`}
             >
@@ -199,11 +199,11 @@ export function LobbyView({
         </div>
       )}
 
-      {/* Game list — server only */}
       {isServer && (
-        <div className="w-full">
+        <div className="w-full space-y-3">
+          <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Open Tables</div>
           {filteredGames.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-gray-700 py-8 text-center">
+            <div className="rounded-[18px] border border-dashed border-white/10 py-8 text-center">
               <p className="text-sm text-gray-500">
                 No games available. Host one or join by code!
               </p>
@@ -222,15 +222,17 @@ export function LobbyView({
         </div>
       )}
 
-      {/* P2P description */}
       {isP2P && (
-        <div className="w-full rounded-lg border border-cyan-500/20 bg-cyan-500/5 px-4 py-3 text-sm text-cyan-200">
-          Direct peer-to-peer connection. Host a game and share the 5-character code with your opponent.
+        <div className="w-full rounded-[18px] border border-cyan-400/20 bg-cyan-500/[0.07] px-4 py-3 text-sm leading-6 text-cyan-100">
+          Dedicated server unavailable. You can still host or join directly with a 5-character room code.
         </div>
       )}
 
-      {/* Manual code entry */}
-      <div className="flex w-full items-center gap-2">
+      <div className="w-full space-y-3">
+        <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
+          {isP2P ? "Join by Code" : "Join a Table"}
+        </div>
+        <div className="flex w-full items-center gap-2">
         <input
           type="text"
           value={joinCode}
@@ -238,7 +240,7 @@ export function LobbyView({
           onKeyDown={(e) => e.key === "Enter" && handleJoinByCode()}
           placeholder={isP2P ? "Enter 5-character P2P code" : "Enter code or CODE@IP:PORT"}
           maxLength={isP2P ? 5 : 50}
-          className="flex-1 rounded-lg bg-gray-800 px-4 py-2 font-mono text-sm tracking-wider text-white placeholder-gray-500 outline-none ring-1 ring-gray-700 focus:ring-cyan-500"
+          className="flex-1 rounded-[18px] bg-black/18 px-4 py-2 font-mono text-sm tracking-wider text-white placeholder-gray-500 outline-none ring-1 ring-white/10 focus:ring-white/20"
         />
         <button
           onClick={handleJoinByCode}
@@ -251,10 +253,16 @@ export function LobbyView({
         >
           Join
         </button>
+        </div>
       </div>
 
-      {/* Host Game button — mode-specific */}
-      <div className="flex gap-3">
+      <div className="flex w-full flex-col gap-3 border-t border-white/8 pt-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Host</div>
+          <div className="mt-1 text-sm text-slate-400">
+            {isP2P ? "Create a direct room for one opponent." : "Open a room and wait for players."}
+          </div>
+        </div>
         {isServer && (
           <button
             onClick={onHostGame}
@@ -280,7 +288,7 @@ export function LobbyView({
             className="absolute inset-0 bg-black/60"
             onClick={() => setPasswordModal(null)}
           />
-          <div className="relative z-10 w-full max-w-xs rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700">
+          <div className="relative z-10 w-full max-w-xs rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-6 shadow-2xl backdrop-blur-md">
             <h3 className="mb-3 text-sm font-semibold text-white">
               Password Required
             </h3>
@@ -317,6 +325,6 @@ export function LobbyView({
           </div>
         </div>
       )}
-    </div>
+    </MenuPanel>
   );
 }

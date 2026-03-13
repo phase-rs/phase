@@ -5,7 +5,6 @@ interface FormatOption {
   label: string;
   description: string;
   players: string;
-  icon: string;
   tone: string;
 }
 
@@ -15,7 +14,6 @@ const FORMAT_OPTIONS: FormatOption[] = [
     label: "Standard",
     description: "Classic 1v1 constructed",
     players: "2 players, 20 life",
-    icon: "\u2694",
     tone: "indigo",
   },
   {
@@ -23,7 +21,6 @@ const FORMAT_OPTIONS: FormatOption[] = [
     label: "Commander",
     description: "Singleton with legendary commander",
     players: "2-4 players, 40 life",
-    icon: "\uD83D\uDC51",
     tone: "amber",
   },
   {
@@ -31,7 +28,6 @@ const FORMAT_OPTIONS: FormatOption[] = [
     label: "Free-for-All",
     description: "Multiplayer battle royale",
     players: "3-6 players, 20 life",
-    icon: "\uD83D\uDD25",
     tone: "red",
   },
   {
@@ -39,35 +35,38 @@ const FORMAT_OPTIONS: FormatOption[] = [
     label: "Two-Headed Giant",
     description: "2v2 team-based format",
     players: "4 players, 30 life",
-    icon: "\uD83D\uDEE1",
     tone: "emerald",
   },
 ];
 
-const TONE_CLASSES: Record<string, { border: string; bg: string; hover: string; text: string }> = {
+const TONE_CLASSES: Record<string, { accent: string; border: string; bg: string; hover: string; text: string }> = {
   indigo: {
-    border: "border-indigo-400/50",
-    bg: "bg-indigo-500/10",
-    hover: "hover:bg-indigo-500/20 hover:border-indigo-400/70",
-    text: "text-indigo-200",
+    accent: "bg-indigo-300/70",
+    border: "border-white/10",
+    bg: "bg-[linear-gradient(180deg,rgba(76,105,255,0.06),rgba(9,13,24,0.82))]",
+    hover: "hover:border-white/18 hover:bg-[linear-gradient(180deg,rgba(76,105,255,0.1),rgba(9,13,24,0.9))]",
+    text: "text-white",
   },
   amber: {
-    border: "border-amber-400/50",
-    bg: "bg-amber-500/10",
-    hover: "hover:bg-amber-500/20 hover:border-amber-400/70",
-    text: "text-amber-200",
+    accent: "bg-amber-300/70",
+    border: "border-white/10",
+    bg: "bg-[linear-gradient(180deg,rgba(255,196,122,0.06),rgba(9,13,24,0.82))]",
+    hover: "hover:border-white/18 hover:bg-[linear-gradient(180deg,rgba(255,196,122,0.1),rgba(9,13,24,0.9))]",
+    text: "text-white",
   },
   red: {
-    border: "border-red-400/50",
-    bg: "bg-red-500/10",
-    hover: "hover:bg-red-500/20 hover:border-red-400/70",
-    text: "text-red-200",
+    accent: "bg-red-300/70",
+    border: "border-white/10",
+    bg: "bg-[linear-gradient(180deg,rgba(248,113,113,0.06),rgba(9,13,24,0.82))]",
+    hover: "hover:border-white/18 hover:bg-[linear-gradient(180deg,rgba(248,113,113,0.1),rgba(9,13,24,0.9))]",
+    text: "text-white",
   },
   emerald: {
-    border: "border-emerald-400/50",
-    bg: "bg-emerald-500/10",
-    hover: "hover:bg-emerald-500/20 hover:border-emerald-400/70",
-    text: "text-emerald-200",
+    accent: "bg-emerald-300/70",
+    border: "border-white/10",
+    bg: "bg-[linear-gradient(180deg,rgba(52,211,153,0.06),rgba(9,13,24,0.82))]",
+    hover: "hover:border-white/18 hover:bg-[linear-gradient(180deg,rgba(52,211,153,0.1),rgba(9,13,24,0.9))]",
+    text: "text-white",
   },
 };
 
@@ -77,8 +76,8 @@ interface FormatPickerProps {
 
 export function FormatPicker({ onFormatSelect }: FormatPickerProps) {
   return (
-    <div className="flex w-full max-w-2xl flex-col items-center gap-6 px-4">
-      <h2 className="text-2xl font-bold tracking-tight">Choose Format</h2>
+    <div className="flex w-full max-w-3xl flex-col items-center gap-6 px-4">
+      <h2 className="menu-display text-[2rem] leading-tight text-white">Choose Format</h2>
       <div className="grid w-full grid-cols-1 gap-4 sm:grid-cols-2">
         {FORMAT_OPTIONS.map((opt) => {
           const tone = TONE_CLASSES[opt.tone];
@@ -86,16 +85,16 @@ export function FormatPicker({ onFormatSelect }: FormatPickerProps) {
             <button
               key={opt.format}
               onClick={() => onFormatSelect(opt.format)}
-              className={`flex flex-col items-start gap-2 rounded-xl border p-5 text-left transition-colors ${tone.border} ${tone.bg} ${tone.hover} cursor-pointer`}
+              className={`group relative flex min-h-40 flex-col overflow-hidden rounded-[22px] border p-5 text-left transition-colors ${tone.border} ${tone.bg} ${tone.hover} cursor-pointer`}
             >
-              <div className="flex items-center gap-3">
-                <span className="text-2xl">{opt.icon}</span>
-                <span className={`text-lg font-semibold ${tone.text}`}>
+              <div className={`absolute inset-y-5 left-0 w-[3px] rounded-r ${tone.accent}`} />
+              <div className="flex h-full flex-col">
+                <div className={`text-[1.35rem] font-semibold ${tone.text}`}>
                   {opt.label}
-                </span>
+                </div>
+                <p className="mt-2 text-sm leading-6 text-slate-400">{opt.description}</p>
+                <p className="mt-auto pt-5 text-sm text-slate-500">{opt.players}</p>
               </div>
-              <p className="text-sm text-gray-400">{opt.description}</p>
-              <p className="text-xs text-gray-500">{opt.players}</p>
             </button>
           );
         })}

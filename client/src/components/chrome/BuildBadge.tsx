@@ -25,13 +25,13 @@ export function BuildBadge() {
 
   return (
     <div className="fixed left-2 bottom-[calc(env(safe-area-inset-bottom)+0.5rem)] z-20">
-      <div className="rounded-md border border-slate-600/60 bg-slate-950/75 px-2 py-1 text-[10px] text-slate-300 shadow-lg shadow-black/40 backdrop-blur-sm flex items-center gap-1">
+      <div className="flex items-center gap-1 rounded-full border border-white/10 bg-black/18 px-2.5 py-1.5 text-[10px] text-slate-400 shadow-lg shadow-black/30 backdrop-blur-md">
         <span>v{__APP_VERSION__}</span>
-        <span className="text-slate-500">{__BUILD_HASH__}</span>
+        <span className="text-slate-600">{__BUILD_HASH__}</span>
         <button
           type="button"
           onClick={checkForUpdates}
-          className={`ml-0.5 text-slate-300/90 hover:text-white transition-colors cursor-pointer ${status === "checking" ? "animate-spin" : ""}`}
+          className={`ml-0.5 text-slate-500 hover:text-white transition-colors cursor-pointer ${status === "checking" ? "animate-spin" : ""}`}
           aria-label="Check for updates"
           title="Check for updates"
         >

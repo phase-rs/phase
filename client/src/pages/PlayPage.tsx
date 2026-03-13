@@ -3,6 +3,7 @@ import { useNavigate } from "react-router";
 
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { MenuParticles } from "../components/menu/MenuParticles";
+import { MenuShell } from "../components/menu/MenuShell";
 import { MyDecks } from "../components/menu/MyDecks";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX, listSavedDeckNames } from "../constants/storage";
 import { STARTER_DECKS } from "../data/starterDecks";
@@ -57,11 +58,20 @@ export function PlayPage() {
   };
 
   return (
-    <div className="relative flex min-h-screen flex-col items-center justify-center">
+    <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
       <MenuParticles />
       <ScreenChrome onBack={() => navigate("/")} />
+      <div className="menu-scene__vignette" />
+      <div className="menu-scene__sigil menu-scene__sigil--left" />
+      <div className="menu-scene__sigil menu-scene__sigil--right" />
+      <div className="menu-scene__haze" />
 
-      <div className="relative z-10 flex w-full justify-center py-8">
+      <MenuShell
+        eyebrow="Quick Duel"
+        title="Quick duel."
+        description="Choose a deck, set the AI level, and start a one-on-one match."
+        layout="stacked"
+      >
         <MyDecks
           mode="select"
           onSelectDeck={handleSelectDeck}
@@ -72,7 +82,7 @@ export function PlayPage() {
           difficulty={difficulty}
           onDifficultyChange={setDifficulty}
         />
-      </div>
+      </MenuShell>
     </div>
   );
 }

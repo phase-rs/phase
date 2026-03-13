@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import type { FormatConfig, GameFormat, MatchType } from "../../adapter/types";
 import { FORMAT_DEFAULTS, useMultiplayerStore } from "../../stores/multiplayerStore";
+import { MenuPanel } from "../menu/MenuShell";
 import { menuButtonClass } from "../menu/buttonStyles";
 
 export interface HostSettings {
@@ -33,33 +34,14 @@ const TIMER_OPTIONS: { value: number | null; label: string }[] = [
   { value: 120, label: "120s" },
 ];
 
-const FORMAT_OPTIONS: { format: GameFormat; label: string; color: string }[] = [
-  { format: "Standard", label: "Standard", color: "blue" },
-  { format: "Commander", label: "Commander", color: "indigo" },
-  { format: "FreeForAll", label: "Free-for-All", color: "amber" },
-  { format: "TwoHeadedGiant", label: "Two-Headed Giant", color: "emerald" },
+const FORMAT_OPTIONS: { format: GameFormat; label: string }[] = [
+  { format: "Standard", label: "Standard" },
+  { format: "Commander", label: "Commander" },
+  { format: "FreeForAll", label: "Free-for-All" },
+  { format: "TwoHeadedGiant", label: "Two-Headed Giant" },
 ];
 
 const DIFFICULTY_OPTIONS = ["VeryEasy", "Easy", "Medium", "Hard", "VeryHard"];
-
-const FORMAT_BUTTON_CLASSES: Record<string, { active: string; inactive: string }> = {
-  blue: {
-    active: "border-blue-400 bg-blue-500/30 text-blue-100",
-    inactive: "border-gray-600 bg-gray-800/60 text-gray-400 hover:border-gray-500 hover:text-gray-300",
-  },
-  indigo: {
-    active: "border-indigo-400 bg-indigo-500/30 text-indigo-100",
-    inactive: "border-gray-600 bg-gray-800/60 text-gray-400 hover:border-gray-500 hover:text-gray-300",
-  },
-  amber: {
-    active: "border-amber-400 bg-amber-500/30 text-amber-100",
-    inactive: "border-gray-600 bg-gray-800/60 text-gray-400 hover:border-gray-500 hover:text-gray-300",
-  },
-  emerald: {
-    active: "border-emerald-400 bg-emerald-500/30 text-emerald-100",
-    inactive: "border-gray-600 bg-gray-800/60 text-gray-400 hover:border-gray-500 hover:text-gray-300",
-  },
-};
 
 export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
   const storeDisplayName = useMultiplayerStore((s) => s.displayName);
@@ -145,16 +127,19 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
       onSubmit={(e) => { e.preventDefault(); handleHost(); }}
       className="relative z-10 flex w-full max-w-md flex-col items-center gap-6 px-4"
     >
-      <h2 className={`text-2xl font-bold tracking-tight ${isP2P ? "text-cyan-200" : "text-white"}`}>
-        {isP2P ? "Host P2P Game" : "Host Game"}
-      </h2>
-      {isP2P && (
-        <p className="text-center text-xs text-cyan-300/90">
-          Dedicated server unavailable. Hosting with direct peer-to-peer connection.
-        </p>
-      )}
+      <MenuPanel className="flex w-full flex-col gap-6">
+        <div className="space-y-2">
+          <h2 className="menu-display text-[1.9rem] leading-tight text-white">
+            {isP2P ? "Host Direct Match" : "Host Match"}
+          </h2>
+          {isP2P && (
+            <p className="text-sm leading-6 text-slate-400">
+              Dedicated server is unavailable, so this room will use a direct connection.
+            </p>
+          )}
+        </div>
 
-      <div className="flex w-full flex-col gap-4">
+        <div className="flex w-full flex-col gap-4">
         {/* Display name */}
         <div>
           <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-gray-400">
@@ -166,7 +151,7 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
             onChange={(e) => setDisplayName(e.target.value)}
             placeholder="Enter your name"
             maxLength={20}
-            className="w-full rounded-lg bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none ring-1 ring-gray-700 focus:ring-cyan-500"
+            className="w-full rounded-[16px] bg-black/18 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none ring-1 ring-white/10 focus:ring-white/20"
           />
         </div>
 
@@ -177,14 +162,16 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
           </label>
           <div className="grid grid-cols-2 gap-2">
             {availableFormats.map((opt) => {
-              const classes = FORMAT_BUTTON_CLASSES[opt.color];
               const isSelected = selectedFormat === opt.format;
               return (
                 <button
+                  type="button"
                   key={opt.format}
                   onClick={() => handleFormatSelect(opt.format)}
-                  className={`rounded-lg border px-3 py-2.5 text-sm font-medium transition-colors ${
-                    isSelected ? classes.active : classes.inactive
+                  className={`rounded-[16px] border px-3 py-2.5 text-sm font-medium transition-colors ${
+                    isSelected
+                      ? "border-white/18 bg-white/10 text-white"
+                      : "border-white/10 bg-black/18 text-slate-400 hover:border-white/18 hover:text-white"
                   }`}
                 >
                   {opt.label}
@@ -200,7 +187,7 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
         </div>
 
         {/* Format-specific settings */}
-        <div className="rounded-lg border border-gray-700 bg-gray-800/40 p-3">
+        <div className="rounded-[18px] border border-white/10 bg-black/18 p-3">
           <div className="flex flex-col gap-3">
             {/* Starting life */}
             <div className="flex items-center justify-between">
@@ -215,7 +202,7 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
                   }))
                 }
                 min={1}
-                className="w-16 rounded bg-gray-700 px-2 py-1 text-center text-sm text-white outline-none ring-1 ring-gray-600 focus:ring-cyan-500"
+                className="w-16 rounded-xl bg-black/18 px-2 py-1 text-center text-sm text-white outline-none ring-1 ring-white/10 focus:ring-white/20"
               />
             </div>
 
@@ -223,17 +210,18 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
             {!isP2P && formatConfig.min_players !== formatConfig.max_players && (
               <div className="flex items-center justify-between">
                 <span className="text-xs text-gray-400">Players</span>
-                <div className="flex rounded bg-gray-700 p-0.5 ring-1 ring-gray-600">
+                <div className="flex rounded-[14px] bg-black/18 p-0.5 ring-1 ring-white/10">
                   {Array.from(
                     { length: maxPlayers - formatConfig.min_players + 1 },
                     (_, i) => formatConfig.min_players + i,
                   ).map((count) => (
                     <button
+                      type="button"
                       key={count}
                       onClick={() => handlePlayerCountChange(count)}
                       className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
                         playerCount === count
-                          ? "bg-cyan-600 text-white"
+                          ? "bg-white/10 text-white"
                           : "text-gray-400 hover:text-gray-200"
                       }`}
                     >
@@ -246,23 +234,25 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
 
             <div className="flex items-center justify-between">
               <span className="text-xs text-gray-400">Match Type</span>
-              <div className="flex rounded bg-gray-700 p-0.5 ring-1 ring-gray-600">
+              <div className="flex rounded-[14px] bg-black/18 p-0.5 ring-1 ring-white/10">
                 <button
+                  type="button"
                   onClick={() => setMatchType("Bo1")}
                   className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
                     matchType === "Bo1"
-                      ? "bg-cyan-600 text-white"
+                      ? "bg-white/10 text-white"
                       : "text-gray-400 hover:text-gray-200"
                   }`}
                 >
                   BO1
                 </button>
                 <button
+                  type="button"
                   onClick={() => setMatchType("Bo3")}
                   disabled={playerCount !== 2}
                   className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
                     matchType === "Bo3"
-                      ? "bg-cyan-600 text-white"
+                      ? "bg-white/10 text-white"
                       : "text-gray-400 hover:text-gray-200"
                   } ${playerCount !== 2 ? "cursor-not-allowed opacity-40" : ""}`}
                 >
@@ -288,7 +278,7 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
                     }))
                   }
                   min={1}
-                  className="w-16 rounded bg-gray-700 px-2 py-1 text-center text-sm text-white outline-none ring-1 ring-gray-600 focus:ring-cyan-500"
+                  className="w-16 rounded-xl bg-black/18 px-2 py-1 text-center text-sm text-white outline-none ring-1 ring-white/10 focus:ring-white/20"
                 />
               </div>
             )}
@@ -303,7 +293,7 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
             </label>
             <div className="flex flex-col gap-1.5">
               {/* Seat 0 is always the host */}
-              <div className="flex items-center gap-2 rounded-lg border border-gray-700 bg-gray-800/40 px-3 py-2">
+              <div className="flex items-center gap-2 rounded-[16px] border border-white/10 bg-black/18 px-3 py-2">
                 <span className="text-xs font-medium text-emerald-400">Seat 1</span>
                 <span className="flex-1 text-xs text-gray-300">You (Host)</span>
               </div>
@@ -313,10 +303,11 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
                 return (
                   <div
                     key={seatIndex}
-                    className="flex items-center gap-2 rounded-lg border border-gray-700 bg-gray-800/40 px-3 py-2"
+                    className="flex items-center gap-2 rounded-[16px] border border-white/10 bg-black/18 px-3 py-2"
                   >
                     <span className="text-xs font-medium text-gray-400">Seat {seatIndex + 1}</span>
                     <button
+                      type="button"
                       onClick={() => toggleAiSeat(seatIndex)}
                       className={`rounded px-2 py-0.5 text-xs font-medium transition-colors ${
                         aiSeat
@@ -385,7 +376,7 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
               onChange={(e) => setPassword(e.target.value)}
               placeholder="Game password"
               maxLength={32}
-              className="mt-2 w-full rounded-lg bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none ring-1 ring-gray-700 focus:ring-cyan-500"
+              className="mt-2 w-full rounded-[16px] bg-black/18 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none ring-1 ring-white/10 focus:ring-white/20"
             />
           )}
         </div>
@@ -395,14 +386,15 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
           <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-gray-400">
             Turn Timer
           </label>
-          <div className="flex rounded bg-gray-800 p-0.5 ring-1 ring-gray-700">
+          <div className="flex rounded-[14px] bg-black/18 p-0.5 ring-1 ring-white/10">
             {TIMER_OPTIONS.map((opt) => (
               <button
+                type="button"
                 key={opt.label}
                 onClick={() => setTimerSeconds(opt.value)}
                 className={`flex-1 rounded px-3 py-1 text-xs font-medium capitalize transition-colors ${
                   timerSeconds === opt.value
-                    ? (isP2P ? "bg-cyan-600 text-white" : "bg-emerald-600 text-white")
+                    ? "bg-white/10 text-white"
                     : "text-gray-400 hover:text-gray-200"
                 }`}
               >
@@ -413,22 +405,22 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
         </div>
       </div>
 
-      {/* Action buttons */}
-      <div className="flex gap-3">
-        <button
-          type="button"
-          onClick={onBack}
-          className={menuButtonClass({ tone: "neutral", size: "sm" })}
-        >
-          Back
-        </button>
-        <button
-          type="submit"
-          className={menuButtonClass({ tone: accentTone, size: "md" })}
-        >
-          {isP2P ? "Host P2P Game" : "Host Game"}
-        </button>
-      </div>
+        <div className="flex gap-3">
+          <button
+            type="button"
+            onClick={onBack}
+            className={menuButtonClass({ tone: "neutral", size: "sm" })}
+          >
+            Back
+          </button>
+          <button
+            type="submit"
+            className={menuButtonClass({ tone: accentTone, size: "md" })}
+          >
+            {isP2P ? "Host P2P Game" : "Host Game"}
+          </button>
+        </div>
+      </MenuPanel>
     </form>
   );
 }

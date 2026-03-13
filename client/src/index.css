@@ -18,6 +18,85 @@
   }
 }
 
+body {
+  background:
+    radial-gradient(circle at top, rgba(251, 146, 60, 0.12), transparent 30%),
+    linear-gradient(180deg, #040816 0%, #050b1d 36%, #02050f 100%);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.menu-display {
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.menu-kicker {
+  font-size: 0.72rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.menu-meta {
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.menu-scene {
+  background:
+    radial-gradient(circle at 50% 18%, rgba(255, 161, 72, 0.16), transparent 22%),
+    radial-gradient(circle at 20% 24%, rgba(72, 163, 255, 0.12), transparent 28%),
+    radial-gradient(circle at 80% 24%, rgba(31, 201, 152, 0.1), transparent 24%),
+    linear-gradient(180deg, rgba(6, 10, 24, 0.96) 0%, rgba(4, 7, 17, 0.96) 58%, rgba(2, 3, 10, 1) 100%);
+}
+
+.menu-scene__vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at center, transparent 38%, rgba(0, 0, 0, 0.22) 70%, rgba(0, 0, 0, 0.62) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.26), transparent 18%, transparent 82%, rgba(0, 0, 0, 0.42));
+}
+
+.menu-scene__haze {
+  position: absolute;
+  inset: auto 0 0;
+  height: 32vh;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, transparent 0%, rgba(9, 14, 30, 0.45) 38%, rgba(3, 5, 12, 0.84) 100%),
+    radial-gradient(circle at 50% 0%, rgba(255, 176, 89, 0.14), transparent 48%);
+}
+
+.menu-scene__sigil {
+  position: absolute;
+  top: 12%;
+  width: 32rem;
+  height: 32rem;
+  border-radius: 9999px;
+  pointer-events: none;
+  opacity: 0.18;
+  filter: blur(1px);
+  background:
+    radial-gradient(circle, transparent 58%, rgba(255, 255, 255, 0.08) 59%, transparent 61%),
+    radial-gradient(circle, transparent 70%, rgba(255, 255, 255, 0.05) 71%, transparent 73%);
+}
+
+.menu-scene__sigil--left {
+  left: -12rem;
+  transform: rotate(18deg);
+}
+
+.menu-scene__sigil--right {
+  right: -12rem;
+  transform: rotate(-18deg);
+}
+
 @media (min-width: 1200px) {
   :root {
     --card-base: 7vw;

@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
 
 import type { PlayerSlot } from "../../stores/multiplayerStore";
+import { MenuPanel } from "../menu/MenuShell";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { ReadyRoom } from "./ReadyRoom";
 import type { ChatMessage } from "./ReadyRoom";
@@ -56,7 +57,7 @@ export function WaitingScreen({
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/80" />
 
-      <div className="relative z-10 flex flex-col items-center gap-6 rounded-xl bg-gray-900 p-10 shadow-2xl ring-1 ring-gray-700">
+      <MenuPanel className="relative z-10 flex flex-col items-center gap-6 p-10">
         <h2 className="text-xl font-bold text-white">Waiting for Opponent</h2>
 
         {/* Game code */}
@@ -110,7 +111,7 @@ export function WaitingScreen({
         >
           Cancel
         </button>
-      </div>
+      </MenuPanel>
     </div>
   );
 }

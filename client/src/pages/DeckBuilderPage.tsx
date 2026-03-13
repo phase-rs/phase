@@ -21,7 +21,7 @@ export function DeckBuilderPage() {
   }, [searchParams]);
 
   return (
-    <div className="h-screen bg-gray-950">
+    <div className="menu-scene h-screen overflow-hidden">
       <DeckBuilder
         onCardHover={setHoveredCardName}
         format={format}

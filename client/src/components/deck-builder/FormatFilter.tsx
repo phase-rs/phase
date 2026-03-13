@@ -24,15 +24,15 @@ interface FormatFilterProps {
 
 export function FormatFilter({ selected, onChange }: FormatFilterProps) {
   return (
-    <div className="flex flex-wrap gap-1">
+    <div className="flex flex-wrap gap-1.5">
       {FORMATS.map(({ value, label }) => (
         <button
           key={value}
           onClick={() => onChange(value)}
-          className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
+          className={`rounded-xl border px-3 py-1.5 text-xs font-medium transition-colors ${
             selected === value
-              ? "bg-blue-600 text-white"
-              : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+              ? "border-white/18 bg-white/10 text-white"
+              : "border-white/8 bg-black/18 text-slate-400 hover:border-white/14 hover:bg-white/6 hover:text-white"
           }`}
         >
           {label}

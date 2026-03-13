@@ -6,8 +6,8 @@ import { HostSetup } from "../components/lobby/HostSetup";
 import { LobbyView } from "../components/lobby/LobbyView";
 import { WaitingScreen } from "../components/lobby/WaitingScreen";
 import { MenuParticles } from "../components/menu/MenuParticles";
+import { MenuShell } from "../components/menu/MenuShell";
 import { MyDecks } from "../components/menu/MyDecks";
-import { ServerOfflineDialog } from "../components/multiplayer/ServerOfflineDialog";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX, listSavedDeckNames } from "../constants/storage";
 import { STARTER_DECKS } from "../data/starterDecks";
 import { parseRoomCode } from "../network/connection";
@@ -50,7 +50,6 @@ export function MultiplayerPage() {
   const [hostIsPublic, setHostIsPublic] = useState(true);
   const [connectionMode, setConnectionMode] = useState<ConnectionMode>("server");
   const [showSettings, setShowSettings] = useState(false);
-  const [showServerOfflineDialog, setShowServerOfflineDialog] = useState(false);
   const hostWsRef = useRef<WebSocket | null>(null);
 
   const serverAddress = useMultiplayerStore((s) => s.serverAddress);
@@ -58,7 +57,6 @@ export function MultiplayerPage() {
   const fallbackToP2PMode = useCallback(() => {
     setConnectionMode("p2p");
     setView("lobby");
-    setShowServerOfflineDialog(true);
   }, []);
 
   useEffect(() => {
@@ -221,26 +219,37 @@ export function MultiplayerPage() {
     }
   };
 
-  const handleServerOffline = useCallback(() => {
-    fallbackToP2PMode();
-  }, [fallbackToP2PMode]);
+  const title = view === "deck-select"
+    ? "Choose a deck for multiplayer."
+    : view === "lobby"
+      ? "Join or host a table."
+      : view === "host-setup"
+        ? "Set up your table."
+        : "Waiting for players.";
 
-  const handleOpenSettings = useCallback(() => {
-    setShowServerOfflineDialog(false);
-    setShowSettings(true);
-  }, []);
+  const description = view === "deck-select"
+    ? "Pick the deck you want to bring online."
+    : view === "lobby"
+      ? "Browse available tables, join by code, or host a new match."
+      : view === "host-setup"
+        ? "Adjust format, privacy, and timing before opening the room."
+        : "Share the code and wait for the room to fill.";
 
   return (
-    <div className="relative flex min-h-screen flex-col items-center justify-center">
+    <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
       <MenuParticles />
       <ScreenChrome
         onBack={handleBack}
         settingsOpen={showSettings}
         onSettingsOpenChange={setShowSettings}
       />
+      <div className="menu-scene__vignette" />
+      <div className="menu-scene__sigil menu-scene__sigil--left" />
+      <div className="menu-scene__sigil menu-scene__sigil--right" />
+      <div className="menu-scene__haze" />
 
-      {view === "deck-select" && (
-        <div className="relative z-10 flex w-full justify-center py-8">
+      <MenuShell eyebrow="Multiplayer" title={title} description={description} layout="stacked">
+        {view === "deck-select" && (
           <MyDecks
             mode="select"
             onSelectDeck={handleSelectDeck}
@@ -248,43 +257,37 @@ export function MultiplayerPage() {
             onConfirmSelection={() => setView("lobby")}
             confirmLabel="Continue"
           />
-        </div>
-      )}
+        )}
 
-      {view === "lobby" && (
-        <LobbyView
-          onHostGame={() => { setConnectionMode("server"); setView("host-setup"); }}
-          onHostP2P={() => { setConnectionMode("p2p"); setView("host-setup"); }}
-          onJoinGame={handleJoinWithPassword}
-          activeDeckName={activeDeckName}
-          onChangeDeck={() => setView("deck-select")}
-          connectionMode={connectionMode}
-          onServerOffline={handleServerOffline}
-        />
-      )}
+        {view === "lobby" && (
+          <LobbyView
+            onHostGame={() => { setConnectionMode("server"); setView("host-setup"); }}
+            onHostP2P={() => { setConnectionMode("p2p"); setView("host-setup"); }}
+            onJoinGame={handleJoinWithPassword}
+            activeDeckName={activeDeckName}
+            onChangeDeck={() => setView("deck-select")}
+            connectionMode={connectionMode}
+            onServerOffline={fallbackToP2PMode}
+          />
+        )}
 
-      {view === "host-setup" && (
-        <HostSetup
-          onHost={connectionMode === "p2p" ? handleHostP2P : handleHostWithSettings}
-          onBack={() => setView("lobby")}
-          connectionMode={connectionMode}
-        />
-      )}
+        {view === "host-setup" && (
+          <HostSetup
+            onHost={connectionMode === "p2p" ? handleHostP2P : handleHostWithSettings}
+            onBack={() => setView("lobby")}
+            connectionMode={connectionMode}
+          />
+        )}
 
-      {view === "waiting" && hostGameCode && (
-        <WaitingScreen
-          gameCode={hostGameCode}
-          isPublic={hostIsPublic}
-          onCancel={handleCancelHost}
-        />
-      )}
+        {view === "waiting" && hostGameCode && (
+          <WaitingScreen
+            gameCode={hostGameCode}
+            isPublic={hostIsPublic}
+            onCancel={handleCancelHost}
+          />
+        )}
+      </MenuShell>
 
-      <ServerOfflineDialog
-        isOpen={showServerOfflineDialog}
-        serverAddress={serverAddress}
-        onOpenSettings={handleOpenSettings}
-        onClose={() => setShowServerOfflineDialog(false)}
-      />
     </div>
   );
 }

@@ -11,6 +11,7 @@ import {
   type DeckCompatibilityResult,
 } from "../../services/deckCompatibility";
 import { ImportDeckModal } from "./ImportDeckModal";
+import { MenuPanel } from "./MenuShell";
 import { menuButtonClass } from "./buttonStyles";
 
 const DIFFICULTIES = [
@@ -249,6 +250,9 @@ export function MyDecks({
   const noDeckSelected = mode === "select"
     ? !activeDeckName || !filteredDeckNames.includes(activeDeckName)
     : false;
+  const selectedDeckLabel = mode === "select" && activeDeckName && filteredDeckNames.includes(activeDeckName)
+    ? activeDeckName
+    : null;
 
   const handleTileClick = (deckName: string) => {
     if (mode === "manage") {
@@ -266,9 +270,9 @@ export function MyDecks({
   };
 
   return (
-    <div className="flex w-full max-w-5xl flex-col items-center gap-6 px-4">
+    <MenuPanel className="flex w-full max-w-5xl flex-col items-center gap-6 px-4 py-5">
       <div className="flex w-full items-center justify-between gap-3">
-        <h2 className="text-2xl font-bold tracking-tight">
+        <h2 className="menu-display text-[1.9rem] leading-tight text-white">
           {mode === "manage" ? "My Decks" : "Select Deck"}
         </h2>
         {mode === "manage" && (
@@ -282,15 +286,15 @@ export function MyDecks({
       </div>
 
       {mode === "select" && showDifficultySelector && onDifficultyChange && (
-        <div className="flex overflow-hidden rounded-lg border border-gray-700">
+        <div className="flex overflow-hidden rounded-[18px] border border-white/10 bg-black/18">
           {DIFFICULTIES.map((item) => (
             <button
               key={item.id}
               onClick={() => onDifficultyChange(item.id)}
               className={`px-3 py-1.5 text-xs font-medium transition-colors ${
                 difficulty === item.id
-                  ? "bg-indigo-600 text-white"
-                  : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+                  ? "bg-white/10 text-white"
+                  : "text-slate-400 hover:text-white"
               }`}
             >
               {item.label}
@@ -304,8 +308,8 @@ export function MyDecks({
           onClick={() => setActiveFilter("all")}
           className={`rounded px-2 py-1 text-xs font-medium ${
             activeFilter === "all"
-              ? "bg-indigo-600 text-white"
-              : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+              ? "bg-white/10 text-white"
+              : "bg-black/18 text-slate-400 hover:bg-white/8 hover:text-white"
           }`}
         >
           All
@@ -314,8 +318,8 @@ export function MyDecks({
           onClick={() => setActiveFilter("standard")}
           className={`rounded px-2 py-1 text-xs font-medium ${
             activeFilter === "standard"
-              ? "bg-indigo-600 text-white"
-              : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+              ? "bg-white/10 text-white"
+              : "bg-black/18 text-slate-400 hover:bg-white/8 hover:text-white"
           }`}
         >
           Standard
@@ -324,8 +328,8 @@ export function MyDecks({
           onClick={() => setActiveFilter("commander")}
           className={`rounded px-2 py-1 text-xs font-medium ${
             activeFilter === "commander"
-              ? "bg-indigo-600 text-white"
-              : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+              ? "bg-white/10 text-white"
+              : "bg-black/18 text-slate-400 hover:bg-white/8 hover:text-white"
           }`}
         >
           Commander
@@ -334,8 +338,8 @@ export function MyDecks({
           onClick={() => setActiveFilter("bo3")}
           className={`rounded px-2 py-1 text-xs font-medium ${
             activeFilter === "bo3"
-              ? "bg-indigo-600 text-white"
-              : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+              ? "bg-white/10 text-white"
+              : "bg-black/18 text-slate-400 hover:bg-white/8 hover:text-white"
           }`}
         >
           BO3
@@ -359,8 +363,22 @@ export function MyDecks({
         </div>
       )}
 
-      <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-        {filteredDeckNames.map((deckName) => {
+      {filteredDeckNames.length === 0 ? (
+        <div className="flex w-full flex-col items-center justify-center gap-4 rounded-[20px] border border-dashed border-white/10 bg-black/12 px-6 py-12 text-center">
+          <div className="text-lg font-medium text-white">No decks match this filter.</div>
+          <div className="max-w-md text-sm leading-6 text-slate-400">
+            Pick a different filter or show all decks to choose from your full collection.
+          </div>
+          <button
+            onClick={() => setActiveFilter("all")}
+            className={menuButtonClass({ tone: "neutral", size: "sm" })}
+          >
+            Show All Decks
+          </button>
+        </div>
+      ) : (
+        <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+          {filteredDeckNames.map((deckName) => {
           const isActive = deckName === activeDeckName;
           const colors = getDeckColorIdentity(deckName);
           const count = getDeckCardCount(deckName);
@@ -369,86 +387,97 @@ export function MyDecks({
           const displayName = isPrecon ? deckName.slice(PRECON_PREFIX.length) : deckName;
           const compatibility = compatibilities[deckName];
 
-          return (
-            <button
-              key={deckName}
-              onClick={() => handleTileClick(deckName)}
-              className={`group relative flex aspect-[4/3] flex-col justify-end overflow-hidden rounded-xl text-left transition ${
-                isActive
-                  ? "ring-2 ring-indigo-500 ring-offset-2 ring-offset-gray-950"
-                  : "ring-1 ring-gray-700 hover:ring-gray-500"
-              }`}
-            >
-              <DeckArtTile cardName={representativeCard} />
+            return (
+              <button
+                key={deckName}
+                onClick={() => handleTileClick(deckName)}
+                className={`group relative flex aspect-[4/3] flex-col justify-end overflow-hidden rounded-xl text-left transition ${
+                  isActive
+                    ? "ring-2 ring-white/30 ring-offset-2 ring-offset-[#060a16]"
+                    : "ring-1 ring-white/10 hover:ring-white/20"
+                }`}
+              >
+                <DeckArtTile cardName={representativeCard} />
 
-              {isPrecon && (
-                <span className="absolute right-2 top-2 z-10 rounded-full bg-amber-500/80 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-black">
-                  Pre-built
-                </span>
-              )}
-
-              <div className="relative z-10 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-3 pb-3 pt-8">
-                <p className="text-sm font-semibold text-white">{displayName}</p>
-                <div className="mt-1 flex items-center gap-2">
-                  <div className="flex gap-1">
-                    {colors.map((color) => (
-                      <span
-                        key={color}
-                        className={`inline-block h-2.5 w-2.5 rounded-full ${COLOR_DOT_CLASS[color] ?? "bg-gray-400"}`}
-                      />
-                    ))}
-                    {colors.length === 0 && (
-                      <span className="inline-block h-2.5 w-2.5 rounded-full bg-gray-500" />
-                    )}
-                  </div>
-                  <span className="text-xs text-gray-300">{count} cards</span>
-                </div>
-                {compatibility && (
-                  <div className="mt-2 flex flex-wrap gap-1">
-                    {compatibility.standard.compatible && <StatusBadge label="STD" active />}
-                    {compatibility.commander.compatible && <StatusBadge label="CMD" active />}
-                    {compatibility.bo3_ready && <StatusBadge label="BO3" active />}
-                    {compatibility.unknown_cards.length > 0 && (
-                      <span
-                        className="rounded bg-amber-500/80 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-black"
-                        title={`Unknown cards:\n${compatibility.unknown_cards.join("\n")}`}
-                      >
-                        Unknown {compatibility.unknown_cards.length}
-                      </span>
-                    )}
-                  </div>
+                {isPrecon && (
+                  <span className="absolute right-2 top-2 z-10 rounded-full bg-amber-500/80 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-black">
+                    Pre-built
+                  </span>
                 )}
-              </div>
-            </button>
-          );
-        })}
 
-        <button
-          onClick={() => setShowImport(true)}
-          className="group relative flex aspect-[4/3] flex-col items-center justify-center gap-2 overflow-hidden rounded-xl ring-1 ring-gray-700 transition hover:bg-white/5 hover:ring-gray-500"
-        >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 20 20"
-            fill="currentColor"
-            className="h-8 w-8 text-gray-500 transition-colors group-hover:text-gray-300"
+                <div className="relative z-10 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-3 pb-3 pt-8">
+                  <p className="text-sm font-semibold text-white">{displayName}</p>
+                  <div className="mt-1 flex items-center gap-2">
+                    <div className="flex gap-1">
+                      {colors.map((color) => (
+                        <span
+                          key={color}
+                          className={`inline-block h-2.5 w-2.5 rounded-full ${COLOR_DOT_CLASS[color] ?? "bg-gray-400"}`}
+                        />
+                      ))}
+                      {colors.length === 0 && (
+                        <span className="inline-block h-2.5 w-2.5 rounded-full bg-gray-500" />
+                      )}
+                    </div>
+                    <span className="text-xs text-gray-300">{count} cards</span>
+                  </div>
+                  {compatibility && (
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {compatibility.standard.compatible && <StatusBadge label="STD" active />}
+                      {compatibility.commander.compatible && <StatusBadge label="CMD" active />}
+                      {compatibility.bo3_ready && <StatusBadge label="BO3" active />}
+                      {compatibility.unknown_cards.length > 0 && (
+                        <span
+                          className="rounded bg-amber-500/80 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-black"
+                          title={`Unknown cards:\n${compatibility.unknown_cards.join("\n")}`}
+                        >
+                          Unknown {compatibility.unknown_cards.length}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </button>
+            );
+          })}
+
+          <button
+            onClick={() => setShowImport(true)}
+            className="group relative flex aspect-[4/3] flex-col items-center justify-center gap-2 overflow-hidden rounded-xl ring-1 ring-white/10 transition hover:bg-white/5 hover:ring-white/20"
           >
-            <path d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z" />
-          </svg>
-          <span className="text-xs font-medium text-gray-500 transition-colors group-hover:text-gray-300">
-            Import Deck
-          </span>
-        </button>
-      </div>
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              className="h-8 w-8 text-gray-500 transition-colors group-hover:text-gray-300"
+            >
+              <path d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z" />
+            </svg>
+            <span className="text-xs font-medium text-gray-500 transition-colors group-hover:text-gray-300">
+              Import Deck
+            </span>
+          </button>
+        </div>
+      )}
 
       {mode === "select" && (
-        <button
-          onClick={onConfirmSelection}
-          disabled={noDeckSelected}
-          className={menuButtonClass({ tone: "indigo", size: "sm", disabled: noDeckSelected })}
-        >
-          {confirmLabel}
-        </button>
+        <div className="sticky bottom-3 z-10 w-full">
+          <div className="flex items-center justify-between gap-4 rounded-[20px] border border-white/10 bg-[#0a0f1b]/90 px-4 py-3 shadow-[0_18px_40px_rgba(0,0,0,0.28)] backdrop-blur-md">
+            <div className="min-w-0">
+              <div className="text-xs text-slate-500">Selected deck</div>
+              <div className="truncate text-sm font-medium text-white">
+                {selectedDeckLabel ?? "Choose a deck to continue"}
+              </div>
+            </div>
+            <button
+              onClick={onConfirmSelection}
+              disabled={noDeckSelected}
+              className={menuButtonClass({ tone: "indigo", size: "sm", disabled: noDeckSelected })}
+            >
+              {confirmLabel}
+            </button>
+          </div>
+        </div>
       )}
 
       <ImportDeckModal
@@ -456,6 +485,6 @@ export function MyDecks({
         onClose={() => setShowImport(false)}
         onImported={handleImported}
       />
-    </div>
+    </MenuPanel>
   );
 }

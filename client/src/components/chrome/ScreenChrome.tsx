@@ -68,13 +68,13 @@ export function ScreenChrome({
         <div className="fixed left-4 top-[calc(env(safe-area-inset-top)+1rem)] z-30">
           <motion.button
             className={menuButtonClass({
-              tone: "slate",
+              tone: "neutral",
               size: "sm",
               className:
-                "w-12 h-12 p-0 rounded-full flex items-center justify-center text-white/70 hover:text-white",
+                "h-11 min-w-11 rounded-[16px] px-3 py-0 text-white/68 hover:text-white",
             })}
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
+            whileHover={{ y: -1 }}
+            whileTap={{ scale: 0.98 }}
             onClick={onBack}
             aria-label="Back"
             title="Back"
@@ -88,13 +88,13 @@ export function ScreenChrome({
       <div className="fixed right-4 top-[calc(env(safe-area-inset-top)+1rem)] z-30">
         <motion.button
           className={menuButtonClass({
-            tone: "slate",
+            tone: "neutral",
             size: "sm",
             className:
-              "w-12 h-12 p-0 rounded-full flex items-center justify-center text-white/40 hover:text-white/70",
+              "h-11 min-w-11 rounded-[16px] px-3 py-0 text-white/46 hover:text-white/72",
           })}
-          whileHover={{ scale: 1.05 }}
-          whileTap={{ scale: 0.95 }}
+          whileHover={{ y: -1 }}
+          whileTap={{ scale: 0.98 }}
           onClick={() => setShowSettings(true)}
           aria-label="Settings"
           title="Settings"
