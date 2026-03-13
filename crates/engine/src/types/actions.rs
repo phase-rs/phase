@@ -68,6 +68,9 @@ pub enum GameAction {
     SelectModes {
         indices: Vec<usize>,
     },
+    DecideOptionalCost {
+        pay: bool,
+    },
 }
 
 #[cfg(test)]
