@@ -137,6 +137,14 @@ impl ChosenAttribute {
 }
 
 /// How to specify a damage amount -- either a fixed integer or a variable reference.
+/// Which category of chosen attribute to read as a subtype.
+/// Used by `ContinuousModification::AddChosenSubtype` in layer evaluation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ChosenSubtypeKind {
+    CreatureType,
+    BasicLandType,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", content = "value")]
 pub enum DamageAmount {
@@ -1365,9 +1373,11 @@ pub enum ContinuousModification {
     /// Grants every creature type (Changeling CDA). Expanded at runtime
     /// using `GameState::all_creature_types`.
     AddAllCreatureTypes,
-    /// Adds the source object's chosen basic land type as a subtype.
-    /// Reads from `chosen_basic_land_type()` at apply time (e.g., Multiversal Passage).
-    AddChosenBasicLandType,
+    /// Adds the source object's chosen subtype (creature type or basic land type).
+    /// Resolved at layer evaluation time from the source's `chosen_attributes`.
+    AddChosenSubtype {
+        kind: ChosenSubtypeKind,
+    },
     SetColor {
         colors: Vec<ManaColor>,
     },

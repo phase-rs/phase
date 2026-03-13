@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
-    AbilityDefinition, BasicLandType, ChosenAttribute, ModalChoice, ReplacementDefinition,
-    StaticDefinition, TriggerDefinition,
+    AbilityDefinition, BasicLandType, ChosenAttribute, ChosenSubtypeKind, ModalChoice,
+    ReplacementDefinition, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card_type::CardType;
 use crate::types::identifiers::{CardId, ObjectId};
@@ -206,6 +206,18 @@ impl GameObject {
             ChosenAttribute::CreatureType(s) => Some(s.as_str()),
             _ => None,
         })
+    }
+
+    /// Get the chosen subtype as a string, unified across creature types and basic land types.
+    /// Used by the layer system's `AddChosenSubtype` modification.
+    pub fn chosen_subtype_str(&self, kind: &ChosenSubtypeKind) -> Option<String> {
+        match kind {
+            ChosenSubtypeKind::CreatureType => self.chosen_creature_type().map(|s| s.to_string()),
+            ChosenSubtypeKind::BasicLandType => {
+                self.chosen_basic_land_type()
+                    .map(|t| t.as_subtype_str().to_string())
+            }
+        }
     }
 }
 

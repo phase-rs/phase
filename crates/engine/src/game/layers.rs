@@ -256,7 +256,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::AddSubtype { .. }
             | ContinuousModification::RemoveSubtype { .. }
             | ContinuousModification::AddAllCreatureTypes
-            | ContinuousModification::AddChosenBasicLandType
+            | ContinuousModification::AddChosenSubtype { .. }
     );
 
     if b_changes_types && filter_references_type(&a.affected_filter) {
@@ -326,16 +326,14 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
         .copied()
         .collect();
 
-    // Pre-read chosen basic land type from source (avoids borrow conflict in the loop)
-    let chosen_basic_land_subtype = if matches!(
-        effect.modification,
-        ContinuousModification::AddChosenBasicLandType
-    ) {
+    // Pre-read chosen subtype from source (avoids borrow conflict in the loop)
+    let chosen_subtype = if let ContinuousModification::AddChosenSubtype { ref kind } =
+        effect.modification
+    {
         state
             .objects
             .get(&effect.source_id)
-            .and_then(|src| src.chosen_basic_land_type())
-            .map(|t| t.as_subtype_str().to_string())
+            .and_then(|src| src.chosen_subtype_str(kind))
     } else {
         None
     };
@@ -407,8 +405,8 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                     }
                 }
             }
-            ContinuousModification::AddChosenBasicLandType => {
-                if let Some(ref subtype) = chosen_basic_land_subtype {
+            ContinuousModification::AddChosenSubtype { .. } => {
+                if let Some(ref subtype) = chosen_subtype {
                     if !obj.card_types.subtypes.iter().any(|s| s == subtype) {
                         obj.card_types.subtypes.push(subtype.clone());
                     }
@@ -424,8 +422,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ContinuousModification, ControllerRef, FilterProp, StaticDefinition, TargetFilter,
-        TypeFilter,
+        ChosenSubtypeKind, ContinuousModification, ControllerRef, FilterProp, StaticDefinition,
+        TargetFilter, TypeFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
@@ -1048,7 +1046,9 @@ mod tests {
             obj.static_definitions.push(StaticDefinition {
                 mode: StaticMode::Continuous,
                 affected: Some(TargetFilter::SelfRef),
-                modifications: vec![ContinuousModification::AddChosenBasicLandType],
+                modifications: vec![ContinuousModification::AddChosenSubtype {
+                    kind: ChosenSubtypeKind::BasicLandType,
+                }],
                 condition: None,
                 affected_zone: None,
                 effect_zone: None,
@@ -1071,7 +1071,7 @@ mod tests {
     fn test_chosen_basic_land_type_no_choice_is_noop() {
         let mut state = setup();
 
-        // Land with AddChosenBasicLandType but no choice stored
+        // Land with AddChosenSubtype(BasicLandType) but no choice stored
         let land = create_object(
             &mut state,
             CardId(0),
@@ -1089,7 +1089,9 @@ mod tests {
             obj.static_definitions.push(StaticDefinition {
                 mode: StaticMode::Continuous,
                 affected: Some(TargetFilter::SelfRef),
-                modifications: vec![ContinuousModification::AddChosenBasicLandType],
+                modifications: vec![ContinuousModification::AddChosenSubtype {
+                    kind: ChosenSubtypeKind::BasicLandType,
+                }],
                 condition: None,
                 affected_zone: None,
                 effect_zone: None,
@@ -1105,6 +1107,57 @@ mod tests {
         assert!(
             obj.card_types.subtypes.is_empty(),
             "No subtypes should be added when no choice was made"
+        );
+    }
+
+    #[test]
+    fn test_chosen_creature_type_adds_subtype() {
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = setup();
+
+        let mimic = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Metallic Mimic".to_string(),
+            Zone::Battlefield,
+        );
+        let ts = state.next_timestamp();
+        {
+            let obj = state.objects.get_mut(&mimic).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.card_types.subtypes.push("Shapeshifter".to_string());
+            obj.timestamp = ts;
+            obj.chosen_attributes
+                .push(ChosenAttribute::CreatureType("Elf".to_string()));
+            obj.static_definitions.push(StaticDefinition {
+                mode: StaticMode::Continuous,
+                affected: Some(TargetFilter::SelfRef),
+                modifications: vec![ContinuousModification::AddChosenSubtype {
+                    kind: ChosenSubtypeKind::CreatureType,
+                }],
+                condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                characteristic_defining: false,
+                description: None,
+            });
+        }
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&mimic).unwrap();
+        assert!(
+            obj.card_types.subtypes.contains(&"Elf".to_string()),
+            "Creature should gain Elf subtype from chosen creature type"
+        );
+        assert!(
+            obj.card_types.subtypes.contains(&"Shapeshifter".to_string()),
+            "Should retain original subtypes"
         );
     }
 }

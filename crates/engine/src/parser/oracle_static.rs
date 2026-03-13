@@ -2,8 +2,8 @@ use std::str::FromStr;
 
 use super::oracle_util::strip_reminder_text;
 use crate::types::ability::{
-    ContinuousModification, ControllerRef, FilterProp, StaticCondition, StaticDefinition,
-    TargetFilter, TypeFilter,
+    ChosenSubtypeKind, ContinuousModification, ControllerRef, FilterProp, StaticCondition,
+    StaticDefinition, TargetFilter, TypeFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
@@ -177,12 +177,21 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         }
     }
 
-    // --- "This land is the chosen type." (Multiversal Passage pattern) ---
+    // --- "~ is the chosen type in addition to its other types" ---
+    // Distinguish creature type (Metallic Mimic) vs basic land type (Multiversal Passage)
     if lower.contains("is the chosen type") {
+        let kind = if lower.starts_with("this creature")
+            || lower.contains("creature is the chosen")
+        {
+            ChosenSubtypeKind::CreatureType
+        } else {
+            ChosenSubtypeKind::BasicLandType
+        };
+        let modification = ContinuousModification::AddChosenSubtype { kind };
         return Some(StaticDefinition {
             mode: StaticMode::Continuous,
             affected: Some(TargetFilter::SelfRef),
-            modifications: vec![ContinuousModification::AddChosenBasicLandType],
+            modifications: vec![modification],
             condition: None,
             affected_zone: None,
             effect_zone: None,
@@ -985,7 +994,25 @@ mod tests {
         assert_eq!(def.affected, Some(TargetFilter::SelfRef));
         assert_eq!(
             def.modifications,
-            vec![ContinuousModification::AddChosenBasicLandType]
+            vec![ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::BasicLandType,
+            }]
+        );
+    }
+
+    #[test]
+    fn this_creature_is_the_chosen_type() {
+        let def = parse_static_line(
+            "This creature is the chosen type in addition to its other types.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::CreatureType,
+            }]
         );
     }
 }

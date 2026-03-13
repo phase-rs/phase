@@ -834,6 +834,25 @@ fn target_filter_matches_object(
                             return false;
                         }
                     }
+                    FilterProp::IsChosenCreatureType => {
+                        let chosen = state
+                            .objects
+                            .get(&source_id)
+                            .and_then(|src| src.chosen_creature_type());
+                        match chosen {
+                            Some(ct) => {
+                                if !obj
+                                    .card_types
+                                    .subtypes
+                                    .iter()
+                                    .any(|s| s.eq_ignore_ascii_case(ct))
+                                {
+                                    return false;
+                                }
+                            }
+                            None => return false,
+                        }
+                    }
                     _ => {
                         // Other filter props: pass through for now
                     }
@@ -3433,5 +3452,118 @@ pub mod tests {
             }
             _ => panic!("Expected TriggeredAbility on stack"),
         }
+    }
+
+    #[test]
+    fn is_chosen_creature_type_filter_matches() {
+        let mut state = setup();
+
+        // Metallic Mimic on battlefield with chosen type "Elf"
+        let mimic = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Metallic Mimic".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&mimic)
+            .unwrap()
+            .chosen_attributes
+            .push(crate::types::ability::ChosenAttribute::CreatureType(
+                "Elf".to_string(),
+            ));
+
+        // Elf creature entering
+        let elf = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Llanowar Elves".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&elf).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.card_types.subtypes.push("Elf".to_string());
+        }
+
+        // Non-elf creature
+        let goblin = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Goblin Guide".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&goblin).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.card_types.subtypes.push("Goblin".to_string());
+        }
+
+        let filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Creature),
+            subtype: None,
+            controller: None,
+            properties: vec![FilterProp::Another, FilterProp::IsChosenCreatureType],
+        };
+
+        // Elf matches (is chosen type and is another creature)
+        assert!(target_filter_matches_object(&state, elf, &filter, mimic));
+
+        // Goblin doesn't match (wrong creature type)
+        assert!(!target_filter_matches_object(
+            &state, goblin, &filter, mimic
+        ));
+
+        // Mimic doesn't match itself (Another filter)
+        assert!(!target_filter_matches_object(
+            &state, mimic, &filter, mimic
+        ));
+    }
+
+    #[test]
+    fn is_chosen_creature_type_no_choice_rejects() {
+        let mut state = setup();
+
+        // Source with no chosen creature type
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "No Choice".to_string(),
+            Zone::Battlefield,
+        );
+
+        let elf = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Llanowar Elves".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&elf).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.card_types.subtypes.push("Elf".to_string());
+        }
+
+        let filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Creature),
+            subtype: None,
+            controller: None,
+            properties: vec![FilterProp::IsChosenCreatureType],
+        };
+
+        // No chosen type → always rejects
+        assert!(!target_filter_matches_object(&state, elf, &filter, source));
     }
 }
