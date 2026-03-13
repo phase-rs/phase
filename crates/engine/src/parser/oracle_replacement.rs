@@ -3,7 +3,7 @@ use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{parse_number, strip_reminder_text};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChoiceType, Effect, FilterProp, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, TargetFilter,
+    ReplacementDefinition, ReplacementMode, TargetFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{ControllerRef, TypeFilter};
@@ -168,31 +168,27 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
 
     let has_basic_land_type_choice = norm_lower.contains("choose a basic land type");
     let execute = if has_basic_land_type_choice {
-        AbilityDefinition {
-            sub_ability: Some(Box::new(lose_life)),
-            ..AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Choose {
-                    choice_type: ChoiceType::BasicLandType,
-                    persist: true,
-                },
-            )
-        }
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Choose {
+                choice_type: ChoiceType::BasicLandType,
+                persist: true,
+            },
+        )
+        .sub_ability(lose_life)
     } else {
         lose_life
     };
 
     let decline = if has_basic_land_type_choice {
-        AbilityDefinition {
-            sub_ability: Some(Box::new(tap_self)),
-            ..AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Choose {
-                    choice_type: ChoiceType::BasicLandType,
-                    persist: true,
-                },
-            )
-        }
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Choose {
+                choice_type: ChoiceType::BasicLandType,
+                persist: true,
+            },
+        )
+        .sub_ability(tap_self)
     } else {
         tap_self
     };
@@ -348,19 +344,19 @@ fn parse_enters_with_counters(
         let (filter, _) = parse_type_phrase(subject_text);
         // Inject Another since we stripped "other" above
         let filter = match filter {
-            TargetFilter::Typed {
+            TargetFilter::Typed(TypedFilter {
                 card_type,
                 subtype,
                 controller,
                 mut properties,
-            } => {
+            }) => {
                 properties.insert(0, FilterProp::Another);
-                TargetFilter::Typed {
+                TargetFilter::Typed(TypedFilter {
                     card_type,
                     subtype,
                     controller,
                     properties,
-                }
+                })
             }
             other => other,
         };
@@ -667,12 +663,12 @@ mod tests {
         ));
         // valid_card should filter for other creatures you control of chosen type
         match &def.valid_card {
-            Some(TargetFilter::Typed {
+            Some(TargetFilter::Typed(TypedFilter {
                 card_type,
                 controller,
                 properties,
                 ..
-            }) => {
+            })) => {
                 assert_eq!(*card_type, Some(TypeFilter::Creature));
                 assert_eq!(*controller, Some(ControllerRef::You));
                 assert!(properties.contains(&FilterProp::Another));
@@ -700,12 +696,12 @@ mod tests {
             } if counter_type == "P1P1"
         ));
         match &def.valid_card {
-            Some(TargetFilter::Typed {
+            Some(TargetFilter::Typed(TypedFilter {
                 card_type,
                 controller,
                 properties,
                 ..
-            }) => {
+            })) => {
                 assert_eq!(*card_type, Some(TypeFilter::Creature));
                 assert_eq!(*controller, Some(ControllerRef::You));
                 assert!(properties.contains(&FilterProp::Another));

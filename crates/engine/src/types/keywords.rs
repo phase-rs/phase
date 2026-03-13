@@ -4,7 +4,7 @@ use std::str::FromStr;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::ability::TargetFilter;
+use super::ability::{TargetFilter, TypedFilter};
 use super::mana::{ManaColor, ManaCost};
 
 /// What a Protection keyword protects from.
@@ -266,19 +266,9 @@ fn parse_enchant_target(s: &str) -> TargetFilter {
     };
 
     match type_filter {
-        Some(tf) => TargetFilter::Typed {
-            card_type: Some(tf),
-            subtype: None,
-            controller: None,
-            properties: vec![],
-        },
+        Some(tf) => TargetFilter::Typed(TypedFilter::new(tf)),
         // If not a recognized type, use a typed filter with the string as subtype
-        None => TargetFilter::Typed {
-            card_type: None,
-            subtype: Some(s.to_string()),
-            controller: None,
-            properties: vec![],
-        },
+        None => TargetFilter::Typed(TypedFilter::default().subtype(s.to_string())),
     }
 }
 
@@ -838,9 +828,9 @@ mod tests {
         let enchant = Keyword::from_str("Enchant:creature").unwrap();
         assert!(matches!(
             enchant,
-            Keyword::Enchant(TargetFilter::Typed { .. })
+            Keyword::Enchant(TargetFilter::Typed(TypedFilter { .. }))
         ));
-        if let Keyword::Enchant(TargetFilter::Typed { card_type, .. }) = &enchant {
+        if let Keyword::Enchant(TargetFilter::Typed(TypedFilter { card_type, .. })) = &enchant {
             assert!(matches!(
                 card_type,
                 Some(super::super::ability::TypeFilter::Creature)

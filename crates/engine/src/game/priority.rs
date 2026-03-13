@@ -409,19 +409,15 @@ mod tests {
         );
         let _ = hand_card;
 
-        let ability = ResolvedAbility {
-            effect: Effect::RevealHand {
+        let ability = ResolvedAbility::new(
+            Effect::RevealHand {
                 target: TargetFilter::Any,
                 card_filter: TargetFilter::Any,
             },
-            targets: vec![TargetRef::Player(PlayerId(1))],
+            vec![TargetRef::Player(PlayerId(1))],
             source_id,
-            controller: PlayerId(0),
-            sub_ability: None,
-            duration: None,
-            condition: None,
-            context: crate::types::ability::SpellContext::default(),
-        };
+            PlayerId(0),
+        );
 
         state.stack.push(StackEntry {
             id: source_id,

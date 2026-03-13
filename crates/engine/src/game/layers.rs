@@ -5,7 +5,7 @@ use crate::game::devotion::count_devotion;
 use crate::game::filter::matches_target_filter;
 use crate::game::game_object::CounterType;
 use crate::types::ability::{
-    ContinuousModification, DynamicPTValue, StaticCondition, TargetFilter,
+    ContinuousModification, DynamicPTValue, StaticCondition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -281,7 +281,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
 /// Check if a TargetFilter references a card type (used for dependency ordering).
 fn filter_references_type(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed { card_type, .. } => card_type.is_some(),
+        TargetFilter::Typed(TypedFilter { card_type, .. }) => card_type.is_some(),
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
             filters.iter().any(filter_references_type)
         }
@@ -293,7 +293,7 @@ fn filter_references_type(filter: &TargetFilter) -> bool {
 /// Check if a TargetFilter references abilities/keywords (used for dependency ordering).
 fn filter_references_ability(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed { properties, .. } => properties
+        TargetFilter::Typed(TypedFilter { properties, .. }) => properties
             .iter()
             .any(|p| matches!(p, crate::types::ability::FilterProp::WithKeyword { .. })),
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
@@ -501,12 +501,7 @@ mod tests {
 
     /// Helper: creatures you control filter
     fn creature_you_ctrl() -> TargetFilter {
-        TargetFilter::Typed {
-            card_type: Some(TypeFilter::Creature),
-            subtype: None,
-            controller: Some(ControllerRef::You),
-            properties: vec![],
-        }
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
     }
 
     fn add_lord_static(
@@ -587,12 +582,7 @@ mod tests {
         // Effect that makes artifacts into creatures (layer 4 - Type)
         let animator = make_creature(&mut state, "Animator", 1, 1, PlayerId(0));
         {
-            let artifact_you_ctrl = TargetFilter::Typed {
-                card_type: Some(TypeFilter::Artifact),
-                subtype: None,
-                controller: Some(ControllerRef::You),
-                properties: vec![],
-            };
+            let artifact_you_ctrl = TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You));
             let def = StaticDefinition::continuous()
                 .affected(artifact_you_ctrl)
                 .modifications(vec![ContinuousModification::AddType {
@@ -677,12 +667,7 @@ mod tests {
             obj.timestamp = 10;
         }
         {
-            let artifact_you_ctrl = TargetFilter::Typed {
-                card_type: Some(TypeFilter::Artifact),
-                subtype: None,
-                controller: Some(ControllerRef::You),
-                properties: vec![],
-            };
+            let artifact_you_ctrl = TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You));
             let def = StaticDefinition::continuous()
                 .affected(artifact_you_ctrl)
                 .modifications(vec![ContinuousModification::AddType {
@@ -758,12 +743,7 @@ mod tests {
             obj.attached_to = Some(bear_a);
             obj.timestamp = ts;
 
-            let enchanted_creature = TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: None,
-                properties: vec![FilterProp::EnchantedBy],
-            };
+            let enchanted_creature = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
             obj.static_definitions.push(
                 StaticDefinition::continuous()
                     .affected(enchanted_creature)

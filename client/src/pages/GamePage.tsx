@@ -58,6 +58,7 @@ import {
 } from "../stores/multiplayerStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { usePlayerId } from "../hooks/usePlayerId.ts";
+import { abilityChoiceLabel } from "../viewmodel/costLabel.ts";
 
 export function GamePage() {
   const navigate = useNavigate();
@@ -518,7 +519,8 @@ function GamePageContent({
         className="fixed z-30"
         style={{
           bottom: "calc(env(safe-area-inset-bottom) + 11rem)",
-          right: "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
+          right:
+            "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
         }}
       >
         <CombatPhaseIndicator />
@@ -632,7 +634,8 @@ function GamePageContent({
         className="fixed z-30"
         style={{
           bottom: "calc(env(safe-area-inset-bottom) + 5rem)",
-          right: "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
+          right:
+            "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
         }}
       >
         <FullControlToggle />
@@ -653,6 +656,9 @@ function GamePageContent({
 
       {/* Scry/Dig/Surveil card choice modal */}
       <CardChoiceModal />
+
+      {/* Ability choice picker (planeswalkers, multi-ability permanents) */}
+      <AbilityChoiceModal />
 
       {waitingFor?.type === "MulliganDecision" &&
         waitingFor.data.player === playerId && (
@@ -1223,5 +1229,34 @@ function GameOverScreen({
         )}
       </AnimatePresence>
     </div>
+  );
+}
+
+// ── Ability Choice Modal ──────────────────────────────────────────────────
+
+function AbilityChoiceModal() {
+  const dispatch = useGameDispatch();
+  const pending = useUiStore((s) => s.pendingAbilityChoice);
+  const setPending = useUiStore((s) => s.setPendingAbilityChoice);
+  const obj = useGameStore((s) =>
+    pending ? s.gameState?.objects[pending.objectId] : undefined,
+  );
+
+  if (!pending || !obj) return null;
+
+  return (
+    <ChoiceModal
+      title={obj.name}
+      subtitle="Choose an ability to activate"
+      options={pending.actions.map((action, i) => {
+        const { label, description } = abilityChoiceLabel(action, obj.abilities);
+        return { id: String(i), label, description };
+      })}
+      onChoose={(id) => {
+        dispatch(pending.actions[Number(id)]);
+        setPending(null);
+      }}
+      onClose={() => setPending(null)}
+    />
   );
 }

@@ -3,7 +3,7 @@ use std::str::FromStr;
 use super::oracle_util::strip_reminder_text;
 use crate::types::ability::{
     ChosenSubtypeKind, ContinuousModification, ControllerRef, DynamicPTValue, FilterProp,
-    StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+    StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
@@ -19,12 +19,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     if lower.starts_with("enchanted creature ") {
         return parse_continuous_gets_has(
             &text[19..],
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: None,
-                properties: vec![FilterProp::EnchantedBy],
-            },
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])),
         );
     }
 
@@ -32,12 +27,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     if lower.starts_with("enchanted permanent ") {
         return parse_continuous_gets_has(
             &text[20..],
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Permanent),
-                subtype: None,
-                controller: None,
-                properties: vec![FilterProp::EnchantedBy],
-            },
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy])),
         );
     }
 
@@ -45,12 +35,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     if lower.starts_with("equipped creature ") {
         return parse_continuous_gets_has(
             &text[18..],
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: None,
-                properties: vec![FilterProp::EquippedBy],
-            },
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy])),
         );
     }
 
@@ -58,12 +43,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     if lower.starts_with("all creatures ") {
         return parse_continuous_gets_has(
             &text[14..],
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: None,
-                properties: vec![],
-            },
+            TargetFilter::Typed(TypedFilter::creature()),
         );
     }
 
@@ -85,12 +65,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     if lower.starts_with("creatures you control ") {
         return parse_continuous_gets_has(
             &text[22..],
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: Some(ControllerRef::You),
-                properties: vec![],
-            },
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
         );
     }
 
@@ -98,12 +73,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     if lower.starts_with("other creatures you control ") {
         return parse_continuous_gets_has(
             &text[28..],
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: Some(ControllerRef::You),
-                properties: vec![],
-            },
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
         );
     }
 
@@ -115,12 +85,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
             .trim_matches(|c: char| c == '\'' || c == '"');
         return Some(
             StaticDefinition::continuous()
-                .affected(TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Land),
-                    subtype: None,
-                    controller: Some(ControllerRef::You),
-                    properties: vec![],
-                })
+                .affected(TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)))
                 .modifications(vec![ContinuousModification::AddSubtype {
                     subtype: rest.to_string(),
                 }])
@@ -323,12 +288,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     if lower.contains("cost") && lower.contains("less") && lower.contains("spell") {
         return Some(
             StaticDefinition::new(StaticMode::ReduceCost)
-                .affected(TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Card),
-                    subtype: None,
-                    controller: Some(ControllerRef::You),
-                    properties: vec![],
-                })
+                .affected(TargetFilter::Typed(TypedFilter::card().controller(ControllerRef::You)))
                 .description(text.to_string()),
         );
     }
@@ -341,12 +301,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     {
         return Some(
             StaticDefinition::new(StaticMode::RaiseCost)
-                .affected(TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Card),
-                    subtype: None,
-                    controller: Some(ControllerRef::Opponent),
-                    properties: vec![],
-                })
+                .affected(TargetFilter::Typed(TypedFilter::card().controller(ControllerRef::Opponent)))
                 .description(text.to_string()),
         );
     }
@@ -378,21 +333,17 @@ fn parse_typed_you_control(text: &str, lower: &str, _is_other: bool) -> Option<S
         if !descriptor.is_empty() {
             let after_prefix = &text[creatures_pos + 23..];
             let typed_filter = if let Some(color) = parse_named_color(descriptor) {
-                TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Creature),
-                    subtype: None,
-                    controller: Some(ControllerRef::You),
-                    properties: vec![FilterProp::HasColor {
-                        color: color.to_string(),
-                    }],
-                }
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::HasColor { color: color.to_string() }]),
+                )
             } else if is_capitalized_words(descriptor) {
-                TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Creature),
-                    subtype: Some(descriptor.to_string()),
-                    controller: Some(ControllerRef::You),
-                    properties: vec![],
-                }
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .subtype(descriptor.to_string())
+                        .controller(ControllerRef::You),
+                )
             } else {
                 return None;
             };
@@ -406,23 +357,19 @@ fn parse_typed_you_control(text: &str, lower: &str, _is_other: bool) -> Option<S
         if !descriptor.is_empty() {
             let after_prefix = &text[yc_pos + 13..];
             let typed_filter = if let Some(color) = parse_named_color(descriptor) {
-                TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Creature),
-                    subtype: None,
-                    controller: Some(ControllerRef::You),
-                    properties: vec![FilterProp::HasColor {
-                        color: color.to_string(),
-                    }],
-                }
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::HasColor { color: color.to_string() }]),
+                )
             } else if is_capitalized_words(descriptor) {
                 // Strip trailing 's' for the subtype name (Zombies -> Zombie)
                 let subtype_name = descriptor.trim_end_matches('s').to_string();
-                TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Creature),
-                    subtype: Some(subtype_name),
-                    controller: Some(ControllerRef::You),
-                    properties: vec![],
-                }
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .subtype(subtype_name)
+                        .controller(ControllerRef::You),
+                )
             } else {
                 return None;
             };
@@ -614,6 +561,7 @@ fn parse_cda_pt_equality(lower: &str, text: &str) -> Option<StaticDefinition> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::TypeFilter;
 
     #[test]
     fn static_bonesplitter() {
@@ -652,10 +600,10 @@ mod tests {
         assert_eq!(def.mode, StaticMode::Continuous);
         assert!(matches!(
             def.affected,
-            Some(TargetFilter::Typed {
+            Some(TargetFilter::Typed(TypedFilter {
                 controller: Some(ControllerRef::You),
                 ..
-            })
+            }))
         ));
     }
 
@@ -679,10 +627,10 @@ mod tests {
         assert_eq!(def.mode, StaticMode::Continuous);
         assert!(matches!(
             def.affected,
-            Some(TargetFilter::Typed {
+            Some(TargetFilter::Typed(TypedFilter {
                 card_type: Some(TypeFilter::Permanent),
                 ..
-            })
+            }))
         ));
         assert!(def
             .modifications
@@ -697,11 +645,11 @@ mod tests {
         assert_eq!(def.mode, StaticMode::Continuous);
         assert!(matches!(
             def.affected,
-            Some(TargetFilter::Typed {
+            Some(TargetFilter::Typed(TypedFilter {
                 card_type: Some(TypeFilter::Creature),
                 controller: None,
                 ..
-            })
+            }))
         ));
         assert!(def
             .modifications
@@ -714,12 +662,12 @@ mod tests {
         assert_eq!(def.mode, StaticMode::Continuous);
         assert!(matches!(
             def.affected,
-            Some(TargetFilter::Typed {
+            Some(TargetFilter::Typed(TypedFilter {
                 card_type: Some(TypeFilter::Creature),
                 subtype: Some(ref s),
                 controller: Some(ControllerRef::You),
                 ..
-            }) if s == "Elf"
+            })) if s == "Elf"
         ));
     }
 
@@ -729,12 +677,12 @@ mod tests {
         assert_eq!(def.mode, StaticMode::Continuous);
         assert!(matches!(
             def.affected,
-            Some(TargetFilter::Typed {
+            Some(TargetFilter::Typed(TypedFilter {
                 card_type: Some(TypeFilter::Creature),
                 subtype: None,
                 controller: Some(ControllerRef::You),
                 properties,
-            }) if properties == vec![FilterProp::HasColor {
+            })) if properties == vec![FilterProp::HasColor {
                 color: "White".to_string(),
             }]
         ));

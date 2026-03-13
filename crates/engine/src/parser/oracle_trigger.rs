@@ -2,7 +2,7 @@ use super::oracle_effect::parse_effect_chain;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{parse_number, strip_reminder_text};
 use crate::types::ability::{
-    AbilityKind, ControllerRef, FilterProp, TargetFilter, TriggerCondition, TriggerConstraint,
+    AbilityKind, ControllerRef, FilterProp, TargetFilter, TypedFilter, TriggerCondition, TriggerConstraint,
     TriggerDefinition,
 };
 use crate::types::phase::Phase;
@@ -349,29 +349,24 @@ fn merge_or_filters(a: TargetFilter, b: TargetFilter) -> TargetFilter {
 /// Add FilterProp::Another to a TargetFilter. Distributes into Or branches recursively.
 fn add_another_prop(filter: TargetFilter) -> TargetFilter {
     match filter {
-        TargetFilter::Typed {
+        TargetFilter::Typed(TypedFilter {
             card_type,
             subtype,
             controller,
             mut properties,
-        } => {
+        }) => {
             properties.push(FilterProp::Another);
-            TargetFilter::Typed {
+            TargetFilter::Typed(TypedFilter {
                 card_type,
                 subtype,
                 controller,
                 properties,
-            }
+            })
         }
         TargetFilter::Or { filters } => TargetFilter::Or {
             filters: filters.into_iter().map(add_another_prop).collect(),
         },
-        _ => TargetFilter::Typed {
-            card_type: None,
-            subtype: None,
-            controller: None,
-            properties: vec![FilterProp::Another],
-        },
+        _ => TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Another])),
     }
 }
 
@@ -524,12 +519,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
 
         // Determine the caster filter
         if who.contains("opponent") {
-            def.valid_target = Some(TargetFilter::Typed {
-                card_type: None,
-                subtype: None,
-                controller: Some(ControllerRef::Opponent),
-                properties: vec![],
-            });
+            def.valid_target = Some(TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)));
         }
 
         // Parse the spell quality (e.g., "multicolored spell")
@@ -539,12 +529,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             .unwrap_or(after_casts)
             .trim_start();
         if after_article.starts_with("multicolored") {
-            def.valid_card = Some(TargetFilter::Typed {
-                card_type: None,
-                subtype: None,
-                controller: None,
-                properties: vec![FilterProp::Multicolored],
-            });
+            def.valid_card = Some(TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Multicolored])));
         }
 
         return Some((TriggerMode::SpellCast, def));
@@ -687,12 +672,7 @@ mod tests {
         assert_eq!(def.destination, Some(Zone::Battlefield));
         assert_eq!(
             def.valid_card,
-            Some(TargetFilter::Typed {
-                card_type: Some(crate::types::ability::TypeFilter::Creature),
-                subtype: None,
-                controller: Some(crate::types::ability::ControllerRef::You),
-                properties: vec![FilterProp::Another],
-            })
+            Some(TargetFilter::Typed(TypedFilter::creature().controller(crate::types::ability::ControllerRef::You).properties(vec![FilterProp::Another])))
         );
     }
 
@@ -705,7 +685,7 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZone);
         assert_eq!(def.destination, Some(Zone::Battlefield));
         match &def.valid_card {
-            Some(TargetFilter::Typed { properties, .. }) => {
+            Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
                 assert!(properties.contains(&FilterProp::Another));
             }
             other => panic!("Expected Typed filter with Another, got {:?}", other),
@@ -722,12 +702,7 @@ mod tests {
         assert_eq!(def.destination, Some(Zone::Battlefield));
         assert_eq!(
             def.valid_card,
-            Some(TargetFilter::Typed {
-                card_type: Some(crate::types::ability::TypeFilter::Creature),
-                subtype: None,
-                controller: None,
-                properties: vec![],
-            })
+            Some(TargetFilter::Typed(TypedFilter::creature()))
         );
     }
 
@@ -806,21 +781,11 @@ mod tests {
                 // Both branches should have Another + You controller
                 assert_eq!(
                     filters[1],
-                    TargetFilter::Typed {
-                        card_type: Some(TypeFilter::Creature),
-                        subtype: None,
-                        controller: Some(ControllerRef::You),
-                        properties: vec![FilterProp::Another],
-                    }
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You).properties(vec![FilterProp::Another]))
                 );
                 assert_eq!(
                     filters[2],
-                    TargetFilter::Typed {
-                        card_type: Some(TypeFilter::Artifact),
-                        subtype: None,
-                        controller: Some(ControllerRef::You),
-                        properties: vec![FilterProp::Another],
-                    }
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You).properties(vec![FilterProp::Another]))
                 );
             }
             other => panic!("Expected Or filter with 3 branches, got {:?}", other),
@@ -848,7 +813,7 @@ mod tests {
                 assert_eq!(filters.len(), 2);
                 assert_eq!(filters[0], TargetFilter::SelfRef);
                 match &filters[1] {
-                    TargetFilter::Typed { properties, .. } => {
+                    TargetFilter::Typed(TypedFilter { properties, .. }) => {
                         assert!(properties.contains(&FilterProp::Another));
                     }
                     other => panic!("Expected Typed with Another, got {:?}", other),
@@ -951,12 +916,7 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::CounterAdded);
         assert_eq!(
             def.valid_card,
-            Some(TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: Some(ControllerRef::You),
-                properties: vec![FilterProp::Another],
-            })
+            Some(TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You).properties(vec![FilterProp::Another])))
         );
     }
 
@@ -970,12 +930,7 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::CounterAdded);
         assert_eq!(
             def.valid_card,
-            Some(TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: Some(ControllerRef::You),
-                properties: vec![],
-            })
+            Some(TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)))
         );
     }
 
@@ -1004,14 +959,11 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::Attacks);
         assert_eq!(
             def.valid_card,
-            Some(TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: Some(crate::types::ability::ControllerRef::You),
-                properties: vec![FilterProp::HasColor {
-                    color: "White".to_string()
-                }],
-            })
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(crate::types::ability::ControllerRef::You)
+                    .properties(vec![FilterProp::HasColor { color: "White".to_string() }])
+            ))
         );
     }
 
@@ -1139,21 +1091,11 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::SpellCast);
         assert_eq!(
             def.valid_target,
-            Some(TargetFilter::Typed {
-                card_type: None,
-                subtype: None,
-                controller: Some(ControllerRef::Opponent),
-                properties: vec![],
-            })
+            Some(TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)))
         );
         assert_eq!(
             def.valid_card,
-            Some(TargetFilter::Typed {
-                card_type: None,
-                subtype: None,
-                controller: None,
-                properties: vec![FilterProp::Multicolored],
-            })
+            Some(TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Multicolored])))
         );
     }
 

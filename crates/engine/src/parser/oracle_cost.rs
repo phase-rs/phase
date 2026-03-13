@@ -189,7 +189,7 @@ fn parse_single_cost(text: &str) -> AbilityCost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::TypeFilter;
+    use crate::types::ability::{TypeFilter, TypedFilter};
     use crate::types::mana::{ManaCost, ManaCostShard};
 
     #[test]
@@ -242,10 +242,10 @@ mod tests {
             AbilityCost::Sacrifice { target } => {
                 assert!(matches!(
                     target,
-                    TargetFilter::Typed {
+                    TargetFilter::Typed(TypedFilter {
                         card_type: Some(TypeFilter::Creature),
                         ..
-                    }
+                    })
                 ));
             }
             other => panic!("Expected Sacrifice, got {:?}", other),

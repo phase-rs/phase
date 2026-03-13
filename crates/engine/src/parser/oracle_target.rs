@@ -1,4 +1,4 @@
-use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter};
+use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypedFilter, TypeFilter};
 use crate::types::zones::Zone;
 
 use super::oracle_util::contains_possessive;
@@ -35,12 +35,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     // "target opponent"
     if lower.starts_with("target opponent") {
         return (
-            TargetFilter::Typed {
-                card_type: None,
-                subtype: None,
-                controller: Some(ControllerRef::Opponent),
-                properties: vec![],
-            },
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
             &text[15..],
         );
     }
@@ -53,12 +48,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     // "each opponent"
     if lower.starts_with("each opponent") {
         return (
-            TargetFilter::Typed {
-                card_type: None,
-                subtype: None,
-                controller: Some(ControllerRef::Opponent),
-                properties: vec![],
-            },
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
             &text[13..],
         );
     }
@@ -82,12 +72,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     // "enchanted creature"
     if lower.starts_with("enchanted creature") {
         return (
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: None,
-                properties: vec![FilterProp::EnchantedBy],
-            },
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])),
             &text[18..],
         );
     }
@@ -95,12 +80,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     // "equipped creature"
     if lower.starts_with("equipped creature") {
         return (
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: None,
-                properties: vec![FilterProp::EquippedBy],
-            },
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy])),
             &text[17..],
         );
     }
@@ -149,15 +129,15 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
 
         // Distribute shared controller suffix from right branch to left:
         // "creature or artifact you control" → both get "you control"
-        if let TargetFilter::Typed {
+        if let TargetFilter::Typed(TypedFilter {
             controller: Some(ref ctrl),
             ..
-        } = other_filter
+        }) = other_filter
         {
-            if let TargetFilter::Typed {
+            if let TargetFilter::Typed(TypedFilter {
                 controller: ref mut left_ctrl,
                 ..
-            } = left
+            }) = left
             {
                 if left_ctrl.is_none() {
                     *left_ctrl = Some(ctrl.clone());
@@ -211,12 +191,12 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         pos += remaining_offset + "of the chosen type".len();
     }
 
-    let filter = TargetFilter::Typed {
+    let filter = TargetFilter::Typed(TypedFilter {
         card_type,
         subtype,
         controller,
         properties,
-    };
+    });
 
     (filter, &text[pos..])
 }
@@ -356,12 +336,12 @@ fn typed(
     subtype: Option<String>,
     properties: Vec<FilterProp>,
 ) -> TargetFilter {
-    TargetFilter::Typed {
+    TargetFilter::Typed(TypedFilter {
         card_type: Some(card_type),
         subtype,
         controller: None,
         properties,
-    }
+    })
 }
 
 /// Parse a zone suffix like "card from a graveyard", "from your graveyard", "from exile".
@@ -463,12 +443,7 @@ mod tests {
         let (f, _) = parse_target("target creature");
         assert_eq!(
             f,
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: None,
-                properties: vec![],
-            }
+            TargetFilter::Typed(TypedFilter::creature())
         );
     }
 
@@ -477,12 +452,7 @@ mod tests {
         let (f, _) = parse_target("target creature you control");
         assert_eq!(
             f,
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: Some(ControllerRef::You),
-                properties: vec![],
-            }
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
         );
     }
 
@@ -491,14 +461,9 @@ mod tests {
         let (f, _) = parse_target("target nonland permanent");
         assert_eq!(
             f,
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Permanent),
-                subtype: None,
-                controller: None,
-                properties: vec![FilterProp::NonType {
-                    value: "land".to_string()
-                }],
-            }
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::NonType {
+                value: "land".to_string()
+            }]))
         );
     }
 
@@ -524,12 +489,7 @@ mod tests {
         let (f, _) = parse_target("enchanted creature");
         assert_eq!(
             f,
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: None,
-                properties: vec![FilterProp::EnchantedBy],
-            }
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]))
         );
     }
 
@@ -538,12 +498,7 @@ mod tests {
         let (f, _) = parse_target("equipped creature");
         assert_eq!(
             f,
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: None,
-                properties: vec![FilterProp::EquippedBy],
-            }
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy]))
         );
     }
 
@@ -552,12 +507,7 @@ mod tests {
         let (f, _) = parse_target("each opponent");
         assert_eq!(
             f,
-            TargetFilter::Typed {
-                card_type: None,
-                subtype: None,
-                controller: Some(ControllerRef::Opponent),
-                properties: vec![],
-            }
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
         );
     }
 
@@ -566,12 +516,7 @@ mod tests {
         let (f, _) = parse_target("target opponent");
         assert_eq!(
             f,
-            TargetFilter::Typed {
-                card_type: None,
-                subtype: None,
-                controller: Some(ControllerRef::Opponent),
-                properties: vec![],
-            }
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
         );
     }
 
@@ -584,21 +529,11 @@ mod tests {
                 assert_eq!(filters.len(), 2);
                 assert_eq!(
                     filters[0],
-                    TargetFilter::Typed {
-                        card_type: Some(TypeFilter::Creature),
-                        subtype: None,
-                        controller: Some(ControllerRef::You),
-                        properties: vec![],
-                    }
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
                 );
                 assert_eq!(
                     filters[1],
-                    TargetFilter::Typed {
-                        card_type: Some(TypeFilter::Artifact),
-                        subtype: None,
-                        controller: Some(ControllerRef::You),
-                        properties: vec![],
-                    }
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You))
                 );
             }
             _ => panic!("Expected Or filter, got {:?}", f),
@@ -624,14 +559,11 @@ mod tests {
         let (f, _) = parse_type_phrase("white creature you control");
         assert_eq!(
             f,
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: Some(ControllerRef::You),
-                properties: vec![FilterProp::HasColor {
-                    color: "White".to_string()
-                }],
-            }
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::HasColor { color: "White".to_string() }])
+            )
         );
     }
 
@@ -640,14 +572,9 @@ mod tests {
         let (f, _) = parse_type_phrase("red spell");
         assert_eq!(
             f,
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Card),
-                subtype: None,
-                controller: None,
-                properties: vec![FilterProp::HasColor {
-                    color: "Red".to_string()
-                }],
-            }
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasColor {
+                color: "Red".to_string()
+            }]))
         );
     }
 
@@ -656,12 +583,7 @@ mod tests {
         let (f, _) = parse_type_phrase("spell with mana value 4 or greater");
         assert_eq!(
             f,
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Card),
-                subtype: None,
-                controller: None,
-                properties: vec![FilterProp::CmcGE { value: 4 }],
-            }
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::CmcGE { value: 4 }]))
         );
     }
 
@@ -670,12 +592,11 @@ mod tests {
         let (f, rest) = parse_type_phrase("creature you control with power 2 or less enter");
         assert_eq!(
             f,
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: Some(ControllerRef::You),
-                properties: vec![FilterProp::PowerLE { value: 2 }],
-            }
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::PowerLE { value: 2 }])
+            )
         );
         // Remaining text should be the event verb
         assert!(rest.trim_start().starts_with("enter"), "rest = {:?}", rest);
@@ -686,12 +607,7 @@ mod tests {
         let (f, _) = parse_type_phrase("creature with power 3 or greater");
         assert_eq!(
             f,
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: None,
-                properties: vec![FilterProp::PowerGE { value: 3 }],
-            }
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::PowerGE { value: 3 }]))
         );
     }
 
@@ -700,14 +616,9 @@ mod tests {
         let (f, rest) = parse_target("target card from a graveyard");
         assert_eq!(
             f,
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Card),
-                subtype: None,
-                controller: None,
-                properties: vec![FilterProp::InZone {
-                    zone: Zone::Graveyard
-                }],
-            }
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard
+            }]))
         );
         assert_eq!(rest.trim(), "");
     }
@@ -717,14 +628,11 @@ mod tests {
         let (f, rest) = parse_target("target creature card in your graveyard");
         assert_eq!(
             f,
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: Some(ControllerRef::You),
-                properties: vec![FilterProp::InZone {
-                    zone: Zone::Graveyard
-                }],
-            }
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone { zone: Zone::Graveyard }])
+            )
         );
         assert_eq!(rest.trim(), "");
     }
@@ -734,12 +642,7 @@ mod tests {
         let (f, rest) = parse_target("target card from exile");
         assert_eq!(
             f,
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Card),
-                subtype: None,
-                controller: None,
-                properties: vec![FilterProp::InZone { zone: Zone::Exile }],
-            }
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InZone { zone: Zone::Exile }]))
         );
         assert_eq!(rest.trim(), "");
     }
@@ -749,14 +652,9 @@ mod tests {
         let (f, _) = parse_target("target card in a graveyard");
         assert_eq!(
             f,
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Card),
-                subtype: None,
-                controller: None,
-                properties: vec![FilterProp::InZone {
-                    zone: Zone::Graveyard
-                }],
-            }
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard
+            }]))
         );
     }
 
@@ -765,12 +663,11 @@ mod tests {
         let (f, _) = parse_type_phrase("creature you control of the chosen type");
         assert_eq!(
             f,
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: Some(ControllerRef::You),
-                properties: vec![FilterProp::IsChosenCreatureType],
-            }
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::IsChosenCreatureType])
+            )
         );
     }
 }

@@ -167,7 +167,7 @@ pub fn resolve_ability_chain(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{DamageAmount, SpellContext, TargetFilter, TargetRef};
+    use crate::types::ability::{DamageAmount, TargetFilter, TargetRef};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -248,19 +248,16 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         );
-        let ability = ResolvedAbility {
-            effect: Effect::DealDamage {
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
                 amount: DamageAmount::Fixed(2),
                 target: TargetFilter::Any,
             },
-            targets: vec![TargetRef::Player(PlayerId(1))],
-            source_id: ObjectId(100),
-            controller: PlayerId(0),
-            sub_ability: Some(Box::new(sub)),
-            duration: None,
-            condition: None,
-            context: SpellContext::default(),
-        };
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
         let mut events = Vec::new();
 
         let result = resolve_ability_chain(&mut state, &ability, &mut events, 0);

@@ -10,7 +10,7 @@ use crate::game::deck_loading::derive_colors_from_mana_cost;
 use crate::parser::oracle::parse_oracle_text;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Effect,
-    ManaProduction, PtValue, StaticDefinition, TargetFilter, TypeFilter,
+    ManaProduction, PtValue, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::card::{CardFace, CardLayout, CardRules};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -90,9 +90,8 @@ fn synthesize_basic_land_mana(face: &mut CardFace) {
 
     for (subtype, color) in land_mana {
         if face.card_type.subtypes.iter().any(|s| s == subtype) {
-            face.abilities.push(AbilityDefinition {
-                cost: Some(AbilityCost::Tap),
-                ..AbilityDefinition::new(
+            face.abilities.push(
+                AbilityDefinition::new(
                     AbilityKind::Activated,
                     Effect::Mana {
                         produced: ManaProduction::Fixed {
@@ -101,7 +100,8 @@ fn synthesize_basic_land_mana(face: &mut CardFace) {
                         restrictions: vec![],
                     },
                 )
-            });
+                .cost(AbilityCost::Tap),
+            );
         }
     }
 }
@@ -112,20 +112,15 @@ fn synthesize_equip(face: &mut CardFace) {
         .iter()
         .filter_map(|kw| {
             if let Keyword::Equip(cost) = kw {
-                Some(AbilityDefinition {
-                    cost: Some(AbilityCost::Mana { cost: cost.clone() }),
-                    ..AbilityDefinition::new(
+                Some(
+                    AbilityDefinition::new(
                         AbilityKind::Activated,
                         Effect::Attach {
-                            target: TargetFilter::Typed {
-                                card_type: Some(TypeFilter::Creature),
-                                subtype: None,
-                                controller: Some(ControllerRef::You),
-                                properties: vec![],
-                            },
+                            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
                         },
                     )
-                })
+                    .cost(AbilityCost::Mana { cost: cost.clone() }),
+                )
             } else {
                 None
             }

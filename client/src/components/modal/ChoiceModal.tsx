@@ -11,6 +11,7 @@ interface ChoiceModalProps {
   subtitle?: string;
   options: ChoiceOption[];
   onChoose: (id: string) => void;
+  onClose?: () => void;
 }
 
 export function ChoiceModal({
@@ -18,6 +19,7 @@ export function ChoiceModal({
   subtitle,
   options,
   onChoose,
+  onClose,
 }: ChoiceModalProps) {
   return (
     <AnimatePresence>
@@ -29,7 +31,7 @@ export function ChoiceModal({
         transition={{ duration: 0.2 }}
       >
         {/* Backdrop */}
-        <div className="absolute inset-0 bg-black/60" />
+        <div className="absolute inset-0 bg-black/60" onClick={onClose} />
 
         {/* Modal card */}
         <motion.div

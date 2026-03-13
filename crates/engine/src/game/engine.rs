@@ -893,23 +893,22 @@ fn resolved_ability_from_definition(
     controller: PlayerId,
     targets: Vec<TargetRef>,
 ) -> ResolvedAbility {
-    ResolvedAbility {
-        effect: def.effect.clone(),
-        targets,
-        source_id,
-        controller,
-        sub_ability: def.sub_ability.as_ref().map(|sub| {
-            Box::new(resolved_ability_from_definition(
-                sub,
-                source_id,
-                controller,
-                Vec::new(),
-            ))
-        }),
-        duration: def.duration.clone(),
-        condition: def.condition.clone(),
-        context: crate::types::ability::SpellContext::default(),
+    let mut resolved = ResolvedAbility::new(def.effect.clone(), targets, source_id, controller);
+    if let Some(sub) = &def.sub_ability {
+        resolved = resolved.sub_ability(resolved_ability_from_definition(
+            sub,
+            source_id,
+            controller,
+            Vec::new(),
+        ));
     }
+    if let Some(d) = def.duration.clone() {
+        resolved = resolved.duration(d);
+    }
+    if let Some(c) = def.condition.clone() {
+        resolved = resolved.condition(c);
+    }
+    resolved
 }
 
 fn handle_play_land(
@@ -1356,7 +1355,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, DamageAmount, Effect, ResolvedAbility,
-        SpellContext, TargetFilter,
+        TargetFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -1373,16 +1372,17 @@ mod tests {
         } else {
             AbilityKind::Spell
         };
-        AbilityDefinition {
-            cost,
-            ..AbilityDefinition::new(
-                kind,
-                Effect::DealDamage {
-                    amount: DamageAmount::Fixed(amount),
-                    target: TargetFilter::Any,
-                },
-            )
+        let mut def = AbilityDefinition::new(
+            kind,
+            Effect::DealDamage {
+                amount: DamageAmount::Fixed(amount),
+                target: TargetFilter::Any,
+            },
+        );
+        if let Some(c) = cost {
+            def = def.cost(c);
         }
+        def
     }
 
     fn setup_game_at_main_phase() -> GameState {
@@ -1693,19 +1693,15 @@ mod tests {
                 controller: PlayerId(0),
                 kind: StackEntryKind::Spell {
                     card_id: CardId(1),
-                    ability: ResolvedAbility {
-                        effect: crate::types::ability::Effect::Unimplemented {
+                    ability: ResolvedAbility::new(
+                        crate::types::ability::Effect::Unimplemented {
                             name: String::new(),
                             description: None,
                         },
-                        targets: vec![],
-                        source_id: id1,
-                        controller: PlayerId(0),
-                        sub_ability: None,
-                        duration: None,
-                        condition: None,
-                        context: SpellContext::default(),
-                    },
+                        vec![],
+                        id1,
+                        PlayerId(0),
+                    ),
                 },
             },
             &mut events,
@@ -1718,19 +1714,15 @@ mod tests {
                 controller: PlayerId(0),
                 kind: StackEntryKind::Spell {
                     card_id: CardId(2),
-                    ability: ResolvedAbility {
-                        effect: crate::types::ability::Effect::Unimplemented {
+                    ability: ResolvedAbility::new(
+                        crate::types::ability::Effect::Unimplemented {
                             name: String::new(),
                             description: None,
                         },
-                        targets: vec![],
-                        source_id: id2,
-                        controller: PlayerId(0),
-                        sub_ability: None,
-                        duration: None,
-                        condition: None,
-                        context: SpellContext::default(),
-                    },
+                        vec![],
+                        id2,
+                        PlayerId(0),
+                    ),
                 },
             },
             &mut events,
@@ -1848,39 +1840,37 @@ mod tests {
         {
             let obj = state.objects.get_mut(&verge_id).unwrap();
             obj.card_types.core_types.push(CoreType::Land);
-            obj.abilities
-                .push(crate::types::ability::AbilityDefinition {
-                    cost: Some(crate::types::ability::AbilityCost::Tap),
-                    ..AbilityDefinition::new(
-                        crate::types::ability::AbilityKind::Activated,
-                        crate::types::ability::Effect::Mana {
-                            produced: crate::types::ability::ManaProduction::Fixed {
-                                colors: vec![crate::types::mana::ManaColor::Blue],
-                            },
-                            restrictions: vec![],
+            obj.abilities.push(
+                AbilityDefinition::new(
+                    crate::types::ability::AbilityKind::Activated,
+                    crate::types::ability::Effect::Mana {
+                        produced: crate::types::ability::ManaProduction::Fixed {
+                            colors: vec![crate::types::mana::ManaColor::Blue],
                         },
-                    )
-                });
-            obj.abilities
-                .push(crate::types::ability::AbilityDefinition {
-                    cost: Some(crate::types::ability::AbilityCost::Tap),
-                    sub_ability: Some(Box::new(crate::types::ability::AbilityDefinition::new(
-                        crate::types::ability::AbilityKind::Activated,
-                        crate::types::ability::Effect::Unimplemented {
-                            name: "activate_only_if_controls_land_subtype_any".to_string(),
-                            description: Some("Island|Swamp".to_string()),
+                        restrictions: vec![],
+                    },
+                )
+                .cost(crate::types::ability::AbilityCost::Tap),
+            );
+            obj.abilities.push(
+                AbilityDefinition::new(
+                    crate::types::ability::AbilityKind::Activated,
+                    crate::types::ability::Effect::Mana {
+                        produced: crate::types::ability::ManaProduction::Fixed {
+                            colors: vec![crate::types::mana::ManaColor::Black],
                         },
-                    ))),
-                    ..AbilityDefinition::new(
-                        crate::types::ability::AbilityKind::Activated,
-                        crate::types::ability::Effect::Mana {
-                            produced: crate::types::ability::ManaProduction::Fixed {
-                                colors: vec![crate::types::mana::ManaColor::Black],
-                            },
-                            restrictions: vec![],
-                        },
-                    )
-                });
+                        restrictions: vec![],
+                    },
+                )
+                .cost(crate::types::ability::AbilityCost::Tap)
+                .sub_ability(AbilityDefinition::new(
+                    crate::types::ability::AbilityKind::Activated,
+                    crate::types::ability::Effect::Unimplemented {
+                        name: "activate_only_if_controls_land_subtype_any".to_string(),
+                        description: Some("Island|Swamp".to_string()),
+                    },
+                )),
+            );
         }
 
         let result = apply(
@@ -2250,7 +2240,7 @@ mod tests {
 
     // === Phase 04 Plan 03 Integration Tests ===
 
-    use crate::types::ability::TargetRef;
+    use crate::types::ability::{TargetRef, TypedFilter};
     use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 
     fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usize) {
@@ -2457,12 +2447,7 @@ mod tests {
             obj.abilities.push(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Counter {
-                    target: TargetFilter::Typed {
-                        card_type: Some(crate::types::ability::TypeFilter::Card),
-                        subtype: None,
-                        controller: None,
-                        properties: vec![],
-                    },
+                    target: TargetFilter::Typed(TypedFilter::card()),
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -2544,12 +2529,7 @@ mod tests {
                 Effect::Pump {
                     power: crate::types::ability::PtValue::Fixed(3),
                     toughness: crate::types::ability::PtValue::Fixed(3),
-                    target: TargetFilter::Typed {
-                        card_type: Some(crate::types::ability::TypeFilter::Creature),
-                        subtype: None,
-                        controller: Some(crate::types::ability::ControllerRef::You),
-                        properties: vec![],
-                    },
+                    target: TargetFilter::Typed(TypedFilter::creature().controller(crate::types::ability::ControllerRef::You)),
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -2675,9 +2655,8 @@ mod tests {
         {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
-            obj.abilities.push(AbilityDefinition {
-                cost: Some(AbilityCost::Tap),
-                ..AbilityDefinition::new(
+            obj.abilities.push(
+                AbilityDefinition::new(
                     AbilityKind::Activated,
                     Effect::Mana {
                         produced: crate::types::ability::ManaProduction::Fixed {
@@ -2686,7 +2665,8 @@ mod tests {
                         restrictions: vec![],
                     },
                 )
-            });
+                .cost(AbilityCost::Tap),
+            );
         }
 
         let result = apply(
@@ -2740,9 +2720,8 @@ mod tests {
         {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
-            obj.abilities.push(AbilityDefinition {
-                cost: Some(AbilityCost::Tap),
-                ..AbilityDefinition::new(
+            obj.abilities.push(
+                AbilityDefinition::new(
                     AbilityKind::Activated,
                     Effect::Mana {
                         produced: crate::types::ability::ManaProduction::Fixed {
@@ -2751,7 +2730,8 @@ mod tests {
                         restrictions: vec![],
                     },
                 )
-            });
+                .cost(AbilityCost::Tap),
+            );
         }
 
         let result = apply(
@@ -2991,19 +2971,15 @@ mod tests {
                 controller: PlayerId(1),
                 kind: crate::types::game_state::StackEntryKind::Spell {
                     card_id: CardId(99),
-                    ability: crate::types::ability::ResolvedAbility {
-                        effect: crate::types::ability::Effect::Unimplemented {
+                    ability: crate::types::ability::ResolvedAbility::new(
+                        crate::types::ability::Effect::Unimplemented {
                             name: String::new(),
                             description: None,
                         },
-                        targets: vec![],
-                        source_id: ObjectId(99),
-                        controller: PlayerId(1),
-                        sub_ability: None,
-                        duration: None,
-                        condition: None,
-                        context: SpellContext::default(),
-                    },
+                        vec![],
+                        ObjectId(99),
+                        PlayerId(1),
+                    ),
                 },
             });
             let result = apply(
@@ -3092,7 +3068,7 @@ mod trigger_target_tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ControllerRef, Effect, SpellContext, TargetFilter, TargetRef, TriggerDefinition, TypeFilter,
+        ControllerRef, Effect, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
@@ -3153,25 +3129,17 @@ mod trigger_target_tests {
         }
 
         // Manually set up the pending trigger state (as process_triggers would)
-        let ability = crate::types::ability::ResolvedAbility {
-            effect: Effect::ChangeZone {
+        let ability = crate::types::ability::ResolvedAbility::new(
+            Effect::ChangeZone {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
-                target: TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Creature),
-                    subtype: None,
-                    controller: Some(ControllerRef::Opponent),
-                    properties: vec![],
-                },
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent)),
             },
-            targets: Vec::new(),
-            source_id: trigger_creature,
-            controller: PlayerId(0),
-            sub_ability: None,
-            duration: Some(crate::types::ability::Duration::UntilHostLeavesPlay),
-            condition: None,
-            context: SpellContext::default(),
-        };
+            Vec::new(),
+            trigger_creature,
+            PlayerId(0),
+        )
+        .duration(crate::types::ability::Duration::UntilHostLeavesPlay);
 
         state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
             source_id: trigger_creature,
@@ -3590,19 +3558,17 @@ mod phase_trigger_regression_tests {
         );
         let mut events = Vec::new();
 
-        let effect_def = AbilityDefinition {
-            sub_ability: Some(Box::new(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::LoseLife { amount: 2 },
-            ))),
-            ..AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Choose {
-                    choice_type: crate::types::ability::ChoiceType::BasicLandType,
-                    persist: false,
-                },
-            )
-        };
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Choose {
+                choice_type: crate::types::ability::ChoiceType::BasicLandType,
+                persist: false,
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife { amount: 2 },
+        ));
 
         let waiting_for =
             apply_post_replacement_effect(&mut state, &effect_def, Some(source_id), &mut events);

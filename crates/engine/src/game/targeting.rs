@@ -1,4 +1,4 @@
-use crate::types::ability::{FilterProp, TargetFilter, TargetRef};
+use crate::types::ability::{FilterProp, TargetFilter, TypedFilter, TargetRef};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{Keyword, ProtectionTarget};
@@ -25,11 +25,11 @@ pub fn find_legal_targets(
 
     // Typed filter with no card_type targets players, not permanents.
     // e.g. "target opponent" → Typed { card_type: None, controller: Opponent }
-    if let TargetFilter::Typed {
+    if let TargetFilter::Typed(TypedFilter {
         card_type: None,
         controller,
         ..
-    } = filter
+    }) = filter
     {
         for player in &state.players {
             let is_opponent = player.id != source_controller;
@@ -165,11 +165,11 @@ fn add_stack_spells(
 fn filter_targets_stack_spells(filter: &TargetFilter) -> bool {
     use crate::types::ability::TypeFilter;
     match filter {
-        TargetFilter::Typed {
+        TargetFilter::Typed(TypedFilter {
             card_type,
             properties,
             ..
-        } => {
+        }) => {
             let in_stack = properties
                 .iter()
                 .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Stack));
@@ -265,7 +265,7 @@ fn zone_object_ids(state: &GameState, zone: Zone) -> Vec<ObjectId> {
 /// Extract all explicit `InZone` zones from a target filter, recursing through combinators.
 fn extract_explicit_zones(filter: &TargetFilter) -> Vec<Zone> {
     match filter {
-        TargetFilter::Typed { properties, .. } => properties
+        TargetFilter::Typed(TypedFilter { properties, .. }) => properties
             .iter()
             .filter_map(|p| match p {
                 FilterProp::InZone { zone } => Some(*zone),
@@ -321,12 +321,7 @@ mod tests {
     }
 
     fn creature_filter() -> TargetFilter {
-        TargetFilter::Typed {
-            card_type: Some(TypeFilter::Creature),
-            subtype: None,
-            controller: None,
-            properties: vec![],
-        }
+        TargetFilter::Typed(TypedFilter::creature())
     }
 
     #[test]
@@ -569,12 +564,7 @@ mod tests {
     #[test]
     fn find_legal_targets_creature_filter() {
         let (state, c0, c1, _land) = setup_with_typed_creatures();
-        let filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Creature),
-            subtype: None,
-            controller: None,
-            properties: vec![],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::creature());
         let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(c0)));
         assert!(targets.contains(&TargetRef::Object(c1)));
@@ -584,14 +574,9 @@ mod tests {
     #[test]
     fn find_legal_targets_permanent_opponent_nonland() {
         let (state, _c0, c1, _land) = setup_with_typed_creatures();
-        let filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Permanent),
-            subtype: None,
-            controller: Some(ControllerRef::Opponent),
-            properties: vec![FilterProp::NonType {
-                value: "Land".to_string(),
-            }],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::Opponent).properties(vec![FilterProp::NonType {
+            value: "Land".to_string(),
+        }]));
         let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
         // Should find opponent's creature but not their land
         assert!(targets.contains(&TargetRef::Object(c1)));
@@ -621,12 +606,7 @@ mod tests {
     #[test]
     fn find_legal_targets_opponent_as_player() {
         let (state, _c0, _c1, _land) = setup_with_typed_creatures();
-        let filter = TargetFilter::Typed {
-            card_type: None,
-            subtype: None,
-            controller: Some(ControllerRef::Opponent),
-            properties: vec![],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
         let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
         assert_eq!(targets.len(), 1);
         assert!(targets.contains(&TargetRef::Player(PlayerId(1))));
@@ -641,12 +621,7 @@ mod tests {
             .unwrap()
             .keywords
             .push(Keyword::Hexproof);
-        let filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Creature),
-            subtype: None,
-            controller: None,
-            properties: vec![],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::creature());
         // Player 0 can't target hexproof creature controlled by player 1
         let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
         assert!(!targets.contains(&TargetRef::Object(c1)));
@@ -681,12 +656,7 @@ mod tests {
                 ),
             },
         });
-        let filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Card),
-            subtype: None,
-            controller: None,
-            properties: vec![],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::card());
         let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(spell_id)));
     }
@@ -738,12 +708,7 @@ mod tests {
             .push(crate::types::card_type::CoreType::Artifact);
         spell_obj.zone = crate::types::zones::Zone::Stack;
 
-        let filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Artifact),
-            subtype: None,
-            controller: None,
-            properties: vec![FilterProp::InZone { zone: Zone::Stack }],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![FilterProp::InZone { zone: Zone::Stack }]));
         let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(spell_id)));
         assert!(!targets.contains(&TargetRef::Object(c0)));
@@ -785,14 +750,9 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        let filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Card),
-            subtype: None,
-            controller: None,
-            properties: vec![FilterProp::InZone {
-                zone: Zone::Graveyard,
-            }],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InZone {
+            zone: Zone::Graveyard,
+        }]));
         let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(gy_card)));
         assert!(!targets.contains(&TargetRef::Object(bf_card)));
@@ -817,14 +777,9 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        let filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Card),
-            subtype: None,
-            controller: None,
-            properties: vec![FilterProp::InZone {
-                zone: Zone::Graveyard,
-            }],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InZone {
+            zone: Zone::Graveyard,
+        }]));
         let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
         assert!(targets.is_empty());
     }
@@ -865,14 +820,9 @@ mod tests {
             .color
             .push(ManaColor::Red);
 
-        let filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Card),
-            subtype: None,
-            controller: None,
-            properties: vec![FilterProp::InZone {
-                zone: Zone::Graveyard,
-            }],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InZone {
+            zone: Zone::Graveyard,
+        }]));
         let targets = find_legal_targets(&state, &filter, PlayerId(0), red_source);
         assert!(!targets.contains(&TargetRef::Object(gy_card)));
     }
@@ -894,14 +844,9 @@ mod tests {
             obj.keywords.push(Keyword::Hexproof);
         }
 
-        let filter = TargetFilter::Typed {
-            card_type: Some(TypeFilter::Card),
-            subtype: None,
-            controller: None,
-            properties: vec![FilterProp::InZone {
-                zone: Zone::Graveyard,
-            }],
-        };
+        let filter = TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InZone {
+            zone: Zone::Graveyard,
+        }]));
         // Opponent (player 0) CAN target hexproof card in graveyard
         let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(gy_card)));

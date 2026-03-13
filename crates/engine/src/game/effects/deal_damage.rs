@@ -162,7 +162,7 @@ pub fn resolve_all(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::TargetFilter;
+    use crate::types::ability::{TargetFilter, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -261,12 +261,12 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::DamageAll {
                 amount: DamageAmount::Fixed(2),
-                target: TargetFilter::Typed {
+                target: TargetFilter::Typed(TypedFilter {
                     card_type: Some(crate::types::ability::TypeFilter::Creature),
                     subtype: None,
                     controller: None,
                     properties: vec![],
-                },
+                }),
             },
             vec![],
             ObjectId(100),

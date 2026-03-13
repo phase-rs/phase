@@ -69,7 +69,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::TypeFilter;
+    use crate::types::ability::{TypeFilter, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -142,12 +142,7 @@ mod tests {
         let _land = add_library_land(&mut state, 2, PlayerId(0), "Forest", true);
 
         let ability = make_search_ability(
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: None,
-                properties: vec![],
-            },
+            TargetFilter::Typed(TypedFilter::creature()),
             1,
         );
         let mut events = Vec::new();
@@ -219,12 +214,7 @@ mod tests {
         add_library_land(&mut state, 2, PlayerId(0), "Plains", true);
 
         let ability = make_search_ability(
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: None,
-                properties: vec![],
-            },
+            TargetFilter::Typed(TypedFilter::creature()),
             1,
         );
         let mut events = Vec::new();
@@ -244,12 +234,7 @@ mod tests {
         add_library_land(&mut state, 2, PlayerId(0), "Forest", true);
 
         let ability = make_search_ability(
-            TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: None,
-                properties: vec![],
-            },
+            TargetFilter::Typed(TypedFilter::creature()),
             1,
         );
         let mut events = Vec::new();

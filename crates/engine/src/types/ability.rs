@@ -497,6 +497,55 @@ pub enum FilterProp {
     },
 }
 
+/// Named fields for the `TargetFilter::Typed` variant, extracted for builder ergonomics.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TypedFilter {
+    #[serde(default)]
+    pub card_type: Option<TypeFilter>,
+    #[serde(default)]
+    pub subtype: Option<String>,
+    #[serde(default)]
+    pub controller: Option<ControllerRef>,
+    #[serde(default)]
+    pub properties: Vec<FilterProp>,
+}
+
+impl TypedFilter {
+    pub fn new(card_type: TypeFilter) -> Self {
+        Self { card_type: Some(card_type), ..Self::default() }
+    }
+    pub fn creature() -> Self {
+        Self::new(TypeFilter::Creature)
+    }
+    pub fn permanent() -> Self {
+        Self::new(TypeFilter::Permanent)
+    }
+    pub fn land() -> Self {
+        Self::new(TypeFilter::Land)
+    }
+    pub fn card() -> Self {
+        Self::new(TypeFilter::Card)
+    }
+    pub fn controller(mut self, ctrl: ControllerRef) -> Self {
+        self.controller = Some(ctrl);
+        self
+    }
+    pub fn subtype(mut self, sub: String) -> Self {
+        self.subtype = Some(sub);
+        self
+    }
+    pub fn properties(mut self, props: Vec<FilterProp>) -> Self {
+        self.properties = props;
+        self
+    }
+}
+
+impl From<TypedFilter> for TargetFilter {
+    fn from(f: TypedFilter) -> Self {
+        TargetFilter::Typed(f)
+    }
+}
+
 /// Typed target filter replacing all Forge filter strings and TargetSpec.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
@@ -506,16 +555,7 @@ pub enum TargetFilter {
     Player,
     Controller,
     SelfRef,
-    Typed {
-        #[serde(default)]
-        card_type: Option<TypeFilter>,
-        #[serde(default)]
-        subtype: Option<String>,
-        #[serde(default)]
-        controller: Option<ControllerRef>,
-        #[serde(default)]
-        properties: Vec<FilterProp>,
-    },
+    Typed(TypedFilter),
     Not {
         filter: Box<TargetFilter>,
     },
@@ -1186,6 +1226,41 @@ impl AbilityDefinition {
             condition: None,
         }
     }
+
+    pub fn cost(mut self, cost: AbilityCost) -> Self {
+        self.cost = Some(cost);
+        self
+    }
+
+    pub fn sub_ability(mut self, ability: AbilityDefinition) -> Self {
+        self.sub_ability = Some(Box::new(ability));
+        self
+    }
+
+    pub fn duration(mut self, duration: Duration) -> Self {
+        self.duration = Some(duration);
+        self
+    }
+
+    pub fn description(mut self, desc: String) -> Self {
+        self.description = Some(desc);
+        self
+    }
+
+    pub fn target_prompt(mut self, prompt: String) -> Self {
+        self.target_prompt = Some(prompt);
+        self
+    }
+
+    pub fn sorcery_speed(mut self) -> Self {
+        self.sorcery_speed = true;
+        self
+    }
+
+    pub fn condition(mut self, condition: AbilityCondition) -> Self {
+        self.condition = Some(condition);
+        self
+    }
 }
 
 /// Condition on an ability within a sub_ability chain.
@@ -1632,6 +1707,26 @@ impl ResolvedAbility {
             context: SpellContext::default(),
         }
     }
+
+    pub fn sub_ability(mut self, ability: ResolvedAbility) -> Self {
+        self.sub_ability = Some(Box::new(ability));
+        self
+    }
+
+    pub fn duration(mut self, duration: Duration) -> Self {
+        self.duration = Some(duration);
+        self
+    }
+
+    pub fn condition(mut self, condition: AbilityCondition) -> Self {
+        self.condition = Some(condition);
+        self
+    }
+
+    pub fn context(mut self, context: SpellContext) -> Self {
+        self.context = context;
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1686,19 +1781,15 @@ mod tests {
 
     #[test]
     fn resolved_ability_serializes_and_roundtrips() {
-        let ability = ResolvedAbility {
-            effect: Effect::DealDamage {
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
                 amount: DamageAmount::Fixed(3),
                 target: TargetFilter::Any,
             },
-            targets: vec![TargetRef::Object(ObjectId(10))],
-            source_id: ObjectId(1),
-            controller: PlayerId(0),
-            sub_ability: None,
-            duration: None,
-            condition: None,
-            context: SpellContext::default(),
-        };
+            vec![TargetRef::Object(ObjectId(10))],
+            ObjectId(1),
+            PlayerId(0),
+        );
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
         assert_eq!(ability, deserialized);
@@ -1706,29 +1797,17 @@ mod tests {
 
     #[test]
     fn resolved_ability_with_sub_ability_roundtrips() {
-        let sub = ResolvedAbility {
-            effect: Effect::Draw { count: 1 },
-            targets: vec![],
-            source_id: ObjectId(1),
-            controller: PlayerId(0),
-            sub_ability: None,
-            duration: None,
-            condition: None,
-            context: SpellContext::default(),
-        };
-        let ability = ResolvedAbility {
-            effect: Effect::DealDamage {
+        let sub = ResolvedAbility::new(Effect::Draw { count: 1 }, vec![], ObjectId(1), PlayerId(0));
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
                 amount: DamageAmount::Fixed(3),
                 target: TargetFilter::Any,
             },
-            targets: vec![TargetRef::Player(PlayerId(1))],
-            source_id: ObjectId(1),
-            controller: PlayerId(0),
-            sub_ability: Some(Box::new(sub)),
-            duration: None,
-            condition: None,
-            context: SpellContext::default(),
-        };
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
         assert_eq!(ability, deserialized);
@@ -1801,12 +1880,7 @@ mod tests {
     fn static_definition_roundtrip() {
         let static_def = StaticDefinition {
             mode: StaticMode::Continuous,
-            affected: Some(TargetFilter::Typed {
-                card_type: Some(TypeFilter::Creature),
-                subtype: None,
-                controller: Some(ControllerRef::You),
-                properties: vec![],
-            }),
+            affected: Some(TypedFilter::creature().controller(ControllerRef::You).into()),
             modifications: vec![
                 ContinuousModification::AddPower { value: 1 },
                 ContinuousModification::AddToughness { value: 1 },
@@ -1847,12 +1921,7 @@ mod tests {
     fn target_filter_nested_roundtrip() {
         let filter = TargetFilter::And {
             filters: vec![
-                TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Creature),
-                    subtype: None,
-                    controller: Some(ControllerRef::You),
-                    properties: vec![],
-                },
+                TypedFilter::creature().controller(ControllerRef::You).into(),
                 TargetFilter::Not {
                     filter: Box::new(TargetFilter::SelfRef),
                 },
@@ -1865,29 +1934,27 @@ mod tests {
 
     #[test]
     fn ability_definition_with_sub_ability_chain_roundtrip() {
-        let ability = AbilityDefinition {
-            cost: Some(AbilityCost::Mana {
-                cost: ManaCost::Cost {
-                    shards: vec![],
-                    generic: 2,
-                },
-            }),
-            sub_ability: Some(Box::new(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Draw { count: 1 },
-            ))),
-            duration: Some(Duration::UntilEndOfTurn),
-            description: Some("Deal 3 damage, then draw a card.".to_string()),
-            target_prompt: Some("Choose a target".to_string()),
-            sorcery_speed: true,
-            ..AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::DealDamage {
-                    amount: DamageAmount::Fixed(3),
-                    target: TargetFilter::Any,
-                },
-            )
-        };
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::DealDamage {
+                amount: DamageAmount::Fixed(3),
+                target: TargetFilter::Any,
+            },
+        )
+        .cost(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            },
+        })
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw { count: 1 },
+        ))
+        .duration(Duration::UntilEndOfTurn)
+        .description("Deal 3 damage, then draw a card.".to_string())
+        .target_prompt("Choose a target".to_string())
+        .sorcery_speed();
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: AbilityDefinition = serde_json::from_str(&json).unwrap();
         assert_eq!(ability, deserialized);
@@ -1913,29 +1980,14 @@ mod tests {
             AbilityCost::Exile {
                 count: 1,
                 zone: None,
-                filter: Some(TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Creature),
-                    subtype: None,
-                    controller: None,
-                    properties: vec![],
-                }),
+                filter: Some(TypedFilter::creature().into()),
             },
             AbilityCost::TapCreatures {
                 count: 2,
-                filter: TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Creature),
-                    subtype: None,
-                    controller: Some(ControllerRef::You),
-                    properties: vec![],
-                },
+                filter: TypedFilter::creature().controller(ControllerRef::You).into(),
             },
             AbilityCost::Sacrifice {
-                target: TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Artifact),
-                    subtype: None,
-                    controller: None,
-                    properties: vec![],
-                },
+                target: TypedFilter::new(TypeFilter::Artifact).into(),
             },
         ];
         let json = serde_json::to_string(&costs).unwrap();
@@ -2063,12 +2115,7 @@ mod tests {
                 threshold: 7,
             },
             StaticCondition::IsPresent {
-                filter: Some(TargetFilter::Typed {
-                    card_type: Some(TypeFilter::Creature),
-                    subtype: None,
-                    controller: Some(ControllerRef::You),
-                    properties: vec![],
-                }),
+                filter: Some(TypedFilter::creature().controller(ControllerRef::You).into()),
             },
             StaticCondition::CheckSVar {
                 var: "X".to_string(),
@@ -2185,20 +2232,17 @@ mod tests {
 
     #[test]
     fn resolved_ability_duration_roundtrips() {
-        let ability = ResolvedAbility {
-            effect: Effect::ChangeZone {
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
             },
-            targets: vec![TargetRef::Object(ObjectId(10))],
-            source_id: ObjectId(1),
-            controller: PlayerId(0),
-            sub_ability: None,
-            duration: Some(Duration::UntilHostLeavesPlay),
-            condition: None,
-            context: SpellContext::default(),
-        };
+            vec![TargetRef::Object(ObjectId(10))],
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .duration(Duration::UntilHostLeavesPlay);
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
         assert_eq!(ability, deserialized);

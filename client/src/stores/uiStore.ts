@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ObjectId } from "../adapter/types";
+import type { GameAction, ObjectId } from "../adapter/types";
 
 interface UiStoreState {
   selectedObjectId: ObjectId | null;
@@ -22,6 +22,7 @@ interface UiStoreState {
   showTurnBanner: boolean;
   turnBannerText: string;
   focusedOpponent: number | null;
+  pendingAbilityChoice: { objectId: ObjectId; actions: GameAction[] } | null;
 }
 
 interface UiStoreActions {
@@ -45,6 +46,7 @@ interface UiStoreActions {
   clearEndTurnMode: () => void;
   flashTurnBanner: (text: string) => void;
   setFocusedOpponent: (id: number | null) => void;
+  setPendingAbilityChoice: (choice: { objectId: ObjectId; actions: GameAction[] } | null) => void;
 }
 
 export type UiStore = UiStoreState & UiStoreActions;
@@ -70,6 +72,7 @@ export const useUiStore = create<UiStore>()((set) => ({
   showTurnBanner: false,
   turnBannerText: "",
   focusedOpponent: null,
+  pendingAbilityChoice: null,
 
   selectObject: (id) => set({ selectedObjectId: id }),
   hoverObject: (id) => set({ hoveredObjectId: id }),
@@ -138,4 +141,5 @@ export const useUiStore = create<UiStore>()((set) => ({
     setTimeout(() => set({ showTurnBanner: false }), 1500);
   },
   setFocusedOpponent: (id) => set({ focusedOpponent: id }),
+  setPendingAbilityChoice: (choice) => set({ pendingAbilityChoice: choice }),
 }));

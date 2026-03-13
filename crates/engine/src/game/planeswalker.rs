@@ -169,7 +169,8 @@ fn build_pw_resolved(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{AbilityCost, AbilityDefinition, AbilityKind, Effect};
+    use crate::types::ability::{AbilityCost, AbilityDefinition, AbilityKind, Effect, TargetFilter,
+    TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::zones::Zone;
@@ -188,12 +189,8 @@ mod tests {
 
     /// Create a loyalty ability with the given cost and effect.
     fn make_loyalty_ability(loyalty_amount: i32, effect: Effect) -> AbilityDefinition {
-        AbilityDefinition {
-            cost: Some(AbilityCost::Loyalty {
-                amount: loyalty_amount,
-            }),
-            ..AbilityDefinition::new(AbilityKind::Activated, effect)
-        }
+        AbilityDefinition::new(AbilityKind::Activated, effect)
+            .cost(AbilityCost::Loyalty { amount: loyalty_amount })
     }
 
     fn create_planeswalker(
@@ -249,12 +246,7 @@ mod tests {
             vec![make_loyalty_ability(
                 -3,
                 Effect::Destroy {
-                    target: crate::types::ability::TargetFilter::Typed {
-                        card_type: Some(crate::types::ability::TypeFilter::Creature),
-                        subtype: None,
-                        controller: None,
-                        properties: vec![],
-                    },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
                 },
             )],
         );
@@ -375,12 +367,7 @@ mod tests {
             vec![make_loyalty_ability(
                 -3,
                 Effect::Destroy {
-                    target: crate::types::ability::TargetFilter::Typed {
-                        card_type: Some(crate::types::ability::TypeFilter::Creature),
-                        subtype: None,
-                        controller: None,
-                        properties: vec![],
-                    },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
                 },
             )],
         );
@@ -394,10 +381,8 @@ mod tests {
     fn parse_loyalty_cost_prefers_typed_ability_cost() {
         use crate::types::ability::{AbilityCost, AbilityKind, Effect};
         // When AbilityCost::Loyalty is set, it should be used
-        let ability = crate::types::ability::AbilityDefinition {
-            cost: Some(AbilityCost::Loyalty { amount: -3 }),
-            ..AbilityDefinition::new(AbilityKind::Activated, Effect::Draw { count: 1 })
-        };
+        let ability = AbilityDefinition::new(AbilityKind::Activated, Effect::Draw { count: 1 })
+            .cost(AbilityCost::Loyalty { amount: -3 });
         assert_eq!(parse_loyalty_cost(&ability), -3);
     }
 
