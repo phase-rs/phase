@@ -605,6 +605,11 @@ pub enum AbilityCost {
         count: u32,
     },
     Exert,
+    /// Blight N — put N -1/-1 counters on a creature you control.
+    /// Used as both activated ability costs and optional additional casting costs.
+    Blight {
+        count: u32,
+    },
     Reveal {
         count: u32,
     },
@@ -1766,6 +1771,16 @@ mod tests {
         assert!(json.contains("\"type\":\"Untap\""));
         let deser: AbilityCost = serde_json::from_str(&json).unwrap();
         assert_eq!(deser, AbilityCost::Untap);
+    }
+
+    #[test]
+    fn blight_cost_roundtrips() {
+        let cost = AbilityCost::Blight { count: 2 };
+        let json = serde_json::to_value(&cost).unwrap();
+        assert_eq!(json["type"], "Blight");
+        assert_eq!(json["count"], 2);
+        let deserialized: AbilityCost = serde_json::from_value(json).unwrap();
+        assert_eq!(deserialized, cost);
     }
 
     // --- Serde roundtrip tests for new typed definitions ---
