@@ -25,6 +25,20 @@ phase.rs is a Magic: The Gathering game engine written in Rust (compiling to nat
 - Am I solving one card or a pattern? → Build the building block, not the special case.
 - Is this the Rust way? → Check how `std` and well-known crates solve similar problems.
 
+### CRITICAL: Building Blocks and Architecture Purity
+
+**Before writing any logic, search for existing building blocks.** The codebase has composable helpers for parsing (`parse_type_phrase`, `parse_non_prefix`, `parse_number`, `parse_target`, `parse_continuous_modifications`), filtering (`FilterProp` variants, `TargetFilter`), and game mechanics (`enter_tapped`, `enter_with_counters`, the replacement pipeline). Duplicating what these already do is a defect.
+
+**Self-review every change as you go.** After writing code, ask:
+1. Did I duplicate logic that an existing helper already handles?
+2. Is this inline extraction something that should use a shared building block?
+3. Would this logic work for 50 cards, or just the one I'm looking at?
+4. Did I extend the general pattern, or write a special case?
+
+If the answer to any of these is wrong, **stop and refactor before moving on.** Do not leave architectural debt for later — fix it now, in the same change.
+
+**Trace before you build.** Before implementing a new pattern, trace how an existing analogous feature works end-to-end (e.g., trace `enter_tapped` before building `enter_with_counters`; trace `Changeling` before building a new CDA). This prevents reinventing existing infrastructure and ensures consistency.
+
 ## Setup
 
 ```bash

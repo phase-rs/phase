@@ -1,9 +1,12 @@
 use super::oracle_effect::{parse_effect_chain, try_parse_named_choice};
+use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{parse_number, strip_reminder_text};
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, FilterProp,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, TargetFilter, TypeFilter,
+    AbilityDefinition, AbilityKind, ChoiceType, Effect, FilterProp, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, TargetFilter,
 };
+#[cfg(test)]
+use crate::types::ability::{ControllerRef, TypeFilter};
 use crate::types::replacements::ReplacementEvent;
 
 /// Parse a replacement effect line into a ReplacementDefinition.
@@ -343,25 +346,33 @@ fn parse_enters_with_counters(
     ));
 
     // Determine valid_card filter: self vs other creatures
-    let valid_card = if norm_lower.starts_with("each other creature")
-        || norm_lower.starts_with("other creature")
-    {
-        // "each other creature you control of the chosen type"
-        let mut properties = vec![FilterProp::Another];
-        if norm_lower.contains("chosen type") {
-            properties.push(FilterProp::IsChosenCreatureType);
-        }
-        let controller = if norm_lower.contains("you control") {
-            Some(ControllerRef::You)
-        } else {
-            None
+    // Strip "each other " or "other " prefix, then delegate to parse_type_phrase
+    // which handles non-X, controller, "of the chosen type", etc.
+    let subject = norm_lower
+        .strip_prefix("each other ")
+        .or_else(|| norm_lower.strip_prefix("other "))
+        .filter(|s| s.contains("creature") || s.contains("permanent"));
+    let valid_card = if let Some(subject_text) = subject {
+        let (filter, _) = parse_type_phrase(subject_text);
+        // Inject Another since we stripped "other" above
+        let filter = match filter {
+            TargetFilter::Typed {
+                card_type,
+                subtype,
+                controller,
+                mut properties,
+            } => {
+                properties.insert(0, FilterProp::Another);
+                TargetFilter::Typed {
+                    card_type,
+                    subtype,
+                    controller,
+                    properties,
+                }
+            }
+            other => other,
         };
-        Some(TargetFilter::Typed {
-            card_type: Some(TypeFilter::Creature),
-            subtype: None,
-            controller,
-            properties,
-        })
+        Some(filter)
     } else {
         Some(TargetFilter::SelfRef)
     };
@@ -673,6 +684,41 @@ mod tests {
                 assert_eq!(*controller, Some(ControllerRef::You));
                 assert!(properties.contains(&FilterProp::Another));
                 assert!(properties.contains(&FilterProp::IsChosenCreatureType));
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_non_subtype_creature_enters_with_counter() {
+        // Grumgully, the Generous
+        let def = parse_replacement_line(
+            "Each other non-Human creature you control enters with an additional +1/+1 counter on it.",
+            "Grumgully, the Generous",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(
+            def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: 1,
+                ..
+            } if counter_type == "P1P1"
+        ));
+        match &def.valid_card {
+            Some(TargetFilter::Typed {
+                card_type,
+                controller,
+                properties,
+                ..
+            }) => {
+                assert_eq!(*card_type, Some(TypeFilter::Creature));
+                assert_eq!(*controller, Some(ControllerRef::You));
+                assert!(properties.contains(&FilterProp::Another));
+                assert!(properties.contains(&FilterProp::NonType {
+                    value: "human".to_string()
+                }));
             }
             other => panic!("Expected Typed filter, got {other:?}"),
         }

@@ -223,12 +223,15 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
 
 fn parse_non_prefix(text: &str) -> (Option<String>, usize) {
     if let Some(rest) = text.strip_prefix("non") {
+        // Strip optional hyphen: "non-Human" and "nonland" both valid
+        let rest = rest.strip_prefix('-').unwrap_or(rest);
+        let consumed_prefix = text.len() - rest.len(); // "non" or "non-"
         let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
         let negated = rest[..end].to_string();
-        // We consumed "non{type} " but the core type is the NEXT word, so return just the negated type
+        // We consumed "non[-]{type} " but the core type is the NEXT word, so return just the negated type
         (
             Some(negated),
-            3 + end + if rest.len() > end { 1 } else { 0 },
+            consumed_prefix + end + if rest.len() > end { 1 } else { 0 },
         )
     } else {
         (None, 0)

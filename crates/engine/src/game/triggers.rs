@@ -791,6 +791,16 @@ fn target_filter_matches_object(
                             if obj.card_types.core_types.contains(&ct) {
                                 return false;
                             }
+                        } else {
+                            // Not a core type — check subtypes (e.g., "non-Human")
+                            if obj
+                                .card_types
+                                .subtypes
+                                .iter()
+                                .any(|s| s.eq_ignore_ascii_case(value))
+                            {
+                                return false;
+                            }
                         }
                     }
                     FilterProp::WithKeyword { value } => {

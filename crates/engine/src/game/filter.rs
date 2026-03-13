@@ -165,11 +165,17 @@ fn matches_filter_prop(
         }
         FilterProp::Tapped => obj.tapped,
         FilterProp::NonType { value } => {
-            // Object does not have this type
+            // Object does not have this type or subtype
             let core: Option<CoreType> = value.parse().ok();
             match core {
                 Some(ct) => !obj.card_types.core_types.contains(&ct),
-                None => true, // Unknown type name -- permissive
+                None => {
+                    // Not a core type — check subtypes (e.g., "non-Human")
+                    !obj.card_types
+                        .subtypes
+                        .iter()
+                        .any(|s| s.eq_ignore_ascii_case(value))
+                }
             }
         }
         FilterProp::WithKeyword { value } => {
