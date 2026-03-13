@@ -2564,7 +2564,10 @@ mod tests {
                 Effect::Pump {
                     power: crate::types::ability::PtValue::Fixed(3),
                     toughness: crate::types::ability::PtValue::Fixed(3),
-                    target: TargetFilter::Typed(TypedFilter::creature().controller(crate::types::ability::ControllerRef::You)),
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .controller(crate::types::ability::ControllerRef::You),
+                    ),
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -3168,7 +3171,9 @@ mod trigger_target_tests {
             Effect::ChangeZone {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
-                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent)),
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::Opponent),
+                ),
             },
             Vec::new(),
             trigger_creature,

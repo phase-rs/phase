@@ -536,7 +536,9 @@ fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
         AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Attach {
-                target: crate::types::ability::TargetFilter::Typed(TypedFilter::creature().controller(crate::types::ability::ControllerRef::You)),
+                target: crate::types::ability::TargetFilter::Typed(
+                    TypedFilter::creature().controller(crate::types::ability::ControllerRef::You),
+                ),
             },
         )
         .cost(cost)

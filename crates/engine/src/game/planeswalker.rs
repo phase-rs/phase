@@ -169,8 +169,9 @@ fn build_pw_resolved(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{AbilityCost, AbilityDefinition, AbilityKind, Effect, TargetFilter,
-    TypedFilter};
+    use crate::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, Effect, TargetFilter, TypedFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::zones::Zone;
@@ -189,8 +190,9 @@ mod tests {
 
     /// Create a loyalty ability with the given cost and effect.
     fn make_loyalty_ability(loyalty_amount: i32, effect: Effect) -> AbilityDefinition {
-        AbilityDefinition::new(AbilityKind::Activated, effect)
-            .cost(AbilityCost::Loyalty { amount: loyalty_amount })
+        AbilityDefinition::new(AbilityKind::Activated, effect).cost(AbilityCost::Loyalty {
+            amount: loyalty_amount,
+        })
     }
 
     fn create_planeswalker(

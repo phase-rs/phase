@@ -512,7 +512,10 @@ pub struct TypedFilter {
 
 impl TypedFilter {
     pub fn new(card_type: TypeFilter) -> Self {
-        Self { card_type: Some(card_type), ..Self::default() }
+        Self {
+            card_type: Some(card_type),
+            ..Self::default()
+        }
     }
     pub fn creature() -> Self {
         Self::new(TypeFilter::Creature)
@@ -1930,7 +1933,11 @@ mod tests {
     fn static_definition_roundtrip() {
         let static_def = StaticDefinition {
             mode: StaticMode::Continuous,
-            affected: Some(TypedFilter::creature().controller(ControllerRef::You).into()),
+            affected: Some(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .into(),
+            ),
             modifications: vec![
                 ContinuousModification::AddPower { value: 1 },
                 ContinuousModification::AddToughness { value: 1 },
@@ -1971,7 +1978,9 @@ mod tests {
     fn target_filter_nested_roundtrip() {
         let filter = TargetFilter::And {
             filters: vec![
-                TypedFilter::creature().controller(ControllerRef::You).into(),
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .into(),
                 TargetFilter::Not {
                     filter: Box::new(TargetFilter::SelfRef),
                 },
@@ -2034,7 +2043,9 @@ mod tests {
             },
             AbilityCost::TapCreatures {
                 count: 2,
-                filter: TypedFilter::creature().controller(ControllerRef::You).into(),
+                filter: TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .into(),
             },
             AbilityCost::Sacrifice {
                 target: TypedFilter::new(TypeFilter::Artifact).into(),
@@ -2165,7 +2176,11 @@ mod tests {
                 threshold: 7,
             },
             StaticCondition::IsPresent {
-                filter: Some(TypedFilter::creature().controller(ControllerRef::You).into()),
+                filter: Some(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .into(),
+                ),
             },
             StaticCondition::CheckSVar {
                 var: "X".to_string(),

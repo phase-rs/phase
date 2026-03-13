@@ -582,7 +582,9 @@ mod tests {
         // Effect that makes artifacts into creatures (layer 4 - Type)
         let animator = make_creature(&mut state, "Animator", 1, 1, PlayerId(0));
         {
-            let artifact_you_ctrl = TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You));
+            let artifact_you_ctrl = TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
+            );
             let def = StaticDefinition::continuous()
                 .affected(artifact_you_ctrl)
                 .modifications(vec![ContinuousModification::AddType {
@@ -667,7 +669,9 @@ mod tests {
             obj.timestamp = 10;
         }
         {
-            let artifact_you_ctrl = TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You));
+            let artifact_you_ctrl = TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
+            );
             let def = StaticDefinition::continuous()
                 .affected(artifact_you_ctrl)
                 .modifications(vec![ContinuousModification::AddType {
@@ -743,7 +747,9 @@ mod tests {
             obj.attached_to = Some(bear_a);
             obj.timestamp = ts;
 
-            let enchanted_creature = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
+            let enchanted_creature = TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            );
             obj.static_definitions.push(
                 StaticDefinition::continuous()
                     .affected(enchanted_creature)

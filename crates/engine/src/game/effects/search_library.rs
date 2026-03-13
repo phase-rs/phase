@@ -69,7 +69,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{TypeFilter, TypedFilter};
+    use crate::types::ability::TypedFilter;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -141,10 +141,7 @@ mod tests {
         let bear = add_library_creature(&mut state, 1, PlayerId(0), "Bear");
         let _land = add_library_land(&mut state, 2, PlayerId(0), "Forest", true);
 
-        let ability = make_search_ability(
-            TargetFilter::Typed(TypedFilter::creature()),
-            1,
-        );
+        let ability = make_search_ability(TargetFilter::Typed(TypedFilter::creature()), 1);
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -213,10 +210,7 @@ mod tests {
         add_library_land(&mut state, 1, PlayerId(0), "Forest", true);
         add_library_land(&mut state, 2, PlayerId(0), "Plains", true);
 
-        let ability = make_search_ability(
-            TargetFilter::Typed(TypedFilter::creature()),
-            1,
-        );
+        let ability = make_search_ability(TargetFilter::Typed(TypedFilter::creature()), 1);
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -233,10 +227,7 @@ mod tests {
         // Controller has no creatures
         add_library_land(&mut state, 2, PlayerId(0), "Forest", true);
 
-        let ability = make_search_ability(
-            TargetFilter::Typed(TypedFilter::creature()),
-            1,
-        );
+        let ability = make_search_ability(TargetFilter::Typed(TypedFilter::creature()), 1);
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 

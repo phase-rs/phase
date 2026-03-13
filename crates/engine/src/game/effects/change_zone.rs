@@ -1,6 +1,8 @@
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef, TypedFilter};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetRef, TypedFilter,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::proposed_event::ProposedEvent;
@@ -132,7 +134,7 @@ pub fn resolve_all(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{TargetFilter, TypedFilter};
+    use crate::types::ability::TargetFilter;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;

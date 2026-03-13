@@ -85,7 +85,9 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
             .trim_matches(|c: char| c == '\'' || c == '"');
         return Some(
             StaticDefinition::continuous()
-                .affected(TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)))
+                .affected(TargetFilter::Typed(
+                    TypedFilter::land().controller(ControllerRef::You),
+                ))
                 .modifications(vec![ContinuousModification::AddSubtype {
                     subtype: rest.to_string(),
                 }])
@@ -288,7 +290,9 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     if lower.contains("cost") && lower.contains("less") && lower.contains("spell") {
         return Some(
             StaticDefinition::new(StaticMode::ReduceCost)
-                .affected(TargetFilter::Typed(TypedFilter::card().controller(ControllerRef::You)))
+                .affected(TargetFilter::Typed(
+                    TypedFilter::card().controller(ControllerRef::You),
+                ))
                 .description(text.to_string()),
         );
     }
@@ -301,7 +305,9 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     {
         return Some(
             StaticDefinition::new(StaticMode::RaiseCost)
-                .affected(TargetFilter::Typed(TypedFilter::card().controller(ControllerRef::Opponent)))
+                .affected(TargetFilter::Typed(
+                    TypedFilter::card().controller(ControllerRef::Opponent),
+                ))
                 .description(text.to_string()),
         );
     }
@@ -336,7 +342,9 @@ fn parse_typed_you_control(text: &str, lower: &str, _is_other: bool) -> Option<S
                 TargetFilter::Typed(
                     TypedFilter::creature()
                         .controller(ControllerRef::You)
-                        .properties(vec![FilterProp::HasColor { color: color.to_string() }]),
+                        .properties(vec![FilterProp::HasColor {
+                            color: color.to_string(),
+                        }]),
                 )
             } else if is_capitalized_words(descriptor) {
                 TargetFilter::Typed(
@@ -360,7 +368,9 @@ fn parse_typed_you_control(text: &str, lower: &str, _is_other: bool) -> Option<S
                 TargetFilter::Typed(
                     TypedFilter::creature()
                         .controller(ControllerRef::You)
-                        .properties(vec![FilterProp::HasColor { color: color.to_string() }]),
+                        .properties(vec![FilterProp::HasColor {
+                            color: color.to_string(),
+                        }]),
                 )
             } else if is_capitalized_words(descriptor) {
                 // Strip trailing 's' for the subtype name (Zombies -> Zombie)

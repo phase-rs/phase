@@ -204,8 +204,7 @@ pub fn handle_cast_spell(
     }
 
     let resolved = {
-        let mut r =
-            ResolvedAbility::new(ability_def.effect.clone(), Vec::new(), object_id, player);
+        let mut r = ResolvedAbility::new(ability_def.effect.clone(), Vec::new(), object_id, player);
         if let Some(sub) = &ability_def.sub_ability {
             r = r.sub_ability(build_resolved_from_def(sub, object_id, player));
         }
@@ -605,8 +604,7 @@ pub fn handle_activate_ability(
     }
 
     let resolved = {
-        let mut r =
-            ResolvedAbility::new(ability_def.effect.clone(), Vec::new(), source_id, player);
+        let mut r = ResolvedAbility::new(ability_def.effect.clone(), Vec::new(), source_id, player);
         if let Some(sub) = &ability_def.sub_ability {
             r = r.sub_ability(build_resolved_from_def(sub, source_id, player));
         }
@@ -1425,7 +1423,9 @@ mod tests {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
             obj.card_types.subtypes.push("Aura".to_string());
-            obj.keywords.push(Keyword::Enchant(TargetFilter::Typed(TypedFilter::creature())));
+            obj.keywords.push(Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature(),
+            )));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::White],
                 generic: 0,

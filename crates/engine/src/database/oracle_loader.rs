@@ -116,7 +116,9 @@ fn synthesize_equip(face: &mut CardFace) {
                     AbilityDefinition::new(
                         AbilityKind::Activated,
                         Effect::Attach {
-                            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                            target: TargetFilter::Typed(
+                                TypedFilter::creature().controller(ControllerRef::You),
+                            ),
                         },
                     )
                     .cost(AbilityCost::Mana { cost: cost.clone() }),
@@ -157,14 +159,10 @@ fn synthesize_kicker(face: &mut CardFace) {
     if face.additional_cost.is_some() {
         return;
     }
-    if let Some(cost) = face
-        .keywords
-        .iter()
-        .find_map(|k| match k {
-            Keyword::Kicker(cost) => Some(cost.clone()),
-            _ => None,
-        })
-    {
+    if let Some(cost) = face.keywords.iter().find_map(|k| match k {
+        Keyword::Kicker(cost) => Some(cost.clone()),
+        _ => None,
+    }) {
         face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Mana { cost }));
     }
 }

@@ -2,8 +2,8 @@ use super::oracle_effect::parse_effect_chain;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{parse_number, strip_reminder_text};
 use crate::types::ability::{
-    AbilityKind, ControllerRef, FilterProp, TargetFilter, TypedFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition,
+    AbilityKind, ControllerRef, FilterProp, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TypedFilter,
 };
 use crate::types::phase::Phase;
 use crate::types::triggers::TriggerMode;
@@ -521,7 +521,9 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
 
         // Determine the caster filter
         if who.contains("opponent") {
-            def.valid_target = Some(TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)));
+            def.valid_target = Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            ));
         }
 
         // Parse the spell quality (e.g., "multicolored spell")
@@ -531,7 +533,9 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             .unwrap_or(after_casts)
             .trim_start();
         if after_article.starts_with("multicolored") {
-            def.valid_card = Some(TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Multicolored])));
+            def.valid_card = Some(TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::Multicolored]),
+            ));
         }
 
         return Some((TriggerMode::SpellCast, def));
@@ -674,7 +678,11 @@ mod tests {
         assert_eq!(def.destination, Some(Zone::Battlefield));
         assert_eq!(
             def.valid_card,
-            Some(TargetFilter::Typed(TypedFilter::creature().controller(crate::types::ability::ControllerRef::You).properties(vec![FilterProp::Another])))
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(crate::types::ability::ControllerRef::You)
+                    .properties(vec![FilterProp::Another])
+            ))
         );
     }
 
@@ -783,11 +791,19 @@ mod tests {
                 // Both branches should have Another + You controller
                 assert_eq!(
                     filters[1],
-                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You).properties(vec![FilterProp::Another]))
+                    TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::Another])
+                    )
                 );
                 assert_eq!(
                     filters[2],
-                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You).properties(vec![FilterProp::Another]))
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact)
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::Another])
+                    )
                 );
             }
             other => panic!("Expected Or filter with 3 branches, got {:?}", other),
@@ -910,7 +926,7 @@ mod tests {
 
     #[test]
     fn trigger_counters_put_on_another_creature_you_control() {
-        use crate::types::ability::{ControllerRef, TypeFilter};
+        use crate::types::ability::ControllerRef;
         let def = parse_trigger_line(
             "Whenever one or more +1/+1 counters are put on another creature you control, put a +1/+1 counter on this creature.",
             "Enduring Scalelord",
@@ -918,13 +934,17 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::CounterAdded);
         assert_eq!(
             def.valid_card,
-            Some(TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You).properties(vec![FilterProp::Another])))
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another])
+            ))
         );
     }
 
     #[test]
     fn trigger_you_put_counters_on_creature_you_control() {
-        use crate::types::ability::{ControllerRef, TypeFilter};
+        use crate::types::ability::ControllerRef;
         let def = parse_trigger_line(
             "Whenever you put one or more +1/+1 counters on a creature you control, draw a card.",
             "The Powerful Dragon",
@@ -932,7 +952,9 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::CounterAdded);
         assert_eq!(
             def.valid_card,
-            Some(TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)))
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            ))
         );
     }
 
@@ -953,7 +975,6 @@ mod tests {
 
     #[test]
     fn trigger_white_creature_you_control_attacks() {
-        use crate::types::ability::TypeFilter;
         let def = parse_trigger_line(
             "Whenever a white creature you control attacks, you gain 1 life.",
             "Linden, the Steadfast Queen",
@@ -964,7 +985,9 @@ mod tests {
             Some(TargetFilter::Typed(
                 TypedFilter::creature()
                     .controller(crate::types::ability::ControllerRef::You)
-                    .properties(vec![FilterProp::HasColor { color: "White".to_string() }])
+                    .properties(vec![FilterProp::HasColor {
+                        color: "White".to_string()
+                    }])
             ))
         );
     }
@@ -1093,11 +1116,15 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::SpellCast);
         assert_eq!(
             def.valid_target,
-            Some(TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)))
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
         );
         assert_eq!(
             def.valid_card,
-            Some(TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Multicolored])))
+            Some(TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::Multicolored])
+            ))
         );
     }
 
