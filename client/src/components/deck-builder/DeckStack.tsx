@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useCardImage } from "../../hooks/useCardImage";
 import type { DeckEntry, ParsedDeck } from "../../services/deckParser";
@@ -25,7 +25,9 @@ interface DeckStackItem {
 const CARD_HEIGHT = 156;
 const CARD_WIDTH = 112;
 const CARD_OFFSET = 48;
-const ITEMS_PER_COLUMN = 10;
+const COLUMN_GAP = 16;
+const TARGET_ITEMS_PER_COLUMN = 5;
+const MIN_ITEMS_PER_COLUMN = 4;
 
 const SECTION_LABELS: Record<DeckStackSection, string> = {
   commander: "CMD",
@@ -103,11 +105,42 @@ function createDeckStackItems(
   };
 }
 
-function chunkEntries(entries: DeckStackItem[]): DeckStackItem[][] {
+function chunkEntries(entries: DeckStackItem[], availableWidth: number): DeckStackItem[][] {
+  if (entries.length === 0) return [];
+
+  const minimumColumnCount = Math.max(
+    1,
+    Math.ceil(entries.length / TARGET_ITEMS_PER_COLUMN),
+  );
+  const maximumColumnCount = Math.max(
+    1,
+    Math.ceil(entries.length / MIN_ITEMS_PER_COLUMN),
+  );
+  const visibleColumnCount = availableWidth > 0
+    ? Math.max(
+      1,
+      Math.floor((availableWidth + COLUMN_GAP) / (CARD_WIDTH + COLUMN_GAP)),
+    )
+    : minimumColumnCount;
+  const columnCount = Math.min(
+    entries.length,
+    Math.max(
+      minimumColumnCount,
+      Math.min(visibleColumnCount, maximumColumnCount),
+    ),
+  );
+
+  const baseColumnSize = Math.floor(entries.length / columnCount);
+  const columnsWithExtraCard = entries.length % columnCount;
   const columns: DeckStackItem[][] = [];
-  for (let index = 0; index < entries.length; index += ITEMS_PER_COLUMN) {
-    columns.push(entries.slice(index, index + ITEMS_PER_COLUMN));
+  let offset = 0;
+
+  for (let columnIndex = 0; columnIndex < columnCount; columnIndex += 1) {
+    const columnSize = baseColumnSize + (columnIndex < columnsWithExtraCard ? 1 : 0);
+    columns.push(entries.slice(offset, offset + columnSize));
+    offset += columnSize;
   }
+
   return columns;
 }
 
@@ -220,7 +253,34 @@ function DeckStackSectionLane({
   onRemoveCommander: (cardName: string) => void;
   onCardHover?: (cardName: string | null) => void;
 }) {
-  const columns = useMemo(() => chunkEntries(entries), [entries]);
+  const laneRef = useRef<HTMLDivElement>(null);
+  const [availableWidth, setAvailableWidth] = useState(0);
+  const columns = useMemo(
+    () => chunkEntries(entries, availableWidth),
+    [entries, availableWidth],
+  );
+
+  useEffect(() => {
+    const element = laneRef.current;
+    if (!element) return;
+
+    const updateWidth = (width: number) => {
+      setAvailableWidth((currentWidth) => {
+        const nextWidth = Math.floor(width);
+        return currentWidth === nextWidth ? currentWidth : nextWidth;
+      });
+    };
+
+    updateWidth(element.clientWidth);
+
+    const observer = new ResizeObserver((observerEntries) => {
+      const entry = observerEntries[0];
+      updateWidth(entry?.contentRect.width ?? element.clientWidth);
+    });
+
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [entries.length]);
 
   return (
     <section className="flex min-w-0 flex-col rounded-[20px] border border-white/8 bg-black/14 px-3 py-3">
@@ -236,7 +296,7 @@ function DeckStackSectionLane({
           {emptyLabel}
         </div>
       ) : (
-        <div className="overflow-auto pb-1">
+        <div ref={laneRef} className="overflow-auto pb-1">
           <div className="flex items-start gap-4">
             {columns.map((column, columnIndex) => (
               <div

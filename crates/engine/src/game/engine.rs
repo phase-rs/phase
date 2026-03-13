@@ -392,7 +392,11 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             }
             // Execute any continuation saved when this choice interrupted an ability chain.
             // Reset waiting_for first so non-interactive continuations don't return stale state.
+            // Also sync priority_player: interactive choices (Scry/Dig/Surveil) skip the
+            // reset_priority() call in handle_priority_pass, so we must update it here
+            // to avoid "Not your priority" errors on the next player action.
             state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
             if let Some(cont) = state.pending_continuation.take() {
                 let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
             }
@@ -431,6 +435,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 zones::move_to_zone(state, obj_id, Zone::Graveyard, &mut events);
             }
             state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
             if let Some(cont) = state.pending_continuation.take() {
                 let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
             }
@@ -453,6 +458,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             }
             // Cards not in to_graveyard stay on top of library (already there)
             state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
             if let Some(cont) = state.pending_continuation.take() {
                 let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
             }
@@ -508,6 +514,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             // (e.g. ChangeZone) doesn't set a new interactive state, we don't
             // return a stale RevealChoice that re-renders the modal.
             state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
             if let Some(mut cont) = state.pending_continuation.take() {
                 cont.targets = vec![crate::types::ability::TargetRef::Object(chosen_id)];
                 let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
@@ -548,6 +555,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
 
             // Run the pending continuation with chosen cards as targets
             state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
             if let Some(mut cont) = state.pending_continuation.take() {
                 cont.targets = chosen
                     .iter()
@@ -641,6 +649,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
 
             // Resume pending continuation if present
             state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
             if let Some(cont) = state.pending_continuation.take() {
                 let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
             }

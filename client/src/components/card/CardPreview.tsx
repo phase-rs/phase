@@ -42,8 +42,8 @@ function CardPreviewInner({
         top: Math.min(position.y - 200, window.innerHeight - 736),
       }
     : {
-        right: 16,
-        top: 16,
+        right: "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
+        top: "calc(env(safe-area-inset-top) + var(--game-top-overlay-offset, 0px) + 1rem)",
       };
 
   return (
@@ -52,12 +52,12 @@ function CardPreviewInner({
       style={style}
     >
       {isLoading || !src ? (
-        <div className="max-h-[80vh] max-w-[45vw] w-[472px] aspect-[5/7] rounded-xl bg-gray-700 border border-gray-600 shadow-2xl animate-pulse" />
+        <div className="max-h-[80vh] max-w-[42vw] w-[clamp(220px,26vw,472px)] aspect-[5/7] rounded-xl border border-gray-600 bg-gray-700 shadow-2xl animate-pulse md:max-w-[45vw]" />
       ) : (
         <img
           src={src}
           alt={cardName}
-          className="max-h-[80vh] max-w-[45vw] w-[472px] rounded-xl border border-gray-600 shadow-2xl object-cover"
+          className="max-h-[80vh] max-w-[42vw] w-[clamp(220px,26vw,472px)] rounded-xl border border-gray-600 object-cover shadow-2xl md:max-w-[45vw]"
           draggable={false}
         />
       )}

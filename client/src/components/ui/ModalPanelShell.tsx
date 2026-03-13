@@ -34,7 +34,7 @@ export function ModalPanelShell({
         />
 
         <motion.div
-          className={`relative z-10 flex max-h-[calc(100vh-1.5rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] w-full flex-col overflow-hidden rounded-[20px] border border-white/10 bg-[#0b1020]/96 shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md sm:rounded-[24px] ${maxWidthClassName}`}
+          className={`relative z-10 flex max-h-[calc(100vh_-_1.5rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] w-full flex-col overflow-hidden rounded-[20px] border border-white/10 bg-[#0b1020]/96 shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md sm:rounded-[24px] ${maxWidthClassName}`}
           initial={{ scale: 0.97, opacity: 0, y: 10 }}
           animate={{ scale: 1, opacity: 1, y: 0 }}
           exit={{ scale: 0.97, opacity: 0, y: 10 }}

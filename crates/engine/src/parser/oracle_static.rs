@@ -180,8 +180,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     // --- "~ is the chosen type in addition to its other types" ---
     // Distinguish creature type (Metallic Mimic) vs basic land type (Multiversal Passage)
     if lower.contains("is the chosen type") {
-        let kind = if lower.starts_with("this creature")
-            || lower.contains("creature is the chosen")
+        let kind = if lower.starts_with("this creature") || lower.contains("creature is the chosen")
         {
             ChosenSubtypeKind::CreatureType
         } else {
@@ -631,7 +630,6 @@ fn map_keyword(text: &str) -> Option<Keyword> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -960,10 +958,9 @@ mod tests {
 
     #[test]
     fn this_creature_is_the_chosen_type() {
-        let def = parse_static_line(
-            "This creature is the chosen type in addition to its other types.",
-        )
-        .unwrap();
+        let def =
+            parse_static_line("This creature is the chosen type in addition to its other types.")
+                .unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);
         assert_eq!(def.affected, Some(TargetFilter::SelfRef));
         assert_eq!(

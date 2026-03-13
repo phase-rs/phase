@@ -327,16 +327,15 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
         .collect();
 
     // Pre-read chosen subtype from source (avoids borrow conflict in the loop)
-    let chosen_subtype = if let ContinuousModification::AddChosenSubtype { ref kind } =
-        effect.modification
-    {
-        state
-            .objects
-            .get(&effect.source_id)
-            .and_then(|src| src.chosen_subtype_str(kind))
-    } else {
-        None
-    };
+    let chosen_subtype =
+        if let ContinuousModification::AddChosenSubtype { ref kind } = effect.modification {
+            state
+                .objects
+                .get(&effect.source_id)
+                .and_then(|src| src.chosen_subtype_str(kind))
+        } else {
+            None
+        };
 
     for id in affected_ids {
         let obj = match state.objects.get_mut(&id) {
@@ -1156,7 +1155,9 @@ mod tests {
             "Creature should gain Elf subtype from chosen creature type"
         );
         assert!(
-            obj.card_types.subtypes.contains(&"Shapeshifter".to_string()),
+            obj.card_types
+                .subtypes
+                .contains(&"Shapeshifter".to_string()),
             "Should retain original subtypes"
         );
     }

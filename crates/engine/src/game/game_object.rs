@@ -213,10 +213,9 @@ impl GameObject {
     pub fn chosen_subtype_str(&self, kind: &ChosenSubtypeKind) -> Option<String> {
         match kind {
             ChosenSubtypeKind::CreatureType => self.chosen_creature_type().map(|s| s.to_string()),
-            ChosenSubtypeKind::BasicLandType => {
-                self.chosen_basic_land_type()
-                    .map(|t| t.as_subtype_str().to_string())
-            }
+            ChosenSubtypeKind::BasicLandType => self
+                .chosen_basic_land_type()
+                .map(|t| t.as_subtype_str().to_string()),
         }
     }
 }

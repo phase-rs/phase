@@ -20,6 +20,8 @@ use crate::types::zones::Zone;
 struct ParsedEffectClause {
     effect: Effect,
     duration: Option<Duration>,
+    /// Compound "and" remainder parsed into a sub_ability chain.
+    sub_ability: Option<Box<AbilityDefinition>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -999,13 +1001,22 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     let sentences = split_effect_sentences(text);
     let mut defs: Vec<AbilityDefinition> = sentences
         .iter()
-        .map(|s| {
+        .flat_map(|s| {
             let (condition, text) = strip_additional_cost_conditional(s);
             let clause = parse_effect_clause(&text);
-            AbilityDefinition {
+            let mut def = AbilityDefinition {
                 duration: clause.duration,
                 condition,
                 ..AbilityDefinition::new(kind, clause.effect)
+            };
+            // If the clause produced a compound sub_ability (e.g., pump "and" life gain),
+            // emit both as separate defs so they chain properly.
+            if let Some(sub) = clause.sub_ability {
+                let sub_def = *sub;
+                def.sub_ability = None;
+                vec![def, sub_def]
+            } else {
+                vec![def]
             }
         })
         .collect();
@@ -1137,11 +1148,7 @@ fn parse_mana_spend_restriction(lower: &str) -> Option<ManaSpendRestriction> {
         .trim_end_matches(['.', '"']);
 
     // Strip trailing ", and that spell can't be countered" or similar trailing clauses
-    let rest = rest
-        .split(", and ")
-        .next()
-        .unwrap_or(rest)
-        .trim();
+    let rest = rest.split(", and ").next().unwrap_or(rest).trim();
 
     if rest.contains("of the chosen type") {
         return Some(ManaSpendRestriction::ChosenCreatureType);
@@ -1339,6 +1346,7 @@ fn parsed_clause(effect: Effect) -> ParsedEffectClause {
     ParsedEffectClause {
         effect,
         duration: None,
+        sub_ability: None,
     }
 }
 
@@ -1504,7 +1512,7 @@ fn parse_subject_application(subject: &str) -> Option<SubjectApplication> {
     }
     if matches!(
         lower.as_str(),
-        "this"
+        "~" | "this"
             | "it"
             | "this card"
             | "this creature"
@@ -1531,32 +1539,82 @@ fn subject_filter_application(filter: TargetFilter, targeted: bool) -> Option<Su
     })
 }
 
+/// Build a Pump or PumpAll effect from a subject application and P/T values.
+fn build_pump_effect(
+    application: &SubjectApplication,
+    power: PtValue,
+    toughness: PtValue,
+) -> Effect {
+    if let Some(target) = application.target.clone() {
+        Effect::Pump {
+            power,
+            toughness,
+            target,
+        }
+    } else if application.affected == TargetFilter::SelfRef {
+        Effect::Pump {
+            power,
+            toughness,
+            target: TargetFilter::SelfRef,
+        }
+    } else {
+        Effect::PumpAll {
+            power,
+            toughness,
+            target: application.affected.clone(),
+        }
+    }
+}
+
+/// Split compound predicates like "get +1/+1 until end of turn and you gain 1 life"
+/// into a pump clause with the remainder chained as a sub_ability.
+fn try_split_pump_compound(
+    normalized: &str,
+    application: &SubjectApplication,
+) -> Option<ParsedEffectClause> {
+    let lower = normalized.to_lowercase();
+    // Find " and " that separates two independent clauses after a pump+duration.
+    let and_pos = lower.find(" and ")?;
+    let pump_part = &normalized[..and_pos];
+    let remainder = normalized[and_pos + " and ".len()..].trim();
+
+    let (power, toughness, duration) = parse_pump_clause(pump_part)?;
+    let effect = build_pump_effect(application, power, toughness);
+
+    // Parse the remainder as an independent effect chain (sub_ability).
+    let sub_ability = if remainder.is_empty() {
+        None
+    } else {
+        Some(Box::new(parse_effect_chain(remainder, AbilityKind::Spell)))
+    };
+    Some(ParsedEffectClause {
+        effect,
+        duration,
+        sub_ability,
+    })
+}
+
 fn build_continuous_clause(
     application: SubjectApplication,
     predicate: &str,
 ) -> Option<ParsedEffectClause> {
     let normalized = deconjugate_verb(predicate);
+
+    // Try the full predicate first (simple pump with no compound).
     if let Some((power, toughness, duration)) = parse_pump_clause(&normalized) {
-        let effect = if let Some(target) = application.target.clone() {
-            Effect::Pump {
-                power,
-                toughness,
-                target,
-            }
-        } else if application.affected == TargetFilter::SelfRef {
-            Effect::Pump {
-                power,
-                toughness,
-                target: TargetFilter::SelfRef,
-            }
-        } else {
-            Effect::PumpAll {
-                power,
-                toughness,
-                target: application.affected,
-            }
-        };
-        return Some(ParsedEffectClause { effect, duration });
+        let effect = build_pump_effect(&application, power, toughness);
+        return Some(ParsedEffectClause {
+            effect,
+            duration,
+            sub_ability: None,
+        });
+    }
+
+    // Compound: "get +1/+1 until end of turn and you gain 1 life"
+    // Split on " and " that follows a duration marker, producing a pump
+    // with a chained sub_ability for the remainder.
+    if let Some(clause) = try_split_pump_compound(&normalized, &application) {
+        return Some(clause);
     }
 
     let (predicate, duration) = strip_trailing_duration(&normalized);
@@ -1566,26 +1624,12 @@ fn build_continuous_clause(
     }
 
     if let Some((power, toughness)) = extract_pump_modifiers(&modifications) {
-        let effect = if let Some(target) = application.target.clone() {
-            Effect::Pump {
-                power,
-                toughness,
-                target,
-            }
-        } else if application.affected == TargetFilter::SelfRef {
-            Effect::Pump {
-                power,
-                toughness,
-                target: TargetFilter::SelfRef,
-            }
-        } else {
-            Effect::PumpAll {
-                power,
-                toughness,
-                target: application.affected,
-            }
-        };
-        return Some(ParsedEffectClause { effect, duration });
+        let effect = build_pump_effect(&application, power, toughness);
+        return Some(ParsedEffectClause {
+            effect,
+            duration,
+            sub_ability: None,
+        });
     }
 
     Some(ParsedEffectClause {
@@ -1604,6 +1648,7 @@ fn build_continuous_clause(
             target: application.target,
         },
         duration,
+        sub_ability: None,
     })
 }
 
@@ -1636,6 +1681,7 @@ fn build_become_clause(
             target: application.target,
         },
         duration,
+        sub_ability: None,
     })
 }
 
@@ -1671,6 +1717,7 @@ fn build_restriction_clause(
             target: application.target,
         },
         duration,
+        sub_ability: None,
     })
 }
 
@@ -3331,7 +3378,8 @@ mod tests {
                 produced: ManaProduction::AnyOneColor {
                     count: CountValue::Fixed(3),
                     ..
-                }, ..
+                },
+                ..
             }
         ));
     }
@@ -3345,7 +3393,8 @@ mod tests {
                 produced: ManaProduction::AnyCombination {
                     count: CountValue::Fixed(2),
                     ..
-                }, ..
+                },
+                ..
             }
         ));
     }
@@ -3358,7 +3407,8 @@ mod tests {
             Effect::Mana {
                 produced: ManaProduction::ChosenColor {
                     count: CountValue::Fixed(1)
-                }, ..
+                },
+                ..
             }
         ));
     }
@@ -3401,7 +3451,8 @@ mod tests {
             Effect::Mana {
                 produced: ManaProduction::Colorless {
                     count: CountValue::Fixed(1)
-                }, ..
+                },
+                ..
             }
         ));
     }

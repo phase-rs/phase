@@ -329,6 +329,19 @@ pub(crate) fn check_trigger_condition(
             .find(|p| p.id == controller)
             .map(|p| p.life_gained_this_turn >= *minimum)
             .unwrap_or(false),
+        TriggerCondition::ControlCreatureCount { minimum } => {
+            let count = state
+                .battlefield
+                .iter()
+                .filter(|id| {
+                    state.objects.get(id).is_some_and(|obj| {
+                        obj.controller == controller
+                            && obj.card_types.core_types.contains(&CoreType::Creature)
+                    })
+                })
+                .count();
+            count >= *minimum as usize
+        }
     }
 }
 
@@ -3533,9 +3546,7 @@ pub mod tests {
         ));
 
         // Mimic doesn't match itself (Another filter)
-        assert!(!target_filter_matches_object(
-            &state, mimic, &filter, mimic
-        ));
+        assert!(!target_filter_matches_object(&state, mimic, &filter, mimic));
     }
 
     #[test]

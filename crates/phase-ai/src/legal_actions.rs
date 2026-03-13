@@ -102,9 +102,7 @@ pub fn get_legal_actions(state: &GameState) -> Vec<GameAction> {
                 }]
             }
         }
-        WaitingFor::DiscardToHandSize {
-            cards, count, ..
-        } => {
+        WaitingFor::DiscardToHandSize { cards, count, .. } => {
             // Generate combinations of `count` cards to discard from hand
             let combos = combinations(cards, *count);
             combos

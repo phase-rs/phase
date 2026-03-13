@@ -146,7 +146,7 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   const tapOpacity = tapRotation === "mtga" && obj.tapped && !isAttacking ? 0.85 : 1;
 
   // Attacker slide-forward: player creatures slide up, opponent creatures slide down
-  const attackSlide = isAttacking ? (obj.controller === 0 ? -30 : 30) : 0;
+  const attackSlide = isAttacking ? (obj.controller === playerId ? -30 : 30) : 0;
 
   const handleClick = () => {
     if (combatMode === "attackers") {

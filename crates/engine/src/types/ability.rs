@@ -1203,6 +1203,8 @@ pub struct SpellContext {
 pub enum TriggerCondition {
     /// "if you gained life this turn" / "if you've gained N or more life this turn"
     LifeGainedThisTurn { minimum: u32 },
+    /// "if you control N or more creatures"
+    ControlCreatureCount { minimum: u32 },
 }
 
 /// Condition that gates whether a replacement effect applies.

@@ -11,6 +11,7 @@ import { LogEntry } from "./LogEntry.tsx";
 const EMPTY_EVENTS: GameEvent[] = [];
 
 const VERBOSITY_OPTIONS: LogVerbosity[] = ["full", "compact", "minimal"];
+const LOG_PANEL_WIDTH_PX = 320;
 
 export function GameLogPanel() {
   const eventHistory = useGameStore((s) => s.eventHistory ?? EMPTY_EVENTS);
@@ -46,6 +47,12 @@ export function GameLogPanel() {
       return () => document.removeEventListener("mousedown", handleOutsideClick);
     }
   }, [isOpen, handleOutsideClick]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.style.setProperty("--game-right-rail-offset", isOpen ? `${LOG_PANEL_WIDTH_PX}px` : "0px");
+    return () => root.style.setProperty("--game-right-rail-offset", "0px");
+  }, [isOpen]);
 
   return (
     <>

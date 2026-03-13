@@ -21,7 +21,11 @@ export function ConnectionDot() {
 
   return (
     <div
-      className="fixed right-14 top-3 z-40 flex items-center gap-1.5"
+      className="fixed z-40 flex items-center gap-1.5"
+      style={{
+        right: "calc(env(safe-area-inset-right) + 3.5rem)",
+        top: "calc(env(safe-area-inset-top) + var(--game-top-overlay-offset, 0px) + 0.75rem)",
+      }}
       title={label}
     >
       {connectionStatus === "connecting" ? (

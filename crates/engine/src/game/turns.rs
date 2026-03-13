@@ -157,10 +157,7 @@ pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) {
 /// Execute the cleanup step. Returns `Some(WaitingFor)` if the player must
 /// choose which cards to discard down to maximum hand size, or `None` if
 /// cleanup completes immediately.
-pub fn execute_cleanup(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-) -> Option<WaitingFor> {
+pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
     // Check day/night transition at cleanup (per Rule 727.2)
     day_night::check_day_night_transition(state, events);
 

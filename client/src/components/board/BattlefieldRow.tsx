@@ -14,6 +14,23 @@ const ROW_JUSTIFY: Record<string, string> = {
   other: "justify-end",
 };
 
+function getCreatureScale(groupCount: number, display: "art_crop" | "full_card"): number {
+  if (display === "art_crop") {
+    if (groupCount <= 1) return 1.45;
+    if (groupCount === 2) return 1.35;
+    if (groupCount === 3) return 1.25;
+    if (groupCount === 4) return 1.15;
+    if (groupCount <= 6) return 1.06;
+    return 1;
+  }
+
+  if (groupCount <= 1) return 1.18;
+  if (groupCount === 2) return 1.14;
+  if (groupCount === 3) return 1.1;
+  if (groupCount === 4) return 1.05;
+  return 1;
+}
+
 export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowProps) {
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
 
@@ -23,9 +40,24 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
   const minH = battlefieldCardDisplay === "art_crop"
     ? "min-h-[calc(var(--art-crop-h)+24px)]"
     : "min-h-[calc(var(--card-h)+8px)]";
+  const creatureScale = rowType === "creatures"
+    ? getCreatureScale(groups.length, battlefieldCardDisplay)
+    : 1;
+
+  const rowStyle = rowType === "creatures"
+    ? ({
+        "--art-crop-w": `calc(var(--art-crop-base) * var(--card-size-scale) * var(--art-crop-viewport-scale) * ${creatureScale})`,
+        "--art-crop-h": `calc(var(--art-crop-base) * var(--card-size-scale) * var(--art-crop-viewport-scale) * ${creatureScale} * 0.75)`,
+        "--card-w": `calc(var(--card-base) * var(--card-size-scale) * var(--card-viewport-scale) * ${creatureScale})`,
+        "--card-h": `calc(var(--card-base) * var(--card-size-scale) * var(--card-viewport-scale) * ${creatureScale} * 1.4)`,
+      } as React.CSSProperties)
+    : undefined;
 
   return (
-    <div className={`flex ${minH} flex-wrap items-center gap-2 px-2 ${ROW_JUSTIFY[rowType]} ${className ?? ""}`}>
+    <div
+      className={`flex ${minH} flex-wrap items-center gap-2 px-2 ${ROW_JUSTIFY[rowType]} ${className ?? ""}`}
+      style={rowStyle}
+    >
       {groups.map((group) => (
         <GroupedPermanentDisplay key={group.ids[0]} group={group} />
       ))}

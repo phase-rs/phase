@@ -8,11 +8,17 @@ export interface ChoiceOption {
 
 interface ChoiceModalProps {
   title: string;
+  subtitle?: string;
   options: ChoiceOption[];
   onChoose: (id: string) => void;
 }
 
-export function ChoiceModal({ title, options, onChoose }: ChoiceModalProps) {
+export function ChoiceModal({
+  title,
+  subtitle,
+  options,
+  onChoose,
+}: ChoiceModalProps) {
   return (
     <AnimatePresence>
       <motion.div
@@ -27,7 +33,7 @@ export function ChoiceModal({ title, options, onChoose }: ChoiceModalProps) {
 
         {/* Modal card */}
         <motion.div
-          className="relative z-10 w-full max-w-sm rounded-[20px] bg-gray-900 p-4 shadow-2xl ring-1 ring-gray-700 sm:p-6"
+          className="relative z-10 max-h-[calc(100vh_-_2rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] w-full max-w-sm overflow-y-auto rounded-[20px] bg-gray-900 p-4 shadow-2xl ring-1 ring-gray-700 sm:p-6"
           initial={{ scale: 0.9, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.9, opacity: 0 }}
@@ -36,6 +42,11 @@ export function ChoiceModal({ title, options, onChoose }: ChoiceModalProps) {
           <h2 className="mb-4 text-center text-base font-bold text-white sm:text-lg">
             {title}
           </h2>
+          {subtitle && (
+            <p className="-mt-2 mb-4 text-center text-sm text-gray-400">
+              {subtitle}
+            </p>
+          )}
 
           <div className="flex flex-col gap-2">
             {options.map((opt) => (

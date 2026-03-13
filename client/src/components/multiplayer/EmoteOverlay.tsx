@@ -27,7 +27,12 @@ export function EmoteOverlay({ onSendEmote, receivedEmote }: EmoteOverlayProps) 
   return (
     <>
       {/* Received emote display — near top-center (opponent area) */}
-      <div className="fixed left-1/2 top-24 z-40 -translate-x-1/2">
+      <div
+        className="fixed left-1/2 z-40 -translate-x-1/2"
+        style={{
+          top: "calc(env(safe-area-inset-top) + var(--game-top-overlay-offset, 0px) + 6rem)",
+        }}
+      >
         <AnimatePresence>
           {displayedEmote && (
             <motion.div
@@ -45,7 +50,13 @@ export function EmoteOverlay({ onSendEmote, receivedEmote }: EmoteOverlayProps) 
       </div>
 
       {/* Emote button bar — bottom-left, above player zones */}
-      <div className="fixed bottom-28 left-4 z-30">
+      <div
+        className="fixed z-30"
+        style={{
+          bottom: "calc(env(safe-area-inset-bottom) + 7rem)",
+          left: "calc(env(safe-area-inset-left) + 1rem)",
+        }}
+      >
         <button
           onClick={() => setShowPanel((v) => !v)}
           className="flex h-8 w-8 items-center justify-center rounded-full bg-gray-800/80 text-gray-400 transition-colors hover:bg-gray-700/80 hover:text-gray-200"

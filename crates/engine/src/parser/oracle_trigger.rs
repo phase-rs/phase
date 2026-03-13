@@ -1,6 +1,6 @@
 use super::oracle_effect::parse_effect_chain;
 use super::oracle_target::parse_type_phrase;
-use super::oracle_util::strip_reminder_text;
+use super::oracle_util::{parse_number, strip_reminder_text};
 use crate::types::ability::{
     AbilityKind, ControllerRef, FilterProp, TargetFilter, TriggerCondition, TriggerConstraint,
     TriggerDefinition,
@@ -146,7 +146,40 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         }
     }
 
+    // Pattern: "if you control N or more creatures, {effect}"
+    if let Some((condition, end_pos)) = parse_control_count_condition(&lower) {
+        // Strip the "if you control N or more creatures" clause and keep the rest.
+        // The text before the clause + the text after the clause = the effect.
+        let before = text[..lower.find("if you control ").unwrap()]
+            .trim_end()
+            .trim_end_matches(',');
+        let after = text[end_pos..].trim_start_matches(',').trim_start();
+        let cleaned = if before.is_empty() {
+            after.to_string()
+        } else if after.is_empty() {
+            before.to_string()
+        } else {
+            format!("{before} {after}")
+        };
+        return (cleaned, Some(condition));
+    }
+
     (text.to_string(), None)
+}
+
+/// Parse "if you control N or more creatures" → (condition, end_byte_offset)
+fn parse_control_count_condition(lower: &str) -> Option<(TriggerCondition, usize)> {
+    let start = lower.find("if you control ")?;
+    let after_prefix = &lower[start + "if you control ".len()..];
+    let (n, rest) = parse_number(after_prefix)?;
+    if rest.starts_with("or more creatures") {
+        let end = start
+            + "if you control ".len()
+            + (after_prefix.len() - rest.len())
+            + "or more creatures".len();
+        return Some((TriggerCondition::ControlCreatureCount { minimum: n }, end));
+    }
+    None
 }
 
 /// Parse "N or more life this turn" → N, or "life this turn" → 1
@@ -594,6 +627,7 @@ fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinit
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{Duration, Effect, LifeAmount, PtValue};
 
     #[test]
     fn trigger_etb_self() {
@@ -1135,6 +1169,54 @@ mod tests {
                 controller: None,
                 properties: vec![FilterProp::Multicolored],
             })
+        );
+    }
+
+    // --- ControlCreatureCount condition tests ---
+
+    #[test]
+    fn trigger_leonin_vanguard_control_creature_count() {
+        let def = parse_trigger_line(
+            "At the beginning of combat on your turn, if you control three or more creatures, this creature gets +1/+1 until end of turn and you gain 1 life.",
+            "Leonin Vanguard",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::BeginCombat));
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::ControlCreatureCount { minimum: 3 })
+        );
+        // Effect: pump self +1/+1 with life gain sub_ability
+        let exec = def.execute.as_ref().expect("should have execute");
+        assert!(matches!(
+            exec.effect,
+            Effect::Pump {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                target: TargetFilter::SelfRef,
+            }
+        ));
+        assert_eq!(exec.duration, Some(Duration::UntilEndOfTurn));
+        // Sub-ability: gain 1 life
+        let sub = exec.sub_ability.as_ref().expect("should have sub_ability");
+        assert!(matches!(
+            sub.effect,
+            Effect::GainLife {
+                amount: LifeAmount::Fixed(1),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn extract_if_control_creature_count() {
+        let (cleaned, cond) = extract_if_condition(
+            "if you control three or more creatures, ~ gets +1/+1 until end of turn",
+        );
+        assert_eq!(cleaned, "~ gets +1/+1 until end of turn");
+        assert_eq!(
+            cond,
+            Some(TriggerCondition::ControlCreatureCount { minimum: 3 })
         );
     }
 }

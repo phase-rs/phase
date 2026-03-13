@@ -11,7 +11,7 @@ import { CommanderDisplay } from "./CommanderDisplay.tsx";
 import { CommanderDamage } from "./CommanderDamage.tsx";
 
 /** Scale for land column (left) */
-const LAND_SCALE = 0.65;
+const LAND_SCALE = 0.9;
 
 const LAND_COL_STYLE = {
   "--art-crop-w": `calc(var(--art-crop-base) * var(--card-size-scale) * ${LAND_SCALE})`,
@@ -112,7 +112,9 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
       </div>
       {/* Enchantments/artifacts -- right column */}
       <div
-        className="z-10 flex h-full flex-shrink-0 flex-col flex-wrap-reverse gap-2 px-1 py-2"
+        className={`z-10 flex h-full flex-shrink-0 flex-col flex-wrap-reverse gap-2 px-1 py-2 ${
+          isCommander ? (mode === "focused" ? "pb-16" : "pb-24") : ""
+        }`}
         style={OTHER_COL_STYLE}
       >
         {partitioned?.other.map((g) => (

@@ -59,7 +59,7 @@ export function DeckBuilder({
   const [deckName, setDeckName] = useState("");
   const [savedDecks, setSavedDecks] = useState(listSavedDecks);
   const [commanders, setCommanders] = useState<string[]>([]);
-  const [isDeckViewExpanded, setIsDeckViewExpanded] = useState(false);
+  const [isDeckViewExpanded, setIsDeckViewExpanded] = useState(true);
   const { cardDataCache, cacheCards } = useDeckCardData([
     ...deck.main.map((entry) => entry.name),
     ...deck.sideboard.map((entry) => entry.name),
@@ -71,11 +71,16 @@ export function DeckBuilder({
 
   const handleSearchResults = useCallback(
     (cards: ScryfallCard[], _total: number) => {
+      setIsDeckViewExpanded(false);
       setSearchResults(cards);
       cacheCards(cards);
     },
     [cacheCards],
   );
+
+  const handleSearchTrigger = useCallback(() => {
+    setIsDeckViewExpanded(false);
+  }, []);
 
   const handleAddCard = useCallback((card: ScryfallCard) => {
     cacheCards([card]);
@@ -278,7 +283,11 @@ export function DeckBuilder({
 
       <div className="flex min-h-0 flex-1">
         <div className="w-56 shrink-0 overflow-y-auto border-r border-white/8 bg-black/12 backdrop-blur-sm">
-          <CardSearch onResults={handleSearchResults} format={format} />
+          <CardSearch
+            onResults={handleSearchResults}
+            onSearchTrigger={handleSearchTrigger}
+            format={format}
+          />
         </div>
 
         <div className="flex min-w-0 flex-1 flex-col">

@@ -13,6 +13,12 @@ import type { GameAction } from "../../adapter/types.ts";
 /** Cards are played when dragged above their starting position (any upward drag counts). */
 const DRAG_PLAY_THRESHOLD = -20;
 
+function getHandOverlap(handSize: number): string {
+  if (handSize <= 5) return "calc(var(--card-w) * -0.25)";
+  if (handSize <= 7) return "calc(var(--card-w) * -0.45)";
+  return "calc(var(--card-w) * -0.6)";
+}
+
 export function PlayerHand() {
   const playerId = usePlayerId();
   const player = useGameStore((s) => s.gameState?.players[playerId]);
@@ -256,12 +262,17 @@ function HandCard({
         isSelected ? "ring-2 ring-cyan-400" : ""
       }`}
       style={{
-        marginLeft: index === 0 ? 0 : "-16px",
+        marginLeft: index === 0 ? 0 : getHandOverlap(handSize),
         zIndex: isDragging ? 50 : isSelected ? 20 : index,
       }}
       {...longPressHandlers}
     >
-      <CardImage cardName={cardName} size="normal" unimplementedMechanics={unimplementedMechanics} className="!w-[calc(var(--card-w)*1.3)] !h-[calc(var(--card-h)*1.3)]" />
+      <CardImage
+        cardName={cardName}
+        size="normal"
+        unimplementedMechanics={unimplementedMechanics}
+        className="!w-[calc(var(--card-w)*1.1)] !h-[calc(var(--card-h)*1.1)] sm:!w-[calc(var(--card-w)*1.3)] sm:!h-[calc(var(--card-h)*1.3)]"
+      />
     </motion.div>
   );
 }

@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
 import { AnimatePresence, motion } from "framer-motion";
 
@@ -45,7 +52,10 @@ import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
 import { useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
-import { FORMAT_DEFAULTS, useMultiplayerStore } from "../stores/multiplayerStore.ts";
+import {
+  FORMAT_DEFAULTS,
+  useMultiplayerStore,
+} from "../stores/multiplayerStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { usePlayerId } from "../hooks/usePlayerId.ts";
 
@@ -70,11 +80,15 @@ export function GamePage() {
 
   // Map URL modes to GameProvider modes
   const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" =
-    rawMode === "p2p-host" ? "p2p-host"
-    : rawMode === "p2p-join" ? "p2p-join"
-    : rawMode === "host" || rawMode === "join" ? "online"
-    : rawMode === "ai" ? "ai"
-    : "local";
+    rawMode === "p2p-host"
+      ? "p2p-host"
+      : rawMode === "p2p-join"
+        ? "p2p-join"
+        : rawMode === "host" || rawMode === "join"
+          ? "online"
+          : rawMode === "ai"
+            ? "ai"
+            : "local";
 
   const [showCardDataMissing, setShowCardDataMissing] = useState(false);
 
@@ -92,8 +106,12 @@ export function GamePage() {
   // Multiplayer UX state
   const [showConcedeDialog, setShowConcedeDialog] = useState(false);
   const [receivedEmote, setReceivedEmote] = useState<string | null>(null);
-  const receivedEmoteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [timerRemaining, setTimerRemaining] = useState<Record<number, number>>({});
+  const receivedEmoteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const [timerRemaining, setTimerRemaining] = useState<Record<number, number>>(
+    {},
+  );
   const [gameStartedAt, setGameStartedAt] = useState<number | null>(null);
 
   const handleWsEvent = useCallback((event: WsAdapterEvent) => {
@@ -133,11 +151,18 @@ export function GamePage() {
         break;
       case "emoteReceived":
         setReceivedEmote(event.emote);
-        if (receivedEmoteTimerRef.current) clearTimeout(receivedEmoteTimerRef.current);
-        receivedEmoteTimerRef.current = setTimeout(() => setReceivedEmote(null), 3000);
+        if (receivedEmoteTimerRef.current)
+          clearTimeout(receivedEmoteTimerRef.current);
+        receivedEmoteTimerRef.current = setTimeout(
+          () => setReceivedEmote(null),
+          3000,
+        );
         break;
       case "timerUpdate":
-        setTimerRemaining((prev) => ({ ...prev, [event.player]: event.remainingSeconds }));
+        setTimerRemaining((prev) => ({
+          ...prev,
+          [event.player]: event.remainingSeconds,
+        }));
         break;
     }
   }, []);
@@ -186,8 +211,14 @@ export function GamePage() {
       playerCount={playerCount}
       matchConfig={matchConfig}
       onWsEvent={mode === "online" ? handleWsEvent : undefined}
-      onP2PEvent={mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined}
-      onReady={mode === "online" || mode === "p2p-host" || mode === "p2p-join" ? handleReady : undefined}
+      onP2PEvent={
+        mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined
+      }
+      onReady={
+        mode === "online" || mode === "p2p-host" || mode === "p2p-join"
+          ? handleReady
+          : undefined
+      }
       onCardDataMissing={handleCardDataMissing}
       onNoDeck={handleNoDeck}
     >
@@ -274,11 +305,15 @@ function GamePageContent({
   const focusedOpponent = useUiStore((s) => s.focusedOpponent);
   const opponents = useMemo(() => {
     if (!gameState) return [];
-    const seatOrder = gameState.seat_order ?? gameState.players.map((p) => p.id);
+    const seatOrder =
+      gameState.seat_order ?? gameState.players.map((p) => p.id);
     const eliminated = gameState.eliminated_players ?? [];
-    return seatOrder.filter((id) => id !== playerId && !eliminated.includes(id));
+    return seatOrder.filter(
+      (id) => id !== playerId && !eliminated.includes(id),
+    );
   }, [gameState, playerId]);
-  const activeOpponentId = focusedOpponent ?? opponents[0] ?? (playerId === 0 ? 1 : 0);
+  const activeOpponentId =
+    focusedOpponent ?? opponents[0] ?? (playerId === 0 ? 1 : 0);
 
   const handleConcede = useCallback(() => {
     if (adapter && adapter instanceof WebSocketAdapter) {
@@ -300,12 +335,12 @@ function GamePageContent({
   const inspectedFaceIndex = useUiStore((s) => s.inspectedFaceIndex);
   const inspectedObj =
     !isDragging && inspectedObjectId != null && objects
-      ? objects[inspectedObjectId] ?? null
+      ? (objects[inspectedObjectId] ?? null)
       : null;
   const inspectedCardName = inspectedObj
-    ? (inspectedFaceIndex === 1 && inspectedObj.back_face
+    ? inspectedFaceIndex === 1 && inspectedObj.back_face
       ? inspectedObj.back_face.name
-      : inspectedObj.name)
+      : inspectedObj.name
     : null;
 
   useKeyboardShortcuts();
@@ -338,12 +373,19 @@ function GamePageContent({
 
   const handleSubmitSideboard = useCallback(() => {
     if (!gameState?.deck_pools) return;
-    const pool = gameState.deck_pools.find((deckPool) => deckPool.player === playerId);
+    const pool = gameState.deck_pools.find(
+      (deckPool) => deckPool.player === playerId,
+    );
     if (!pool) return;
-    const toSortedCounts = (entries: Array<{ card: { name: string }; count: number }>) => {
+    const toSortedCounts = (
+      entries: Array<{ card: { name: string }; count: number }>,
+    ) => {
       const counts = new Map<string, number>();
       for (const entry of entries) {
-        counts.set(entry.card.name, (counts.get(entry.card.name) ?? 0) + entry.count);
+        counts.set(
+          entry.card.name,
+          (counts.get(entry.card.name) ?? 0) + entry.count,
+        );
       }
       return [...counts.entries()]
         .sort((a, b) => a[0].localeCompare(b[0]))
@@ -369,16 +411,25 @@ function GamePageContent({
   );
 
   const isReconnecting = reconnectState.status !== "idle";
+  const topOverlayOffsetPx = reconnectState.status === "idle" ? 0 : 56;
+  const gamePageStyle = {
+    "--game-top-overlay-offset": `${topOverlayOffsetPx}px`,
+  } as CSSProperties;
 
   return (
-    <div ref={containerRef} className="relative h-screen w-screen overflow-hidden bg-gray-950">
+    <div
+      ref={containerRef}
+      className="relative h-[100dvh] w-full overflow-hidden bg-gray-950"
+      style={gamePageStyle}
+    >
       <BattlefieldBackground />
       <StackDisplay />
 
       {/* Reconnecting banner */}
       {reconnectState.status === "reconnecting" && (
         <div className="fixed left-0 right-0 top-0 z-40 bg-amber-600 px-4 py-2 text-center text-sm font-semibold text-white">
-          Reconnecting... (attempt {reconnectState.attempt}/{reconnectState.maxAttempts})
+          Reconnecting... (attempt {reconnectState.attempt}/
+          {reconnectState.maxAttempts})
         </div>
       )}
 
@@ -396,12 +447,17 @@ function GamePageContent({
       )}
 
       {/* Full-screen board layout */}
-      <div className={`relative z-10 flex h-full flex-col${isReconnecting ? " pointer-events-none" : ""}`}>
+      <div
+        className={`relative z-10 flex h-full flex-col${isReconnecting ? " pointer-events-none" : ""}`}
+        style={{ paddingTop: "var(--game-top-overlay-offset, 0px)" }}
+      >
         {/* Opponent hand at top */}
         <OpponentHand showCards={showAiHand} />
 
         {/* Opponent avatar centered below their hand */}
-        <OpponentHud opponentName={isOnlineMode ? opponentDisplayName : undefined} />
+        <OpponentHud
+          opponentName={isOnlineMode ? opponentDisplayName : undefined}
+        />
 
         {/* Battlefield */}
         <GameBoard />
@@ -414,7 +470,13 @@ function GamePageContent({
       </div>
 
       {/* Player zones — bottom-left: graveyard pile, library pile, exile badge */}
-      <div className="fixed bottom-4 left-4 z-30 flex items-end gap-2">
+      <div
+        className="fixed z-30 flex items-end gap-2"
+        style={{
+          bottom: "calc(env(safe-area-inset-bottom) + 1rem)",
+          left: "calc(env(safe-area-inset-left) + 1rem)",
+        }}
+      >
         <GraveyardPile
           playerId={playerId}
           onClick={() => setViewingZone({ zone: "graveyard", playerId })}
@@ -428,21 +490,37 @@ function GamePageContent({
       </div>
 
       {/* Opponent zones — upper-right */}
-      <div className="fixed right-2 top-2 z-30 flex items-start gap-2">
+      <div
+        className="fixed z-30 flex items-start gap-2"
+        style={{
+          right: "calc(env(safe-area-inset-right) + 0.5rem)",
+          top: "calc(env(safe-area-inset-top) + var(--game-top-overlay-offset, 0px) + 0.5rem)",
+        }}
+      >
         <ZoneIndicator
           zone="exile"
           playerId={activeOpponentId}
-          onClick={() => setViewingZone({ zone: "exile", playerId: activeOpponentId })}
+          onClick={() =>
+            setViewingZone({ zone: "exile", playerId: activeOpponentId })
+          }
         />
         <LibraryPile playerId={activeOpponentId} />
         <GraveyardPile
           playerId={activeOpponentId}
-          onClick={() => setViewingZone({ zone: "graveyard", playerId: activeOpponentId })}
+          onClick={() =>
+            setViewingZone({ zone: "graveyard", playerId: activeOpponentId })
+          }
         />
       </div>
 
       {/* Combat phase indicator — above action buttons to avoid overlap */}
-      <div className="fixed bottom-44 right-4 z-30">
+      <div
+        className="fixed z-30"
+        style={{
+          bottom: "calc(env(safe-area-inset-bottom) + 11rem)",
+          right: "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
+        }}
+      >
         <CombatPhaseIndicator />
       </div>
 
@@ -495,9 +573,7 @@ function GamePageContent({
           <div className="absolute inset-0 bg-black/70" />
           <div className="relative z-10 rounded-xl bg-gray-900 p-6 text-center shadow-2xl ring-1 ring-gray-700">
             <h2 className="text-lg font-bold text-white">Joining Game...</h2>
-            <p className="mt-2 text-sm text-gray-400">
-              Connecting to game
-            </p>
+            <p className="mt-2 text-sm text-gray-400">Connecting to game</p>
           </div>
         </div>
       )}
@@ -552,7 +628,13 @@ function GamePageContent({
 
       {/* Unified action button (combat + priority controls) */}
       <ActionButton />
-      <div className="fixed bottom-20 right-4 z-30">
+      <div
+        className="fixed z-30"
+        style={{
+          bottom: "calc(env(safe-area-inset-bottom) + 5rem)",
+          right: "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
+        }}
+      >
         <FullControlToggle />
       </div>
 
@@ -560,49 +642,65 @@ function GamePageContent({
       <CardPreview cardName={inspectedCardName} />
 
       {/* WaitingFor-driven prompt overlays (only for human player) */}
-      {(waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection") && waitingFor.data.player === playerId && <TargetingOverlay />}
-      {waitingFor?.type === "ManaPayment" && waitingFor.data.player === playerId && <ManaPaymentUI />}
-      {waitingFor?.type === "ReplacementChoice" && waitingFor.data.player === playerId && <ReplacementModal />}
+      {(waitingFor?.type === "TargetSelection" ||
+        waitingFor?.type === "TriggerTargetSelection") &&
+        waitingFor.data.player === playerId && <TargetingOverlay />}
+      {waitingFor?.type === "ManaPayment" &&
+        waitingFor.data.player === playerId && <ManaPaymentUI />}
+      {waitingFor?.type === "ReplacementChoice" &&
+        waitingFor.data.player === playerId && <ReplacementModal />}
       <ModeChoiceModal />
 
       {/* Scry/Dig/Surveil card choice modal */}
       <CardChoiceModal />
 
-      {waitingFor?.type === "MulliganDecision" && waitingFor.data.player === playerId && (
-        <MulliganDecisionPrompt
-          playerId={waitingFor.data.player}
-          mulliganCount={waitingFor.data.mulligan_count}
-          onChoose={handleMulliganChoice}
-        />
-      )}
+      {waitingFor?.type === "MulliganDecision" &&
+        waitingFor.data.player === playerId && (
+          <MulliganDecisionPrompt
+            playerId={waitingFor.data.player}
+            mulliganCount={waitingFor.data.mulligan_count}
+            onChoose={handleMulliganChoice}
+          />
+        )}
 
-      {waitingFor?.type === "MulliganBottomCards" && waitingFor.data.player === playerId && (
-        <MulliganBottomCardsPrompt
-          playerId={waitingFor.data.player}
-          count={waitingFor.data.count}
-          onChoose={handleBottomCards}
-        />
-      )}
+      {waitingFor?.type === "MulliganBottomCards" &&
+        waitingFor.data.player === playerId && (
+          <MulliganBottomCardsPrompt
+            playerId={waitingFor.data.player}
+            count={waitingFor.data.count}
+            onChoose={handleBottomCards}
+          />
+        )}
 
-      {waitingFor?.type === "BetweenGamesSideboard" && waitingFor.data.player === playerId && (
-        <BetweenGamesSideboardPrompt
-          gameNumber={waitingFor.data.game_number}
-          score={waitingFor.data.score}
-          onSubmit={handleSubmitSideboard}
-        />
-      )}
+      {waitingFor?.type === "BetweenGamesSideboard" &&
+        waitingFor.data.player === playerId && (
+          <BetweenGamesSideboardPrompt
+            gameNumber={waitingFor.data.game_number}
+            score={waitingFor.data.score}
+            onSubmit={handleSubmitSideboard}
+          />
+        )}
 
-      {waitingFor?.type === "BetweenGamesChoosePlayDraw" && waitingFor.data.player === playerId && (
-        <ChoiceModal
-          title={`Game ${waitingFor.data.game_number}: Choose Play or Draw`}
-          subtitle={`Match score ${waitingFor.data.score.p0_wins}-${waitingFor.data.score.p1_wins}`}
-          options={[
-            { id: "play", label: "Play First", description: "Take the first turn" },
-            { id: "draw", label: "Draw First", description: "Take the extra draw on your first turn" },
-          ]}
-          onChoose={(id) => handleChoosePlayDraw(id === "play")}
-        />
-      )}
+      {waitingFor?.type === "BetweenGamesChoosePlayDraw" &&
+        waitingFor.data.player === playerId && (
+          <ChoiceModal
+            title={`Game ${waitingFor.data.game_number}: Choose Play or Draw`}
+            subtitle={`Match score ${waitingFor.data.score.p0_wins}-${waitingFor.data.score.p1_wins}`}
+            options={[
+              {
+                id: "play",
+                label: "Play First",
+                description: "Take the first turn",
+              },
+              {
+                id: "draw",
+                label: "Draw First",
+                description: "Take the extra draw on your first turn",
+              },
+            ]}
+            onChoose={(id) => handleChoosePlayDraw(id === "play")}
+          />
+        )}
 
       {/* Multiplayer UX overlays */}
       {isOnlineMode && (
@@ -612,7 +710,10 @@ function GamePageContent({
             onConfirm={handleConcede}
             onCancel={onHideConcedeDialog}
           />
-          <EmoteOverlay onSendEmote={handleSendEmote} receivedEmote={receivedEmote} />
+          <EmoteOverlay
+            onSendEmote={handleSendEmote}
+            receivedEmote={receivedEmote}
+          />
           {/* Per-player timer display */}
           {Object.entries(timerRemaining).map(([pid, secs]) =>
             secs > 0 ? (
@@ -712,12 +813,16 @@ function MulliganDecisionPrompt({
   const handObjects = player.hand.map((id) => objects[id]).filter(Boolean);
   const nextHandSize = 7 - mulliganCount - 1;
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto px-3 py-4 sm:px-4 sm:py-6"
-      style={{
-        background: "radial-gradient(ellipse at center, rgba(30,30,50,0.95) 0%, rgba(0,0,0,0.98) 70%)",
-        "--card-w": "clamp(100px, 14vw, 180px)",
-        "--card-h": "clamp(140px, 19.6vw, 252px)",
-      } as React.CSSProperties}
+    <div
+      className="fixed inset-0 z-50 overflow-y-auto px-3 py-4 sm:px-4 sm:py-6"
+      style={
+        {
+          background:
+            "radial-gradient(ellipse at center, rgba(30,30,50,0.95) 0%, rgba(0,0,0,0.98) 70%)",
+          "--card-w": "clamp(100px, 14vw, 180px)",
+          "--card-h": "clamp(140px, 19.6vw, 252px)",
+        } as React.CSSProperties
+      }
     >
       <div className="flex min-h-full flex-col items-center justify-center pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
         {/* Title */}
@@ -734,7 +839,9 @@ function MulliganDecisionPrompt({
             Opening Hand
           </h2>
           {mulliganCount > 0 && (
-            <p className="mt-1 text-sm text-gray-400">Mulligan {mulliganCount}</p>
+            <p className="mt-1 text-sm text-gray-400">
+              Mulligan {mulliganCount}
+            </p>
           )}
         </motion.div>
 
@@ -745,10 +852,16 @@ function MulliganDecisionPrompt({
               <motion.div
                 key={obj.id}
                 className="cursor-pointer flex-shrink-0 rounded-lg transition-shadow duration-200 hover:z-50 hover:shadow-[0_0_20px_rgba(200,200,255,0.3)]"
-                style={{ marginLeft: index === 0 ? 0 : "clamp(-26px, -3vw, -16px)" }}
+                style={{
+                  marginLeft: index === 0 ? 0 : "clamp(-26px, -3vw, -16px)",
+                }}
                 initial={{ opacity: 0, y: 80, scale: 0.8 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
-                transition={{ delay: 0.1 + index * 0.08, duration: 0.4, ease: "easeOut" }}
+                transition={{
+                  delay: 0.1 + index * 0.08,
+                  duration: 0.4,
+                  ease: "easeOut",
+                }}
                 whileHover={{ scale: 1.06, y: -12 }}
                 onAnimationComplete={() => {
                   if (index === handObjects.length - 1) setButtonsVisible(true);
@@ -818,11 +931,14 @@ function MulliganBottomCardsPrompt({
   return (
     <div
       className="fixed inset-0 z-50 overflow-y-auto px-3 py-4 sm:px-4 sm:py-6"
-      style={{
-        background: "radial-gradient(ellipse at center, rgba(30,30,50,0.95) 0%, rgba(0,0,0,0.98) 70%)",
-        "--card-w": "clamp(100px, 14vw, 180px)",
-        "--card-h": "clamp(140px, 19.6vw, 252px)",
-      } as React.CSSProperties}
+      style={
+        {
+          background:
+            "radial-gradient(ellipse at center, rgba(30,30,50,0.95) 0%, rgba(0,0,0,0.98) 70%)",
+          "--card-w": "clamp(100px, 14vw, 180px)",
+          "--card-h": "clamp(140px, 19.6vw, 252px)",
+        } as React.CSSProperties
+      }
     >
       <div className="flex min-h-full flex-col items-center justify-center pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
         {/* Title */}
@@ -839,7 +955,8 @@ function MulliganBottomCardsPrompt({
             Put {count} card{count > 1 ? "s" : ""} on bottom
           </h2>
           <p className="mt-2 text-sm text-gray-400">
-            Select {count} card{count > 1 ? "s" : ""} to put on the bottom of your library
+            Select {count} card{count > 1 ? "s" : ""} to put on the bottom of
+            your library
           </p>
         </motion.div>
 
@@ -861,10 +978,16 @@ function MulliganBottomCardsPrompt({
                       ? "z-40 ring-3 ring-cyan-400 opacity-70"
                       : "hover:shadow-[0_0_20px_rgba(200,200,255,0.3)]"
                   }`}
-                  style={{ marginLeft: index === 0 ? 0 : "clamp(-26px, -3vw, -16px)" }}
+                  style={{
+                    marginLeft: index === 0 ? 0 : "clamp(-26px, -3vw, -16px)",
+                  }}
                   initial={{ opacity: 0, y: 80, scale: 0.8 }}
                   animate={{ opacity: isSelected ? 0.7 : 1, y: 0, scale: 1 }}
-                  transition={{ delay: 0.1 + index * 0.08, duration: 0.4, ease: "easeOut" }}
+                  transition={{
+                    delay: 0.1 + index * 0.08,
+                    duration: 0.4,
+                    ease: "easeOut",
+                  }}
                   whileHover={{ scale: 1.06, y: -12 }}
                   onMouseEnter={() => inspectObject(obj.id)}
                   onMouseLeave={() => inspectObject(null)}
@@ -975,7 +1098,9 @@ function GameOverScreen({
   const isDraw = winner == null;
 
   const turnCount = gameState?.turn_number ?? 0;
-  const gameDuration = gameStartedAt ? Math.floor((Date.now() - gameStartedAt) / 1000) : null;
+  const gameDuration = gameStartedAt
+    ? Math.floor((Date.now() - gameStartedAt) / 1000)
+    : null;
 
   const titleText = isDraw ? "DRAW" : isVictory ? "VICTORY" : "DEFEAT";
   const titleColor = isDraw ? "#B0B0B0" : isVictory ? "#C9B037" : "#991B1B";
@@ -1020,7 +1145,12 @@ function GameOverScreen({
         style={{ color: titleColor, textShadow }}
         initial={{ scale: 0.5, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}
-        transition={{ type: "spring", stiffness: 200, damping: 12, duration: 0.6 }}
+        transition={{
+          type: "spring",
+          stiffness: 200,
+          damping: 12,
+          duration: 0.6,
+        }}
         onAnimationComplete={() => setButtonsVisible(true)}
       >
         {titleText}
@@ -1038,19 +1168,19 @@ function GameOverScreen({
             <p className="text-base text-gray-200 sm:text-lg">
               You: <span className="font-bold text-white">{playerLife}</span>
               <span className="mx-3 text-gray-500">/</span>
-              Opponent: <span className="font-bold text-white">{opponentLife}</span>
+              Opponent:{" "}
+              <span className="font-bold text-white">{opponentLife}</span>
             </p>
             {(turnCount > 0 || gameDuration !== null) && (
               <p className="mt-2 text-xs text-gray-400 sm:text-sm">
-                {turnCount > 0 && (
-                  <span>Turns: {turnCount}</span>
-                )}
+                {turnCount > 0 && <span>Turns: {turnCount}</span>}
                 {turnCount > 0 && gameDuration !== null && (
                   <span className="mx-2 text-gray-600">|</span>
                 )}
                 {gameDuration !== null && (
                   <span>
-                    Duration: {Math.floor(gameDuration / 60)}:{String(gameDuration % 60).padStart(2, "0")}
+                    Duration: {Math.floor(gameDuration / 60)}:
+                    {String(gameDuration % 60).padStart(2, "0")}
                   </span>
                 )}
               </p>

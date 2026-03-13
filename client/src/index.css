@@ -2,19 +2,21 @@
 
 :root {
   --card-size-scale: 1;
-  --card-base: 18vw;
-  --card-w: calc(var(--card-base) * var(--card-size-scale));
+  --card-viewport-scale: 1;
+  --art-crop-viewport-scale: 1;
+  --card-base: clamp(4rem, min(7vw, 11vh), 6.75rem);
+  --card-w: calc(var(--card-base) * var(--card-size-scale) * var(--card-viewport-scale));
   --card-h: calc(var(--card-w) * 1.4);
   --card-radius: 6px;
-  --art-crop-base: 26vw;
-  --art-crop-w: calc(var(--art-crop-base) * var(--card-size-scale));
+  --art-crop-base: clamp(6rem, min(10vw, 14vh), 9.5rem);
+  --art-crop-w: calc(var(--art-crop-base) * var(--card-size-scale) * var(--art-crop-viewport-scale));
   --art-crop-h: calc(var(--art-crop-w) * 0.75);
 }
 
 @media (min-width: 768px) {
   :root {
-    --card-base: 12vw;
-    --art-crop-base: 18vw;
+    --card-base: clamp(4.25rem, min(6.4vw, 11.5vh), 7rem);
+    --art-crop-base: clamp(6.25rem, min(8.8vw, 15vh), 9.75rem);
   }
 }
 
@@ -47,11 +49,124 @@ body {
 }
 
 .menu-scene {
+  position: relative;
+  isolation: isolate;
   background:
     radial-gradient(circle at 50% 18%, rgba(255, 161, 72, 0.16), transparent 22%),
     radial-gradient(circle at 20% 24%, rgba(72, 163, 255, 0.12), transparent 28%),
     radial-gradient(circle at 80% 24%, rgba(31, 201, 152, 0.1), transparent 24%),
     linear-gradient(180deg, rgba(6, 10, 24, 0.96) 0%, rgba(4, 7, 17, 0.96) 58%, rgba(2, 3, 10, 1) 100%);
+}
+
+.menu-scene::before,
+.menu-scene::after {
+  content: "";
+  position: absolute;
+  top: clamp(0.75rem, 4vh, 3.5rem);
+  left: clamp(58%, 68vw, 74%);
+  width: clamp(8rem, 18vw, 16rem);
+  height: clamp(8rem, 18vw, 16rem);
+  border-radius: 9999px;
+  pointer-events: none;
+}
+
+.menu-scene::before {
+  z-index: -2;
+  transform: translateX(-50%);
+  opacity: 0.12;
+  background:
+    radial-gradient(circle at 34% 30%, rgba(255, 248, 238, 0.44) 0%, rgba(236, 231, 223, 0.22) 24%, rgba(163, 177, 215, 0.1) 54%, rgba(74, 93, 136, 0.03) 70%, transparent 80%),
+    radial-gradient(circle at center, rgba(255, 184, 108, 0.04), rgba(96, 142, 220, 0.03) 58%, transparent 78%);
+  box-shadow: 0 0 84px rgba(255, 184, 108, 0.04), 0 0 144px rgba(96, 142, 220, 0.04);
+  animation: menu-moon-pulse 28s ease-in-out infinite;
+}
+
+.menu-scene::after {
+  z-index: -1;
+  transform: translateX(calc(-50% + 34%));
+  background:
+    radial-gradient(circle at 50% 50%, rgba(3, 6, 16, 0.62) 0%, rgba(3, 6, 16, 0.74) 66%, rgba(3, 6, 16, 0.18) 76%, transparent 84%);
+  filter: blur(3px);
+  box-shadow: 0 0 24px rgba(2, 4, 10, 0.14);
+  animation: menu-moon-phase 72s ease-in-out infinite alternate;
+}
+
+@keyframes menu-moon-pulse {
+  0% {
+    opacity: 0.12;
+    transform: translateX(-50%) scale(1);
+  }
+
+  25% {
+    opacity: 0.18;
+    transform: translateX(-50%) scale(1.01);
+  }
+
+  50% {
+    opacity: 0.15;
+    transform: translateX(-50%) scale(0.998);
+  }
+
+  75% {
+    opacity: 0.16;
+    transform: translateX(-50%) scale(1.006);
+  }
+
+  100% {
+    opacity: 0.12;
+    transform: translateX(-50%) scale(1);
+  }
+}
+
+@keyframes menu-moon-phase {
+  0% {
+    opacity: 0.42;
+    transform: translateX(calc(-50% + 34%));
+  }
+
+  18% {
+    opacity: 0.48;
+    transform: translateX(calc(-50% + 20%));
+  }
+
+  34% {
+    opacity: 0.54;
+    transform: translateX(calc(-50% + 8%));
+  }
+
+  50% {
+    opacity: 0.58;
+    transform: translateX(-50%);
+  }
+
+  66% {
+    opacity: 0.54;
+    transform: translateX(calc(-50% - 8%));
+  }
+
+  82% {
+    opacity: 0.48;
+    transform: translateX(calc(-50% - 20%));
+  }
+
+  100% {
+    opacity: 0.42;
+    transform: translateX(calc(-50% - 34%));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .menu-scene::before {
+    animation: none;
+    opacity: 0.14;
+    transform: translateX(-50%);
+  }
+
+  .menu-scene::after {
+    animation: none;
+    opacity: 0.46;
+    transform: translateX(calc(-50% + 18%));
+  }
 }
 
 .menu-scene__vignette {
@@ -99,8 +214,31 @@ body {
 
 @media (min-width: 1200px) {
   :root {
-    --card-base: 7vw;
+    --card-base: clamp(4.5rem, min(5.9vw, 12vh), 7.25rem);
     --card-radius: 8px;
-    --art-crop-base: 12vw;
+    --art-crop-base: clamp(6.5rem, min(8.2vw, 15.5vh), 10rem);
+  }
+}
+
+@media (max-height: 820px) and (min-aspect-ratio: 11/10) {
+  :root {
+    --card-viewport-scale: 0.95;
+    --art-crop-viewport-scale: 0.93;
+  }
+}
+
+@media (max-aspect-ratio: 10/11) {
+  :root {
+    --card-viewport-scale: 1;
+    --art-crop-viewport-scale: 1;
+    --card-base: clamp(3.5rem, 8.25vw, 5.5rem);
+    --art-crop-base: clamp(5.25rem, 11vw, 7.5rem);
+  }
+}
+
+@media (min-width: 900px) and (max-aspect-ratio: 10/11) {
+  :root {
+    --card-base: clamp(3.5rem, 6vw, 5.25rem);
+    --art-crop-base: clamp(5.25rem, 7.75vw, 7.25rem);
   }
 }

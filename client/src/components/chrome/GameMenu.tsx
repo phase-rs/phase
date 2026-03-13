@@ -38,7 +38,14 @@ export function GameMenu({
   }, [open]);
 
   return (
-    <div ref={menuRef} className="fixed left-2 top-2 z-40">
+    <div
+      ref={menuRef}
+      className="fixed z-40"
+      style={{
+        left: "calc(env(safe-area-inset-left) + 0.5rem)",
+        top: "calc(env(safe-area-inset-top) + var(--game-top-overlay-offset, 0px) + 0.5rem)",
+      }}
+    >
       <button
         onClick={() => setOpen(!open)}
         className="flex h-9 w-9 items-center justify-center rounded-lg bg-gray-800/80 text-gray-400 transition-colors hover:bg-gray-700/80 hover:text-gray-200"

@@ -59,7 +59,10 @@ export function StackDisplay() {
         animate={{ opacity: 1, x: 0 }}
         exit={{ opacity: 0, x: 60 }}
         transition={{ type: "spring", stiffness: 300, damping: 30 }}
-        className="fixed right-4 top-1/2 z-30 -translate-y-1/2"
+        className="fixed top-1/2 z-30 -translate-y-1/2"
+        style={{
+          right: "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
+        }}
       >
         {/* Staggered pile — no wrapper chrome, just cards */}
         <div
