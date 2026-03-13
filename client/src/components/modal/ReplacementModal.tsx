@@ -29,7 +29,7 @@ export function ReplacementModal() {
   return (
     <AnimatePresence>
       <motion.div
-        className="fixed inset-0 z-50 flex items-center justify-center"
+        className="fixed inset-0 z-50 flex items-center justify-center px-3 py-4 sm:px-4 sm:py-6"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
@@ -40,13 +40,13 @@ export function ReplacementModal() {
 
         {/* Modal */}
         <motion.div
-          className="relative z-10 w-full max-w-md rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700"
+          className="relative z-10 max-h-[calc(100vh-2rem)] w-full max-w-md overflow-y-auto rounded-[20px] bg-gray-900 p-4 shadow-2xl ring-1 ring-gray-700 sm:p-6"
           initial={{ scale: 0.9, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.9, opacity: 0 }}
           transition={{ duration: 0.2, ease: "easeOut" }}
         >
-          <h2 className="mb-2 text-center text-lg font-bold text-white">
+          <h2 className="mb-2 text-center text-base font-bold text-white sm:text-lg">
             Replacement Effects
           </h2>
           <p className="mb-4 text-center text-sm text-gray-400">
@@ -60,7 +60,7 @@ export function ReplacementModal() {
                 <button
                   key={index}
                   onClick={() => handleChoose(index)}
-                  className="rounded-lg bg-gray-800 px-4 py-3 text-left transition hover:bg-gray-700 hover:ring-1 hover:ring-cyan-400/50"
+                  className="min-h-11 rounded-lg bg-gray-800 px-4 py-3 text-left transition hover:bg-gray-700 hover:ring-1 hover:ring-cyan-400/50"
                 >
                   <span className="font-semibold text-white">
                     {desc || `Replacement Effect ${index + 1}`}

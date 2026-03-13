@@ -162,6 +162,17 @@ pub fn choose_action(
         }
     }
 
+    if let WaitingFor::DiscardToHandSize { cards, count, .. } = &state.waiting_for {
+        // Discard the lowest-value cards
+        let mut scored: Vec<_> = cards
+            .iter()
+            .map(|&id| (id, evaluate_card_value(state, id)))
+            .collect();
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let to_discard: Vec<_> = scored.iter().take(*count).map(|(id, _)| *id).collect();
+        return Some(GameAction::SelectCards { cards: to_discard });
+    }
+
     // Combat decisions: delegate to specialized combat AI
     if let WaitingFor::DeclareAttackers { .. } = &state.waiting_for {
         let attacks = choose_attackers_with_targets(state, ai_player);

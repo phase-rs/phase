@@ -56,7 +56,7 @@ export function ModeChoiceModal() {
   return (
     <AnimatePresence>
       <motion.div
-        className="fixed inset-0 z-50 flex items-center justify-center"
+        className="fixed inset-0 z-50 flex items-center justify-center px-3 py-4 sm:px-4 sm:py-6"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
@@ -65,13 +65,13 @@ export function ModeChoiceModal() {
         <div className="absolute inset-0 bg-black/60" />
 
         <motion.div
-          className="relative z-10 w-full max-w-md rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700"
+          className="relative z-10 max-h-[calc(100vh-2rem)] w-full max-w-md overflow-y-auto rounded-[20px] bg-gray-900 p-4 shadow-2xl ring-1 ring-gray-700 sm:p-6"
           initial={{ scale: 0.9, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.9, opacity: 0 }}
           transition={{ duration: 0.2, ease: "easeOut" }}
         >
-          <h2 className="mb-4 text-center text-lg font-bold text-white">
+          <h2 className="mb-4 text-center text-base font-bold text-white sm:text-lg">
             {chooseLabel}
           </h2>
 
@@ -101,12 +101,12 @@ export function ModeChoiceModal() {
             })}
           </div>
 
-          <div className="mt-4 flex justify-center gap-3">
+          <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:justify-center">
             {!isSingleChoice && (
               <button
                 onClick={handleConfirm}
                 disabled={!canConfirm}
-                className={`rounded-lg px-6 py-2 font-semibold shadow-lg transition ${
+                className={`min-h-11 rounded-lg px-6 py-2 font-semibold shadow-lg transition ${
                   canConfirm
                     ? "bg-cyan-600 text-white hover:bg-cyan-500"
                     : "cursor-not-allowed bg-gray-700 text-gray-500"
@@ -117,7 +117,7 @@ export function ModeChoiceModal() {
             )}
             <button
               onClick={handleCancel}
-              className="rounded-lg bg-gray-700 px-6 py-2 font-semibold text-gray-200 shadow-lg transition hover:bg-gray-600"
+              className="min-h-11 rounded-lg bg-gray-700 px-6 py-2 font-semibold text-gray-200 shadow-lg transition hover:bg-gray-600"
             >
               Cancel
             </button>

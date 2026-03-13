@@ -287,7 +287,8 @@ export type WaitingFor =
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string; options: string[] } }
-  | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast } };
+  | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast } }
+  | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } };
 
 // ── Action Result ────────────────────────────────────────────────────────
 

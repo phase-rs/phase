@@ -390,13 +390,13 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             for &card_id in &bottom_cards {
                 player_state.library.push(card_id);
             }
-            // Execute any continuation saved when this choice interrupted an ability chain
+            // Execute any continuation saved when this choice interrupted an ability chain.
+            // Reset waiting_for first so non-interactive continuations don't return stale state.
+            state.waiting_for = WaitingFor::Priority { player: p };
             if let Some(cont) = state.pending_continuation.take() {
                 let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
-                state.waiting_for.clone()
-            } else {
-                WaitingFor::Priority { player: p }
             }
+            state.waiting_for.clone()
         }
         // Dig: player selects keep_count cards for hand, rest go to graveyard
         (
@@ -430,12 +430,11 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             for &obj_id in &to_graveyard {
                 zones::move_to_zone(state, obj_id, Zone::Graveyard, &mut events);
             }
+            state.waiting_for = WaitingFor::Priority { player: p };
             if let Some(cont) = state.pending_continuation.take() {
                 let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
-                state.waiting_for.clone()
-            } else {
-                WaitingFor::Priority { player: p }
             }
+            state.waiting_for.clone()
         }
         // Surveil: player selects cards to put in GRAVEYARD, rest stay on top
         (
@@ -453,12 +452,11 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 }
             }
             // Cards not in to_graveyard stay on top of library (already there)
+            state.waiting_for = WaitingFor::Priority { player: p };
             if let Some(cont) = state.pending_continuation.take() {
                 let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
-                state.waiting_for.clone()
-            } else {
-                WaitingFor::Priority { player: p }
             }
+            state.waiting_for.clone()
         }
         // RevealChoice: player selects a card from revealed hand.
         // Chosen card becomes the target for the pending_continuation sub-ability
@@ -505,14 +503,16 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 state.revealed_cards.remove(&card_id);
             }
 
-            // Run the pending continuation with the chosen card as its target
+            // Run the pending continuation with the chosen card as its target.
+            // Reset waiting_for to Priority first so that if the continuation
+            // (e.g. ChangeZone) doesn't set a new interactive state, we don't
+            // return a stale RevealChoice that re-renders the modal.
+            state.waiting_for = WaitingFor::Priority { player: p };
             if let Some(mut cont) = state.pending_continuation.take() {
                 cont.targets = vec![crate::types::ability::TargetRef::Object(chosen_id)];
                 let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
-                state.waiting_for.clone()
-            } else {
-                WaitingFor::Priority { player: p }
             }
+            state.waiting_for.clone()
         }
         // SearchChoice: player selects card(s) from filtered library search.
         // Selected cards become targets for the pending_continuation (ChangeZone + Shuffle).
@@ -547,16 +547,50 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             }
 
             // Run the pending continuation with chosen cards as targets
+            state.waiting_for = WaitingFor::Priority { player: p };
             if let Some(mut cont) = state.pending_continuation.take() {
                 cont.targets = chosen
                     .iter()
                     .map(|&id| crate::types::ability::TargetRef::Object(id))
                     .collect();
                 let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
-                state.waiting_for.clone()
-            } else {
-                WaitingFor::Priority { player: p }
             }
+            state.waiting_for.clone()
+        }
+        // DiscardToHandSize: player chose which cards to discard during cleanup (Rule 514.1).
+        (
+            WaitingFor::DiscardToHandSize {
+                player,
+                count,
+                cards: legal_cards,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            let _p = *player;
+            let expected = *count;
+            let legal = legal_cards.clone();
+
+            if chosen.len() != expected {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must discard exactly {} card(s), got {}",
+                    expected,
+                    chosen.len()
+                )));
+            }
+
+            for card_id in &chosen {
+                if !legal.contains(card_id) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected card not in hand".to_string(),
+                    ));
+                }
+            }
+
+            super::turns::finish_cleanup_discard(state, &chosen, &mut events);
+
+            // Continue the turn: advance past cleanup into next turn
+            super::turns::advance_phase(state, &mut events);
+            super::turns::auto_advance(state, &mut events)
         }
         // NamedChoice: player selects from a set of named options (creature type, color, etc.).
         // Stores the chosen value in last_named_choice and resumes any pending continuation.
@@ -606,15 +640,13 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             state.last_named_choice = Some(choice);
 
             // Resume pending continuation if present
+            state.waiting_for = WaitingFor::Priority { player: p };
             if let Some(cont) = state.pending_continuation.take() {
                 let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
-                // Clear the choice after the continuation has consumed it
-                state.last_named_choice = None;
-                state.waiting_for.clone()
-            } else {
-                state.last_named_choice = None;
-                WaitingFor::Priority { player: p }
             }
+            // Clear the choice after the continuation has consumed it
+            state.last_named_choice = None;
+            state.waiting_for.clone()
         }
         (WaitingFor::Priority { player }, GameAction::PlayFaceDown { card_id }) => {
             if state.priority_player != *player {

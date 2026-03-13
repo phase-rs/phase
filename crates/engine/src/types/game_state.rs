@@ -171,6 +171,14 @@ pub enum WaitingFor {
         modal: ModalChoice,
         pending_cast: Box<PendingCast>,
     },
+    /// Player must choose which cards to discard down to maximum hand size (cleanup step).
+    DiscardToHandSize {
+        player: PlayerId,
+        /// How many cards must be discarded.
+        count: usize,
+        /// The ObjectIds of all cards in the player's hand (the chooseable set).
+        cards: Vec<ObjectId>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -645,8 +653,13 @@ mod tests {
                     cost: crate::types::mana::ManaCost::NoCost,
                 }),
             },
+            WaitingFor::DiscardToHandSize {
+                player: PlayerId(0),
+                count: 2,
+                cards: vec![ObjectId(1), ObjectId(2)],
+            },
         ];
-        assert_eq!(variants.len(), 14);
+        assert_eq!(variants.len(), 15);
     }
 
     #[test]

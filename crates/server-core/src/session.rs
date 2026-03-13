@@ -39,7 +39,8 @@ pub fn acting_player(waiting_for: &WaitingFor) -> Option<PlayerId> {
         | WaitingFor::BetweenGamesSideboard { player, .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { player, .. }
         | WaitingFor::NamedChoice { player, .. }
-        | WaitingFor::ModeChoice { player, .. } => Some(*player),
+        | WaitingFor::ModeChoice { player, .. }
+        | WaitingFor::DiscardToHandSize { player, .. } => Some(*player),
         WaitingFor::GameOver { .. } => None,
     }
 }

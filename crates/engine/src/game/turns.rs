@@ -154,13 +154,19 @@ pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) {
     player.has_drawn_this_turn = true;
 }
 
-pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
+/// Execute the cleanup step. Returns `Some(WaitingFor)` if the player must
+/// choose which cards to discard down to maximum hand size, or `None` if
+/// cleanup completes immediately.
+pub fn execute_cleanup(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
     // Check day/night transition at cleanup (per Rule 727.2)
     day_night::check_day_night_transition(state, events);
 
     let active = state.active_player;
 
-    // Discard down to 7 (auto-discard last cards for now)
+    // Discard down to maximum hand size (Rule 514.1)
     let player = state
         .players
         .iter()
@@ -169,13 +175,62 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     let hand_size = player.hand.len();
     if hand_size > 7 {
-        let to_discard: Vec<_> = player.hand[7..].to_vec();
-        for card_id in to_discard {
-            zones::move_to_zone(state, card_id, Zone::Graveyard, events);
-        }
+        let count = hand_size - 7;
+        let cards = player.hand.clone();
+        return Some(WaitingFor::DiscardToHandSize {
+            player: active,
+            count,
+            cards,
+        });
     }
 
     // Clear damage on all battlefield creatures
+    let to_clear: Vec<_> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .map(|obj| obj.damage_marked > 0)
+                .unwrap_or(false)
+        })
+        .collect();
+
+    for id in to_clear {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.damage_marked = 0;
+            obj.dealt_deathtouch_damage = false;
+            events.push(GameEvent::DamageCleared { object_id: id });
+        }
+    }
+
+    None
+}
+
+/// Complete the cleanup step after the player has chosen cards to discard.
+/// Discards the selected cards and clears damage (the parts of cleanup that
+/// were deferred while waiting for player input).
+pub fn finish_cleanup_discard(
+    state: &mut GameState,
+    chosen: &[crate::types::identifiers::ObjectId],
+    events: &mut Vec<GameEvent>,
+) {
+    for &card_id in chosen {
+        zones::move_to_zone(state, card_id, Zone::Graveyard, events);
+        let player_id = state
+            .objects
+            .get(&card_id)
+            .map(|obj| obj.owner)
+            .unwrap_or(state.active_player);
+        events.push(GameEvent::Discarded {
+            player_id,
+            object_id: card_id,
+        });
+    }
+
+    // Clear damage on all battlefield creatures (deferred from execute_cleanup)
     let to_clear: Vec<_> = state
         .battlefield
         .iter()
@@ -298,7 +353,9 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 };
             }
             Phase::Cleanup => {
-                execute_cleanup(state, events);
+                if let Some(waiting) = execute_cleanup(state, events) {
+                    return waiting;
+                }
                 advance_phase(state, events);
                 // advance_phase handles start_next_turn when wrapping Cleanup -> Untap
                 // Continue loop to process next turn's phases
@@ -502,12 +559,50 @@ mod tests {
     }
 
     #[test]
-    fn execute_cleanup_discards_to_seven() {
+    fn execute_cleanup_returns_discard_choice_when_over_seven() {
         let mut state = setup();
         state.active_player = PlayerId(0);
 
         // Give player 9 cards in hand
+        let mut hand_ids = Vec::new();
         for i in 0..9 {
+            let id = create_object(
+                &mut state,
+                CardId(i),
+                PlayerId(0),
+                format!("Card {}", i),
+                Zone::Hand,
+            );
+            hand_ids.push(id);
+        }
+
+        let mut events = Vec::new();
+        let result = execute_cleanup(&mut state, &mut events);
+
+        match result {
+            Some(WaitingFor::DiscardToHandSize {
+                player,
+                count,
+                cards,
+            }) => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(count, 2);
+                assert_eq!(cards.len(), 9);
+            }
+            other => panic!("Expected DiscardToHandSize, got {:?}", other),
+        }
+
+        // Hand unchanged until player makes a choice
+        assert_eq!(state.players[0].hand.len(), 9);
+    }
+
+    #[test]
+    fn execute_cleanup_returns_none_when_at_or_below_seven() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // Give player exactly 7 cards
+        for i in 0..7 {
             create_object(
                 &mut state,
                 CardId(i),
@@ -518,10 +613,40 @@ mod tests {
         }
 
         let mut events = Vec::new();
-        execute_cleanup(&mut state, &mut events);
+        let result = execute_cleanup(&mut state, &mut events);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn finish_cleanup_discard_moves_selected_cards() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let mut hand_ids = Vec::new();
+        for i in 0..9 {
+            let id = create_object(
+                &mut state,
+                CardId(i),
+                PlayerId(0),
+                format!("Card {}", i),
+                Zone::Hand,
+            );
+            hand_ids.push(id);
+        }
+
+        // Player chooses to discard the last 2 cards
+        let to_discard = vec![hand_ids[7], hand_ids[8]];
+        let mut events = Vec::new();
+        finish_cleanup_discard(&mut state, &to_discard, &mut events);
 
         assert_eq!(state.players[0].hand.len(), 7);
         assert_eq!(state.players[0].graveyard.len(), 2);
+        assert!(state.players[0].graveyard.contains(&hand_ids[7]));
+        assert!(state.players[0].graveyard.contains(&hand_ids[8]));
+        // The first 7 cards should still be in hand
+        for &id in &hand_ids[..7] {
+            assert!(state.players[0].hand.contains(&id));
+        }
     }
 
     #[test]

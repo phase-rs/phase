@@ -205,7 +205,7 @@ function ButtonGrid({ data }: { data: NamedChoice["data"] }) {
           return (
             <motion.button
               key={option}
-              className={`rounded-lg border-2 px-5 py-3 text-base font-semibold transition ${
+              className={`min-h-11 rounded-lg border-2 px-4 py-3 text-sm font-semibold transition sm:px-5 sm:text-base ${ 
                 isSelected
                   ? "border-emerald-400 bg-emerald-500/30 text-white"
                   : "border-gray-600 bg-gray-800/80 text-gray-300 hover:border-gray-400 hover:text-white"

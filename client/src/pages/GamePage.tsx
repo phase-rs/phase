@@ -712,77 +712,85 @@ function MulliganDecisionPrompt({
   const handObjects = player.hand.map((id) => objects[id]).filter(Boolean);
   const nextHandSize = 7 - mulliganCount - 1;
   return (
-    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center px-4"
+    <div className="fixed inset-0 z-50 overflow-y-auto px-3 py-4 sm:px-4 sm:py-6"
       style={{
         background: "radial-gradient(ellipse at center, rgba(30,30,50,0.95) 0%, rgba(0,0,0,0.98) 70%)",
         "--card-w": "clamp(100px, 14vw, 180px)",
         "--card-h": "clamp(140px, 19.6vw, 252px)",
       } as React.CSSProperties}
     >
-      {/* Title */}
-      <motion.div
-        className="mb-8 text-center"
-        initial={{ opacity: 0, y: -20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5 }}
-      >
-        <h2
-          className="text-3xl font-black tracking-wide text-white"
-          style={{ textShadow: "0 0 20px rgba(200,200,255,0.3)" }}
+      <div className="flex min-h-full flex-col items-center justify-center pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
+        {/* Title */}
+        <motion.div
+          className="mb-6 text-center sm:mb-8"
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5 }}
         >
-          Opening Hand
-        </h2>
-        {mulliganCount > 0 && (
-          <p className="mt-1 text-sm text-gray-400">Mulligan {mulliganCount}</p>
-        )}
-      </motion.div>
-
-      {/* Card display — overlapping row */}
-      <div className="mb-10 flex items-center justify-center">
-        {handObjects.map((obj, index) => (
-          <motion.div
-            key={obj.id}
-            className="cursor-pointer flex-shrink-0 rounded-lg transition-shadow duration-200 hover:z-50 hover:shadow-[0_0_20px_rgba(200,200,255,0.3)]"
-            style={{ marginLeft: index === 0 ? 0 : "clamp(-40px, -4vw, -25px)" }}
-            initial={{ opacity: 0, y: 80, scale: 0.8 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            transition={{ delay: 0.1 + index * 0.08, duration: 0.4, ease: "easeOut" }}
-            whileHover={{ scale: 1.1, y: -20 }}
-            onAnimationComplete={() => {
-              if (index === handObjects.length - 1) setButtonsVisible(true);
-            }}
-            onMouseEnter={() => inspectObject(obj.id)}
-            onMouseLeave={() => inspectObject(null)}
+          <h2
+            className="text-2xl font-black tracking-wide text-white sm:text-3xl"
+            style={{ textShadow: "0 0 20px rgba(200,200,255,0.3)" }}
           >
-            <CardImage cardName={obj.name} size="normal" />
-          </motion.div>
-        ))}
+            Opening Hand
+          </h2>
+          {mulliganCount > 0 && (
+            <p className="mt-1 text-sm text-gray-400">Mulligan {mulliganCount}</p>
+          )}
+        </motion.div>
+
+        {/* Card display */}
+        <div className="mb-8 w-full overflow-x-auto pb-4">
+          <div className="mx-auto flex w-max min-w-full items-center justify-center px-2 sm:px-4">
+            {handObjects.map((obj, index) => (
+              <motion.div
+                key={obj.id}
+                className="cursor-pointer flex-shrink-0 rounded-lg transition-shadow duration-200 hover:z-50 hover:shadow-[0_0_20px_rgba(200,200,255,0.3)]"
+                style={{ marginLeft: index === 0 ? 0 : "clamp(-26px, -3vw, -16px)" }}
+                initial={{ opacity: 0, y: 80, scale: 0.8 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                transition={{ delay: 0.1 + index * 0.08, duration: 0.4, ease: "easeOut" }}
+                whileHover={{ scale: 1.06, y: -12 }}
+                onAnimationComplete={() => {
+                  if (index === handObjects.length - 1) setButtonsVisible(true);
+                }}
+                onMouseEnter={() => inspectObject(obj.id)}
+                onMouseLeave={() => inspectObject(null)}
+              >
+                <CardImage
+                  cardName={obj.name}
+                  size="normal"
+                  className="h-[clamp(160px,28vh,252px)] w-[clamp(114px,20vh,180px)]"
+                />
+              </motion.div>
+            ))}
+          </div>
+        </div>
+
+        {/* Buttons */}
+        <AnimatePresence>
+          {buttonsVisible && (
+            <motion.div
+              className="flex w-full max-w-sm flex-col gap-3 px-2 sm:max-w-none sm:flex-row sm:flex-wrap sm:justify-center sm:px-4"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.3 }}
+            >
+              <button
+                onClick={() => onChoose("keep")}
+                className="min-h-11 rounded-lg bg-emerald-600 px-6 py-3 text-base font-bold text-white shadow-lg transition hover:bg-emerald-500 hover:shadow-emerald-500/30 sm:px-8 sm:text-lg"
+              >
+                Keep Hand
+              </button>
+              <button
+                onClick={() => onChoose("mulligan")}
+                className="min-h-11 rounded-lg border border-gray-500 bg-transparent px-6 py-3 text-base font-semibold text-gray-200 transition hover:border-gray-300 hover:text-white sm:px-8 sm:text-lg"
+              >
+                Mulligan ({nextHandSize} cards)
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
-
-      {/* Buttons */}
-      <AnimatePresence>
-        {buttonsVisible && (
-          <motion.div
-            className="flex flex-wrap justify-center gap-3 px-4"
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.3 }}
-          >
-            <button
-              onClick={() => onChoose("keep")}
-              className="rounded-lg bg-emerald-600 px-8 py-3 text-lg font-bold text-white shadow-lg transition hover:bg-emerald-500 hover:shadow-emerald-500/30"
-            >
-              Keep Hand
-            </button>
-            <button
-              onClick={() => onChoose("mulligan")}
-              className="rounded-lg border border-gray-500 bg-transparent px-8 py-3 text-lg font-semibold text-gray-200 transition hover:border-gray-300 hover:text-white"
-            >
-              Mulligan ({nextHandSize} cards)
-            </button>
-          </motion.div>
-        )}
-      </AnimatePresence>
     </div>
   );
 }
@@ -809,80 +817,89 @@ function MulliganBottomCardsPrompt({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex flex-col items-center justify-center px-4"
+      className="fixed inset-0 z-50 overflow-y-auto px-3 py-4 sm:px-4 sm:py-6"
       style={{
         background: "radial-gradient(ellipse at center, rgba(30,30,50,0.95) 0%, rgba(0,0,0,0.98) 70%)",
         "--card-w": "clamp(100px, 14vw, 180px)",
         "--card-h": "clamp(140px, 19.6vw, 252px)",
       } as React.CSSProperties}
     >
-      {/* Title */}
-      <motion.div
-        className="mb-8 text-center"
-        initial={{ opacity: 0, y: -20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5 }}
-      >
-        <h2
-          className="text-3xl font-black tracking-wide text-white"
-          style={{ textShadow: "0 0 20px rgba(200,200,255,0.3)" }}
+      <div className="flex min-h-full flex-col items-center justify-center pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
+        {/* Title */}
+        <motion.div
+          className="mb-6 text-center sm:mb-8"
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5 }}
         >
-          Put {count} card{count > 1 ? "s" : ""} on bottom
-        </h2>
-        <p className="mt-2 text-sm text-gray-400">
-          Select {count} card{count > 1 ? "s" : ""} to put on the bottom of your library
-        </p>
-      </motion.div>
+          <h2
+            className="text-2xl font-black tracking-wide text-white sm:text-3xl"
+            style={{ textShadow: "0 0 20px rgba(200,200,255,0.3)" }}
+          >
+            Put {count} card{count > 1 ? "s" : ""} on bottom
+          </h2>
+          <p className="mt-2 text-sm text-gray-400">
+            Select {count} card{count > 1 ? "s" : ""} to put on the bottom of your library
+          </p>
+        </motion.div>
 
-      {/* Card display — overlapping row */}
-      <div className="mb-10 flex items-center justify-center">
-        {handObjects.map((obj, index) => {
-          const isSelected = selectedTargets.includes(obj.id);
-          return (
-            <motion.button
-              key={obj.id}
-              onClick={() => {
-                if (!isSelected && selectedTargets.length < count) {
-                  addTarget(obj.id);
-                }
-              }}
-              className={`flex-shrink-0 rounded-lg p-1 transition hover:z-50 ${
-                isSelected
-                  ? "z-40 ring-3 ring-cyan-400 opacity-70"
-                  : "hover:shadow-[0_0_20px_rgba(200,200,255,0.3)]"
-              }`}
-              style={{ marginLeft: index === 0 ? 0 : "clamp(-40px, -4vw, -25px)" }}
-              initial={{ opacity: 0, y: 80, scale: 0.8 }}
-              animate={{ opacity: isSelected ? 0.7 : 1, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.4, ease: "easeOut" }}
-              whileHover={{ scale: 1.1, y: -20 }}
-              onMouseEnter={() => inspectObject(obj.id)}
-              onMouseLeave={() => inspectObject(null)}
-            >
-              <CardImage cardName={obj.name} size="normal" />
-            </motion.button>
-          );
-        })}
+        {/* Card display */}
+        <div className="mb-8 w-full overflow-x-auto pb-4">
+          <div className="mx-auto flex w-max min-w-full items-center justify-center px-2 sm:px-4">
+            {handObjects.map((obj, index) => {
+              const isSelected = selectedTargets.includes(obj.id);
+              return (
+                <motion.button
+                  key={obj.id}
+                  onClick={() => {
+                    if (!isSelected && selectedTargets.length < count) {
+                      addTarget(obj.id);
+                    }
+                  }}
+                  className={`flex-shrink-0 rounded-lg p-1 transition hover:z-50 ${
+                    isSelected
+                      ? "z-40 ring-3 ring-cyan-400 opacity-70"
+                      : "hover:shadow-[0_0_20px_rgba(200,200,255,0.3)]"
+                  }`}
+                  style={{ marginLeft: index === 0 ? 0 : "clamp(-26px, -3vw, -16px)" }}
+                  initial={{ opacity: 0, y: 80, scale: 0.8 }}
+                  animate={{ opacity: isSelected ? 0.7 : 1, y: 0, scale: 1 }}
+                  transition={{ delay: 0.1 + index * 0.08, duration: 0.4, ease: "easeOut" }}
+                  whileHover={{ scale: 1.06, y: -12 }}
+                  onMouseEnter={() => inspectObject(obj.id)}
+                  onMouseLeave={() => inspectObject(null)}
+                >
+                  <CardImage
+                    cardName={obj.name}
+                    size="normal"
+                    className="h-[clamp(160px,28vh,252px)] w-[clamp(114px,20vh,180px)]"
+                  />
+                </motion.button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Confirm button */}
+        <motion.div
+          className="w-full max-w-sm px-2"
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.5, duration: 0.3 }}
+        >
+          <button
+            onClick={handleConfirm}
+            disabled={!isReady}
+            className={`min-h-11 w-full rounded-lg px-8 py-3 text-lg font-bold transition ${
+              isReady
+                ? "bg-cyan-600 text-white shadow-lg hover:bg-cyan-500 hover:shadow-cyan-500/30"
+                : "cursor-not-allowed bg-gray-700 text-gray-500"
+            }`}
+          >
+            Confirm ({selectedTargets.length}/{count})
+          </button>
+        </motion.div>
       </div>
-
-      {/* Confirm button */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.5, duration: 0.3 }}
-      >
-        <button
-          onClick={handleConfirm}
-          disabled={!isReady}
-          className={`rounded-lg px-12 py-4 text-xl font-bold transition ${
-            isReady
-              ? "bg-cyan-600 text-white shadow-lg hover:bg-cyan-500 hover:shadow-cyan-500/30"
-              : "cursor-not-allowed bg-gray-700 text-gray-500"
-          }`}
-        >
-          Confirm ({selectedTargets.length}/{count})
-        </button>
-      </motion.div>
     </div>
   );
 }
@@ -991,7 +1008,7 @@ function GameOverScreen({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex flex-col items-center justify-center"
+      className="fixed inset-0 z-50 flex flex-col items-center justify-center px-4"
       style={{ background: bgGradient }}
     >
       {/* Victory particles */}
@@ -999,7 +1016,7 @@ function GameOverScreen({
 
       {/* Title text */}
       <motion.h2
-        className="relative z-10 text-6xl font-black tracking-widest"
+        className="relative z-10 text-4xl font-black tracking-[0.24em] text-center sm:text-6xl sm:tracking-widest"
         style={{ color: titleColor, textShadow }}
         initial={{ scale: 0.5, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}
@@ -1013,18 +1030,18 @@ function GameOverScreen({
       <AnimatePresence>
         {buttonsVisible && (
           <motion.div
-            className="relative z-10 mt-6 text-center"
+            className="relative z-10 mt-6 rounded-[20px] border border-white/10 bg-black/18 px-5 py-4 text-center backdrop-blur-md"
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.4 }}
           >
-            <p className="text-lg text-gray-200">
+            <p className="text-base text-gray-200 sm:text-lg">
               You: <span className="font-bold text-white">{playerLife}</span>
               <span className="mx-3 text-gray-500">/</span>
               Opponent: <span className="font-bold text-white">{opponentLife}</span>
             </p>
             {(turnCount > 0 || gameDuration !== null) && (
-              <p className="mt-2 text-sm text-gray-400">
+              <p className="mt-2 text-xs text-gray-400 sm:text-sm">
                 {turnCount > 0 && (
                   <span>Turns: {turnCount}</span>
                 )}
@@ -1046,7 +1063,7 @@ function GameOverScreen({
       <AnimatePresence>
         {buttonsVisible && (
           <motion.div
-            className="relative z-10 mt-8 flex gap-4"
+            className="relative z-10 mt-8 flex w-full max-w-sm flex-col gap-3 sm:max-w-none sm:flex-row"
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.15, duration: 0.3 }}
@@ -1054,21 +1071,21 @@ function GameOverScreen({
             {isOnlineMode ? (
               <button
                 onClick={() => navigate("/?view=lobby")}
-                className={`rounded-lg px-10 py-4 text-lg font-bold shadow-lg transition ${menuBtnClass}`}
+                className={`min-h-11 rounded-lg px-8 py-3 text-base font-bold shadow-lg transition sm:px-10 sm:py-4 sm:text-lg ${menuBtnClass}`}
               >
                 Back to Lobby
               </button>
             ) : (
               <button
                 onClick={() => navigate("/")}
-                className={`rounded-lg px-10 py-4 text-lg font-bold shadow-lg transition ${menuBtnClass}`}
+                className={`min-h-11 rounded-lg px-8 py-3 text-base font-bold shadow-lg transition sm:px-10 sm:py-4 sm:text-lg ${menuBtnClass}`}
               >
                 Return to Menu
               </button>
             )}
             <button
               onClick={handleRematch}
-              className="rounded-lg border border-gray-500 bg-transparent px-10 py-4 text-lg font-semibold text-gray-200 transition hover:border-gray-300 hover:text-white"
+              className="min-h-11 rounded-lg border border-gray-500 bg-transparent px-8 py-3 text-base font-semibold text-gray-200 transition hover:border-gray-300 hover:text-white sm:px-10 sm:py-4 sm:text-lg"
             >
               Rematch
             </button>

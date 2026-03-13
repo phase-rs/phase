@@ -102,6 +102,16 @@ pub fn get_legal_actions(state: &GameState) -> Vec<GameAction> {
                 }]
             }
         }
+        WaitingFor::DiscardToHandSize {
+            cards, count, ..
+        } => {
+            // Generate combinations of `count` cards to discard from hand
+            let combos = combinations(cards, *count);
+            combos
+                .into_iter()
+                .map(|combo| GameAction::SelectCards { cards: combo })
+                .collect()
+        }
         WaitingFor::TriggerTargetSelection { legal_targets, .. } => legal_targets
             .iter()
             .map(|t| GameAction::SelectTargets {

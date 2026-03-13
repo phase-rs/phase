@@ -13,27 +13,29 @@ export function ChoiceOverlay({
 }) {
   return (
     <div
-      className="fixed inset-0 z-50 flex flex-col items-center justify-center px-4"
+      className="fixed inset-0 z-50 overflow-y-auto px-3 py-4 sm:px-4 sm:py-6"
       style={{
         background:
           "radial-gradient(ellipse at center, rgba(30,30,50,0.95) 0%, rgba(0,0,0,0.98) 70%)",
       }}
     >
-      <motion.div
-        className="mb-4 text-center sm:mb-8"
-        initial={{ opacity: 0, y: -20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5 }}
-      >
-        <h2
-          className="text-2xl font-black tracking-wide text-white sm:text-3xl"
-          style={{ textShadow: "0 0 20px rgba(200,200,255,0.3)" }}
+      <div className="flex min-h-full flex-col items-center justify-center pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
+        <motion.div
+          className="mb-4 text-center sm:mb-8"
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5 }}
         >
-          {title}
-        </h2>
-        <p className="mt-2 text-sm text-gray-400">{subtitle}</p>
-      </motion.div>
-      {children}
+          <h2
+            className="text-xl font-black tracking-wide text-white sm:text-3xl"
+            style={{ textShadow: "0 0 20px rgba(200,200,255,0.3)" }}
+          >
+            {title}
+          </h2>
+          <p className="mt-2 max-w-xl text-xs text-gray-400 sm:text-sm">{subtitle}</p>
+        </motion.div>
+        {children}
+      </div>
     </div>
   );
 }

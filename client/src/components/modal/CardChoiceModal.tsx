@@ -15,6 +15,10 @@ type DigChoice = Extract<WaitingFor, { type: "DigChoice" }>;
 type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
 type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
 type SearchChoice = Extract<WaitingFor, { type: "SearchChoice" }>;
+type DiscardToHandSize = Extract<WaitingFor, { type: "DiscardToHandSize" }>;
+const CHOICE_CARD_IMAGE_CLASS = "h-[clamp(136px,24vh,224px)] w-[clamp(97px,17vh,160px)]";
+const CHOICE_CARD_ROW_CLASS =
+  "mb-6 flex w-full max-w-5xl flex-wrap items-start justify-center gap-3 overflow-y-auto px-1 sm:mb-10";
 
 /**
  * Generic card choice modal for Scry, Dig, Surveil, Reveal, Search, and NamedChoice.
@@ -45,6 +49,9 @@ export function CardChoiceModal() {
     case "NamedChoice":
       if (waitingFor.data.player !== playerId) return null;
       return <NamedChoiceModal data={waitingFor.data} />;
+    case "DiscardToHandSize":
+      if (waitingFor.data.player !== playerId) return null;
+      return <DiscardModal data={waitingFor.data} />;
     default:
       return null;
   }
@@ -84,7 +91,7 @@ function ScryModal({ data }: { data: ScryChoice["data"] }) {
       title="Scry"
       subtitle={`Look at the top ${data.cards.length} card${data.cards.length > 1 ? "s" : ""} of your library`}
     >
-      <div className="mb-6 flex w-full max-w-4xl items-center justify-center gap-4 sm:mb-10">
+      <div className={CHOICE_CARD_ROW_CLASS}>
         {data.cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
@@ -111,7 +118,7 @@ function ScryModal({ data }: { data: ScryChoice["data"] }) {
                 <CardImage
                   cardName={obj.name}
                   size="normal"
-                  className="h-[clamp(160px,28vh,224px)] w-[clamp(114px,20vh,160px)]"
+                  className={CHOICE_CARD_IMAGE_CLASS}
                 />
               </motion.div>
               <button
@@ -172,7 +179,7 @@ function DigModal({ data }: { data: DigChoice["data"] }) {
       title="Choose Cards"
       subtitle={`Select ${data.keep_count} card${data.keep_count > 1 ? "s" : ""} to put into your hand`}
     >
-      <div className="mb-6 flex w-full max-w-5xl items-center justify-center gap-3 sm:mb-10">
+      <div className={CHOICE_CARD_ROW_CLASS}>
         {data.cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
@@ -196,7 +203,7 @@ function DigModal({ data }: { data: DigChoice["data"] }) {
               <CardImage
                 cardName={obj.name}
                 size="normal"
-                className="h-[clamp(160px,28vh,224px)] w-[clamp(114px,20vh,160px)]"
+                className={CHOICE_CARD_IMAGE_CLASS}
               />
               {isSelected && (
                 <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
@@ -253,7 +260,7 @@ function SurveilModal({ data }: { data: SurveilChoice["data"] }) {
       title="Surveil"
       subtitle={`Look at the top ${data.cards.length} card${data.cards.length > 1 ? "s" : ""} of your library`}
     >
-      <div className="mb-6 flex w-full max-w-4xl items-center justify-center gap-4 sm:mb-10">
+      <div className={CHOICE_CARD_ROW_CLASS}>
         {data.cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
@@ -280,7 +287,7 @@ function SurveilModal({ data }: { data: SurveilChoice["data"] }) {
                 <CardImage
                   cardName={obj.name}
                   size="normal"
-                  className="h-[clamp(160px,28vh,224px)] w-[clamp(114px,20vh,160px)]"
+                  className={CHOICE_CARD_IMAGE_CLASS}
                 />
               </motion.div>
               <button
@@ -326,7 +333,7 @@ function RevealModal({ data }: { data: RevealChoice["data"] }) {
       title="Opponent's Hand"
       subtitle="Choose a card"
     >
-      <div className="mb-6 flex w-full max-w-5xl items-center justify-center gap-3 sm:mb-10">
+      <div className={CHOICE_CARD_ROW_CLASS}>
         {data.cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
@@ -350,7 +357,7 @@ function RevealModal({ data }: { data: RevealChoice["data"] }) {
               <CardImage
                 cardName={obj.name}
                 size="normal"
-                className="h-[clamp(160px,28vh,224px)] w-[clamp(114px,20vh,160px)]"
+                className={CHOICE_CARD_IMAGE_CLASS}
               />
               {isSelected && (
                 <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
@@ -410,7 +417,7 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
       title="Search Library"
       subtitle={`Choose ${data.count} card${data.count > 1 ? "s" : ""}`}
     >
-      <div className="mb-6 flex w-full max-w-5xl items-center justify-center gap-3 overflow-x-auto sm:mb-10">
+      <div className={CHOICE_CARD_ROW_CLASS}>
         {data.cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
@@ -434,7 +441,7 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
               <CardImage
                 cardName={obj.name}
                 size="normal"
-                className="h-[clamp(160px,28vh,224px)] w-[clamp(114px,20vh,160px)]"
+                className={CHOICE_CARD_IMAGE_CLASS}
               />
               {isSelected && (
                 <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
@@ -450,6 +457,91 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
       <ConfirmButton
         onClick={handleConfirm}
         disabled={selectedSet.size !== data.count}
+      />
+    </ChoiceOverlay>
+  );
+}
+
+// ── Discard to Hand Size Modal ───────────────────────────────────────────────
+
+function DiscardModal({ data }: { data: DiscardToHandSize["data"] }) {
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const inspectObject = useUiStore((s) => s.inspectObject);
+  const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
+
+  const toggleSelect = useCallback(
+    (id: ObjectId) => {
+      setSelected((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) {
+          next.delete(id);
+        } else if (next.size < data.count) {
+          next.add(id);
+        }
+        return next;
+      });
+    },
+    [data.count],
+  );
+
+  const handleConfirm = useCallback(() => {
+    dispatch({
+      type: "SelectCards",
+      data: { cards: Array.from(selected) },
+    });
+  }, [dispatch, selected]);
+
+  if (!objects) return null;
+
+  const isReady = selected.size === data.count;
+
+  return (
+    <ChoiceOverlay
+      title="Discard"
+      subtitle={`Choose ${data.count} card${data.count > 1 ? "s" : ""} to discard`}
+    >
+      <div className={CHOICE_CARD_ROW_CLASS}>
+        {data.cards.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          const isSelected = selected.has(id);
+          return (
+            <motion.button
+              key={id}
+              className={`relative rounded-lg transition ${
+                isSelected
+                  ? "z-10 ring-2 ring-red-400/80"
+                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+              }`}
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6 }}
+              onClick={() => toggleSelect(id)}
+              onMouseEnter={() => inspectObject(id)}
+              onMouseLeave={() => inspectObject(null)}
+            >
+              <CardImage
+                cardName={obj.name}
+                size="normal"
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
+              {isSelected && (
+                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-red-500/20">
+                  <span className="rounded-full bg-red-500/90 px-3 py-1 text-xs font-bold text-white">
+                    Discard
+                  </span>
+                </div>
+              )}
+            </motion.button>
+          );
+        })}
+      </div>
+      <ConfirmButton
+        onClick={handleConfirm}
+        disabled={!isReady}
+        label={`Discard (${selected.size}/${data.count})`}
       />
     </ChoiceOverlay>
   );
