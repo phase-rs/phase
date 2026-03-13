@@ -5,8 +5,8 @@ use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    AdditionalCost, ChoiceType, ModalChoice, ResolvedAbility, TargetFilter, TargetRef,
-    TriggerCondition,
+    AbilityCost, AbilityDefinition, AdditionalCost, ChoiceType, ModalChoice, ResolvedAbility,
+    TargetFilter, TargetRef, TriggerCondition,
 };
 use super::events::GameEvent;
 use super::format::FormatConfig;
@@ -188,6 +188,25 @@ pub enum WaitingFor {
         player: PlayerId,
         cost: AdditionalCost,
         pending_cast: Box<PendingCast>,
+    },
+    /// Player must choose modes for a modal activated or triggered ability.
+    /// Unlike ModeChoice (which is casting-specific via PendingCast), this variant
+    /// is decoupled from PendingCast and carries the mode ability definitions directly.
+    AbilityModeChoice {
+        player: PlayerId,
+        modal: ModalChoice,
+        /// The source object that owns this ability.
+        source_id: ObjectId,
+        /// The individual mode abilities the player can choose from.
+        mode_abilities: Vec<AbilityDefinition>,
+        /// Whether this is an activated ability (needs stack push) or triggered
+        /// (already on stack, needs effect replacement).
+        #[serde(default)]
+        is_activated: bool,
+        /// For activated abilities: the cost to pay after mode selection.
+        /// Per MTG CR 602.2a: announce → choose modes → choose targets → pay costs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ability_cost: Option<AbilityCost>,
     },
 }
 
@@ -689,8 +708,21 @@ mod tests {
                     cost: crate::types::mana::ManaCost::NoCost,
                 }),
             },
+            WaitingFor::AbilityModeChoice {
+                player: PlayerId(0),
+                modal: ModalChoice {
+                    min_choices: 1,
+                    max_choices: 1,
+                    mode_count: 2,
+                    mode_descriptions: vec![],
+                },
+                source_id: ObjectId(1),
+                mode_abilities: vec![],
+                is_activated: true,
+                ability_cost: None,
+            },
         ];
-        assert_eq!(variants.len(), 16);
+        assert_eq!(variants.len(), 17);
     }
 
     #[test]

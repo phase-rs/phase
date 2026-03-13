@@ -1267,6 +1267,14 @@ pub struct AbilityDefinition {
     /// When true, targeting is optional ("up to one"). Player may choose zero targets.
     #[serde(default)]
     pub optional_targeting: bool,
+    /// Modal metadata for activated/triggered abilities with "Choose one —" etc.
+    /// When present, the ability pauses for mode selection before resolving.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modal: Option<ModalChoice>,
+    /// The individual mode abilities for modal activated/triggered abilities.
+    /// Each entry is one selectable mode. Only meaningful when `modal` is Some.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mode_abilities: Vec<AbilityDefinition>,
 }
 
 impl AbilityDefinition {
@@ -1284,6 +1292,8 @@ impl AbilityDefinition {
             sorcery_speed: false,
             condition: None,
             optional_targeting: false,
+            modal: None,
+            mode_abilities: Vec::new(),
         }
     }
 
@@ -1324,6 +1334,12 @@ impl AbilityDefinition {
 
     pub fn optional_targeting(mut self) -> Self {
         self.optional_targeting = true;
+        self
+    }
+
+    pub fn with_modal(mut self, modal: ModalChoice, mode_abilities: Vec<AbilityDefinition>) -> Self {
+        self.modal = Some(modal);
+        self.mode_abilities = mode_abilities;
         self
     }
 }
@@ -2338,5 +2354,33 @@ mod tests {
         let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
         assert_eq!(ability, deserialized);
         assert_eq!(deserialized.duration, Some(Duration::UntilHostLeavesPlay));
+    }
+}
+
+#[cfg(test)]
+mod modal_ability_tests {
+    use super::*;
+
+    #[test]
+    fn ability_definition_supports_modal() {
+        let mode1 = AbilityDefinition::new(AbilityKind::Spell, Effect::Draw { count: 1 });
+        let mode2 = AbilityDefinition::new(AbilityKind::Spell, Effect::GainLife {
+            amount: LifeAmount::Fixed(3),
+            player: GainLifePlayer::Controller,
+        });
+        let modal = ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 2,
+            mode_descriptions: vec!["Draw a card.".to_string(), "Gain 3 life.".to_string()],
+        };
+        let def = AbilityDefinition::new(AbilityKind::Activated, Effect::Unimplemented {
+            name: "modal_placeholder".to_string(),
+            description: None,
+        })
+        .with_modal(modal.clone(), vec![mode1, mode2]);
+
+        assert!(def.modal.is_some());
+        assert_eq!(def.mode_abilities.len(), 2);
     }
 }
