@@ -284,17 +284,10 @@ mod tests {
             }),
             Keyword::Trample,
         ];
-        obj.abilities = vec![AbilityDefinition {
-            kind: crate::types::ability::AbilityKind::Activated,
-            effect: crate::types::ability::Effect::Draw { count: 1 },
-            cost: None,
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
-        }];
+        obj.abilities = vec![AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Activated,
+            crate::types::ability::Effect::Draw { count: 1 },
+        )];
         obj.color = vec![ManaColor::Green];
         id
     }

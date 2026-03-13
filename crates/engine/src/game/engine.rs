@@ -1295,38 +1295,25 @@ mod tests {
 
     /// Create a simple test ability definition.
     fn make_draw_ability(num_cards: u32) -> AbilityDefinition {
-        AbilityDefinition {
-            kind: AbilityKind::Spell,
-            effect: Effect::Draw { count: num_cards },
-            cost: None,
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
-        }
+        AbilityDefinition::new(AbilityKind::Spell, Effect::Draw { count: num_cards })
     }
 
     /// Create a DealDamage ability for testing.
     fn make_damage_ability(amount: i32, cost: Option<AbilityCost>) -> AbilityDefinition {
+        let kind = if cost.is_some() {
+            AbilityKind::Activated
+        } else {
+            AbilityKind::Spell
+        };
         AbilityDefinition {
-            kind: if cost.is_some() {
-                AbilityKind::Activated
-            } else {
-                AbilityKind::Spell
-            },
-            effect: Effect::DealDamage {
-                amount: DamageAmount::Fixed(amount),
-                target: TargetFilter::Any,
-            },
             cost,
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
+            ..AbilityDefinition::new(
+                kind,
+                Effect::DealDamage {
+                    amount: DamageAmount::Fixed(amount),
+                    target: TargetFilter::Any,
+                },
+            )
         }
     }
 
@@ -1795,48 +1782,34 @@ mod tests {
             obj.card_types.core_types.push(CoreType::Land);
             obj.abilities
                 .push(crate::types::ability::AbilityDefinition {
-                    kind: crate::types::ability::AbilityKind::Activated,
-                    effect: crate::types::ability::Effect::Mana {
-                        produced: crate::types::ability::ManaProduction::Fixed {
-                            colors: vec![crate::types::mana::ManaColor::Blue],
-                        },
-                    },
                     cost: Some(crate::types::ability::AbilityCost::Tap),
-                    sub_ability: None,
-                    duration: None,
-                    description: None,
-                    target_prompt: None,
-                    sorcery_speed: false,
-                    condition: None,
+                    ..AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Activated,
+                        crate::types::ability::Effect::Mana {
+                            produced: crate::types::ability::ManaProduction::Fixed {
+                                colors: vec![crate::types::mana::ManaColor::Blue],
+                            },
+                        },
+                    )
                 });
             obj.abilities
                 .push(crate::types::ability::AbilityDefinition {
-                    kind: crate::types::ability::AbilityKind::Activated,
-                    effect: crate::types::ability::Effect::Mana {
-                        produced: crate::types::ability::ManaProduction::Fixed {
-                            colors: vec![crate::types::mana::ManaColor::Black],
-                        },
-                    },
                     cost: Some(crate::types::ability::AbilityCost::Tap),
-                    sub_ability: Some(Box::new(crate::types::ability::AbilityDefinition {
-                        kind: crate::types::ability::AbilityKind::Activated,
-                        effect: crate::types::ability::Effect::Unimplemented {
+                    sub_ability: Some(Box::new(crate::types::ability::AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Activated,
+                        crate::types::ability::Effect::Unimplemented {
                             name: "activate_only_if_controls_land_subtype_any".to_string(),
                             description: Some("Island|Swamp".to_string()),
                         },
-                        cost: None,
-                        sub_ability: None,
-                        duration: None,
-                        description: None,
-                        target_prompt: None,
-                        sorcery_speed: false,
-                        condition: None,
-                    })),
-                    duration: None,
-                    description: None,
-                    target_prompt: None,
-                    sorcery_speed: false,
-                    condition: None,
+                    ))),
+                    ..AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Activated,
+                        crate::types::ability::Effect::Mana {
+                            produced: crate::types::ability::ManaProduction::Fixed {
+                                colors: vec![crate::types::mana::ManaColor::Black],
+                            },
+                        },
+                    )
                 });
         }
 
@@ -2411,9 +2384,9 @@ mod tests {
         {
             let obj = state.objects.get_mut(&counter_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
-            obj.abilities.push(AbilityDefinition {
-                kind: AbilityKind::Spell,
-                effect: Effect::Counter {
+            obj.abilities.push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Counter {
                     target: TargetFilter::Typed {
                         card_type: Some(crate::types::ability::TypeFilter::Card),
                         subtype: None,
@@ -2421,14 +2394,7 @@ mod tests {
                         properties: vec![],
                     },
                 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            });
+            ));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
                 generic: 0,
@@ -2503,9 +2469,9 @@ mod tests {
         {
             let obj = state.objects.get_mut(&growth_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
-            obj.abilities.push(AbilityDefinition {
-                kind: AbilityKind::Spell,
-                effect: Effect::Pump {
+            obj.abilities.push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Pump {
                     power: crate::types::ability::PtValue::Fixed(3),
                     toughness: crate::types::ability::PtValue::Fixed(3),
                     target: TargetFilter::Typed {
@@ -2515,14 +2481,7 @@ mod tests {
                         properties: vec![],
                     },
                 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            });
+            ));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Green],
                 generic: 0,
@@ -2647,19 +2606,15 @@ mod tests {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
             obj.abilities.push(AbilityDefinition {
-                kind: AbilityKind::Activated,
-                effect: Effect::Mana {
-                    produced: crate::types::ability::ManaProduction::Fixed {
-                        colors: vec![crate::types::mana::ManaColor::Green],
-                    },
-                },
                 cost: Some(AbilityCost::Tap),
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
+                ..AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: crate::types::ability::ManaProduction::Fixed {
+                            colors: vec![crate::types::mana::ManaColor::Green],
+                        },
+                    },
+                )
             });
         }
 
@@ -2715,19 +2670,15 @@ mod tests {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
             obj.abilities.push(AbilityDefinition {
-                kind: AbilityKind::Activated,
-                effect: Effect::Mana {
-                    produced: crate::types::ability::ManaProduction::Fixed {
-                        colors: vec![crate::types::mana::ManaColor::Green],
-                    },
-                },
                 cost: Some(AbilityCost::Tap),
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
+                ..AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: crate::types::ability::ManaProduction::Fixed {
+                            colors: vec![crate::types::mana::ManaColor::Green],
+                        },
+                    },
+                )
             });
         }
 
@@ -3044,19 +2995,12 @@ mod tests {
         let obj = state.objects.get_mut(&obj_id).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
         obj.replacement_definitions.push(ReplacementDefinition {
-            execute: Some(Box::new(AbilityDefinition {
-                kind: AbilityKind::Spell,
-                effect: Effect::Tap {
+            execute: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Tap {
                     target: TargetFilter::SelfRef,
                 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            })),
+            ))),
             valid_card: Some(TargetFilter::SelfRef),
             description: Some("Selesnya Guildgate enters the battlefield tapped.".into()),
             ..ReplacementDefinition::new(ReplacementEvent::Moved)
@@ -3495,20 +3439,13 @@ mod phase_trigger_regression_tests {
             obj.trigger_definitions.push(TriggerDefinition {
                 mode: TriggerMode::Phase,
                 phase: Some(Phase::BeginCombat),
-                execute: Some(Box::new(AbilityDefinition {
-                    kind: AbilityKind::Activated,
-                    effect: Effect::GainLife {
+                execute: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
                         amount: LifeAmount::Fixed(1),
                         player: GainLifePlayer::Controller,
                     },
-                    cost: None,
-                    sub_ability: None,
-                    target_prompt: None,
-                    description: None,
-                    duration: None,
-                    sorcery_speed: false,
-                    condition: None,
-                })),
+                ))),
                 valid_card: None,
                 origin: None,
                 destination: None,
@@ -3624,28 +3561,17 @@ mod phase_trigger_regression_tests {
         let mut events = Vec::new();
 
         let effect_def = AbilityDefinition {
-            kind: AbilityKind::Spell,
-            effect: Effect::Choose {
-                choice_type: crate::types::ability::ChoiceType::BasicLandType,
-                persist: false,
-            },
-            cost: None,
-            sub_ability: Some(Box::new(AbilityDefinition {
-                kind: AbilityKind::Spell,
-                effect: Effect::LoseLife { amount: 2 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            })),
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
+            sub_ability: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::LoseLife { amount: 2 },
+            ))),
+            ..AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Choose {
+                    choice_type: crate::types::ability::ChoiceType::BasicLandType,
+                    persist: false,
+                },
+            )
         };
 
         let waiting_for =

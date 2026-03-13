@@ -71,15 +71,8 @@ mod tests {
 
     fn make_mana_ability(produced: ManaProduction) -> AbilityDefinition {
         AbilityDefinition {
-            kind: AbilityKind::Activated,
-            effect: Effect::Mana { produced },
             cost: Some(AbilityCost::Tap),
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
+            ..AbilityDefinition::new(AbilityKind::Activated, Effect::Mana { produced })
         }
     }
 
@@ -94,18 +87,14 @@ mod tests {
     #[test]
     fn non_mana_api_type_not_detected() {
         let def = AbilityDefinition {
-            kind: AbilityKind::Activated,
-            effect: Effect::DealDamage {
-                amount: DamageAmount::Fixed(1),
-                target: TargetFilter::Any,
-            },
             cost: Some(AbilityCost::Tap),
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
+            ..AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::DealDamage {
+                    amount: DamageAmount::Fixed(1),
+                    target: TargetFilter::Any,
+                },
+            )
         };
         assert!(!is_mana_ability(&def));
     }
@@ -113,15 +102,8 @@ mod tests {
     #[test]
     fn draw_ability_is_not_mana_ability() {
         let def = AbilityDefinition {
-            kind: AbilityKind::Activated,
-            effect: Effect::Draw { count: 1 },
             cost: Some(AbilityCost::Tap),
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
+            ..AbilityDefinition::new(AbilityKind::Activated, Effect::Draw { count: 1 })
         };
         assert!(!is_mana_ability(&def));
     }
@@ -186,19 +168,15 @@ mod tests {
         );
 
         let def = AbilityDefinition {
-            kind: AbilityKind::Activated,
-            effect: Effect::Mana {
-                produced: ManaProduction::Colorless {
-                    count: CountValue::Fixed(1),
-                },
-            },
             cost: Some(AbilityCost::Tap),
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
+            ..AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: CountValue::Fixed(1),
+                    },
+                },
+            )
         };
         let mut events = Vec::new();
         resolve_mana_ability(&mut state, obj_id, PlayerId(0), &def, &mut events).unwrap();

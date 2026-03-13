@@ -528,22 +528,20 @@ fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
 
     let cost = parse_oracle_cost(cost_text);
     Some(AbilityDefinition {
-        kind: AbilityKind::Activated,
-        effect: Effect::Attach {
-            target: crate::types::ability::TargetFilter::Typed {
-                card_type: Some(crate::types::ability::TypeFilter::Creature),
-                subtype: None,
-                controller: Some(crate::types::ability::ControllerRef::You),
-                properties: vec![],
-            },
-        },
         cost: Some(cost),
-        sub_ability: None,
-        duration: None,
         description: Some(line.to_string()),
-        target_prompt: None,
         sorcery_speed: true,
-        condition: None,
+        ..AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Attach {
+                target: crate::types::ability::TargetFilter::Typed {
+                    card_type: Some(crate::types::ability::TypeFilter::Creature),
+                    subtype: None,
+                    controller: Some(crate::types::ability::ControllerRef::You),
+                    properties: vec![],
+                },
+            },
+        )
     })
 }
 
@@ -667,6 +665,7 @@ fn is_static_pattern(lower: &str) -> bool {
         || lower.contains("cost more")
         || lower.contains("costs less")
         || lower.contains("costs more")
+        || lower.contains("is the chosen type")
 }
 
 /// Check if a line looks like a replacement effect.
@@ -871,18 +870,14 @@ fn parse_modal_choose_count(lower: &str) -> (usize, usize) {
 /// Create an Unimplemented fallback ability.
 fn make_unimplemented(line: &str) -> AbilityDefinition {
     AbilityDefinition {
-        kind: AbilityKind::Spell,
-        effect: Effect::Unimplemented {
-            name: "unknown".to_string(),
-            description: Some(line.to_string()),
-        },
-        cost: None,
-        sub_ability: None,
-        duration: None,
         description: Some(line.to_string()),
-        target_prompt: None,
-        sorcery_speed: false,
-        condition: None,
+        ..AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Unimplemented {
+                name: "unknown".to_string(),
+                description: Some(line.to_string()),
+            },
+        )
     }
 }
 

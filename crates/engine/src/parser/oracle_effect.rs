@@ -484,7 +484,10 @@ fn parse_imperative_effect(text: &str) -> Effect {
 
     // --- Named choices: "choose a creature type", "choose a color", etc. ---
     if let Some(choice_type) = try_parse_named_choice(&lower) {
-        return Effect::Choose { choice_type, persist: false };
+        return Effect::Choose {
+            choice_type,
+            persist: false,
+        };
     }
 
     // --- Choose card from revealed hand (absorbed into RevealHand filter) ---
@@ -645,7 +648,7 @@ fn parse_choose_filter_from_sentence(lower: &str) -> TargetFilter {
     if let Some(negated) = word.strip_prefix("non") {
         if let Some(TargetFilter::Typed { card_type, .. }) = type_str_to_target_filter(negated) {
             return TargetFilter::Typed {
-                card_type: Some(TypeFilter::Permanent),
+                card_type: Some(TypeFilter::Card),
                 subtype: None,
                 controller: None,
                 properties: vec![FilterProp::NonType {
@@ -990,15 +993,9 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
             let (condition, text) = strip_additional_cost_conditional(s);
             let clause = parse_effect_clause(&text);
             AbilityDefinition {
-                kind,
-                effect: clause.effect,
-                cost: None,
-                sub_ability: None,
                 duration: clause.duration,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
                 condition,
+                ..AbilityDefinition::new(kind, clause.effect)
             }
         })
         .collect();
@@ -1009,21 +1006,14 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
         let search_text = &sentences[0];
         let lower = search_text.to_lowercase();
         let destination = parse_search_destination(&lower);
-        let change_zone = AbilityDefinition {
+        let change_zone = AbilityDefinition::new(
             kind,
-            effect: Effect::ChangeZone {
+            Effect::ChangeZone {
                 origin: Some(Zone::Library),
                 destination,
                 target: TargetFilter::Any,
             },
-            cost: None,
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
-        };
+        );
         // Insert ChangeZone as second element (between search and shuffle)
         defs.insert(1, change_zone);
     }
@@ -1077,19 +1067,14 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
         }
         chain
     } else {
-        defs.pop().unwrap_or_else(|| AbilityDefinition {
-            kind,
-            effect: Effect::Unimplemented {
-                name: "empty".to_string(),
-                description: None,
-            },
-            cost: None,
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
+        defs.pop().unwrap_or_else(|| {
+            AbilityDefinition::new(
+                kind,
+                Effect::Unimplemented {
+                    name: "empty".to_string(),
+                    description: None,
+                },
+            )
         })
     }
 }
@@ -4155,7 +4140,7 @@ mod tests {
         assert!(matches!(
             filter,
             TargetFilter::Typed {
-                card_type: Some(TypeFilter::Permanent),
+                card_type: Some(TypeFilter::Card),
                 properties,
                 ..
             } if properties.iter().any(|p| matches!(p, FilterProp::NonType { value } if value == "Land"))

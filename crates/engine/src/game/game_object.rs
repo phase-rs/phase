@@ -275,7 +275,8 @@ mod tests {
             Zone::Battlefield,
         );
         assert!(obj.chosen_color().is_none());
-        obj.chosen_attributes.push(ChosenAttribute::Color(ManaColor::Red));
+        obj.chosen_attributes
+            .push(ChosenAttribute::Color(ManaColor::Red));
         assert_eq!(obj.chosen_color(), Some(ManaColor::Red));
     }
 
@@ -288,11 +289,9 @@ mod tests {
             "Test Land".to_string(),
             Zone::Battlefield,
         );
-        obj.chosen_attributes.push(ChosenAttribute::BasicLandType(BasicLandType::Forest));
-        assert_eq!(
-            obj.chosen_basic_land_type(),
-            Some(BasicLandType::Forest)
-        );
+        obj.chosen_attributes
+            .push(ChosenAttribute::BasicLandType(BasicLandType::Forest));
+        assert_eq!(obj.chosen_basic_land_type(), Some(BasicLandType::Forest));
     }
 
     #[test]

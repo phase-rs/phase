@@ -287,8 +287,8 @@ function ExileGhostCard({ objectId, offset }: ExileGhostCardProps) {
 
   return (
     <div
-      className="absolute left-0 z-0 cursor-default opacity-70"
-      style={{ bottom: `-${offset}px` }}
+      className="absolute z-0 cursor-default opacity-70"
+      style={{ bottom: `-${offset}px`, left: `${offset}px` }}
       onMouseEnter={() => inspectObject(objectId)}
       onMouseLeave={() => inspectObject(null)}
     >

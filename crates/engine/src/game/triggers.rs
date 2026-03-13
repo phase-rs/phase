@@ -1908,17 +1908,10 @@ pub mod tests {
             obj.entered_battlefield_turn = Some(1);
             obj.trigger_definitions.push(TriggerDefinition {
                 mode: TriggerMode::ChangesZone,
-                execute: Some(Box::new(AbilityDefinition {
-                    kind: AbilityKind::Database,
-                    effect: Effect::Draw { count: 1 },
-                    cost: None,
-                    sub_ability: None,
-                    duration: None,
-                    description: None,
-                    target_prompt: None,
-                    sorcery_speed: false,
-                    condition: None,
-                })),
+                execute: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw { count: 1 },
+                ))),
                 valid_card: None,
                 origin: None,
                 destination: Some(Zone::Battlefield),
@@ -1949,17 +1942,10 @@ pub mod tests {
             obj.entered_battlefield_turn = Some(1);
             obj.trigger_definitions.push(TriggerDefinition {
                 mode: TriggerMode::ChangesZone,
-                execute: Some(Box::new(AbilityDefinition {
-                    kind: AbilityKind::Database,
-                    effect: Effect::Draw { count: 1 },
-                    cost: None,
-                    sub_ability: None,
-                    duration: None,
-                    description: None,
-                    target_prompt: None,
-                    sorcery_speed: false,
-                    condition: None,
-                })),
+                execute: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw { count: 1 },
+                ))),
                 valid_card: None,
                 origin: None,
                 destination: Some(Zone::Battlefield),
@@ -2200,17 +2186,10 @@ pub mod tests {
             obj.entered_battlefield_turn = Some(1);
             obj.trigger_definitions.push(TriggerDefinition {
                 mode: TriggerMode::ChangesZone,
-                execute: Some(Box::new(AbilityDefinition {
-                    kind: AbilityKind::Database,
-                    effect: Effect::Draw { count: 1 },
-                    cost: None,
-                    sub_ability: None,
-                    duration: None,
-                    description: None,
-                    target_prompt: None,
-                    sorcery_speed: false,
-                    condition: None,
-                })),
+                execute: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw { count: 1 },
+                ))),
                 valid_card: None,
                 origin: None,
                 destination: Some(Zone::Battlefield),
@@ -2274,17 +2253,10 @@ pub mod tests {
             obj.entered_battlefield_turn = Some(1);
             obj.trigger_definitions.push(TriggerDefinition {
                 mode: TriggerMode::ChangesZone,
-                execute: Some(Box::new(AbilityDefinition {
-                    kind: AbilityKind::Database,
-                    effect: Effect::Draw { count: 1 },
-                    cost: None,
-                    sub_ability: None,
-                    duration: None,
-                    description: None,
-                    target_prompt: None,
-                    sorcery_speed: false,
-                    condition: None,
-                })),
+                execute: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw { count: 1 },
+                ))),
                 valid_card: None,
                 origin: None,
                 destination: Some(Zone::Battlefield),
@@ -2315,17 +2287,10 @@ pub mod tests {
             obj.entered_battlefield_turn = Some(1);
             obj.trigger_definitions.push(TriggerDefinition {
                 mode: TriggerMode::ChangesZone,
-                execute: Some(Box::new(AbilityDefinition {
-                    kind: AbilityKind::Database,
-                    effect: Effect::Draw { count: 1 },
-                    cost: None,
-                    sub_ability: None,
-                    duration: None,
-                    description: None,
-                    target_prompt: None,
-                    sorcery_speed: false,
-                    condition: None,
-                })),
+                execute: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw { count: 1 },
+                ))),
                 valid_card: None,
                 origin: None,
                 destination: Some(Zone::Battlefield),
@@ -2375,17 +2340,10 @@ pub mod tests {
             obj.entered_battlefield_turn = Some(1);
             obj.trigger_definitions.push(TriggerDefinition {
                 mode: TriggerMode::ChangesZone,
-                execute: Some(Box::new(AbilityDefinition {
-                    kind: AbilityKind::Database,
-                    effect: Effect::Draw { count: 1 },
-                    cost: None,
-                    sub_ability: None,
-                    duration: None,
-                    description: None,
-                    target_prompt: None,
-                    sorcery_speed: false,
-                    condition: None,
-                })),
+                execute: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw { count: 1 },
+                ))),
                 valid_card: Some(TargetFilter::Typed {
                     card_type: Some(crate::types::ability::TypeFilter::Creature),
                     subtype: None,
@@ -2795,28 +2753,14 @@ pub mod tests {
         let trig_def = TriggerDefinition {
             mode: TriggerMode::ChangesZone,
             execute: Some(Box::new(AbilityDefinition {
-                kind: AbilityKind::Database,
-                effect: Effect::Draw { count: 2 },
-                cost: None,
-                sub_ability: Some(Box::new(AbilityDefinition {
-                    kind: AbilityKind::Database,
-                    effect: Effect::GainLife {
+                sub_ability: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
                         amount: LifeAmount::Fixed(3),
                         player: GainLifePlayer::Controller,
                     },
-                    cost: None,
-                    sub_ability: None,
-                    duration: None,
-                    description: None,
-                    target_prompt: None,
-                    sorcery_speed: false,
-                    condition: None,
-                })),
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
+                ))),
+                ..AbilityDefinition::new(AbilityKind::Database, Effect::Draw { count: 2 })
             })),
             valid_card: None,
             origin: None,
@@ -2978,24 +2922,20 @@ pub mod tests {
             obj.trigger_definitions.push(TriggerDefinition {
                 mode: TriggerMode::ChangesZone,
                 execute: Some(Box::new(AbilityDefinition {
-                    kind: AbilityKind::Database,
-                    effect: Effect::ChangeZone {
-                        origin: Some(Zone::Battlefield),
-                        destination: Zone::Exile,
-                        target: TargetFilter::Typed {
-                            card_type: Some(TypeFilter::Creature),
-                            subtype: None,
-                            controller: Some(ControllerRef::Opponent),
-                            properties: vec![],
-                        },
-                    },
-                    cost: None,
-                    sub_ability: None,
                     duration: Some(crate::types::ability::Duration::UntilHostLeavesPlay),
-                    description: None,
-                    target_prompt: None,
-                    sorcery_speed: false,
-                    condition: None,
+                    ..AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::ChangeZone {
+                            origin: Some(Zone::Battlefield),
+                            destination: Zone::Exile,
+                            target: TargetFilter::Typed {
+                                card_type: Some(TypeFilter::Creature),
+                                subtype: None,
+                                controller: Some(ControllerRef::Opponent),
+                                properties: vec![],
+                            },
+                        },
+                    )
                 })),
                 valid_card: Some(TargetFilter::SelfRef),
                 origin: None,
@@ -3071,24 +3011,20 @@ pub mod tests {
             obj.trigger_definitions.push(TriggerDefinition {
                 mode: TriggerMode::ChangesZone,
                 execute: Some(Box::new(AbilityDefinition {
-                    kind: AbilityKind::Database,
-                    effect: Effect::ChangeZone {
-                        origin: Some(Zone::Battlefield),
-                        destination: Zone::Exile,
-                        target: TargetFilter::Typed {
-                            card_type: Some(TypeFilter::Creature),
-                            subtype: None,
-                            controller: Some(ControllerRef::Opponent),
-                            properties: vec![],
-                        },
-                    },
-                    cost: None,
-                    sub_ability: None,
                     duration: Some(crate::types::ability::Duration::UntilHostLeavesPlay),
-                    description: None,
-                    target_prompt: None,
-                    sorcery_speed: false,
-                    condition: None,
+                    ..AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::ChangeZone {
+                            origin: Some(Zone::Battlefield),
+                            destination: Zone::Exile,
+                            target: TargetFilter::Typed {
+                                card_type: Some(TypeFilter::Creature),
+                                subtype: None,
+                                controller: Some(ControllerRef::Opponent),
+                                properties: vec![],
+                            },
+                        },
+                    )
                 })),
                 valid_card: Some(TargetFilter::SelfRef),
                 origin: None,
@@ -3154,9 +3090,9 @@ pub mod tests {
             obj.entered_battlefield_turn = Some(1);
             obj.trigger_definitions.push(TriggerDefinition {
                 mode: TriggerMode::ChangesZone,
-                execute: Some(Box::new(AbilityDefinition {
-                    kind: AbilityKind::Database,
-                    effect: Effect::ChangeZone {
+                execute: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::ChangeZone {
                         origin: Some(Zone::Battlefield),
                         destination: Zone::Exile,
                         target: TargetFilter::Typed {
@@ -3166,14 +3102,7 @@ pub mod tests {
                             properties: vec![],
                         },
                     },
-                    cost: None,
-                    sub_ability: None,
-                    duration: None,
-                    description: None,
-                    target_prompt: None,
-                    sorcery_speed: false,
-                    condition: None,
-                })),
+                ))),
                 valid_card: Some(TargetFilter::SelfRef),
                 origin: None,
                 destination: Some(Zone::Battlefield),
@@ -3274,17 +3203,10 @@ pub mod tests {
             obj.entered_battlefield_turn = Some(1);
             obj.trigger_definitions.push(TriggerDefinition {
                 mode: TriggerMode::ChangesZone,
-                execute: Some(Box::new(AbilityDefinition {
-                    kind: AbilityKind::Database,
-                    effect: Effect::Draw { count: 1 },
-                    cost: None,
-                    sub_ability: None,
-                    duration: None,
-                    description: None,
-                    target_prompt: None,
-                    sorcery_speed: false,
-                    condition: None,
-                })),
+                execute: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw { count: 1 },
+                ))),
                 valid_card: None,
                 origin: None,
                 destination: Some(Zone::Battlefield),
@@ -3367,21 +3289,14 @@ pub mod tests {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             let mut trigger = make_trigger(TriggerMode::CommitCrime);
             trigger.trigger_zones = vec![Zone::Graveyard];
-            trigger.execute = Some(Box::new(crate::types::ability::AbilityDefinition {
-                kind: AbilityKind::Spell,
-                effect: Effect::ChangeZone {
+            trigger.execute = Some(Box::new(crate::types::ability::AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,
                     target: TargetFilter::SelfRef,
                 },
-                target_prompt: None,
-                sub_ability: None,
-                cost: None,
-                duration: None,
-                description: None,
-                sorcery_speed: false,
-                condition: None,
-            }));
+            )));
             obj.trigger_definitions.push(trigger);
         }
 
@@ -3442,44 +3357,36 @@ pub mod tests {
             obj.trigger_definitions.push(TriggerDefinition {
                 mode: TriggerMode::ChangesZone,
                 execute: Some(Box::new(AbilityDefinition {
-                    kind: AbilityKind::Spell,
-                    effect: Effect::RevealHand {
-                        target: TargetFilter::Typed {
-                            card_type: None,
-                            subtype: None,
-                            controller: Some(ControllerRef::Opponent),
-                            properties: vec![],
-                        },
-                        card_filter: TargetFilter::Typed {
-                            card_type: Some(TypeFilter::Permanent),
-                            subtype: None,
-                            controller: None,
-                            properties: vec![FilterProp::NonType {
-                                value: "Land".to_string(),
-                            }],
-                        },
-                    },
-                    cost: None,
                     sub_ability: Some(Box::new(AbilityDefinition {
-                        kind: AbilityKind::Spell,
-                        effect: Effect::ChangeZone {
-                            origin: None,
-                            destination: Zone::Exile,
-                            target: TargetFilter::Any,
-                        },
-                        cost: None,
-                        sub_ability: None,
                         duration: Some(crate::types::ability::Duration::UntilHostLeavesPlay),
-                        description: None,
-                        target_prompt: None,
-                        sorcery_speed: false,
-                        condition: None,
+                        ..AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::ChangeZone {
+                                origin: None,
+                                destination: Zone::Exile,
+                                target: TargetFilter::Any,
+                            },
+                        )
                     })),
-                    duration: None,
-                    description: None,
-                    target_prompt: None,
-                    sorcery_speed: false,
-                    condition: None,
+                    ..AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::RevealHand {
+                            target: TargetFilter::Typed {
+                                card_type: None,
+                                subtype: None,
+                                controller: Some(ControllerRef::Opponent),
+                                properties: vec![],
+                            },
+                            card_filter: TargetFilter::Typed {
+                                card_type: Some(TypeFilter::Permanent),
+                                subtype: None,
+                                controller: None,
+                                properties: vec![FilterProp::NonType {
+                                    value: "Land".to_string(),
+                                }],
+                            },
+                        },
+                    )
                 })),
                 valid_card: Some(TargetFilter::SelfRef),
                 origin: None,

@@ -125,20 +125,13 @@ mod tests {
         };
         obj.keywords = vec![Keyword::Vigilance];
         obj.base_keywords = vec![Keyword::Vigilance];
-        obj.abilities = vec![crate::types::ability::AbilityDefinition {
-            kind: crate::types::ability::AbilityKind::Spell,
-            effect: crate::types::ability::Effect::Unimplemented {
+        obj.abilities = vec![crate::types::ability::AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Spell,
+            crate::types::ability::Effect::Unimplemented {
                 name: "FrontAbility".to_string(),
                 description: None,
             },
-            cost: None,
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
-        }];
+        )];
         obj.color = vec![ManaColor::Green];
         obj.base_color = vec![ManaColor::Green];
 
@@ -152,20 +145,13 @@ mod tests {
                 subtypes: vec!["Werewolf".to_string()],
             },
             keywords: vec![Keyword::Trample],
-            abilities: vec![crate::types::ability::AbilityDefinition {
-                kind: crate::types::ability::AbilityKind::Spell,
-                effect: crate::types::ability::Effect::Unimplemented {
+            abilities: vec![crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                crate::types::ability::Effect::Unimplemented {
                     name: "BackAbility".to_string(),
                     description: None,
                 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            }],
+            )],
             color: vec![ManaColor::Green, ManaColor::Red],
         });
 

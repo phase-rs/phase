@@ -349,7 +349,8 @@ mod tests {
             "Captivating Crossroads".to_string(),
             Zone::Battlefield,
         );
-        obj.chosen_attributes.push(ChosenAttribute::Color(ManaColor::Green));
+        obj.chosen_attributes
+            .push(ChosenAttribute::Color(ManaColor::Green));
         state.objects.insert(obj_id, obj);
 
         let mut events = Vec::new();

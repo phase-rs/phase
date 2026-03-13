@@ -110,20 +110,13 @@ pub fn handle_cast_spell(
     let ability_def = if obj.abilities.is_empty() {
         // Vanilla creatures/enchantments/etc. have no explicit ability text
         // but are still castable -- they resolve by entering the battlefield.
-        AbilityDefinition {
-            kind: AbilityKind::Spell,
-            effect: Effect::Unimplemented {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Unimplemented {
                 name: "PermanentNoncreature".to_string(),
                 description: None,
             },
-            cost: None,
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
-        }
+        )
     } else {
         obj.abilities[0].clone()
     };
@@ -1002,20 +995,13 @@ mod tests {
         {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
-            obj.abilities.push(AbilityDefinition {
-                kind: AbilityKind::Spell,
-                effect: Effect::DealDamage {
+            obj.abilities.push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
                     amount: crate::types::ability::DamageAmount::Fixed(3),
                     target: crate::types::ability::TargetFilter::Any,
                 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            });
+            ));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],
                 generic: 0,
@@ -1035,17 +1021,10 @@ mod tests {
         {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Sorcery);
-            obj.abilities.push(AbilityDefinition {
-                kind: AbilityKind::Spell,
-                effect: Effect::Draw { count: 2 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            });
+            obj.abilities.push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw { count: 2 },
+            ));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Blue],
                 generic: 2,
@@ -1065,47 +1044,33 @@ mod tests {
         let obj = state.objects.get_mut(&obj_id).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
         obj.abilities.push(AbilityDefinition {
-            kind: AbilityKind::Activated,
-            effect: Effect::Mana {
-                produced: crate::types::ability::ManaProduction::Fixed {
-                    colors: vec![ManaColor::Blue],
-                },
-            },
             cost: Some(crate::types::ability::AbilityCost::Tap),
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
+            ..AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: crate::types::ability::ManaProduction::Fixed {
+                        colors: vec![ManaColor::Blue],
+                    },
+                },
+            )
         });
         obj.abilities.push(AbilityDefinition {
-            kind: AbilityKind::Activated,
-            effect: Effect::Mana {
-                produced: crate::types::ability::ManaProduction::Fixed {
-                    colors: vec![ManaColor::Black],
-                },
-            },
             cost: Some(crate::types::ability::AbilityCost::Tap),
-            sub_ability: Some(Box::new(AbilityDefinition {
-                kind: AbilityKind::Activated,
-                effect: Effect::Unimplemented {
+            sub_ability: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Unimplemented {
                     name: "activate_only_if_controls_land_subtype_any".to_string(),
                     description: Some("Island|Swamp".to_string()),
                 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            })),
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
+            ))),
+            ..AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: crate::types::ability::ManaProduction::Fixed {
+                        colors: vec![ManaColor::Black],
+                    },
+                },
+            )
         });
         obj_id
     }
@@ -1238,17 +1203,10 @@ mod tests {
         {
             let spell = state.objects.get_mut(&spell_id).unwrap();
             spell.card_types.core_types.push(CoreType::Instant);
-            spell.abilities.push(AbilityDefinition {
-                kind: AbilityKind::Spell,
-                effect: Effect::Draw { count: 1 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            });
+            spell.abilities.push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw { count: 1 },
+            ));
             spell.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Black],
                 generic: 0,
@@ -1290,17 +1248,10 @@ mod tests {
         {
             let spell = state.objects.get_mut(&spell_id).unwrap();
             spell.card_types.core_types.push(CoreType::Instant);
-            spell.abilities.push(AbilityDefinition {
-                kind: AbilityKind::Spell,
-                effect: Effect::Draw { count: 1 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            });
+            spell.abilities.push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw { count: 1 },
+            ));
             spell.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Black],
                 generic: 0,
@@ -1625,47 +1576,26 @@ mod tests {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
             // Mode 0: Deal 2 damage to any target
-            obj.abilities.push(AbilityDefinition {
-                kind: AbilityKind::Spell,
-                effect: Effect::DealDamage {
+            obj.abilities.push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
                     amount: crate::types::ability::DamageAmount::Fixed(2),
                     target: crate::types::ability::TargetFilter::Any,
                 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            });
+            ));
             // Mode 1: Draw a card
-            obj.abilities.push(AbilityDefinition {
-                kind: AbilityKind::Spell,
-                effect: Effect::Draw { count: 1 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            });
+            obj.abilities.push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw { count: 1 },
+            ));
             // Mode 2: Gain 3 life
-            obj.abilities.push(AbilityDefinition {
-                kind: AbilityKind::Spell,
-                effect: Effect::GainLife {
+            obj.abilities.push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
                     amount: crate::types::ability::LifeAmount::Fixed(3),
                     player: crate::types::ability::GainLifePlayer::Controller,
                 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            });
+            ));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],
                 generic: 0,

@@ -1,3 +1,4 @@
+use crate::game::filter::matches_target_filter;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
@@ -60,9 +61,26 @@ pub fn resolve(
         card_names,
     });
 
+    // Filter to only eligible cards for the choice (e.g. "nonland card")
+    let eligible: Vec<_> = if matches!(card_filter, TargetFilter::Any) {
+        hand
+    } else {
+        hand.into_iter()
+            .filter(|&id| matches_target_filter(state, id, &card_filter, ability.source_id))
+            .collect()
+    };
+
+    if eligible.is_empty() {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::Reveal,
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
     state.waiting_for = WaitingFor::RevealChoice {
         player: ability.controller,
-        cards: hand,
+        cards: eligible,
         filter: card_filter,
     };
 

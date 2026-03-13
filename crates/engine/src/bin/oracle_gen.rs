@@ -358,19 +358,15 @@ fn synthesize_basic_land_mana(face: &mut CardFace) {
     for (subtype, color) in land_mana {
         if face.card_type.subtypes.iter().any(|s| s == subtype) {
             face.abilities.push(AbilityDefinition {
-                kind: AbilityKind::Activated,
-                effect: Effect::Mana {
-                    produced: ManaProduction::Fixed {
-                        colors: vec![color],
-                    },
-                },
                 cost: Some(AbilityCost::Tap),
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
+                ..AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![color],
+                        },
+                    },
+                )
             });
         }
     }
@@ -383,22 +379,18 @@ fn synthesize_equip(face: &mut CardFace) {
         .filter_map(|kw| {
             if let Keyword::Equip(cost) = kw {
                 Some(AbilityDefinition {
-                    kind: AbilityKind::Activated,
-                    effect: Effect::Attach {
-                        target: TargetFilter::Typed {
-                            card_type: Some(TypeFilter::Creature),
-                            subtype: None,
-                            controller: Some(ControllerRef::You),
-                            properties: vec![],
-                        },
-                    },
                     cost: Some(AbilityCost::Mana { cost: cost.clone() }),
-                    sub_ability: None,
-                    duration: None,
-                    description: None,
-                    target_prompt: None,
-                    sorcery_speed: false,
-                    condition: None,
+                    ..AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::Attach {
+                            target: TargetFilter::Typed {
+                                card_type: Some(TypeFilter::Creature),
+                                subtype: None,
+                                controller: Some(ControllerRef::You),
+                                properties: vec![],
+                            },
+                        },
+                    )
                 })
             } else {
                 None

@@ -189,17 +189,10 @@ mod tests {
     /// Create a loyalty ability with the given cost and effect.
     fn make_loyalty_ability(loyalty_amount: i32, effect: Effect) -> AbilityDefinition {
         AbilityDefinition {
-            kind: AbilityKind::Activated,
-            effect,
             cost: Some(AbilityCost::Loyalty {
                 amount: loyalty_amount,
             }),
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
+            ..AbilityDefinition::new(AbilityKind::Activated, effect)
         }
     }
 
@@ -402,15 +395,8 @@ mod tests {
         use crate::types::ability::{AbilityCost, AbilityKind, Effect};
         // When AbilityCost::Loyalty is set, it should be used
         let ability = crate::types::ability::AbilityDefinition {
-            kind: AbilityKind::Activated,
-            effect: Effect::Draw { count: 1 },
             cost: Some(AbilityCost::Loyalty { amount: -3 }),
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
+            ..AbilityDefinition::new(AbilityKind::Activated, Effect::Draw { count: 1 })
         };
         assert_eq!(parse_loyalty_cost(&ability), -3);
     }
@@ -419,17 +405,10 @@ mod tests {
     fn parse_loyalty_cost_defaults_to_zero_without_loyalty_cost() {
         use crate::types::ability::{AbilityKind, Effect};
         // When no AbilityCost::Loyalty, fall back to 0
-        let ability = crate::types::ability::AbilityDefinition {
-            kind: AbilityKind::Activated,
-            effect: Effect::Draw { count: 1 },
-            cost: None,
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
-        };
+        let ability = crate::types::ability::AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw { count: 1 },
+        );
         assert_eq!(parse_loyalty_cost(&ability), 0);
     }
 
@@ -459,17 +438,7 @@ mod tests {
             0
         );
         // No loyalty cost
-        let no_cost = AbilityDefinition {
-            kind: AbilityKind::Activated,
-            effect: Effect::Draw { count: 1 },
-            cost: None,
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
-        };
+        let no_cost = AbilityDefinition::new(AbilityKind::Activated, Effect::Draw { count: 1 });
         assert_eq!(parse_loyalty_cost(&no_cost), 0);
     }
 }

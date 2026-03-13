@@ -1131,6 +1131,24 @@ pub struct AbilityDefinition {
     pub condition: Option<AbilityCondition>,
 }
 
+impl AbilityDefinition {
+    /// Create a new `AbilityDefinition` with only the required fields; all optional
+    /// fields default to `None` / `false`.
+    pub fn new(kind: AbilityKind, effect: Effect) -> Self {
+        Self {
+            kind,
+            effect,
+            cost: None,
+            sub_ability: None,
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
+            condition: None,
+        }
+    }
+}
+
 /// Condition on an ability within a sub_ability chain.
 /// Checked during resolve_ability_chain before executing the ability.
 /// The condition is a pure predicate — it describes WHAT to check, not the outcome.
@@ -1328,6 +1346,9 @@ pub enum ContinuousModification {
     /// Grants every creature type (Changeling CDA). Expanded at runtime
     /// using `GameState::all_creature_types`.
     AddAllCreatureTypes,
+    /// Adds the source object's chosen basic land type as a subtype.
+    /// Reads from `chosen_basic_land_type()` at apply time (e.g., Multiversal Passage).
+    AddChosenBasicLandType,
     SetColor {
         colors: Vec<ManaColor>,
     },
@@ -1531,17 +1552,10 @@ mod tests {
     fn trigger_definition_roundtrip() {
         let trigger = TriggerDefinition {
             mode: TriggerMode::ChangesZone,
-            execute: Some(Box::new(AbilityDefinition {
-                kind: AbilityKind::Spell,
-                effect: Effect::Draw { count: 1 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            })),
+            execute: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw { count: 1 },
+            ))),
             valid_card: Some(TargetFilter::SelfRef),
             origin: Some(Zone::Battlefield),
             destination: Some(Zone::Graveyard),
@@ -1589,20 +1603,13 @@ mod tests {
     #[test]
     fn replacement_definition_roundtrip() {
         let replacement = ReplacementDefinition {
-            execute: Some(Box::new(AbilityDefinition {
-                kind: AbilityKind::Spell,
-                effect: Effect::GainLife {
+            execute: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
                     amount: LifeAmount::Fixed(1),
                     player: GainLifePlayer::Controller,
                 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            })),
+            ))),
             valid_card: Some(TargetFilter::SelfRef),
             description: Some(
                 "If damage would be dealt to ~, prevent it and gain 1 life.".to_string(),
@@ -1637,33 +1644,27 @@ mod tests {
     #[test]
     fn ability_definition_with_sub_ability_chain_roundtrip() {
         let ability = AbilityDefinition {
-            kind: AbilityKind::Activated,
-            effect: Effect::DealDamage {
-                amount: DamageAmount::Fixed(3),
-                target: TargetFilter::Any,
-            },
             cost: Some(AbilityCost::Mana {
                 cost: ManaCost::Cost {
                     shards: vec![],
                     generic: 2,
                 },
             }),
-            sub_ability: Some(Box::new(AbilityDefinition {
-                kind: AbilityKind::Spell,
-                effect: Effect::Draw { count: 1 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            })),
+            sub_ability: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw { count: 1 },
+            ))),
             duration: Some(Duration::UntilEndOfTurn),
             description: Some("Deal 3 damage, then draw a card.".to_string()),
             target_prompt: Some("Choose a target".to_string()),
             sorcery_speed: true,
-            condition: None,
+            ..AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::DealDamage {
+                    amount: DamageAmount::Fixed(3),
+                    target: TargetFilter::Any,
+                },
+            )
         };
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: AbilityDefinition = serde_json::from_str(&json).unwrap();

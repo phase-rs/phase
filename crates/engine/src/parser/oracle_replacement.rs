@@ -36,19 +36,12 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
     // --- "~ enters the battlefield tapped" (unconditional) ---
     if norm_lower.contains("enters the battlefield tapped") || norm_lower.contains("enters tapped")
     {
-        let tap_effect = Box::new(AbilityDefinition {
-            kind: AbilityKind::Spell,
-            effect: Effect::Tap {
+        let tap_effect = Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Tap {
                 target: TargetFilter::SelfRef,
             },
-            cost: None,
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
-        });
+        ));
         return Some(ReplacementDefinition {
             execute: Some(tap_effect),
             valid_card: Some(TargetFilter::SelfRef),
@@ -158,47 +151,26 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
     // Extract life amount: "pay 2 life", "pay 3 life", etc.
     let amount = extract_life_payment(norm_lower)?;
 
-    let lose_life = AbilityDefinition {
-        kind: AbilityKind::Spell,
-        effect: Effect::LoseLife { amount },
-        cost: None,
-        sub_ability: None,
-        duration: None,
-        description: None,
-        target_prompt: None,
-        sorcery_speed: false,
-        condition: None,
-    };
+    let lose_life = AbilityDefinition::new(AbilityKind::Spell, Effect::LoseLife { amount });
 
-    let tap_self = AbilityDefinition {
-        kind: AbilityKind::Spell,
-        effect: Effect::Tap {
+    let tap_self = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Tap {
             target: TargetFilter::SelfRef,
         },
-        cost: None,
-        sub_ability: None,
-        duration: None,
-        description: None,
-        target_prompt: None,
-        sorcery_speed: false,
-        condition: None,
-    };
+    );
 
     let has_basic_land_type_choice = norm_lower.contains("choose a basic land type");
     let execute = if has_basic_land_type_choice {
         AbilityDefinition {
-            kind: AbilityKind::Spell,
-            effect: Effect::Choose {
-                choice_type: ChoiceType::BasicLandType,
-                persist: true,
-            },
-            cost: None,
             sub_ability: Some(Box::new(lose_life)),
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
+            ..AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Choose {
+                    choice_type: ChoiceType::BasicLandType,
+                    persist: true,
+                },
+            )
         }
     } else {
         lose_life
@@ -206,18 +178,14 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
 
     let decline = if has_basic_land_type_choice {
         AbilityDefinition {
-            kind: AbilityKind::Spell,
-            effect: Effect::Choose {
-                choice_type: ChoiceType::BasicLandType,
-                persist: true,
-            },
-            cost: None,
             sub_ability: Some(Box::new(tap_self)),
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
+            ..AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Choose {
+                    choice_type: ChoiceType::BasicLandType,
+                    persist: true,
+                },
+            )
         }
     } else {
         tap_self
@@ -252,20 +220,13 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     let choose_text = &norm_lower[choose_idx..];
     let choice_type = try_parse_named_choice(choose_text)?;
 
-    let execute = Box::new(AbilityDefinition {
-        kind: AbilityKind::Spell,
-        effect: Effect::Choose {
+    let execute = Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Choose {
             choice_type,
             persist: true,
         },
-        cost: None,
-        sub_ability: None,
-        duration: None,
-        description: None,
-        target_prompt: None,
-        sorcery_speed: false,
-        condition: None,
-    });
+    ));
 
     Some(ReplacementDefinition {
         execute: Some(execute),
@@ -304,19 +265,12 @@ fn parse_check_land(norm_lower: &str, original_text: &str) -> Option<Replacement
         return None;
     }
 
-    let tap_effect = Box::new(AbilityDefinition {
-        kind: AbilityKind::Spell,
-        effect: Effect::Tap {
+    let tap_effect = Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Tap {
             target: TargetFilter::SelfRef,
         },
-        cost: None,
-        sub_ability: None,
-        duration: None,
-        description: None,
-        target_prompt: None,
-        sorcery_speed: false,
-        condition: None,
-    });
+    ));
 
     Some(ReplacementDefinition {
         execute: Some(tap_effect),

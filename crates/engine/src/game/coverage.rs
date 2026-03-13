@@ -230,20 +230,13 @@ mod tests {
     fn object_with_registered_ability_has_no_unimplemented() {
         let mut obj = make_obj();
         obj.abilities
-            .push(crate::types::ability::AbilityDefinition {
-                kind: AbilityKind::Spell,
-                effect: Effect::DealDamage {
+            .push(crate::types::ability::AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
                     amount: DamageAmount::Fixed(3),
                     target: TargetFilter::Any,
                 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            });
+            ));
         assert!(unimplemented_mechanics(&obj).is_empty());
     }
 
@@ -251,20 +244,13 @@ mod tests {
     fn object_with_unregistered_ability_has_unimplemented() {
         let mut obj = make_obj();
         obj.abilities
-            .push(crate::types::ability::AbilityDefinition {
-                kind: AbilityKind::Spell,
-                effect: Effect::Unimplemented {
+            .push(crate::types::ability::AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
                     name: "Fateseal".to_string(),
                     description: None,
                 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            });
+            ));
         assert!(!unimplemented_mechanics(&obj).is_empty());
     }
 

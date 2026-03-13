@@ -386,19 +386,15 @@ mod tests {
             flavor_name: None,
             keywords: vec![Keyword::Trample],
             abilities: vec![AbilityDefinition {
-                kind: AbilityKind::Activated,
-                effect: Effect::Pump {
-                    power: PtValue::Fixed(0),
-                    toughness: PtValue::Fixed(0),
-                    target: TargetFilter::Any,
-                },
                 cost: Some(crate::types::ability::AbilityCost::Tap),
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
+                ..AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Pump {
+                        power: PtValue::Fixed(0),
+                        toughness: PtValue::Fixed(0),
+                        target: TargetFilter::Any,
+                    },
+                )
             }],
             triggers: vec![],
             static_abilities: vec![],
@@ -429,20 +425,13 @@ mod tests {
             non_ability_text: None,
             flavor_name: None,
             keywords: vec![],
-            abilities: vec![AbilityDefinition {
-                kind: AbilityKind::Spell,
-                effect: Effect::DealDamage {
+            abilities: vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
                     amount: DamageAmount::Fixed(3),
                     target: TargetFilter::Any,
                 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            }],
+            )],
             triggers: vec![],
             static_abilities: vec![],
             replacements: vec![],

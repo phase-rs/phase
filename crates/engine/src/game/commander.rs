@@ -423,20 +423,13 @@ mod tests {
                 shards: vec![ManaCostShard::Red],
                 generic: 2,
             };
-            obj.abilities.push(AbilityDefinition {
-                kind: AbilityKind::Spell,
-                effect: Effect::Unimplemented {
+            obj.abilities.push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
                     name: "Commander".to_string(),
                     description: None,
                 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            });
+            ));
         }
 
         // Give player mana to cast (1R + 2 generic = 3 total for first cast)

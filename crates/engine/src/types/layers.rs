@@ -71,7 +71,8 @@ impl ContinuousModification {
             | ContinuousModification::RemoveType { .. }
             | ContinuousModification::AddSubtype { .. }
             | ContinuousModification::RemoveSubtype { .. }
-            | ContinuousModification::AddAllCreatureTypes => Layer::Type,
+            | ContinuousModification::AddAllCreatureTypes
+            | ContinuousModification::AddChosenBasicLandType => Layer::Type,
             ContinuousModification::SetColor { .. } | ContinuousModification::AddColor { .. } => {
                 Layer::Color
             }

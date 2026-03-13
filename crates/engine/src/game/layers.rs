@@ -256,6 +256,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::AddSubtype { .. }
             | ContinuousModification::RemoveSubtype { .. }
             | ContinuousModification::AddAllCreatureTypes
+            | ContinuousModification::AddChosenBasicLandType
     );
 
     if b_changes_types && filter_references_type(&a.affected_filter) {
@@ -325,6 +326,20 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
         .copied()
         .collect();
 
+    // Pre-read chosen basic land type from source (avoids borrow conflict in the loop)
+    let chosen_basic_land_subtype = if matches!(
+        effect.modification,
+        ContinuousModification::AddChosenBasicLandType
+    ) {
+        state
+            .objects
+            .get(&effect.source_id)
+            .and_then(|src| src.chosen_basic_land_type())
+            .map(|t| t.as_subtype_str().to_string())
+    } else {
+        None
+    };
+
     for id in affected_ids {
         let obj = match state.objects.get_mut(&id) {
             Some(o) => o,
@@ -387,6 +402,13 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             }
             ContinuousModification::AddAllCreatureTypes => {
                 for subtype in &state.all_creature_types {
+                    if !obj.card_types.subtypes.iter().any(|s| s == subtype) {
+                        obj.card_types.subtypes.push(subtype.clone());
+                    }
+                }
+            }
+            ContinuousModification::AddChosenBasicLandType => {
+                if let Some(ref subtype) = chosen_basic_land_subtype {
                     if !obj.card_types.subtypes.iter().any(|s| s == subtype) {
                         obj.card_types.subtypes.push(subtype.clone());
                     }
@@ -996,5 +1018,93 @@ mod tests {
             .card_types
             .subtypes
             .contains(&"Shapeshifter".to_string()));
+    }
+
+    #[test]
+    fn test_chosen_basic_land_type_adds_subtype() {
+        use crate::types::ability::{BasicLandType, ChosenAttribute};
+
+        let mut state = setup();
+
+        // Create a land with a chosen basic land type (simulating Multiversal Passage)
+        let land = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Multiversal Passage".to_string(),
+            Zone::Battlefield,
+        );
+        let ts = state.next_timestamp();
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Land);
+            obj.timestamp = ts;
+            // Simulate the ETB choice: chose Forest
+            obj.chosen_attributes
+                .push(ChosenAttribute::BasicLandType(BasicLandType::Forest));
+            // Add the static definition that reads the chosen type
+            obj.static_definitions.push(StaticDefinition {
+                mode: StaticMode::Continuous,
+                affected: Some(TargetFilter::SelfRef),
+                modifications: vec![ContinuousModification::AddChosenBasicLandType],
+                condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                characteristic_defining: false,
+                description: None,
+            });
+        }
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&land).unwrap();
+        assert!(
+            obj.card_types.subtypes.contains(&"Forest".to_string()),
+            "Land should gain Forest subtype from chosen basic land type"
+        );
+    }
+
+    #[test]
+    fn test_chosen_basic_land_type_no_choice_is_noop() {
+        let mut state = setup();
+
+        // Land with AddChosenBasicLandType but no choice stored
+        let land = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Unchosen Land".to_string(),
+            Zone::Battlefield,
+        );
+        let ts = state.next_timestamp();
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Land);
+            obj.timestamp = ts;
+            obj.static_definitions.push(StaticDefinition {
+                mode: StaticMode::Continuous,
+                affected: Some(TargetFilter::SelfRef),
+                modifications: vec![ContinuousModification::AddChosenBasicLandType],
+                condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                characteristic_defining: false,
+                description: None,
+            });
+        }
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&land).unwrap();
+        assert!(
+            obj.card_types.subtypes.is_empty(),
+            "No subtypes should be added when no choice was made"
+        );
     }
 }

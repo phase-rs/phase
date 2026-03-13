@@ -279,19 +279,15 @@ mod tests {
 
     fn verge_ability(color: ManaColor) -> AbilityDefinition {
         AbilityDefinition {
-            kind: AbilityKind::Activated,
-            effect: Effect::Mana {
-                produced: ManaProduction::Fixed {
-                    colors: vec![color],
-                },
-            },
             cost: Some(AbilityCost::Tap),
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
+            ..AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![color],
+                    },
+                },
+            )
         }
     }
 
@@ -307,34 +303,24 @@ mod tests {
         obj.card_types.core_types.push(CoreType::Land);
         obj.abilities.push(verge_ability(ManaColor::Blue));
         obj.abilities.push(AbilityDefinition {
-            kind: AbilityKind::Activated,
-            effect: Effect::Mana {
-                produced: ManaProduction::Fixed {
-                    colors: vec![ManaColor::Black],
-                },
-            },
             cost: Some(AbilityCost::Tap),
-            sub_ability: Some(Box::new(AbilityDefinition {
-                kind: AbilityKind::Activated,
-                effect: Effect::Unimplemented {
+            sub_ability: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Unimplemented {
                     name: "activate".to_string(),
                     description: Some(
                         "Activate only if you control an Island or a Swamp".to_string(),
                     ),
                 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            })),
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
+            ))),
+            ..AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Black],
+                    },
+                },
+            )
         });
         verge
     }
@@ -395,32 +381,22 @@ mod tests {
     #[test]
     fn parse_canonical_condition_payload() {
         let def = AbilityDefinition {
-            kind: AbilityKind::Activated,
-            effect: Effect::Mana {
-                produced: ManaProduction::Fixed {
-                    colors: vec![ManaColor::Blue],
-                },
-            },
             cost: Some(AbilityCost::Tap),
-            sub_ability: Some(Box::new(AbilityDefinition {
-                kind: AbilityKind::Activated,
-                effect: Effect::Unimplemented {
+            sub_ability: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Unimplemented {
                     name: "activate_only_if_controls_land_subtype_any".to_string(),
                     description: Some("Island|Swamp".to_string()),
                 },
-                cost: None,
-                sub_ability: None,
-                duration: None,
-                description: None,
-                target_prompt: None,
-                sorcery_speed: false,
-                condition: None,
-            })),
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
+            ))),
+            ..AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Blue],
+                    },
+                },
+            )
         };
 
         let parsed = extract_land_subtype_activation_condition(&def).unwrap();

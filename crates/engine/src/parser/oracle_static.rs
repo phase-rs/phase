@@ -177,6 +177,20 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         }
     }
 
+    // --- "This land is the chosen type." (Multiversal Passage pattern) ---
+    if lower.contains("is the chosen type") {
+        return Some(StaticDefinition {
+            mode: StaticMode::Continuous,
+            affected: Some(TargetFilter::SelfRef),
+            modifications: vec![ContinuousModification::AddChosenBasicLandType],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            characteristic_defining: false,
+            description: Some(text.to_string()),
+        });
+    }
+
     // --- "~ has [keyword] as long as ..." (must be before generic self-ref "has") ---
     if let Some(has_pos) = lower.find(" has ") {
         if let Some(cond_pos) = lower.find(" as long as ") {
@@ -962,5 +976,16 @@ mod tests {
             .contains(&ContinuousModification::AddKeyword {
                 keyword: Keyword::Lifelink,
             }));
+    }
+
+    #[test]
+    fn this_land_is_the_chosen_type() {
+        let def = parse_static_line("This land is the chosen type.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::AddChosenBasicLandType]
+        );
     }
 }

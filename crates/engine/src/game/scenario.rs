@@ -149,19 +149,15 @@ impl GameScenario {
         obj.entered_battlefield_turn = Some(self.state.turn_number.saturating_sub(1));
         // Add mana ability
         obj.abilities.push(AbilityDefinition {
-            kind: AbilityKind::Activated,
-            effect: Effect::Mana {
-                produced: crate::types::ability::ManaProduction::Fixed {
-                    colors: vec![color],
-                },
-            },
             cost: Some(crate::types::ability::AbilityCost::Tap),
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
+            ..AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: crate::types::ability::ManaProduction::Fixed {
+                        colors: vec![color],
+                    },
+                },
+            )
         });
         id
     }
@@ -178,20 +174,13 @@ impl GameScenario {
         );
         let obj = self.state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Instant);
-        obj.abilities.push(AbilityDefinition {
-            kind: AbilityKind::Spell,
-            effect: Effect::DealDamage {
+        obj.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
                 amount: DamageAmount::Fixed(3),
                 target: TargetFilter::Any,
             },
-            cost: None,
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
-        });
+        ));
         id
     }
 
@@ -352,17 +341,9 @@ impl<'a> CardBuilder<'a> {
 
     /// Attach an ability definition with the given effect.
     pub fn with_ability(&mut self, effect: Effect) -> &mut Self {
-        self.obj().abilities.push(AbilityDefinition {
-            kind: AbilityKind::Spell,
-            effect,
-            cost: None,
-            sub_ability: None,
-            duration: None,
-            description: None,
-            target_prompt: None,
-            sorcery_speed: false,
-            condition: None,
-        });
+        self.obj()
+            .abilities
+            .push(AbilityDefinition::new(AbilityKind::Spell, effect));
         self
     }
 
