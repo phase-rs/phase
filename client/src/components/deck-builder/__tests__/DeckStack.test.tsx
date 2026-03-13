@@ -26,6 +26,31 @@ function makeCard(name: string, typeLine: string): ScryfallCard {
   };
 }
 
+function getRequiredParent(
+  element: HTMLElement,
+  label: string,
+): HTMLElement {
+  const parent = element.parentElement;
+  if (!parent) {
+    throw new Error(`Missing parent element for ${label}`);
+  }
+  return parent;
+}
+
+function getTileByRemoveTitle(cardName: string): HTMLElement {
+  const removeButton = screen.getByTitle(`Remove one ${cardName}`);
+  return getRequiredParent(
+    getRequiredParent(removeButton, `remove button for ${cardName}`),
+    `tile for ${cardName}`,
+  );
+}
+
+function expectDocumentOrder(before: HTMLElement, after: HTMLElement): void {
+  expect(
+    before.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+}
+
 describe("DeckStack", () => {
   beforeEach(() => {
     vi.stubGlobal("ResizeObserver", ResizeObserverMock);
@@ -36,12 +61,13 @@ describe("DeckStack", () => {
     vi.unstubAllGlobals();
   });
 
-  it("surfaces high-copy entries ahead of 4x cards within the same lane", () => {
+  it("renders each card as its own stack tile with its own count badge", () => {
     render(
       <DeckStack
         deck={{
           main: [
-            { name: "Island", count: 4 },
+            { name: "Banishing Light", count: 2 },
+            { name: "Leyline of Hope", count: 3 },
             { name: "Forest", count: 24 },
           ],
           sideboard: [],
@@ -49,20 +75,83 @@ describe("DeckStack", () => {
         commanders={[]}
         cardDataCache={
           new Map([
-            ["Island", makeCard("Island", "Basic Land — Island")],
+            ["Banishing Light", makeCard("Banishing Light", "Enchantment")],
+            ["Leyline of Hope", makeCard("Leyline of Hope", "Enchantment")],
             ["Forest", makeCard("Forest", "Basic Land — Forest")],
           ])
         }
+        onAddCard={vi.fn()}
         onRemoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
       />,
     );
 
-    const [forestBadge] = screen.getAllByText("24x");
-    const [islandBadge] = screen.getAllByText("4x");
+    const forestTile = getTileByRemoveTitle("Forest");
+    const leylineTile = getTileByRemoveTitle("Leyline of Hope");
+    const banishingTile = getTileByRemoveTitle("Banishing Light");
 
+    expect(screen.getByTitle("Add one Forest")).toBeInTheDocument();
+    expect(forestTile.textContent).toContain("24");
+    expect(forestTile.textContent).toContain("Forest");
+    expect(forestTile.textContent).not.toContain("Leyline of Hope");
+    expect(forestTile.textContent).not.toContain("Banishing Light");
+
+    expect(leylineTile.textContent).toContain("3");
+    expect(leylineTile.textContent).toContain("Leyline of Hope");
+    expect(leylineTile.textContent).not.toContain("Forest");
+
+    expect(banishingTile.textContent).toContain("2");
+    expect(banishingTile.textContent).toContain("Banishing Light");
+    expect(banishingTile.textContent).not.toContain("Forest");
+  });
+
+  it("sorts by type first, then count, with lands after spells", () => {
+    render(
+      <DeckStack
+        deck={{
+          main: [
+            { name: "Plains", count: 20 },
+            { name: "Ajani's Pridemate", count: 4 },
+            { name: "Leyline of Hope", count: 3 },
+            { name: "Banishing Light", count: 2 },
+            { name: "Healer's Hawk", count: 4 },
+          ],
+          sideboard: [],
+        }}
+        commanders={[]}
+        cardDataCache={
+          new Map([
+            ["Plains", makeCard("Plains", "Basic Land — Plains")],
+            ["Ajani's Pridemate", makeCard("Ajani's Pridemate", "Creature")],
+            ["Leyline of Hope", makeCard("Leyline of Hope", "Enchantment")],
+            ["Banishing Light", makeCard("Banishing Light", "Enchantment")],
+            ["Healer's Hawk", makeCard("Healer's Hawk", "Creature")],
+          ])
+        }
+        onAddCard={vi.fn()}
+        onRemoveCard={vi.fn()}
+        onRemoveCommander={vi.fn()}
+      />,
+    );
+
+    const ajaniTile = getTileByRemoveTitle("Ajani's Pridemate");
+    const hawkTile = getTileByRemoveTitle("Healer's Hawk");
+    const leylineTile = getTileByRemoveTitle("Leyline of Hope");
+    const banishingTile = getTileByRemoveTitle("Banishing Light");
+    const plainsTile = getTileByRemoveTitle("Plains");
+
+    expect(screen.getByText("Creatures")).toBeInTheDocument();
+    expect(screen.getByText("Spells")).toBeInTheDocument();
+    expect(screen.getByText("Lands")).toBeInTheDocument();
     expect(
-      forestBadge.compareDocumentPosition(islandBadge) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+      screen.getByTitle("Ajani's Pridemate is at the copy limit"),
+    ).toBeDisabled();
+    expect(screen.queryByText("MD")).not.toBeInTheDocument();
+    expect(screen.queryByText("SB")).not.toBeInTheDocument();
+
+    expectDocumentOrder(ajaniTile, leylineTile);
+    expectDocumentOrder(hawkTile, leylineTile);
+    expectDocumentOrder(leylineTile, banishingTile);
+    expectDocumentOrder(banishingTile, plainsTile);
   });
 });

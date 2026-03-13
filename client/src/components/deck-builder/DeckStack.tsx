@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo } from "react";
 
 import { useCardImage } from "../../hooks/useCardImage";
 import type { DeckEntry, ParsedDeck } from "../../services/deckParser";
@@ -8,6 +8,7 @@ interface DeckStackProps {
   deck: ParsedDeck;
   commanders: string[];
   cardDataCache: Map<string, ScryfallCard>;
+  onAddCard: (name: string) => void;
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
   onCardHover?: (cardName: string | null) => void;
@@ -19,27 +20,18 @@ interface DeckStackItem {
   count: number;
   name: string;
   section: DeckStackSection;
+  typeRank: number;
   sortKey: [number, number, number, string];
+}
+
+interface DeckStackTypeGroup {
+  key: string;
+  title: string;
+  entries: DeckStackItem[];
 }
 
 const CARD_HEIGHT = 156;
 const CARD_WIDTH = 112;
-const CARD_OFFSET = 48;
-const COLUMN_GAP = 16;
-const TARGET_ITEMS_PER_COLUMN = 5;
-const MIN_ITEMS_PER_COLUMN = 4;
-
-const SECTION_LABELS: Record<DeckStackSection, string> = {
-  commander: "CMD",
-  main: "MD",
-  sideboard: "SB",
-};
-
-const SECTION_STYLES: Record<DeckStackSection, string> = {
-  commander: "bg-fuchsia-500/90 text-black",
-  main: "bg-slate-900/90 text-slate-100",
-  sideboard: "bg-amber-300/90 text-black",
-};
 
 function getTypeRank(card: ScryfallCard | undefined): number {
   const typeLine = card?.type_line.toLowerCase() ?? "";
@@ -51,11 +43,11 @@ function getTypeRank(card: ScryfallCard | undefined): number {
 function sortDeckStackItems(items: DeckStackItem[]): DeckStackItem[] {
   const next = [...items];
   next.sort((left, right) => {
-    const [leftRank, leftCmc, leftCountOrder, leftName] = left.sortKey;
-    const [rightRank, rightCmc, rightCountOrder, rightName] = right.sortKey;
+    const [leftRank, leftCountOrder, leftCmc, leftName] = left.sortKey;
+    const [rightRank, rightCountOrder, rightCmc, rightName] = right.sortKey;
     if (leftRank !== rightRank) return leftRank - rightRank;
-    if (leftCmc !== rightCmc) return leftCmc - rightCmc;
     if (leftCountOrder !== rightCountOrder) return leftCountOrder - rightCountOrder;
+    if (leftCmc !== rightCmc) return leftCmc - rightCmc;
     return leftName.localeCompare(rightName);
   });
   return next;
@@ -73,29 +65,34 @@ function createDeckStackItems(
       count: 1,
       name,
       section: "commander",
-      sortKey: [0, card?.cmc ?? 0, -1, name.toLowerCase()],
+      typeRank: 0,
+      sortKey: [0, -1, card?.cmc ?? 0, name.toLowerCase()],
     });
   }
 
   const mainItems: DeckStackItem[] = [];
   for (const entry of deck.main) {
     const card = cardDataCache.get(entry.name);
+    const typeRank = getTypeRank(card);
     mainItems.push({
       count: entry.count,
       name: entry.name,
       section: "main",
-      sortKey: [1 + getTypeRank(card), card?.cmc ?? 0, -entry.count, entry.name.toLowerCase()],
+      typeRank,
+      sortKey: [1 + typeRank, -entry.count, card?.cmc ?? 0, entry.name.toLowerCase()],
     });
   }
 
   const sideboardItems: DeckStackItem[] = [];
   for (const entry of deck.sideboard) {
     const card = cardDataCache.get(entry.name);
+    const typeRank = getTypeRank(card);
     sideboardItems.push({
       count: entry.count,
       name: entry.name,
       section: "sideboard",
-      sortKey: [4 + getTypeRank(card), card?.cmc ?? 0, -entry.count, entry.name.toLowerCase()],
+      typeRank,
+      sortKey: [4 + typeRank, -entry.count, card?.cmc ?? 0, entry.name.toLowerCase()],
     });
   }
 
@@ -106,66 +103,62 @@ function createDeckStackItems(
   };
 }
 
-function chunkEntries(entries: DeckStackItem[], availableWidth: number): DeckStackItem[][] {
-  if (entries.length === 0) return [];
-
-  const minimumColumnCount = Math.max(
-    1,
-    Math.ceil(entries.length / TARGET_ITEMS_PER_COLUMN),
-  );
-  const maximumColumnCount = Math.max(
-    1,
-    Math.ceil(entries.length / MIN_ITEMS_PER_COLUMN),
-  );
-  const visibleColumnCount = availableWidth > 0
-    ? Math.max(
-      1,
-      Math.floor((availableWidth + COLUMN_GAP) / (CARD_WIDTH + COLUMN_GAP)),
-    )
-    : minimumColumnCount;
-  const columnCount = Math.min(
-    entries.length,
-    Math.max(
-      minimumColumnCount,
-      Math.min(visibleColumnCount, maximumColumnCount),
-    ),
-  );
-
-  const baseColumnSize = Math.floor(entries.length / columnCount);
-  const columnsWithExtraCard = entries.length % columnCount;
-  const columns: DeckStackItem[][] = [];
-  let offset = 0;
-
-  for (let columnIndex = 0; columnIndex < columnCount; columnIndex += 1) {
-    const columnSize = baseColumnSize + (columnIndex < columnsWithExtraCard ? 1 : 0);
-    columns.push(entries.slice(offset, offset + columnSize));
-    offset += columnSize;
-  }
-
-  return columns;
-}
-
 function totalCards(entries: DeckEntry[]): number {
   return entries.reduce((sum, entry) => sum + entry.count, 0);
 }
 
+function buildTypeGroups(entries: DeckStackItem[]): DeckStackTypeGroup[] {
+  if (entries.length === 0) return [];
+
+  const groups: DeckStackTypeGroup[] = [];
+  let currentRank: number | null = null;
+  let currentEntries: DeckStackItem[] = [];
+
+  const flush = () => {
+    if (currentRank === null || currentEntries.length === 0) return;
+    groups.push({
+      key: `type-${currentRank}`,
+      title: currentRank === 0 ? "Creatures" : currentRank === 1 ? "Spells" : "Lands",
+      entries: currentEntries,
+    });
+  };
+
+  for (const entry of entries) {
+    if (currentRank !== entry.typeRank) {
+      flush();
+      currentRank = entry.typeRank;
+      currentEntries = [entry];
+      continue;
+    }
+    currentEntries.push(entry);
+  }
+
+  flush();
+  return groups;
+}
+
 function DeckStackCard({
   item,
-  top,
   zIndex,
+  className,
+  canAdd,
+  onAddCard,
   onRemoveCard,
   onRemoveCommander,
   onCardHover,
 }: {
   item: DeckStackItem;
-  top: number;
   zIndex: number;
+  className?: string;
+  canAdd: boolean;
+  onAddCard: (name: string) => void;
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
   onCardHover?: (cardName: string | null) => void;
 }) {
   const { src, isLoading } = useCardImage(item.name, { size: "normal" });
   const isCommander = item.section === "commander";
+  const showAddButton = item.section === "main";
 
   const handleRemove = () => {
     if (item.section === "commander") {
@@ -175,10 +168,15 @@ function DeckStackCard({
     onRemoveCard(item.name, item.section);
   };
 
+  const handleAdd = () => {
+    if (!canAdd) return;
+    onAddCard(item.name);
+  };
+
   return (
     <div
-      className="absolute left-0"
-      style={{ top, zIndex, width: CARD_WIDTH }}
+      className={`relative ${className ?? ""}`}
+      style={{ zIndex, width: CARD_WIDTH }}
       onMouseEnter={() => onCardHover?.(item.name)}
       onMouseLeave={() => onCardHover?.(null)}
     >
@@ -193,17 +191,22 @@ function DeckStackCard({
           <span className="rounded-full bg-black/80 px-2 py-0.5 text-[10px] font-semibold text-white">
             {item.count}x
           </span>
-          <span
-            className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${SECTION_STYLES[item.section]}`}
-          >
-            {SECTION_LABELS[item.section]}
-          </span>
           {isCommander && (
             <span className="rounded-full bg-fuchsia-200/95 px-2 py-0.5 text-[10px] font-bold text-fuchsia-950">
               Commander
             </span>
           )}
         </div>
+        {showAddButton && (
+          <button
+            onClick={handleAdd}
+            disabled={!canAdd}
+            className="absolute right-10 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-black/78 text-sm font-bold text-emerald-300 opacity-0 transition group-hover:opacity-100 hover:bg-emerald-500/85 hover:text-white disabled:cursor-not-allowed disabled:text-slate-500 disabled:hover:bg-black/78"
+            title={canAdd ? `Add one ${item.name}` : `${item.name} is at the copy limit`}
+          >
+            +
+          </button>
+        )}
         <button
           onClick={handleRemove}
           className="absolute right-2 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-black/78 text-sm font-bold text-red-300 opacity-0 transition group-hover:opacity-100 hover:bg-red-500/85 hover:text-white"
@@ -242,6 +245,9 @@ function DeckStackSectionLane({
   badge,
   entries,
   emptyLabel,
+  showTypeSections = false,
+  onAddCard,
+  canAddCard,
   onRemoveCard,
   onRemoveCommander,
   onCardHover,
@@ -250,38 +256,17 @@ function DeckStackSectionLane({
   badge: string;
   entries: DeckStackItem[];
   emptyLabel: string;
+  showTypeSections?: boolean;
+  onAddCard: (name: string) => void;
+  canAddCard: (item: DeckStackItem) => boolean;
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
   onCardHover?: (cardName: string | null) => void;
 }) {
-  const laneRef = useRef<HTMLDivElement>(null);
-  const [availableWidth, setAvailableWidth] = useState(0);
-  const columns = useMemo(
-    () => chunkEntries(entries, availableWidth),
-    [entries, availableWidth],
+  const typeGroups = useMemo(
+    () => showTypeSections ? buildTypeGroups(entries) : [{ key: "all", title: "", entries }],
+    [entries, showTypeSections],
   );
-
-  useEffect(() => {
-    const element = laneRef.current;
-    if (!element) return;
-
-    const updateWidth = (width: number) => {
-      setAvailableWidth((currentWidth) => {
-        const nextWidth = Math.floor(width);
-        return currentWidth === nextWidth ? currentWidth : nextWidth;
-      });
-    };
-
-    updateWidth(element.clientWidth);
-
-    const observer = new ResizeObserver((observerEntries) => {
-      const entry = observerEntries[0];
-      updateWidth(entry?.contentRect.width ?? element.clientWidth);
-    });
-
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [entries.length]);
 
   return (
     <section className="flex min-w-0 flex-col rounded-[20px] border border-white/8 bg-black/14 px-3 py-3">
@@ -297,28 +282,38 @@ function DeckStackSectionLane({
           {emptyLabel}
         </div>
       ) : (
-        <div ref={laneRef} className="overflow-auto pb-1">
-          <div className="flex items-start gap-4">
-            {columns.map((column, columnIndex) => (
-              <div
-                key={columnIndex}
-                className="relative shrink-0"
-                style={{
-                  height: CARD_HEIGHT + Math.max(column.length - 1, 0) * CARD_OFFSET,
-                  width: CARD_WIDTH,
-                }}
-              >
-                {column.map((item, itemIndex) => (
-                  <DeckStackCard
-                    key={`${item.section}:${item.name}`}
-                    item={item}
-                    top={itemIndex * CARD_OFFSET}
-                    zIndex={column.length - itemIndex}
-                    onRemoveCard={onRemoveCard}
-                    onRemoveCommander={onRemoveCommander}
-                    onCardHover={onCardHover}
-                  />
-                ))}
+        <div className="overflow-auto pb-1">
+          <div className="flex min-w-0 flex-col gap-6">
+            {typeGroups.map((group, groupIndex) => (
+              <div key={group.key} className={groupIndex > 0 ? "pt-1" : undefined}>
+                {showTypeSections && (
+                  <div className="mb-3 flex items-center gap-3">
+                    <div className="text-[0.68rem] font-semibold uppercase tracking-[0.22em] text-slate-500">
+                      {group.title}
+                    </div>
+                    <div className="h-px flex-1 bg-white/8" />
+                    <div className="text-[11px] text-slate-500">
+                      {group.entries.reduce((sum, entry) => sum + entry.count, 0)} cards
+                    </div>
+                  </div>
+                )}
+                <div
+                  className="grid justify-start gap-4"
+                  style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${CARD_WIDTH}px, ${CARD_WIDTH}px))` }}
+                >
+                  {group.entries.map((item, itemIndex) => (
+                    <DeckStackCard
+                      key={`${item.section}:${item.name}`}
+                      item={item}
+                      zIndex={group.entries.length - itemIndex}
+                      canAdd={canAddCard(item)}
+                      onAddCard={onAddCard}
+                      onRemoveCard={onRemoveCard}
+                      onRemoveCommander={onRemoveCommander}
+                      onCardHover={onCardHover}
+                    />
+                  ))}
+                </div>
               </div>
             ))}
           </div>
@@ -332,6 +327,7 @@ export function DeckStack({
   deck,
   commanders,
   cardDataCache,
+  onAddCard,
   onRemoveCard,
   onRemoveCommander,
   onCardHover,
@@ -346,6 +342,15 @@ export function DeckStack({
     sections.commander.length > 0
     || sections.main.length > 0
     || sections.sideboard.length > 0;
+  const canAddCard = useMemo(
+    () => (item: DeckStackItem) => {
+      if (item.section !== "main") return false;
+      const typeLine = cardDataCache.get(item.name)?.type_line.toLowerCase() ?? "";
+      const isBasicLand = typeLine.includes("basic") && typeLine.includes("land");
+      return isBasicLand || item.count < 4;
+    },
+    [cardDataCache],
+  );
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
@@ -379,6 +384,8 @@ export function DeckStack({
                 badge={`${sections.commander.length} card${sections.commander.length === 1 ? "" : "s"}`}
                 entries={sections.commander}
                 emptyLabel="No commander selected."
+                onAddCard={onAddCard}
+                canAddCard={canAddCard}
                 onRemoveCard={onRemoveCard}
                 onRemoveCommander={onRemoveCommander}
                 onCardHover={onCardHover}
@@ -389,6 +396,9 @@ export function DeckStack({
               badge={`${mainDeckCount} cards`}
               entries={sections.main}
               emptyLabel="Main deck cards will appear here."
+              showTypeSections
+              onAddCard={onAddCard}
+              canAddCard={canAddCard}
               onRemoveCard={onRemoveCard}
               onRemoveCommander={onRemoveCommander}
               onCardHover={onCardHover}
@@ -399,6 +409,8 @@ export function DeckStack({
                 badge={`${sideboardCount} cards`}
                 entries={sections.sideboard}
                 emptyLabel="No sideboard cards."
+                onAddCard={onAddCard}
+                canAddCard={canAddCard}
                 onRemoveCard={onRemoveCard}
                 onRemoveCommander={onRemoveCommander}
                 onCardHover={onCardHover}

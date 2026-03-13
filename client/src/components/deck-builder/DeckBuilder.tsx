@@ -106,6 +106,12 @@ export function DeckBuilder({
     });
   }, [cacheCards, maxCopies]);
 
+  const handleAddCardByName = useCallback((name: string) => {
+    const card = cardDataCache.get(name);
+    if (!card) return;
+    handleAddCard(card);
+  }, [cardDataCache, handleAddCard]);
+
   const handleRemoveCard = useCallback(
     (name: string, section: "main" | "sideboard") => {
       setDeck((prev) => {
@@ -317,6 +323,7 @@ export function DeckBuilder({
               deck={deck}
               commanders={commanders}
               cardDataCache={cardDataCache}
+              onAddCard={handleAddCardByName}
               onRemoveCard={handleRemoveCard}
               onRemoveCommander={handleRemoveCommander}
               onCardHover={onCardHover}
