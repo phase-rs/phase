@@ -11,8 +11,8 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let choice_type = match &ability.effect {
-        Effect::Choose { choice_type } => *choice_type,
+    let (choice_type, persist) = match &ability.effect {
+        Effect::Choose { choice_type, persist } => (*choice_type, *persist),
         _ => {
             return Err(EffectError::InvalidParam(
                 "expected Choose effect".to_string(),
@@ -26,6 +26,7 @@ pub fn resolve(
         player: ability.controller,
         choice_type,
         options,
+        source_id: if persist { Some(ability.source_id) } else { None },
     };
 
     events.push(GameEvent::EffectResolved {
@@ -111,7 +112,7 @@ mod tests {
 
     fn make_choose_ability(choice_type: ChoiceType) -> ResolvedAbility {
         ResolvedAbility::new(
-            Effect::Choose { choice_type },
+            Effect::Choose { choice_type, persist: false },
             vec![],
             ObjectId(100),
             PlayerId(0),
@@ -132,6 +133,7 @@ mod tests {
                 player,
                 choice_type,
                 options,
+                ..
             } => {
                 assert_eq!(*player, PlayerId(0));
                 assert_eq!(*choice_type, ChoiceType::CreatureType);

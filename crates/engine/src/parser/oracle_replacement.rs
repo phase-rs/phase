@@ -1,8 +1,8 @@
 use super::oracle_effect::parse_effect_chain;
 use super::oracle_util::strip_reminder_text;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, TargetFilter,
+    AbilityDefinition, AbilityKind, ChoiceType, Effect, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, TargetFilter,
 };
 use crate::types::replacements::ReplacementEvent;
 
@@ -152,7 +152,7 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
     // Extract life amount: "pay 2 life", "pay 3 life", etc.
     let amount = extract_life_payment(norm_lower)?;
 
-    let execute = AbilityDefinition {
+    let lose_life = AbilityDefinition {
         kind: AbilityKind::Spell,
         effect: Effect::LoseLife { amount },
         cost: None,
@@ -164,7 +164,7 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
         condition: None,
     };
 
-    let decline = AbilityDefinition {
+    let tap_self = AbilityDefinition {
         kind: AbilityKind::Spell,
         effect: Effect::Tap {
             target: TargetFilter::SelfRef,
@@ -176,6 +176,45 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
         target_prompt: None,
         sorcery_speed: false,
         condition: None,
+    };
+
+    let has_basic_land_type_choice = norm_lower.contains("choose a basic land type");
+    let execute = if has_basic_land_type_choice {
+        AbilityDefinition {
+            kind: AbilityKind::Spell,
+            effect: Effect::Choose {
+                choice_type: ChoiceType::BasicLandType,
+                persist: true,
+            },
+            cost: None,
+            sub_ability: Some(Box::new(lose_life)),
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
+            condition: None,
+        }
+    } else {
+        lose_life
+    };
+
+    let decline = if has_basic_land_type_choice {
+        AbilityDefinition {
+            kind: AbilityKind::Spell,
+            effect: Effect::Choose {
+                choice_type: ChoiceType::BasicLandType,
+                persist: true,
+            },
+            cost: None,
+            sub_ability: Some(Box::new(tap_self)),
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
+            condition: None,
+        }
+    } else {
+        tap_self
     };
 
     Some(ReplacementDefinition {
@@ -364,6 +403,46 @@ mod tests {
         .unwrap();
         let execute = def.execute.as_ref().unwrap();
         assert!(matches!(execute.effect, Effect::LoseLife { amount: 3 }));
+    }
+
+    #[test]
+    fn shock_land_with_basic_land_type_choice_adds_choose_chain() {
+        let def = parse_replacement_line(
+            "As this land enters, choose a basic land type. Then you may pay 2 life. If you don't, it enters tapped.",
+            "Multiversal Passage",
+        )
+        .unwrap();
+
+        assert!(matches!(def.mode, ReplacementMode::Optional { .. }));
+        let execute = def.execute.as_ref().unwrap();
+        assert!(matches!(
+            execute.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::BasicLandType,
+                ..
+            }
+        ));
+        assert!(matches!(
+            execute.sub_ability.as_ref().unwrap().effect,
+            Effect::LoseLife { amount: 2 }
+        ));
+
+        if let ReplacementMode::Optional { decline } = &def.mode {
+            let decline = decline.as_ref().unwrap();
+            assert!(matches!(
+                decline.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::BasicLandType,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                decline.sub_ability.as_ref().unwrap().effect,
+                Effect::Tap {
+                    target: TargetFilter::SelfRef
+                }
+            ));
+        }
     }
 
     #[test]

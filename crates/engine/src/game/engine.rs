@@ -1,7 +1,9 @@
 use rand::Rng;
 use thiserror::Error;
 
-use crate::types::ability::{ChoiceType, EffectKind};
+use crate::types::ability::{
+    AbilityDefinition, ChoiceType, ChosenAttribute, EffectKind, ResolvedAbility, TargetRef,
+};
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ActionResult, GameState, WaitingFor};
@@ -274,19 +276,24 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                         zone_change_object_id = Some(object_id);
                     }
 
+                    let mut waiting_for = WaitingFor::Priority {
+                        player: state.active_player,
+                    };
+                    state.waiting_for = waiting_for.clone();
+
                     // Apply post-replacement side effect (e.g., pay life or enter tapped)
                     if let Some(effect_def) = state.post_replacement_effect.take() {
-                        apply_post_replacement_effect(
+                        if let Some(next_waiting_for) = apply_post_replacement_effect(
                             state,
                             &effect_def,
                             zone_change_object_id,
                             &mut events,
-                        );
+                        ) {
+                            waiting_for = next_waiting_for;
+                        }
                     }
 
-                    WaitingFor::Priority {
-                        player: state.active_player,
-                    }
+                    waiting_for
                 }
                 super::replacement::ReplacementResult::NeedsChoice(player) => {
                     super::replacement::replacement_choice_waiting_for(player, state)
@@ -556,6 +563,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 player,
                 options,
                 choice_type,
+                source_id,
             },
             GameAction::ChooseOption { choice },
         ) => {
@@ -581,6 +589,15 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                     "Invalid choice '{}', must be one of: {:?}",
                     choice, options
                 )));
+            }
+
+            // Store typed attribute on source object if this is a persisted choice
+            if let Some(obj_id) = source_id {
+                if let Some(attr) = ChosenAttribute::from_choice(*choice_type, &choice) {
+                    if let Some(obj) = state.objects.get_mut(obj_id) {
+                        obj.chosen_attributes.push(attr);
+                    }
+                }
             }
 
             // Store the chosen value for continuations to read
@@ -781,30 +798,51 @@ fn apply_post_replacement_effect(
     effect_def: &crate::types::ability::AbilityDefinition,
     object_id: Option<ObjectId>,
     events: &mut Vec<GameEvent>,
-) {
-    use crate::types::ability::Effect;
-    match &effect_def.effect {
-        Effect::LoseLife { amount } => {
-            if let Some(p) = state
-                .players
-                .iter_mut()
-                .find(|p| p.id == state.active_player)
-            {
-                p.life -= *amount;
-                events.push(GameEvent::LifeChanged {
-                    player_id: state.active_player,
-                    amount: -(*amount),
-                });
-            }
-        }
-        Effect::Tap { .. } => {
-            if let Some(obj_id) = object_id {
-                if let Some(obj) = state.objects.get_mut(&obj_id) {
-                    obj.tapped = true;
-                }
-            }
-        }
-        _ => {}
+) -> Option<WaitingFor> {
+    let (source_id, controller) = object_id
+        .and_then(|obj_id| {
+            state
+                .objects
+                .get(&obj_id)
+                .map(|obj| (obj_id, obj.controller))
+        })
+        .unwrap_or((ObjectId(0), state.active_player));
+
+    let targets = object_id
+        .map(TargetRef::Object)
+        .into_iter()
+        .collect::<Vec<_>>();
+    let resolved = resolved_ability_from_definition(effect_def, source_id, controller, targets);
+    let _ = effects::resolve_ability_chain(state, &resolved, events, 0);
+
+    match &state.waiting_for {
+        WaitingFor::Priority { .. } => None,
+        wf => Some(wf.clone()),
+    }
+}
+
+fn resolved_ability_from_definition(
+    def: &AbilityDefinition,
+    source_id: ObjectId,
+    controller: PlayerId,
+    targets: Vec<TargetRef>,
+) -> ResolvedAbility {
+    ResolvedAbility {
+        effect: def.effect.clone(),
+        targets,
+        source_id,
+        controller,
+        sub_ability: def.sub_ability.as_ref().map(|sub| {
+            Box::new(resolved_ability_from_definition(
+                sub,
+                source_id,
+                controller,
+                Vec::new(),
+            ))
+        }),
+        duration: def.duration.clone(),
+        condition: def.condition.clone(),
+        context: crate::types::ability::SpellContext::default(),
     }
 }
 
@@ -3523,6 +3561,7 @@ mod phase_trigger_regression_tests {
             player: PlayerId(0),
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
+            source_id: None,
         };
 
         // Valid card name succeeds
@@ -3539,6 +3578,7 @@ mod phase_trigger_regression_tests {
             player: PlayerId(0),
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
+            source_id: None,
         };
 
         // Invalid card name fails
@@ -3559,6 +3599,7 @@ mod phase_trigger_regression_tests {
             player: PlayerId(0),
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
+            source_id: None,
         };
 
         let result = apply(
@@ -3568,5 +3609,96 @@ mod phase_trigger_regression_tests {
             },
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn post_replacement_choose_sets_named_choice_waiting_for() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Multiversal Passage".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+
+        let effect_def = AbilityDefinition {
+            kind: AbilityKind::Spell,
+            effect: Effect::Choose {
+                choice_type: crate::types::ability::ChoiceType::BasicLandType,
+                persist: false,
+            },
+            cost: None,
+            sub_ability: Some(Box::new(AbilityDefinition {
+                kind: AbilityKind::Spell,
+                effect: Effect::LoseLife { amount: 2 },
+                cost: None,
+                sub_ability: None,
+                duration: None,
+                description: None,
+                target_prompt: None,
+                sorcery_speed: false,
+                condition: None,
+            })),
+            duration: None,
+            description: None,
+            target_prompt: None,
+            sorcery_speed: false,
+            condition: None,
+        };
+
+        let waiting_for =
+            apply_post_replacement_effect(&mut state, &effect_def, Some(source_id), &mut events);
+
+        assert!(matches!(
+            waiting_for,
+            Some(WaitingFor::NamedChoice {
+                choice_type: crate::types::ability::ChoiceType::BasicLandType,
+                ..
+            })
+        ));
+        assert!(state.pending_continuation.is_some());
+    }
+
+    #[test]
+    fn choose_option_with_source_id_stores_chosen_attribute() {
+        use crate::types::ability::ChoiceType;
+        use crate::types::mana::ManaColor;
+
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Captivating Crossroads".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Set up NamedChoice with source_id (simulating persist=true Choose)
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(0),
+            choice_type: ChoiceType::Color,
+            options: vec![
+                "White".to_string(),
+                "Blue".to_string(),
+                "Black".to_string(),
+                "Red".to_string(),
+                "Green".to_string(),
+            ],
+            source_id: Some(obj_id),
+        };
+
+        let result = apply(
+            &mut state,
+            GameAction::ChooseOption {
+                choice: "Red".to_string(),
+            },
+        );
+        assert!(result.is_ok());
+
+        // Verify the choice was stored on the object
+        let obj = state.objects.get(&obj_id).unwrap();
+        assert_eq!(obj.chosen_color(), Some(ManaColor::Red));
     }
 }

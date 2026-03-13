@@ -484,7 +484,7 @@ fn parse_imperative_effect(text: &str) -> Effect {
 
     // --- Named choices: "choose a creature type", "choose a color", etc. ---
     if let Some(choice_type) = try_parse_named_choice(&lower) {
-        return Effect::Choose { choice_type };
+        return Effect::Choose { choice_type, persist: false };
     }
 
     // --- Choose card from revealed hand (absorbed into RevealHand filter) ---
@@ -4274,7 +4274,8 @@ mod tests {
         assert_eq!(
             e,
             Effect::Choose {
-                choice_type: ChoiceType::CreatureType
+                choice_type: ChoiceType::CreatureType,
+                persist: false,
             }
         );
     }
@@ -4285,7 +4286,8 @@ mod tests {
         assert_eq!(
             e,
             Effect::Choose {
-                choice_type: ChoiceType::Color
+                choice_type: ChoiceType::Color,
+                persist: false,
             }
         );
     }
@@ -4296,7 +4298,8 @@ mod tests {
         assert_eq!(
             e,
             Effect::Choose {
-                choice_type: ChoiceType::OddOrEven
+                choice_type: ChoiceType::OddOrEven,
+                persist: false,
             }
         );
     }
@@ -4307,7 +4310,8 @@ mod tests {
         assert_eq!(
             e,
             Effect::Choose {
-                choice_type: ChoiceType::BasicLandType
+                choice_type: ChoiceType::BasicLandType,
+                persist: false,
             }
         );
     }
@@ -4318,7 +4322,8 @@ mod tests {
         assert_eq!(
             e,
             Effect::Choose {
-                choice_type: ChoiceType::CardType
+                choice_type: ChoiceType::CardType,
+                persist: false,
             }
         );
     }
@@ -4329,7 +4334,8 @@ mod tests {
         assert_eq!(
             e,
             Effect::Choose {
-                choice_type: ChoiceType::CardName
+                choice_type: ChoiceType::CardName,
+                persist: false,
             }
         );
     }
@@ -4340,7 +4346,8 @@ mod tests {
         assert_eq!(
             e,
             Effect::Choose {
-                choice_type: ChoiceType::CardName
+                choice_type: ChoiceType::CardName,
+                persist: false,
             }
         );
     }
@@ -4351,7 +4358,8 @@ mod tests {
         assert_eq!(
             e,
             Effect::Choose {
-                choice_type: ChoiceType::CardName
+                choice_type: ChoiceType::CardName,
+                persist: false,
             }
         );
     }

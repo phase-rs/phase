@@ -14,6 +14,20 @@ pub enum ManaColor {
     Green,
 }
 
+impl FromStr for ManaColor {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "White" => Ok(Self::White),
+            "Blue" => Ok(Self::Blue),
+            "Black" => Ok(Self::Black),
+            "Red" => Ok(Self::Red),
+            "Green" => Ok(Self::Green),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ManaType {
     White,

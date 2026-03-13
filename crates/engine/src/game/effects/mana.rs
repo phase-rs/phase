@@ -15,7 +15,19 @@ pub fn resolve(
         Effect::Mana { produced } => produced,
         _ => return Err(EffectError::MissingParam("Produced".to_string())),
     };
-    let mana_types = resolve_mana_types(produced);
+    // ChosenColor needs to read from the source object's chosen_attributes
+    let mana_types = match produced {
+        ManaProduction::ChosenColor { count } => {
+            let amount = resolve_count_value(count) as usize;
+            state
+                .objects
+                .get(&ability.source_id)
+                .and_then(|obj| obj.chosen_color())
+                .map(|color| vec![mana_color_to_type(&color); amount])
+                .unwrap_or_default()
+        }
+        other => resolve_mana_types(other),
+    };
 
     let player = state
         .players
@@ -320,6 +332,40 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 2);
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
         assert_eq!(state.players[0].mana_pool.total(), 3);
+    }
+
+    #[test]
+    fn chosen_color_resolves_from_object_attribute() {
+        use crate::types::ability::ChosenAttribute;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let obj_id = ObjectId(100);
+        let mut obj = crate::game::game_object::GameObject::new(
+            obj_id,
+            CardId(1),
+            PlayerId(0),
+            "Captivating Crossroads".to_string(),
+            Zone::Battlefield,
+        );
+        obj.chosen_attributes.push(ChosenAttribute::Color(ManaColor::Green));
+        state.objects.insert(obj_id, obj);
+
+        let mut events = Vec::new();
+        let ability = make_mana_ability(ManaProduction::ChosenColor {
+            count: CountValue::Fixed(1),
+        });
+        // Override source_id to match our object
+        let ability = ResolvedAbility {
+            source_id: obj_id,
+            ..ability
+        };
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let player = state.players.iter().find(|p| p.id == PlayerId(0)).unwrap();
+        assert_eq!(player.mana_pool.count_color(ManaType::Green), 1);
     }
 
     #[test]

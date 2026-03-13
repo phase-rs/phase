@@ -161,6 +161,9 @@ pub enum WaitingFor {
         player: PlayerId,
         choice_type: ChoiceType,
         options: Vec<String>,
+        /// The object that originated this choice (for persisting to chosen_attributes).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_id: Option<ObjectId>,
     },
     /// Player must choose modes for a modal spell (e.g. "Choose one —").
     ModeChoice {

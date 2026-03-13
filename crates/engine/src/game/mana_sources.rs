@@ -243,6 +243,8 @@ fn mana_options_from_production(produced: &ManaProduction) -> Vec<ManaType> {
             .map(mana_color_to_type)
             .into_iter()
             .collect(),
+        // TODO: resolve from object's chosen_attributes when mana source analysis
+        // gets access to the source object's state
         ManaProduction::ChosenColor { .. } => Vec::new(),
     }
 }

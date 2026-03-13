@@ -19,10 +19,10 @@ pub mod triggers;
 pub mod zones;
 
 pub use ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef,
-    DamageAmount, Duration, Effect, EffectError, FilterProp, ManaProduction, PtValue,
-    ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter,
-    TargetRef, TriggerCondition, TriggerDefinition, TypeFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, ChosenAttribute,
+    ContinuousModification, ControllerRef, DamageAmount, Duration, Effect, EffectError, FilterProp,
+    ManaProduction, Parity, PtValue, ReplacementDefinition, ResolvedAbility, StaticCondition,
+    StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerDefinition, TypeFilter,
 };
 pub use actions::GameAction;
 pub use card::{CardFace, CardLayout, CardRules};

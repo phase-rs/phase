@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
-    AbilityDefinition, ModalChoice, ReplacementDefinition, StaticDefinition, TriggerDefinition,
+    AbilityDefinition, BasicLandType, ChosenAttribute, ModalChoice, ReplacementDefinition,
+    StaticDefinition, TriggerDefinition,
 };
 use crate::types::card_type::CardType;
 use crate::types::identifiers::{CardId, ObjectId};
@@ -119,6 +120,11 @@ pub struct GameObject {
     /// Modal spell metadata ("Choose one —", etc.). Copied from CardFace at load time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modal: Option<ModalChoice>,
+
+    /// Choices made as this permanent entered (e.g., "choose a color").
+    /// Persists for the object's lifetime on the battlefield.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen_attributes: Vec<ChosenAttribute>,
 }
 
 impl GameObject {
@@ -164,6 +170,7 @@ impl GameObject {
             loyalty_activated_this_turn: false,
             is_commander: false,
             modal: None,
+            chosen_attributes: Vec::new(),
         }
     }
 
@@ -175,6 +182,22 @@ impl GameObject {
     /// Check if this object uses any mechanics the engine cannot handle.
     pub fn has_unimplemented_mechanics(&self) -> bool {
         !super::coverage::unimplemented_mechanics(self).is_empty()
+    }
+
+    /// Look up a stored choice by category.
+    pub fn chosen_color(&self) -> Option<ManaColor> {
+        self.chosen_attributes.iter().find_map(|a| match a {
+            ChosenAttribute::Color(c) => Some(*c),
+            _ => None,
+        })
+    }
+
+    /// Look up a stored basic land type choice.
+    pub fn chosen_basic_land_type(&self) -> Option<BasicLandType> {
+        self.chosen_attributes.iter().find_map(|a| match a {
+            ChosenAttribute::BasicLandType(t) => Some(*t),
+            _ => None,
+        })
     }
 }
 
@@ -240,6 +263,36 @@ mod tests {
         let deserialized: GameObject = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.name, "Test Card");
         assert_eq!(deserialized.id, ObjectId(1));
+    }
+
+    #[test]
+    fn chosen_color_returns_stored_color() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Test Land".to_string(),
+            Zone::Battlefield,
+        );
+        assert!(obj.chosen_color().is_none());
+        obj.chosen_attributes.push(ChosenAttribute::Color(ManaColor::Red));
+        assert_eq!(obj.chosen_color(), Some(ManaColor::Red));
+    }
+
+    #[test]
+    fn chosen_basic_land_type_returns_stored_type() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Test Land".to_string(),
+            Zone::Battlefield,
+        );
+        obj.chosen_attributes.push(ChosenAttribute::BasicLandType(BasicLandType::Forest));
+        assert_eq!(
+            obj.chosen_basic_land_type(),
+            Some(BasicLandType::Forest)
+        );
     }
 
     #[test]

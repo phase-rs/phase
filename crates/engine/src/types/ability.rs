@@ -28,6 +28,114 @@ pub enum ChoiceType {
     CardName,
 }
 
+/// The five basic land types (MTG Rule 305.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum BasicLandType {
+    Plains,
+    Island,
+    Swamp,
+    Mountain,
+    Forest,
+}
+
+impl BasicLandType {
+    /// The corresponding mana color for this basic land type.
+    pub fn mana_color(self) -> ManaColor {
+        match self {
+            Self::Plains => ManaColor::White,
+            Self::Island => ManaColor::Blue,
+            Self::Swamp => ManaColor::Black,
+            Self::Mountain => ManaColor::Red,
+            Self::Forest => ManaColor::Green,
+        }
+    }
+
+    /// The subtype string as it appears in card type lines.
+    pub fn as_subtype_str(&self) -> &'static str {
+        match self {
+            Self::Plains => "Plains",
+            Self::Island => "Island",
+            Self::Swamp => "Swamp",
+            Self::Mountain => "Mountain",
+            Self::Forest => "Forest",
+        }
+    }
+}
+
+impl std::str::FromStr for BasicLandType {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "Plains" => Ok(Self::Plains),
+            "Island" => Ok(Self::Island),
+            "Swamp" => Ok(Self::Swamp),
+            "Mountain" => Ok(Self::Mountain),
+            "Forest" => Ok(Self::Forest),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Odd or even — used by cards like "choose odd or even."
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum Parity {
+    Odd,
+    Even,
+}
+
+impl std::str::FromStr for Parity {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "Odd" => Ok(Self::Odd),
+            "Even" => Ok(Self::Even),
+            _ => Err(()),
+        }
+    }
+}
+
+/// A typed choice stored on a permanent (e.g., "choose a color" → Color(Red)).
+/// The variant discriminant serves as the category key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", content = "value")]
+pub enum ChosenAttribute {
+    Color(ManaColor),
+    CreatureType(String),
+    BasicLandType(BasicLandType),
+    CardType(CoreType),
+    OddOrEven(Parity),
+    CardName(String),
+}
+
+impl ChosenAttribute {
+    /// Which category of choice this represents.
+    pub fn choice_type(&self) -> ChoiceType {
+        match self {
+            Self::Color(_) => ChoiceType::Color,
+            Self::CreatureType(_) => ChoiceType::CreatureType,
+            Self::BasicLandType(_) => ChoiceType::BasicLandType,
+            Self::CardType(_) => ChoiceType::CardType,
+            Self::OddOrEven(_) => ChoiceType::OddOrEven,
+            Self::CardName(_) => ChoiceType::CardName,
+        }
+    }
+
+    /// Parse a player's string response into a typed ChosenAttribute.
+    /// Returns None if the string doesn't match the expected choice type.
+    pub fn from_choice(choice_type: ChoiceType, value: &str) -> Option<Self> {
+        match choice_type {
+            ChoiceType::Color => value.parse::<ManaColor>().ok().map(Self::Color),
+            ChoiceType::CreatureType => Some(Self::CreatureType(value.to_string())),
+            ChoiceType::BasicLandType => {
+                value.parse::<BasicLandType>().ok().map(Self::BasicLandType)
+            }
+            ChoiceType::CardType => value.parse::<CoreType>().ok().map(Self::CardType),
+            ChoiceType::OddOrEven => value.parse::<Parity>().ok().map(Self::OddOrEven),
+            ChoiceType::CardName => Some(Self::CardName(value.to_string())),
+        }
+    }
+}
+
 /// How to specify a damage amount -- either a fixed integer or a variable reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", content = "value")]
@@ -738,6 +846,10 @@ pub enum Effect {
     /// Sets WaitingFor::NamedChoice and stores the result in GameState::last_named_choice.
     Choose {
         choice_type: ChoiceType,
+        /// When true, the chosen value is stored on the source object's chosen_attributes.
+        /// Used for ETB choices that other abilities reference ("the chosen type/color").
+        #[serde(default)]
+        persist: bool,
     },
     /// Semantic marker for effects the engine has not yet implemented a handler for.
     /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.
