@@ -5,6 +5,7 @@ import tailwindcss from "@tailwindcss/vite";
 import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
 import { VitePWA } from "vite-plugin-pwa";
+import { compression } from "vite-plugin-compression2";
 
 function gitHash(): string {
   try {
@@ -28,6 +29,14 @@ export default defineConfig({
         maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
         runtimeCaching: [
           {
+            urlPattern: /\/card-data\.json$/,
+            handler: "CacheFirst",
+            options: {
+              cacheName: "card-database",
+              expiration: { maxEntries: 1, maxAgeSeconds: 604800 },
+            },
+          },
+          {
             urlPattern: /^https:\/\/api\.scryfall\.com\//,
             handler: "NetworkFirst",
             options: {
@@ -46,6 +55,7 @@ export default defineConfig({
         ],
       },
     }),
+    compression({ algorithm: "brotliCompress" }),
   ],
   define: {
     __APP_VERSION__: JSON.stringify(process.env.npm_package_version ?? "0.1.0"),

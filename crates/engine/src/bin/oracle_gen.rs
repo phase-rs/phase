@@ -30,6 +30,7 @@ fn main() {
 
     let mut data_dir: Option<PathBuf> = None;
     let mut mtgjson_override: Option<PathBuf> = None;
+    let mut names_out: Option<PathBuf> = None;
     let mut stats = false;
 
     let mut i = 1;
@@ -42,6 +43,14 @@ fn main() {
                     process::exit(1);
                 }
                 mtgjson_override = Some(PathBuf::from(&args[i]));
+            }
+            "--names-out" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --names-out requires a path argument");
+                    process::exit(1);
+                }
+                names_out = Some(PathBuf::from(&args[i]));
             }
             "--stats" => {
                 stats = true;
@@ -156,6 +165,16 @@ fn main() {
         "{}",
         serde_json::to_string(&face_index).expect("Failed to serialize card data")
     );
+
+    if let Some(names_path) = names_out {
+        let mut names: Vec<&str> = face_index.values().map(|e| e.face.name.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        let names_json = serde_json::to_string(&names).expect("Failed to serialize card names");
+        std::fs::write(&names_path, names_json)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", names_path.display()));
+        eprintln!("Card names written: {} names", names.len());
+    }
 
     if stats {
         eprintln!("Total cards: {total_cards}");
