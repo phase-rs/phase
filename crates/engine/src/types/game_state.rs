@@ -771,23 +771,10 @@ mod tests {
         let trigger = PendingTrigger {
             source_id: ObjectId(5),
             controller: PlayerId(0),
-            trigger_def: crate::types::ability::TriggerDefinition {
-                mode: TriggerMode::ChangesZone,
-                execute: None,
-                valid_card: Some(TargetFilter::SelfRef),
-                origin: Some(crate::types::zones::Zone::Battlefield),
-                destination: Some(crate::types::zones::Zone::Graveyard),
-                trigger_zones: vec![],
-                phase: None,
-                optional: false,
-                combat_damage: false,
-                secondary: false,
-                valid_target: None,
-                valid_source: None,
-                description: None,
-                constraint: None,
-                condition: None,
-            },
+            trigger_def: crate::types::ability::TriggerDefinition::new(TriggerMode::ChangesZone)
+                .valid_card(TargetFilter::SelfRef)
+                .origin(crate::types::zones::Zone::Battlefield)
+                .destination(crate::types::zones::Zone::Graveyard),
             ability: ResolvedAbility::new(
                 Effect::Draw { count: 1 },
                 vec![],
@@ -815,23 +802,7 @@ mod tests {
         state.pending_trigger = Some(PendingTrigger {
             source_id: ObjectId(5),
             controller: PlayerId(0),
-            trigger_def: crate::types::ability::TriggerDefinition {
-                mode: TriggerMode::ChangesZone,
-                execute: None,
-                valid_card: None,
-                origin: None,
-                destination: None,
-                trigger_zones: vec![],
-                phase: None,
-                optional: false,
-                combat_damage: false,
-                secondary: false,
-                valid_target: None,
-                valid_source: None,
-                description: None,
-                constraint: None,
-                condition: None,
-            },
+            trigger_def: crate::types::ability::TriggerDefinition::new(TriggerMode::ChangesZone),
             ability: ResolvedAbility::new(
                 Effect::Draw { count: 1 },
                 vec![],

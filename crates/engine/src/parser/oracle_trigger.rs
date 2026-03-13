@@ -240,23 +240,8 @@ fn find_effect_boundary(lower: &str) -> Option<usize> {
 }
 
 fn make_base() -> TriggerDefinition {
-    TriggerDefinition {
-        mode: TriggerMode::Unknown("unknown".to_string()),
-        execute: None,
-        valid_card: None,
-        origin: None,
-        destination: None,
-        trigger_zones: vec![Zone::Battlefield],
-        phase: None,
-        optional: false,
-        combat_damage: false,
-        secondary: false,
-        valid_target: None,
-        valid_source: None,
-        description: None,
-        constraint: None,
-        condition: None,
-    }
+    TriggerDefinition::new(TriggerMode::Unknown("unknown".to_string()))
+        .trigger_zones(vec![Zone::Battlefield])
 }
 
 fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerDefinition) {

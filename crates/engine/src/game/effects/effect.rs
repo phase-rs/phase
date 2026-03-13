@@ -96,7 +96,6 @@ mod tests {
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
-    use crate::types::statics::StaticMode;
     use crate::types::zones::Zone;
 
     #[test]
@@ -110,18 +109,11 @@ mod tests {
             Zone::Battlefield,
         );
 
-        let static_def = StaticDefinition {
-            mode: StaticMode::Continuous,
-            affected: Some(TargetFilter::SelfRef),
-            modifications: vec![ContinuousModification::AddKeyword {
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
                 keyword: Keyword::Flying,
-            }],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: None,
-        };
+            }]);
 
         let ability = ResolvedAbility {
             effect: Effect::GenericEffect {
@@ -186,23 +178,16 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        let static_def = StaticDefinition {
-            mode: StaticMode::Continuous,
-            affected: Some(TargetFilter::Typed {
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed {
                 card_type: Some(TypeFilter::Creature),
                 subtype: None,
                 controller: Some(ControllerRef::You),
                 properties: vec![],
-            }),
-            modifications: vec![ContinuousModification::AddKeyword {
+            })
+            .modifications(vec![ContinuousModification::AddKeyword {
                 keyword: Keyword::Trample,
-            }],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: None,
-        };
+            }]);
 
         let ability = ResolvedAbility {
             effect: Effect::GenericEffect {
@@ -270,23 +255,16 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        let static_def = StaticDefinition {
-            mode: StaticMode::Continuous,
-            affected: Some(TargetFilter::Typed {
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed {
                 card_type: Some(TypeFilter::Creature),
                 subtype: None,
                 controller: None,
                 properties: vec![],
-            }),
-            modifications: vec![ContinuousModification::AddKeyword {
+            })
+            .modifications(vec![ContinuousModification::AddKeyword {
                 keyword: Keyword::Flying,
-            }],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: None,
-        };
+            }]);
 
         let ability = ResolvedAbility {
             effect: Effect::GenericEffect {

@@ -2,8 +2,8 @@ use std::str::FromStr;
 
 use super::oracle_util::strip_reminder_text;
 use crate::types::ability::{
-    ChosenSubtypeKind, ContinuousModification, ControllerRef, FilterProp, StaticCondition,
-    StaticDefinition, TargetFilter, TypeFilter,
+    ChosenSubtypeKind, ContinuousModification, ControllerRef, DynamicPTValue, FilterProp,
+    StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
@@ -113,23 +113,19 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
             .trim()
             .trim_end_matches('.')
             .trim_matches(|c: char| c == '\'' || c == '"');
-        return Some(StaticDefinition {
-            mode: StaticMode::Continuous,
-            affected: Some(TargetFilter::Typed {
-                card_type: Some(TypeFilter::Land),
-                subtype: None,
-                controller: Some(ControllerRef::You),
-                properties: vec![],
-            }),
-            modifications: vec![ContinuousModification::AddSubtype {
-                subtype: rest.to_string(),
-            }],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: Some(text.to_string()),
-        });
+        return Some(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Land),
+                    subtype: None,
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                })
+                .modifications(vec![ContinuousModification::AddSubtype {
+                    subtype: rest.to_string(),
+                }])
+                .description(text.to_string()),
+        );
     }
 
     // --- "During your turn, ~ has [keyword]" ---
@@ -146,16 +142,13 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
                 }
             }
             if !modifications.is_empty() {
-                return Some(StaticDefinition {
-                    mode: StaticMode::Continuous,
-                    affected: Some(TargetFilter::SelfRef),
-                    modifications,
-                    condition: Some(StaticCondition::DuringYourTurn),
-                    affected_zone: None,
-                    effect_zone: None,
-                    characteristic_defining: false,
-                    description: Some(text.to_string()),
-                });
+                return Some(
+                    StaticDefinition::continuous()
+                        .affected(TargetFilter::SelfRef)
+                        .modifications(modifications)
+                        .condition(StaticCondition::DuringYourTurn)
+                        .description(text.to_string()),
+                );
             }
         }
         // Fallback: "during your turn, ~ gets +N/+M"
@@ -163,16 +156,13 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
             let mods_text = &original_rest[gets_pos + 6..];
             let modifications = parse_continuous_modifications(mods_text);
             if !modifications.is_empty() {
-                return Some(StaticDefinition {
-                    mode: StaticMode::Continuous,
-                    affected: Some(TargetFilter::SelfRef),
-                    modifications,
-                    condition: Some(StaticCondition::DuringYourTurn),
-                    affected_zone: None,
-                    effect_zone: None,
-                    characteristic_defining: false,
-                    description: Some(text.to_string()),
-                });
+                return Some(
+                    StaticDefinition::continuous()
+                        .affected(TargetFilter::SelfRef)
+                        .modifications(modifications)
+                        .condition(StaticCondition::DuringYourTurn)
+                        .description(text.to_string()),
+                );
             }
         }
     }
@@ -187,16 +177,18 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
             ChosenSubtypeKind::BasicLandType
         };
         let modification = ContinuousModification::AddChosenSubtype { kind };
-        return Some(StaticDefinition {
-            mode: StaticMode::Continuous,
-            affected: Some(TargetFilter::SelfRef),
-            modifications: vec![modification],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: Some(text.to_string()),
-        });
+        return Some(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![modification])
+                .description(text.to_string()),
+        );
+    }
+
+    // --- CDA: "~'s power is equal to the number of card types among cards in all graveyards
+    //     and its toughness is equal to that number plus 1" (Tarmogoyf) ---
+    if let Some(def) = parse_cda_pt_equality(&lower, &text) {
+        return Some(def);
     }
 
     // --- "~ has [keyword] as long as ..." (must be before generic self-ref "has") ---
@@ -209,19 +201,16 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
                 if let Some(kw) = map_keyword(keyword_text) {
                     modifications.push(ContinuousModification::AddKeyword { keyword: kw });
                 }
-                return Some(StaticDefinition {
-                    mode: StaticMode::Continuous,
-                    affected: Some(TargetFilter::SelfRef),
-                    modifications,
-                    condition: Some(StaticCondition::CheckSVar {
-                        var: "condition".to_string(),
-                        compare: condition_text.to_string(),
-                    }),
-                    affected_zone: None,
-                    effect_zone: None,
-                    characteristic_defining: false,
-                    description: Some(text.to_string()),
-                });
+                return Some(
+                    StaticDefinition::continuous()
+                        .affected(TargetFilter::SelfRef)
+                        .modifications(modifications)
+                        .condition(StaticCondition::CheckSVar {
+                            var: "condition".to_string(),
+                            compare: condition_text.to_string(),
+                        })
+                        .description(text.to_string()),
+                );
             }
         }
     }
@@ -266,100 +255,65 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
 
     // --- "~ can't be blocked" ---
     if lower.contains("can't be blocked") {
-        return Some(StaticDefinition {
-            mode: StaticMode::Other("CantBeBlocked".to_string()),
-            affected: Some(TargetFilter::SelfRef),
-            modifications: vec![],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: Some(text.to_string()),
-        });
+        return Some(
+            StaticDefinition::new(StaticMode::Other("CantBeBlocked".to_string()))
+                .affected(TargetFilter::SelfRef)
+                .description(text.to_string()),
+        );
     }
 
     // --- "~ can't block" ---
     if lower.contains("can't block") && !lower.contains("can't be blocked") {
-        return Some(StaticDefinition {
-            mode: StaticMode::CantBlock,
-            affected: Some(TargetFilter::SelfRef),
-            modifications: vec![],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: Some(text.to_string()),
-        });
+        return Some(
+            StaticDefinition::new(StaticMode::CantBlock)
+                .affected(TargetFilter::SelfRef)
+                .description(text.to_string()),
+        );
     }
 
     // --- "~ can't attack" ---
     if lower.contains("can't attack") {
-        return Some(StaticDefinition {
-            mode: StaticMode::CantAttack,
-            affected: Some(TargetFilter::SelfRef),
-            modifications: vec![],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: Some(text.to_string()),
-        });
+        return Some(
+            StaticDefinition::new(StaticMode::CantAttack)
+                .affected(TargetFilter::SelfRef)
+                .description(text.to_string()),
+        );
     }
 
     // --- "~ can't be countered" ---
     if lower.contains("can't be countered") {
-        return Some(StaticDefinition {
-            mode: StaticMode::CantBeCast,
-            affected: Some(TargetFilter::SelfRef),
-            modifications: vec![],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: Some(text.to_string()),
-        });
+        return Some(
+            StaticDefinition::new(StaticMode::CantBeCast)
+                .affected(TargetFilter::SelfRef)
+                .description(text.to_string()),
+        );
     }
 
     // --- "~ can't be the target" or "~ can't be targeted" ---
     if lower.contains("can't be the target") || lower.contains("can't be targeted") {
-        return Some(StaticDefinition {
-            mode: StaticMode::CantBeTargeted,
-            affected: Some(TargetFilter::SelfRef),
-            modifications: vec![],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: Some(text.to_string()),
-        });
+        return Some(
+            StaticDefinition::new(StaticMode::CantBeTargeted)
+                .affected(TargetFilter::SelfRef)
+                .description(text.to_string()),
+        );
     }
 
     // --- "~ can't be sacrificed" ---
     if lower.contains("can't be sacrificed") {
-        return Some(StaticDefinition {
-            mode: StaticMode::Continuous,
-            affected: Some(TargetFilter::SelfRef),
-            modifications: vec![],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: Some(text.to_string()),
-        });
+        return Some(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .description(text.to_string()),
+        );
     }
 
     // --- "~ doesn't untap during your untap step" ---
     if lower.contains("doesn't untap during") || lower.contains("doesn\u{2019}t untap during") {
-        return Some(StaticDefinition {
-            mode: StaticMode::Continuous,
-            affected: Some(TargetFilter::SelfRef),
-            modifications: vec![],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: Some(text.to_string()),
-        });
+        return Some(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .description(text.to_string()),
+        );
     }
 
     // NOTE: "enters with N counters" patterns are now handled by oracle_replacement.rs
@@ -367,21 +321,16 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
 
     // --- "Spells you cast cost {N} less" ---
     if lower.contains("cost") && lower.contains("less") && lower.contains("spell") {
-        return Some(StaticDefinition {
-            mode: StaticMode::ReduceCost,
-            affected: Some(TargetFilter::Typed {
-                card_type: Some(TypeFilter::Card),
-                subtype: None,
-                controller: Some(ControllerRef::You),
-                properties: vec![],
-            }),
-            modifications: vec![],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: Some(text.to_string()),
-        });
+        return Some(
+            StaticDefinition::new(StaticMode::ReduceCost)
+                .affected(TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Card),
+                    subtype: None,
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                })
+                .description(text.to_string()),
+        );
     }
 
     // --- "Spells your opponents cast cost {N} more" ---
@@ -390,38 +339,29 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         && lower.contains("spell")
         && lower.contains("opponent")
     {
-        return Some(StaticDefinition {
-            mode: StaticMode::RaiseCost,
-            affected: Some(TargetFilter::Typed {
-                card_type: Some(TypeFilter::Card),
-                subtype: None,
-                controller: Some(ControllerRef::Opponent),
-                properties: vec![],
-            }),
-            modifications: vec![],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: Some(text.to_string()),
-        });
+        return Some(
+            StaticDefinition::new(StaticMode::RaiseCost)
+                .affected(TargetFilter::Typed {
+                    card_type: Some(TypeFilter::Card),
+                    subtype: None,
+                    controller: Some(ControllerRef::Opponent),
+                    properties: vec![],
+                })
+                .description(text.to_string()),
+        );
     }
 
     // --- "As long as ..." (generic conditional static) ---
     if lower.starts_with("as long as ") {
-        return Some(StaticDefinition {
-            mode: StaticMode::Continuous,
-            affected: Some(TargetFilter::SelfRef),
-            modifications: vec![],
-            condition: Some(StaticCondition::CheckSVar {
-                var: "condition".to_string(),
-                compare: text.trim_end_matches('.').to_string(),
-            }),
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: Some(text.to_string()),
-        });
+        return Some(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .condition(StaticCondition::CheckSVar {
+                    var: "condition".to_string(),
+                    compare: text.trim_end_matches('.').to_string(),
+                })
+                .description(text.to_string()),
+        );
     }
 
     None
@@ -521,16 +461,11 @@ fn parse_continuous_gets_has(text: &str, affected: TargetFilter) -> Option<Stati
         return None;
     }
 
-    Some(StaticDefinition {
-        mode: StaticMode::Continuous,
-        affected: Some(affected),
-        modifications,
-        condition: None,
-        affected_zone: None,
-        effect_zone: None,
-        characteristic_defining: false,
-        description: None,
-    })
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(modifications),
+    )
 }
 
 pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModification> {
@@ -628,6 +563,52 @@ fn map_keyword(text: &str) -> Option<Keyword> {
         Ok(kw) => Some(kw),
         Err(_) => None, // Infallible, but satisfy the compiler
     }
+}
+
+/// Parse CDA power/toughness equality patterns like:
+/// - "~'s power is equal to the number of card types among cards in all graveyards
+///   and its toughness is equal to that number plus 1."
+fn parse_cda_pt_equality(lower: &str, text: &str) -> Option<StaticDefinition> {
+    // Match "power is equal to the number of card types among cards in all graveyards"
+    if !lower.contains("power is equal to")
+        && !lower.contains("power and toughness are each equal to")
+    {
+        return None;
+    }
+
+    if lower.contains("card types among cards in all graveyards") {
+        let mut modifications = vec![ContinuousModification::SetDynamicPower {
+            value: DynamicPTValue::CardTypesInAllGraveyards { offset: 0 },
+        }];
+
+        // Check for "and its toughness is equal to that number plus N"
+        if let Some(plus_pos) = lower.find("that number plus ") {
+            let after_plus = &lower[plus_pos + 17..];
+            let n_str = after_plus
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .unwrap_or("0");
+            let offset = n_str.parse::<i32>().unwrap_or(0);
+            modifications.push(ContinuousModification::SetDynamicToughness {
+                value: DynamicPTValue::CardTypesInAllGraveyards { offset },
+            });
+        } else if lower.contains("power and toughness are each equal to") {
+            // Same value for both
+            modifications.push(ContinuousModification::SetDynamicToughness {
+                value: DynamicPTValue::CardTypesInAllGraveyards { offset: 0 },
+            });
+        }
+
+        return Some(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(modifications)
+                .cda()
+                .description(text.to_string()),
+        );
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -969,5 +950,26 @@ mod tests {
                 kind: ChosenSubtypeKind::CreatureType,
             }]
         );
+    }
+
+    #[test]
+    fn static_tarmogoyf_cda() {
+        let def = parse_static_line(
+            "Tarmogoyf's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert!(def.characteristic_defining);
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::SetDynamicPower {
+                value: DynamicPTValue::CardTypesInAllGraveyards { offset: 0 },
+            }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::SetDynamicToughness {
+                value: DynamicPTValue::CardTypesInAllGraveyards { offset: 1 },
+            }));
     }
 }

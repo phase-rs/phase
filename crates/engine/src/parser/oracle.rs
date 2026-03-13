@@ -666,6 +666,8 @@ fn is_static_pattern(lower: &str) -> bool {
         || lower.contains("costs less")
         || lower.contains("costs more")
         || lower.contains("is the chosen type")
+        || lower.contains("power is equal to")
+        || lower.contains("power and toughness are each equal to")
 }
 
 /// Check if a line looks like a replacement effect.

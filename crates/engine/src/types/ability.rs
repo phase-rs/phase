@@ -145,6 +145,18 @@ pub enum ChosenSubtypeKind {
     BasicLandType,
 }
 
+/// A dynamically computed power/toughness value, evaluated at layer application time.
+/// Used by CDA static abilities (layer 7a) where P/T depends on game state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum DynamicPTValue {
+    /// Count distinct card types among cards in all graveyards, plus a fixed offset.
+    /// Tarmogoyf: power = count + 0, toughness = count + 1.
+    CardTypesInAllGraveyards {
+        #[serde(default)]
+        offset: i32,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", content = "value")]
 pub enum DamageAmount {
@@ -1264,6 +1276,98 @@ pub struct TriggerDefinition {
     pub condition: Option<TriggerCondition>,
 }
 
+impl TriggerDefinition {
+    pub fn new(mode: TriggerMode) -> Self {
+        Self {
+            mode,
+            execute: None,
+            valid_card: None,
+            origin: None,
+            destination: None,
+            trigger_zones: vec![],
+            phase: None,
+            optional: false,
+            combat_damage: false,
+            secondary: false,
+            valid_target: None,
+            valid_source: None,
+            description: None,
+            constraint: None,
+            condition: None,
+        }
+    }
+
+    pub fn execute(mut self, ability: AbilityDefinition) -> Self {
+        self.execute = Some(Box::new(ability));
+        self
+    }
+
+    pub fn valid_card(mut self, filter: TargetFilter) -> Self {
+        self.valid_card = Some(filter);
+        self
+    }
+
+    pub fn origin(mut self, zone: Zone) -> Self {
+        self.origin = Some(zone);
+        self
+    }
+
+    pub fn destination(mut self, zone: Zone) -> Self {
+        self.destination = Some(zone);
+        self
+    }
+
+    pub fn trigger_zones(mut self, zones: Vec<Zone>) -> Self {
+        self.trigger_zones = zones;
+        self
+    }
+
+    pub fn phase(mut self, phase: Phase) -> Self {
+        self.phase = Some(phase);
+        self
+    }
+
+    pub fn optional(mut self) -> Self {
+        self.optional = true;
+        self
+    }
+
+    pub fn combat_damage(mut self) -> Self {
+        self.combat_damage = true;
+        self
+    }
+
+    pub fn secondary(mut self) -> Self {
+        self.secondary = true;
+        self
+    }
+
+    pub fn valid_target(mut self, filter: TargetFilter) -> Self {
+        self.valid_target = Some(filter);
+        self
+    }
+
+    pub fn valid_source(mut self, filter: TargetFilter) -> Self {
+        self.valid_source = Some(filter);
+        self
+    }
+
+    pub fn description(mut self, desc: String) -> Self {
+        self.description = Some(desc);
+        self
+    }
+
+    pub fn constraint(mut self, constraint: TriggerConstraint) -> Self {
+        self.constraint = Some(constraint);
+        self
+    }
+
+    pub fn condition(mut self, condition: TriggerCondition) -> Self {
+        self.condition = Some(condition);
+        self
+    }
+}
+
 /// Static ability definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct StaticDefinition {
@@ -1282,6 +1386,60 @@ pub struct StaticDefinition {
     pub characteristic_defining: bool,
     #[serde(default)]
     pub description: Option<String>,
+}
+
+impl StaticDefinition {
+    pub fn new(mode: StaticMode) -> Self {
+        Self {
+            mode,
+            affected: None,
+            modifications: vec![],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            characteristic_defining: false,
+            description: None,
+        }
+    }
+
+    pub fn continuous() -> Self {
+        Self::new(StaticMode::Continuous)
+    }
+
+    pub fn affected(mut self, filter: TargetFilter) -> Self {
+        self.affected = Some(filter);
+        self
+    }
+
+    pub fn modifications(mut self, mods: Vec<ContinuousModification>) -> Self {
+        self.modifications = mods;
+        self
+    }
+
+    pub fn condition(mut self, cond: StaticCondition) -> Self {
+        self.condition = Some(cond);
+        self
+    }
+
+    pub fn affected_zone(mut self, zone: Zone) -> Self {
+        self.affected_zone = Some(zone);
+        self
+    }
+
+    pub fn effect_zone(mut self, zone: Zone) -> Self {
+        self.effect_zone = Some(zone);
+        self
+    }
+
+    pub fn cda(mut self) -> Self {
+        self.characteristic_defining = true;
+        self
+    }
+
+    pub fn description(mut self, desc: String) -> Self {
+        self.description = Some(desc);
+        self
+    }
 }
 
 /// Whether a replacement effect is mandatory or offers the affected player a choice.
@@ -1327,6 +1485,31 @@ impl ReplacementDefinition {
             condition: None,
         }
     }
+
+    pub fn execute(mut self, ability: AbilityDefinition) -> Self {
+        self.execute = Some(Box::new(ability));
+        self
+    }
+
+    pub fn mode(mut self, mode: ReplacementMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn valid_card(mut self, filter: TargetFilter) -> Self {
+        self.valid_card = Some(filter);
+        self
+    }
+
+    pub fn description(mut self, desc: String) -> Self {
+        self.description = Some(desc);
+        self
+    }
+
+    pub fn condition(mut self, condition: ReplacementCondition) -> Self {
+        self.condition = Some(condition);
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1371,6 +1554,14 @@ pub enum ContinuousModification {
     },
     RemoveSubtype {
         subtype: String,
+    },
+    /// Set power to a dynamically computed value (CDA, layer 7a).
+    SetDynamicPower {
+        value: DynamicPTValue,
+    },
+    /// Set toughness to a dynamically computed value (CDA, layer 7a).
+    SetDynamicToughness {
+        value: DynamicPTValue,
     },
     /// Grants every creature type (Changeling CDA). Expanded at runtime
     /// using `GameState::all_creature_types`.

@@ -142,16 +142,9 @@ mod tests {
             .get_mut(&obj_id)
             .unwrap()
             .static_definitions
-            .push(StaticDefinition {
-                mode: StaticMode::Other("CantBeCountered".to_string()),
-                affected: None,
-                modifications: vec![],
-                condition: None,
-                affected_zone: None,
-                effect_zone: None,
-                characteristic_defining: false,
-                description: None,
-            });
+            .push(StaticDefinition::new(StaticMode::Other(
+                "CantBeCountered".to_string(),
+            )));
         state.stack.push(StackEntry {
             id: obj_id,
             source_id: obj_id,

@@ -39,74 +39,70 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
     // --- "~ enters the battlefield tapped" (unconditional) ---
     if norm_lower.contains("enters the battlefield tapped") || norm_lower.contains("enters tapped")
     {
-        let tap_effect = Box::new(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::Tap {
-                target: TargetFilter::SelfRef,
-            },
-        ));
-        return Some(ReplacementDefinition {
-            execute: Some(tap_effect),
-            valid_card: Some(TargetFilter::SelfRef),
-            description: Some(text.to_string()),
-            ..ReplacementDefinition::new(ReplacementEvent::Moved)
-        });
+        return Some(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Tap {
+                        target: TargetFilter::SelfRef,
+                    },
+                ))
+                .valid_card(TargetFilter::SelfRef)
+                .description(text.to_string()),
+        );
     }
 
     // --- "If ~ would die, {effect}" ---
     if norm_lower.contains("~ would die") || norm_lower.contains("~ would be destroyed") {
         let effect_text = extract_replacement_effect(&normalized);
-        let execute = effect_text.map(|e| Box::new(parse_effect_chain(&e, AbilityKind::Spell)));
-        return Some(ReplacementDefinition {
-            execute,
-            valid_card: Some(TargetFilter::SelfRef),
-            description: Some(text.to_string()),
-            ..ReplacementDefinition::new(ReplacementEvent::Destroy)
-        });
+        let mut def = ReplacementDefinition::new(ReplacementEvent::Destroy)
+            .valid_card(TargetFilter::SelfRef)
+            .description(text.to_string());
+        if let Some(e) = effect_text {
+            def = def.execute(parse_effect_chain(&e, AbilityKind::Spell));
+        }
+        return Some(def);
     }
 
     // --- "Prevent all combat damage" / "damage ... can't be prevented" ---
     if lower.contains("prevent all") && lower.contains("damage") {
-        return Some(ReplacementDefinition {
-            description: Some(text.to_string()),
-            ..ReplacementDefinition::new(ReplacementEvent::DamageDone)
-        });
+        return Some(
+            ReplacementDefinition::new(ReplacementEvent::DamageDone).description(text.to_string()),
+        );
     }
     if lower.contains("damage") && lower.contains("can't be prevented") {
-        return Some(ReplacementDefinition {
-            description: Some(text.to_string()),
-            ..ReplacementDefinition::new(ReplacementEvent::DamageDone)
-        });
+        return Some(
+            ReplacementDefinition::new(ReplacementEvent::DamageDone).description(text.to_string()),
+        );
     }
 
     // --- "If you would draw a card, {effect}" ---
     if lower.contains("you would draw") {
         let effect_text = extract_replacement_effect(&normalized);
-        let execute = effect_text.map(|e| Box::new(parse_effect_chain(&e, AbilityKind::Spell)));
-        return Some(ReplacementDefinition {
-            execute,
-            description: Some(text.to_string()),
-            ..ReplacementDefinition::new(ReplacementEvent::Draw)
-        });
+        let mut def =
+            ReplacementDefinition::new(ReplacementEvent::Draw).description(text.to_string());
+        if let Some(e) = effect_text {
+            def = def.execute(parse_effect_chain(&e, AbilityKind::Spell));
+        }
+        return Some(def);
     }
 
     // --- "If you would gain life, {effect}" ---
     if lower.contains("you would gain life") {
         let effect_text = extract_replacement_effect(&normalized);
-        let execute = effect_text.map(|e| Box::new(parse_effect_chain(&e, AbilityKind::Spell)));
-        return Some(ReplacementDefinition {
-            execute,
-            description: Some(text.to_string()),
-            ..ReplacementDefinition::new(ReplacementEvent::GainLife)
-        });
+        let mut def =
+            ReplacementDefinition::new(ReplacementEvent::GainLife).description(text.to_string());
+        if let Some(e) = effect_text {
+            def = def.execute(parse_effect_chain(&e, AbilityKind::Spell));
+        }
+        return Some(def);
     }
 
     // --- "If [someone] would lose life, they lose twice that much life instead" ---
     if lower.contains("would lose life") {
-        return Some(ReplacementDefinition {
-            description: Some(text.to_string()),
-            ..ReplacementDefinition::new(ReplacementEvent::LoseLife)
-        });
+        return Some(
+            ReplacementDefinition::new(ReplacementEvent::LoseLife).description(text.to_string()),
+        );
     }
 
     // --- "[Subject] enters with N [type] counter(s)" ---
@@ -201,15 +197,15 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
         tap_self
     };
 
-    Some(ReplacementDefinition {
-        execute: Some(Box::new(execute)),
-        mode: ReplacementMode::Optional {
-            decline: Some(Box::new(decline)),
-        },
-        valid_card: Some(TargetFilter::SelfRef),
-        description: Some(original_text.to_string()),
-        ..ReplacementDefinition::new(ReplacementEvent::Moved)
-    })
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(execute)
+            .mode(ReplacementMode::Optional {
+                decline: Some(Box::new(decline)),
+            })
+            .valid_card(TargetFilter::SelfRef)
+            .description(original_text.to_string()),
+    )
 }
 
 /// Parse "As ~ enters, choose a [type]" into a Moved replacement with persisted Choose.
@@ -230,20 +226,18 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     let choose_text = &norm_lower[choose_idx..];
     let choice_type = try_parse_named_choice(choose_text)?;
 
-    let execute = Box::new(AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::Choose {
-            choice_type,
-            persist: true,
-        },
-    ));
-
-    Some(ReplacementDefinition {
-        execute: Some(execute),
-        valid_card: Some(TargetFilter::SelfRef),
-        description: Some(original_text.to_string()),
-        ..ReplacementDefinition::new(ReplacementEvent::Moved)
-    })
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Choose {
+                    choice_type,
+                    persist: true,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            .description(original_text.to_string()),
+    )
 }
 
 /// Parse check land pattern: "enters tapped unless you control a [LandType] or a [LandType]"
@@ -275,20 +269,18 @@ fn parse_check_land(norm_lower: &str, original_text: &str) -> Option<Replacement
         return None;
     }
 
-    let tap_effect = Box::new(AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::Tap {
-            target: TargetFilter::SelfRef,
-        },
-    ));
-
-    Some(ReplacementDefinition {
-        execute: Some(tap_effect),
-        valid_card: Some(TargetFilter::SelfRef),
-        description: Some(original_text.to_string()),
-        condition: Some(ReplacementCondition::UnlessControlsSubtype { subtypes }),
-        ..ReplacementDefinition::new(ReplacementEvent::Moved)
-    })
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Tap {
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            .description(original_text.to_string())
+            .condition(ReplacementCondition::UnlessControlsSubtype { subtypes }),
+    )
 }
 
 /// Map lowercase land subtype name to canonical (title-cased) form.
@@ -336,14 +328,14 @@ fn parse_enters_with_counters(
         other => other.to_uppercase(),
     };
 
-    let put_counter = Box::new(AbilityDefinition::new(
+    let put_counter = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::PutCounter {
             counter_type,
             count: count as i32,
             target: TargetFilter::SelfRef,
         },
-    ));
+    );
 
     // Determine valid_card filter: self vs other creatures
     // Strip "each other " or "other " prefix, then delegate to parse_type_phrase
@@ -377,12 +369,13 @@ fn parse_enters_with_counters(
         Some(TargetFilter::SelfRef)
     };
 
-    Some(ReplacementDefinition {
-        execute: Some(put_counter),
-        valid_card,
-        description: Some(original_text.to_string()),
-        ..ReplacementDefinition::new(ReplacementEvent::Moved)
-    })
+    let mut def = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .execute(put_counter)
+        .description(original_text.to_string());
+    if let Some(filter) = valid_card {
+        def = def.valid_card(filter);
+    }
+    Some(def)
 }
 
 fn extract_replacement_effect(text: &str) -> Option<String> {

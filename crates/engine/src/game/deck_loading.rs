@@ -584,23 +584,10 @@ mod tests {
     fn create_object_with_trigger_definitions() {
         let mut state = GameState::new_two_player(42);
         let mut face = make_creature_face();
-        face.triggers = vec![crate::types::ability::TriggerDefinition {
-            mode: crate::types::triggers::TriggerMode::ChangesZone,
-            execute: None,
-            valid_card: None,
-            origin: None,
-            destination: Some(Zone::Battlefield),
-            trigger_zones: vec![],
-            phase: None,
-            optional: false,
-            combat_damage: false,
-            secondary: false,
-            valid_target: None,
-            valid_source: None,
-            description: None,
-            constraint: None,
-            condition: None,
-        }];
+        face.triggers = vec![crate::types::ability::TriggerDefinition::new(
+            crate::types::triggers::TriggerMode::ChangesZone,
+        )
+        .destination(Zone::Battlefield)];
 
         let obj_id = create_object_from_card_face(&mut state, &face, PlayerId(0));
         let obj = &state.objects[&obj_id];
@@ -615,16 +602,9 @@ mod tests {
     fn create_object_with_static_definitions() {
         let mut state = GameState::new_two_player(42);
         let mut face = make_creature_face();
-        face.static_abilities = vec![StaticDefinition {
-            mode: crate::types::statics::StaticMode::Continuous,
-            affected: Some(TargetFilter::SelfRef),
-            modifications: vec![ContinuousModification::AddPower { value: 2 }],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: None,
-        }];
+        face.static_abilities = vec![StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddPower { value: 2 }])];
 
         let obj_id = create_object_from_card_face(&mut state, &face, PlayerId(0));
         let obj = &state.objects[&obj_id];
@@ -639,12 +619,10 @@ mod tests {
     fn create_object_with_replacement_definitions() {
         let mut state = GameState::new_two_player(42);
         let mut face = make_creature_face();
-        face.replacements = vec![crate::types::ability::ReplacementDefinition {
-            valid_card: Some(TargetFilter::SelfRef),
-            ..crate::types::ability::ReplacementDefinition::new(
-                crate::types::replacements::ReplacementEvent::DamageDone,
-            )
-        }];
+        face.replacements = vec![crate::types::ability::ReplacementDefinition::new(
+            crate::types::replacements::ReplacementEvent::DamageDone,
+        )
+        .valid_card(TargetFilter::SelfRef)];
 
         let obj_id = create_object_from_card_face(&mut state, &face, PlayerId(0));
         let obj = &state.objects[&obj_id];

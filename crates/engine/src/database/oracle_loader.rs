@@ -144,16 +144,12 @@ fn synthesize_changeling_cda(face: &mut CardFace) {
         .iter()
         .any(|k| matches!(k, Keyword::Changeling))
     {
-        face.static_abilities.push(StaticDefinition {
-            mode: crate::types::statics::StaticMode::Continuous,
-            affected: Some(TargetFilter::SelfRef),
-            modifications: vec![ContinuousModification::AddAllCreatureTypes],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: true,
-            description: None,
-        });
+        face.static_abilities.push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddAllCreatureTypes])
+                .cda(),
+        );
     }
 }
 

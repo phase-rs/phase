@@ -350,16 +350,9 @@ impl<'a> CardBuilder<'a> {
 
     /// Attach a static ability definition.
     pub fn with_static(&mut self, mode: StaticMode) -> &mut Self {
-        self.obj().static_definitions.push(StaticDefinition {
-            mode,
-            affected: None,
-            modifications: vec![],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: None,
-        });
+        self.obj()
+            .static_definitions
+            .push(StaticDefinition::new(mode));
         self
     }
 
@@ -368,38 +361,17 @@ impl<'a> CardBuilder<'a> {
         &mut self,
         modifications: Vec<crate::types::ability::ContinuousModification>,
     ) -> &mut Self {
-        self.obj().static_definitions.push(StaticDefinition {
-            mode: StaticMode::Continuous,
-            affected: None,
-            modifications,
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: None,
-        });
+        self.obj()
+            .static_definitions
+            .push(StaticDefinition::continuous().modifications(modifications));
         self
     }
 
     /// Attach a trigger definition.
     pub fn with_trigger(&mut self, mode: TriggerMode) -> &mut Self {
-        self.obj().trigger_definitions.push(TriggerDefinition {
-            mode,
-            execute: None,
-            valid_card: None,
-            origin: None,
-            destination: None,
-            trigger_zones: vec![],
-            phase: None,
-            optional: false,
-            combat_damage: false,
-            secondary: false,
-            valid_target: None,
-            valid_source: None,
-            description: None,
-            constraint: None,
-            condition: None,
-        });
+        self.obj()
+            .trigger_definitions
+            .push(TriggerDefinition::new(mode));
         self
     }
 

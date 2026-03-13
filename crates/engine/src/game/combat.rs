@@ -988,16 +988,9 @@ mod tests {
             .get_mut(&attacker)
             .unwrap()
             .static_definitions
-            .push(StaticDefinition {
-                mode: StaticMode::Other("CantBeBlocked".to_string()),
-                affected: None,
-                modifications: vec![],
-                condition: None,
-                affected_zone: None,
-                effect_zone: None,
-                characteristic_defining: false,
-                description: None,
-            });
+            .push(StaticDefinition::new(StaticMode::Other(
+                "CantBeBlocked".to_string(),
+            )));
 
         let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
 
@@ -1025,16 +1018,7 @@ mod tests {
             .get_mut(&blocker)
             .unwrap()
             .static_definitions
-            .push(StaticDefinition {
-                mode: StaticMode::CantBlock,
-                affected: None,
-                modifications: vec![],
-                condition: None,
-                affected_zone: None,
-                effect_zone: None,
-                characteristic_defining: false,
-                description: None,
-            });
+            .push(StaticDefinition::new(StaticMode::CantBlock));
 
         assert!(validate_blockers(&state, &[(blocker, attacker)]).is_err());
     }

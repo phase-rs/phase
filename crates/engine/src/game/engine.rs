@@ -3066,17 +3066,17 @@ mod tests {
         );
         let obj = state.objects.get_mut(&obj_id).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
-        obj.replacement_definitions.push(ReplacementDefinition {
-            execute: Some(Box::new(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Tap {
-                    target: TargetFilter::SelfRef,
-                },
-            ))),
-            valid_card: Some(TargetFilter::SelfRef),
-            description: Some("Selesnya Guildgate enters the battlefield tapped.".into()),
-            ..ReplacementDefinition::new(ReplacementEvent::Moved)
-        });
+        obj.replacement_definitions.push(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Tap {
+                        target: TargetFilter::SelfRef,
+                    },
+                ))
+                .valid_card(TargetFilter::SelfRef)
+                .description("Selesnya Guildgate enters the battlefield tapped.".to_string()),
+        );
 
         let _result = apply(&mut state, GameAction::PlayLand { card_id: CardId(1) }).unwrap();
         assert!(state.battlefield.contains(&obj_id));
@@ -3176,23 +3176,8 @@ mod trigger_target_tests {
         state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
             source_id: trigger_creature,
             controller: PlayerId(0),
-            trigger_def: TriggerDefinition {
-                mode: crate::types::triggers::TriggerMode::ChangesZone,
-                execute: None,
-                valid_card: None,
-                origin: None,
-                destination: Some(Zone::Battlefield),
-                trigger_zones: vec![],
-                phase: None,
-                optional: false,
-                combat_damage: false,
-                secondary: false,
-                valid_target: None,
-                valid_source: None,
-                description: None,
-                constraint: None,
-                condition: None,
-            },
+            trigger_def: TriggerDefinition::new(crate::types::triggers::TriggerMode::ChangesZone)
+                .destination(Zone::Battlefield),
             ability,
             timestamp: 1,
         });
@@ -3246,23 +3231,7 @@ mod trigger_target_tests {
         state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
             source_id: ObjectId(1),
             controller: PlayerId(0),
-            trigger_def: TriggerDefinition {
-                mode: crate::types::triggers::TriggerMode::ChangesZone,
-                execute: None,
-                valid_card: None,
-                origin: None,
-                destination: None,
-                trigger_zones: vec![],
-                phase: None,
-                optional: false,
-                combat_damage: false,
-                secondary: false,
-                valid_target: None,
-                valid_source: None,
-                description: None,
-                constraint: None,
-                condition: None,
-            },
+            trigger_def: TriggerDefinition::new(crate::types::triggers::TriggerMode::ChangesZone),
             ability: crate::types::ability::ResolvedAbility::new(
                 Effect::ChangeZone {
                     origin: Some(Zone::Battlefield),
@@ -3508,29 +3477,18 @@ mod phase_trigger_regression_tests {
             obj.card_types.core_types.push(CoreType::Creature);
             obj.power = Some(0);
             obj.toughness = Some(1);
-            obj.trigger_definitions.push(TriggerDefinition {
-                mode: TriggerMode::Phase,
-                phase: Some(Phase::BeginCombat),
-                execute: Some(Box::new(AbilityDefinition::new(
-                    AbilityKind::Activated,
-                    Effect::GainLife {
-                        amount: LifeAmount::Fixed(1),
-                        player: GainLifePlayer::Controller,
-                    },
-                ))),
-                valid_card: None,
-                origin: None,
-                destination: None,
-                trigger_zones: vec![Zone::Battlefield],
-                optional: false,
-                combat_damage: false,
-                secondary: false,
-                valid_target: None,
-                valid_source: None,
-                description: None,
-                constraint: None,
-                condition: None,
-            });
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Phase)
+                    .phase(Phase::BeginCombat)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::GainLife {
+                            amount: LifeAmount::Fixed(1),
+                            player: GainLifePlayer::Controller,
+                        },
+                    ))
+                    .trigger_zones(vec![Zone::Battlefield]),
+            );
         }
 
         // Pass priority twice (P0 passes, then P1 passes) with empty stack.

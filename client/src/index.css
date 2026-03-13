@@ -62,10 +62,10 @@ body {
 .menu-scene::after {
   content: "";
   position: absolute;
-  top: clamp(0.75rem, 4vh, 3.5rem);
-  left: clamp(58%, 68vw, 74%);
-  width: clamp(8rem, 18vw, 16rem);
-  height: clamp(8rem, 18vw, 16rem);
+  top: clamp(-4.5rem, -2vh, -1.75rem);
+  left: clamp(82%, 90vw, 96%);
+  width: clamp(6rem, 12vw, 10.5rem);
+  height: clamp(6rem, 12vw, 10.5rem);
   border-radius: 9999px;
   pointer-events: none;
 }
@@ -73,7 +73,7 @@ body {
 .menu-scene::before {
   z-index: -2;
   transform: translateX(-50%);
-  opacity: 0.12;
+  opacity: 0.08;
   background:
     radial-gradient(circle at 34% 30%, rgba(255, 248, 238, 0.44) 0%, rgba(236, 231, 223, 0.22) 24%, rgba(163, 177, 215, 0.1) 54%, rgba(74, 93, 136, 0.03) 70%, transparent 80%),
     radial-gradient(circle at center, rgba(255, 184, 108, 0.04), rgba(96, 142, 220, 0.03) 58%, transparent 78%);
@@ -83,12 +83,12 @@ body {
 
 .menu-scene::after {
   z-index: -1;
-  transform: translateX(calc(-50% + 34%));
+  opacity: 0.22;
+  transform: translateX(calc(-50% + 8%));
   background:
     radial-gradient(circle at 50% 50%, rgba(3, 6, 16, 0.62) 0%, rgba(3, 6, 16, 0.74) 66%, rgba(3, 6, 16, 0.18) 76%, transparent 84%);
   filter: blur(3px);
   box-shadow: 0 0 24px rgba(2, 4, 10, 0.14);
-  animation: menu-moon-phase 72s ease-in-out infinite alternate;
 }
 
 @keyframes menu-moon-pulse {
@@ -118,54 +118,16 @@ body {
   }
 }
 
-@keyframes menu-moon-phase {
-  0% {
-    opacity: 0.42;
-    transform: translateX(calc(-50% + 34%));
-  }
-
-  18% {
-    opacity: 0.48;
-    transform: translateX(calc(-50% + 20%));
-  }
-
-  34% {
-    opacity: 0.54;
-    transform: translateX(calc(-50% + 8%));
-  }
-
-  50% {
-    opacity: 0.58;
-    transform: translateX(-50%);
-  }
-
-  66% {
-    opacity: 0.54;
-    transform: translateX(calc(-50% - 8%));
-  }
-
-  82% {
-    opacity: 0.48;
-    transform: translateX(calc(-50% - 20%));
-  }
-
-  100% {
-    opacity: 0.42;
-    transform: translateX(calc(-50% - 34%));
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
   .menu-scene::before {
     animation: none;
-    opacity: 0.14;
+    opacity: 0.08;
     transform: translateX(-50%);
   }
 
   .menu-scene::after {
-    animation: none;
-    opacity: 0.46;
-    transform: translateX(calc(-50% + 18%));
+    opacity: 0.22;
+    transform: translateX(calc(-50% + 8%));
   }
 }
 

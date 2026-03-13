@@ -324,27 +324,30 @@ export function DeckBuilder({
           </div>
         </div>
 
-        <div className="w-64 shrink-0 overflow-y-auto border-l border-white/8 bg-black/12 p-3 backdrop-blur-sm">
-          {isCommander && (
-            <div className="mb-3 border-b border-white/8 pb-3">
-              <CommanderPanel
-                commanders={commanders}
-                deck={deck.main}
-                cardDataCache={cardDataCache}
-                onSetCommander={handleSetCommander}
-                onRemoveCommander={handleRemoveCommander}
-              />
-            </div>
-          )}
-          <DeckList
-            deck={deck}
-            onRemoveCard={handleRemoveCard}
-            onImport={handleImport}
-            onCardHover={onCardHover}
-            warnings={warnings}
-            format={format}
-          />
-          <div className="sticky bottom-0 mt-3 border-t border-white/8 bg-black/80 pt-3 backdrop-blur-md">
+        <div className="flex min-h-0 w-64 shrink-0 flex-col overflow-hidden border-l border-white/8 bg-black/12 p-3 backdrop-blur-sm">
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+            {isCommander && (
+              <div className="mb-3 border-b border-white/8 pb-3">
+                <CommanderPanel
+                  commanders={commanders}
+                  deck={deck.main}
+                  cardDataCache={cardDataCache}
+                  onSetCommander={handleSetCommander}
+                  onRemoveCommander={handleRemoveCommander}
+                />
+              </div>
+            )}
+            <DeckList
+              deck={deck}
+              onRemoveCard={handleRemoveCard}
+              onImport={handleImport}
+              onCardHover={onCardHover}
+              warnings={warnings}
+              format={format}
+            />
+          </div>
+
+          <div className="mt-3 shrink-0 rounded-[18px] border border-white/8 bg-black/18 p-3">
             <ManaCurve cmcValues={cmcValues} colorValues={colorValues} />
           </div>
         </div>

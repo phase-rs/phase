@@ -1634,16 +1634,10 @@ fn build_continuous_clause(
 
     Some(ParsedEffectClause {
         effect: Effect::GenericEffect {
-            static_abilities: vec![StaticDefinition {
-                mode: StaticMode::Continuous,
-                affected: Some(application.affected),
-                modifications,
-                condition: None,
-                affected_zone: None,
-                effect_zone: None,
-                characteristic_defining: false,
-                description: Some(predicate.to_string()),
-            }],
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(application.affected)
+                .modifications(modifications)
+                .description(predicate.to_string())],
             duration: duration.clone(),
             target: application.target,
         },
@@ -1667,16 +1661,10 @@ fn build_become_clause(
 
     Some(ParsedEffectClause {
         effect: Effect::GenericEffect {
-            static_abilities: vec![StaticDefinition {
-                mode: StaticMode::Continuous,
-                affected: Some(application.affected),
-                modifications,
-                condition: None,
-                affected_zone: None,
-                effect_zone: None,
-                characteristic_defining: false,
-                description: Some(predicate.to_string()),
-            }],
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(application.affected)
+                .modifications(modifications)
+                .description(predicate.to_string())],
             duration: duration.clone(),
             target: application.target,
         },
@@ -1703,16 +1691,9 @@ fn build_restriction_clause(
 
     Some(ParsedEffectClause {
         effect: Effect::GenericEffect {
-            static_abilities: vec![StaticDefinition {
-                mode,
-                affected: Some(application.affected),
-                modifications: vec![],
-                condition: None,
-                affected_zone: None,
-                effect_zone: None,
-                characteristic_defining: false,
-                description: Some(predicate.to_string()),
-            }],
+            static_abilities: vec![StaticDefinition::new(mode)
+                .affected(application.affected)
+                .description(predicate.to_string())],
             duration: duration.clone(),
             target: application.target,
         },

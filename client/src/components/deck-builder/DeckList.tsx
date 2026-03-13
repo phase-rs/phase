@@ -156,7 +156,7 @@ export function DeckList({
   };
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex flex-col">
       <div className="mb-2 flex items-center justify-between border-b border-white/8 pb-2">
         <div>
           <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Current List</div>
@@ -205,7 +205,7 @@ export function DeckList({
       )}
 
       {/* Main deck grouped by type */}
-      <div className="flex-1 overflow-y-auto">
+      <div>
         {(["Creatures", "Spells", "Lands"] as const).map((group) => (
           <SectionList
             key={group}

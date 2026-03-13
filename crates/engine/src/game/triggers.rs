@@ -150,23 +150,8 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             condition: None,
                             context: SpellContext::default(),
                         };
-                        let prowess_trig_def = TriggerDefinition {
-                            mode: TriggerMode::SpellCast,
-                            execute: None,
-                            valid_card: None,
-                            origin: None,
-                            destination: None,
-                            trigger_zones: vec![],
-                            phase: None,
-                            optional: false,
-                            combat_damage: false,
-                            secondary: false,
-                            valid_target: None,
-                            valid_source: None,
-                            description: Some("Prowess".to_string()),
-                            constraint: None,
-                            condition: None,
-                        };
+                        let prowess_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
+                            .description("Prowess".to_string());
                         pending.push(PendingTrigger {
                             source_id: obj_id,
                             controller,
@@ -1824,23 +1809,7 @@ pub mod tests {
 
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
-        TriggerDefinition {
-            mode,
-            execute: None,
-            valid_card: None,
-            origin: None,
-            destination: None,
-            trigger_zones: vec![],
-            phase: None,
-            optional: false,
-            combat_damage: false,
-            secondary: false,
-            valid_target: None,
-            valid_source: None,
-            description: None,
-            constraint: None,
-            condition: None,
-        }
+        TriggerDefinition::new(mode)
     }
 
     #[test]
@@ -1948,26 +1917,14 @@ pub mod tests {
             let obj = state.objects.get_mut(&p0_creature).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
             obj.entered_battlefield_turn = Some(1);
-            obj.trigger_definitions.push(TriggerDefinition {
-                mode: TriggerMode::ChangesZone,
-                execute: Some(Box::new(AbilityDefinition::new(
-                    AbilityKind::Database,
-                    Effect::Draw { count: 1 },
-                ))),
-                valid_card: None,
-                origin: None,
-                destination: Some(Zone::Battlefield),
-                trigger_zones: vec![],
-                phase: None,
-                optional: false,
-                combat_damage: false,
-                secondary: false,
-                valid_target: None,
-                valid_source: None,
-                description: None,
-                constraint: None,
-                condition: None,
-            });
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Draw { count: 1 },
+                    ))
+                    .destination(Zone::Battlefield),
+            );
         }
 
         let p1_creature = create_object(
@@ -1982,26 +1939,14 @@ pub mod tests {
             obj.card_types.core_types.push(CoreType::Creature);
             obj.controller = PlayerId(1);
             obj.entered_battlefield_turn = Some(1);
-            obj.trigger_definitions.push(TriggerDefinition {
-                mode: TriggerMode::ChangesZone,
-                execute: Some(Box::new(AbilityDefinition::new(
-                    AbilityKind::Database,
-                    Effect::Draw { count: 1 },
-                ))),
-                valid_card: None,
-                origin: None,
-                destination: Some(Zone::Battlefield),
-                trigger_zones: vec![],
-                phase: None,
-                optional: false,
-                combat_damage: false,
-                secondary: false,
-                valid_target: None,
-                valid_source: None,
-                description: None,
-                constraint: None,
-                condition: None,
-            });
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Draw { count: 1 },
+                    ))
+                    .destination(Zone::Battlefield),
+            );
         }
 
         // Trigger event
@@ -2226,26 +2171,14 @@ pub mod tests {
             let obj = state.objects.get_mut(&trigger_creature).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
             obj.entered_battlefield_turn = Some(1);
-            obj.trigger_definitions.push(TriggerDefinition {
-                mode: TriggerMode::ChangesZone,
-                execute: Some(Box::new(AbilityDefinition::new(
-                    AbilityKind::Database,
-                    Effect::Draw { count: 1 },
-                ))),
-                valid_card: None,
-                origin: None,
-                destination: Some(Zone::Battlefield),
-                trigger_zones: vec![],
-                phase: None,
-                optional: false,
-                combat_damage: false,
-                secondary: false,
-                valid_target: None,
-                valid_source: None,
-                description: None,
-                constraint: None,
-                condition: None,
-            });
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Draw { count: 1 },
+                    ))
+                    .destination(Zone::Battlefield),
+            );
         }
 
         // Simulate a ZoneChanged event (another creature enters)
@@ -2293,26 +2226,14 @@ pub mod tests {
             let obj = state.objects.get_mut(&c1).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
             obj.entered_battlefield_turn = Some(1);
-            obj.trigger_definitions.push(TriggerDefinition {
-                mode: TriggerMode::ChangesZone,
-                execute: Some(Box::new(AbilityDefinition::new(
-                    AbilityKind::Database,
-                    Effect::Draw { count: 1 },
-                ))),
-                valid_card: None,
-                origin: None,
-                destination: Some(Zone::Battlefield),
-                trigger_zones: vec![],
-                phase: None,
-                optional: false,
-                combat_damage: false,
-                secondary: false,
-                valid_target: None,
-                valid_source: None,
-                description: None,
-                constraint: None,
-                condition: None,
-            });
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Draw { count: 1 },
+                    ))
+                    .destination(Zone::Battlefield),
+            );
         }
 
         let c2 = create_object(
@@ -2327,26 +2248,14 @@ pub mod tests {
             obj.card_types.core_types.push(CoreType::Creature);
             obj.controller = PlayerId(1);
             obj.entered_battlefield_turn = Some(1);
-            obj.trigger_definitions.push(TriggerDefinition {
-                mode: TriggerMode::ChangesZone,
-                execute: Some(Box::new(AbilityDefinition::new(
-                    AbilityKind::Database,
-                    Effect::Draw { count: 1 },
-                ))),
-                valid_card: None,
-                origin: None,
-                destination: Some(Zone::Battlefield),
-                trigger_zones: vec![],
-                phase: None,
-                optional: false,
-                combat_damage: false,
-                secondary: false,
-                valid_target: None,
-                valid_source: None,
-                description: None,
-                constraint: None,
-                condition: None,
-            });
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Draw { count: 1 },
+                    ))
+                    .destination(Zone::Battlefield),
+            );
         }
 
         let events = vec![GameEvent::ZoneChanged {
@@ -2380,31 +2289,20 @@ pub mod tests {
             let obj = state.objects.get_mut(&trigger_src).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
             obj.entered_battlefield_turn = Some(1);
-            obj.trigger_definitions.push(TriggerDefinition {
-                mode: TriggerMode::ChangesZone,
-                execute: Some(Box::new(AbilityDefinition::new(
-                    AbilityKind::Database,
-                    Effect::Draw { count: 1 },
-                ))),
-                valid_card: Some(TargetFilter::Typed {
-                    card_type: Some(crate::types::ability::TypeFilter::Creature),
-                    subtype: None,
-                    controller: None,
-                    properties: vec![],
-                }),
-                origin: None,
-                destination: Some(Zone::Battlefield),
-                trigger_zones: vec![],
-                phase: None,
-                optional: false,
-                combat_damage: false,
-                secondary: false,
-                valid_target: None,
-                valid_source: None,
-                description: None,
-                constraint: None,
-                condition: None,
-            });
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Draw { count: 1 },
+                    ))
+                    .valid_card(TargetFilter::Typed {
+                        card_type: Some(crate::types::ability::TypeFilter::Creature),
+                        subtype: None,
+                        controller: None,
+                        properties: vec![],
+                    })
+                    .destination(Zone::Battlefield),
+            );
         }
 
         // Create a non-creature that enters
@@ -2792,9 +2690,8 @@ pub mod tests {
 
     #[test]
     fn build_triggered_ability_from_typed_execute() {
-        let trig_def = TriggerDefinition {
-            mode: TriggerMode::ChangesZone,
-            execute: Some(Box::new(AbilityDefinition {
+        let trig_def =
+            TriggerDefinition::new(TriggerMode::ChangesZone).execute(AbilityDefinition {
                 sub_ability: Some(Box::new(AbilityDefinition::new(
                     AbilityKind::Database,
                     Effect::GainLife {
@@ -2803,21 +2700,7 @@ pub mod tests {
                     },
                 ))),
                 ..AbilityDefinition::new(AbilityKind::Database, Effect::Draw { count: 2 })
-            })),
-            valid_card: None,
-            origin: None,
-            destination: None,
-            trigger_zones: vec![],
-            phase: None,
-            optional: false,
-            combat_damage: false,
-            secondary: false,
-            valid_target: None,
-            valid_source: None,
-            description: None,
-            constraint: None,
-            condition: None,
-        };
+            });
 
         let ability = build_triggered_ability(&trig_def, ObjectId(1), PlayerId(0));
         assert_eq!(
@@ -2961,38 +2844,27 @@ pub mod tests {
             let obj = state.objects.get_mut(&trigger_creature).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
             obj.entered_battlefield_turn = Some(1);
-            obj.trigger_definitions.push(TriggerDefinition {
-                mode: TriggerMode::ChangesZone,
-                execute: Some(Box::new(AbilityDefinition {
-                    duration: Some(crate::types::ability::Duration::UntilHostLeavesPlay),
-                    ..AbilityDefinition::new(
-                        AbilityKind::Database,
-                        Effect::ChangeZone {
-                            origin: Some(Zone::Battlefield),
-                            destination: Zone::Exile,
-                            target: TargetFilter::Typed {
-                                card_type: Some(TypeFilter::Creature),
-                                subtype: None,
-                                controller: Some(ControllerRef::Opponent),
-                                properties: vec![],
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition {
+                        duration: Some(crate::types::ability::Duration::UntilHostLeavesPlay),
+                        ..AbilityDefinition::new(
+                            AbilityKind::Database,
+                            Effect::ChangeZone {
+                                origin: Some(Zone::Battlefield),
+                                destination: Zone::Exile,
+                                target: TargetFilter::Typed {
+                                    card_type: Some(TypeFilter::Creature),
+                                    subtype: None,
+                                    controller: Some(ControllerRef::Opponent),
+                                    properties: vec![],
+                                },
                             },
-                        },
-                    )
-                })),
-                valid_card: Some(TargetFilter::SelfRef),
-                origin: None,
-                destination: Some(Zone::Battlefield),
-                trigger_zones: vec![],
-                phase: None,
-                optional: false,
-                combat_damage: false,
-                secondary: false,
-                valid_target: None,
-                valid_source: None,
-                description: None,
-                constraint: None,
-                condition: None,
-            });
+                        )
+                    })
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination(Zone::Battlefield),
+            );
         }
 
         // Fire an ETB event for the trigger creature
@@ -3050,38 +2922,27 @@ pub mod tests {
             let obj = state.objects.get_mut(&trigger_creature).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
             obj.entered_battlefield_turn = Some(1);
-            obj.trigger_definitions.push(TriggerDefinition {
-                mode: TriggerMode::ChangesZone,
-                execute: Some(Box::new(AbilityDefinition {
-                    duration: Some(crate::types::ability::Duration::UntilHostLeavesPlay),
-                    ..AbilityDefinition::new(
-                        AbilityKind::Database,
-                        Effect::ChangeZone {
-                            origin: Some(Zone::Battlefield),
-                            destination: Zone::Exile,
-                            target: TargetFilter::Typed {
-                                card_type: Some(TypeFilter::Creature),
-                                subtype: None,
-                                controller: Some(ControllerRef::Opponent),
-                                properties: vec![],
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition {
+                        duration: Some(crate::types::ability::Duration::UntilHostLeavesPlay),
+                        ..AbilityDefinition::new(
+                            AbilityKind::Database,
+                            Effect::ChangeZone {
+                                origin: Some(Zone::Battlefield),
+                                destination: Zone::Exile,
+                                target: TargetFilter::Typed {
+                                    card_type: Some(TypeFilter::Creature),
+                                    subtype: None,
+                                    controller: Some(ControllerRef::Opponent),
+                                    properties: vec![],
+                                },
                             },
-                        },
-                    )
-                })),
-                valid_card: Some(TargetFilter::SelfRef),
-                origin: None,
-                destination: Some(Zone::Battlefield),
-                trigger_zones: vec![],
-                phase: None,
-                optional: false,
-                combat_damage: false,
-                secondary: false,
-                valid_target: None,
-                valid_source: None,
-                description: None,
-                constraint: None,
-                condition: None,
-            });
+                        )
+                    })
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination(Zone::Battlefield),
+            );
         }
 
         let events = vec![GameEvent::ZoneChanged {
@@ -3130,35 +2991,24 @@ pub mod tests {
             let obj = state.objects.get_mut(&trigger_creature).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
             obj.entered_battlefield_turn = Some(1);
-            obj.trigger_definitions.push(TriggerDefinition {
-                mode: TriggerMode::ChangesZone,
-                execute: Some(Box::new(AbilityDefinition::new(
-                    AbilityKind::Database,
-                    Effect::ChangeZone {
-                        origin: Some(Zone::Battlefield),
-                        destination: Zone::Exile,
-                        target: TargetFilter::Typed {
-                            card_type: Some(TypeFilter::Creature),
-                            subtype: None,
-                            controller: Some(ControllerRef::Opponent),
-                            properties: vec![],
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::ChangeZone {
+                            origin: Some(Zone::Battlefield),
+                            destination: Zone::Exile,
+                            target: TargetFilter::Typed {
+                                card_type: Some(TypeFilter::Creature),
+                                subtype: None,
+                                controller: Some(ControllerRef::Opponent),
+                                properties: vec![],
+                            },
                         },
-                    },
-                ))),
-                valid_card: Some(TargetFilter::SelfRef),
-                origin: None,
-                destination: Some(Zone::Battlefield),
-                trigger_zones: vec![],
-                phase: None,
-                optional: false,
-                combat_damage: false,
-                secondary: false,
-                valid_target: None,
-                valid_source: None,
-                description: None,
-                constraint: None,
-                condition: None,
-            });
+                    ))
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination(Zone::Battlefield),
+            );
         }
 
         let events = vec![GameEvent::ZoneChanged {
@@ -3194,23 +3044,9 @@ pub mod tests {
             let obj = state.objects.get_mut(&trigger_creature).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
             obj.entered_battlefield_turn = Some(1);
-            obj.trigger_definitions.push(TriggerDefinition {
-                mode: TriggerMode::ChangesZone,
-                execute: None, // No execute ability
-                valid_card: None,
-                origin: None,
-                destination: Some(Zone::Battlefield),
-                trigger_zones: vec![],
-                phase: None,
-                optional: false,
-                combat_damage: false,
-                secondary: false,
-                valid_target: None,
-                valid_source: None,
-                description: None,
-                constraint: None,
-                condition: None,
-            });
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone).destination(Zone::Battlefield),
+            );
         }
 
         let events = vec![GameEvent::ZoneChanged {
@@ -3243,26 +3079,14 @@ pub mod tests {
             let obj = state.objects.get_mut(&trigger_creature).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
             obj.entered_battlefield_turn = Some(1);
-            obj.trigger_definitions.push(TriggerDefinition {
-                mode: TriggerMode::ChangesZone,
-                execute: Some(Box::new(AbilityDefinition::new(
-                    AbilityKind::Database,
-                    Effect::Draw { count: 1 },
-                ))),
-                valid_card: None,
-                origin: None,
-                destination: Some(Zone::Battlefield),
-                trigger_zones: vec![],
-                phase: None,
-                optional: false,
-                combat_damage: false,
-                secondary: false,
-                valid_target: None,
-                valid_source: None,
-                description: None,
-                constraint: None,
-                condition: None,
-            });
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Draw { count: 1 },
+                    ))
+                    .destination(Zone::Battlefield),
+            );
         }
 
         let events = vec![GameEvent::ZoneChanged {
@@ -3396,54 +3220,44 @@ pub mod tests {
             let obj = state.objects.get_mut(&bat).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
             obj.entered_battlefield_turn = Some(1);
-            obj.trigger_definitions.push(TriggerDefinition {
-                mode: TriggerMode::ChangesZone,
-                execute: Some(Box::new(AbilityDefinition {
-                    sub_ability: Some(Box::new(AbilityDefinition {
-                        duration: Some(crate::types::ability::Duration::UntilHostLeavesPlay),
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition {
+                        sub_ability: Some(Box::new(AbilityDefinition {
+                            duration: Some(crate::types::ability::Duration::UntilHostLeavesPlay),
+                            ..AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                Effect::ChangeZone {
+                                    origin: None,
+                                    destination: Zone::Exile,
+                                    target: TargetFilter::Any,
+                                },
+                            )
+                        })),
                         ..AbilityDefinition::new(
                             AbilityKind::Spell,
-                            Effect::ChangeZone {
-                                origin: None,
-                                destination: Zone::Exile,
-                                target: TargetFilter::Any,
+                            Effect::RevealHand {
+                                target: TargetFilter::Typed {
+                                    card_type: None,
+                                    subtype: None,
+                                    controller: Some(ControllerRef::Opponent),
+                                    properties: vec![],
+                                },
+                                card_filter: TargetFilter::Typed {
+                                    card_type: Some(TypeFilter::Permanent),
+                                    subtype: None,
+                                    controller: None,
+                                    properties: vec![FilterProp::NonType {
+                                        value: "Land".to_string(),
+                                    }],
+                                },
                             },
                         )
-                    })),
-                    ..AbilityDefinition::new(
-                        AbilityKind::Spell,
-                        Effect::RevealHand {
-                            target: TargetFilter::Typed {
-                                card_type: None,
-                                subtype: None,
-                                controller: Some(ControllerRef::Opponent),
-                                properties: vec![],
-                            },
-                            card_filter: TargetFilter::Typed {
-                                card_type: Some(TypeFilter::Permanent),
-                                subtype: None,
-                                controller: None,
-                                properties: vec![FilterProp::NonType {
-                                    value: "Land".to_string(),
-                                }],
-                            },
-                        },
-                    )
-                })),
-                valid_card: Some(TargetFilter::SelfRef),
-                origin: None,
-                destination: Some(Zone::Battlefield),
-                trigger_zones: vec![Zone::Battlefield],
-                phase: None,
-                optional: false,
-                combat_damage: false,
-                secondary: false,
-                valid_target: None,
-                valid_source: None,
-                description: None,
-                constraint: None,
-                condition: None,
-            });
+                    })
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination(Zone::Battlefield)
+                    .trigger_zones(vec![Zone::Battlefield]),
+            );
         }
 
         // Simulate bat entering battlefield

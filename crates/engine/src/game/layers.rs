@@ -4,7 +4,9 @@ use petgraph::graph::DiGraph;
 use crate::game::devotion::count_devotion;
 use crate::game::filter::matches_target_filter;
 use crate::game::game_object::CounterType;
-use crate::types::ability::{ContinuousModification, StaticCondition, TargetFilter};
+use crate::types::ability::{
+    ContinuousModification, DynamicPTValue, StaticCondition, TargetFilter,
+};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -316,6 +318,25 @@ fn order_by_timestamp(effects: &[&ActiveContinuousEffect]) -> Vec<ActiveContinuo
     sorted
 }
 
+/// Evaluate a dynamic P/T value by inspecting current game state.
+fn evaluate_dynamic_pt(state: &GameState, value: &DynamicPTValue) -> i32 {
+    match value {
+        DynamicPTValue::CardTypesInAllGraveyards { offset } => {
+            let mut seen = std::collections::HashSet::new();
+            for player in &state.players {
+                for &obj_id in &player.graveyard {
+                    if let Some(obj) = state.objects.get(&obj_id) {
+                        for ct in &obj.card_types.core_types {
+                            seen.insert(*ct);
+                        }
+                    }
+                }
+            }
+            seen.len() as i32 + offset
+        }
+    }
+}
+
 /// Apply a single continuous effect to all affected objects.
 fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffect) {
     // Find affected objects
@@ -336,6 +357,15 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
         } else {
             None
         };
+
+    // Pre-compute dynamic P/T values (avoids borrow conflict in the loop)
+    let dynamic_pt = match &effect.modification {
+        ContinuousModification::SetDynamicPower { value }
+        | ContinuousModification::SetDynamicToughness { value } => {
+            Some(evaluate_dynamic_pt(state, value))
+        }
+        _ => None,
+    };
 
     for id in affected_ids {
         let obj = match state.objects.get_mut(&id) {
@@ -411,6 +441,16 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                     }
                 }
             }
+            ContinuousModification::SetDynamicPower { .. } => {
+                if let Some(val) = dynamic_pt {
+                    obj.power = Some(val);
+                }
+            }
+            ContinuousModification::SetDynamicToughness { .. } => {
+                if let Some(val) = dynamic_pt {
+                    obj.toughness = Some(val);
+                }
+            }
             ContinuousModification::AddAbility { .. } => { /* TODO: future */ }
         }
     }
@@ -476,21 +516,14 @@ mod tests {
         add_power: i32,
         add_toughness: i32,
     ) {
-        let def = StaticDefinition {
-            mode: StaticMode::Continuous,
-            affected: Some(filter),
-            modifications: vec![
+        let def = StaticDefinition::continuous()
+            .affected(filter)
+            .modifications(vec![
                 ContinuousModification::AddPower { value: add_power },
                 ContinuousModification::AddToughness {
                     value: add_toughness,
                 },
-            ],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: None,
-        };
+            ]);
         state
             .objects
             .get_mut(&lord_id)
@@ -560,18 +593,11 @@ mod tests {
                 controller: Some(ControllerRef::You),
                 properties: vec![],
             };
-            let def = StaticDefinition {
-                mode: StaticMode::Continuous,
-                affected: Some(artifact_you_ctrl),
-                modifications: vec![ContinuousModification::AddType {
+            let def = StaticDefinition::continuous()
+                .affected(artifact_you_ctrl)
+                .modifications(vec![ContinuousModification::AddType {
                     core_type: CoreType::Creature,
-                }],
-                condition: None,
-                affected_zone: None,
-                effect_zone: None,
-                characteristic_defining: false,
-                description: None,
-            };
+                }]);
             state
                 .objects
                 .get_mut(&animator)
@@ -657,18 +683,11 @@ mod tests {
                 controller: Some(ControllerRef::You),
                 properties: vec![],
             };
-            let def = StaticDefinition {
-                mode: StaticMode::Continuous,
-                affected: Some(artifact_you_ctrl),
-                modifications: vec![ContinuousModification::AddType {
+            let def = StaticDefinition::continuous()
+                .affected(artifact_you_ctrl)
+                .modifications(vec![ContinuousModification::AddType {
                     core_type: CoreType::Creature,
-                }],
-                condition: None,
-                affected_zone: None,
-                effect_zone: None,
-                characteristic_defining: false,
-                description: None,
-            };
+                }]);
             state
                 .objects
                 .get_mut(&animator)
@@ -745,21 +764,16 @@ mod tests {
                 controller: None,
                 properties: vec![FilterProp::EnchantedBy],
             };
-            obj.static_definitions.push(StaticDefinition {
-                mode: StaticMode::Continuous,
-                affected: Some(enchanted_creature),
-                modifications: vec![
-                    ContinuousModification::AddPower { value: 2 },
-                    ContinuousModification::AddKeyword {
-                        keyword: Keyword::Trample,
-                    },
-                ],
-                condition: None,
-                affected_zone: None,
-                effect_zone: None,
-                characteristic_defining: false,
-                description: None,
-            });
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(enchanted_creature)
+                    .modifications(vec![
+                        ContinuousModification::AddPower { value: 2 },
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Trample,
+                        },
+                    ]),
+            );
         }
         state
             .objects
@@ -797,21 +811,14 @@ mod tests {
         // Create a static with both AddPower and AddKeyword
         let source = make_creature(&mut state, "Source", 1, 1, PlayerId(0));
         {
-            let def = StaticDefinition {
-                mode: StaticMode::Continuous,
-                affected: Some(creature_you_ctrl()),
-                modifications: vec![
+            let def = StaticDefinition::continuous()
+                .affected(creature_you_ctrl())
+                .modifications(vec![
                     ContinuousModification::AddPower { value: 2 },
                     ContinuousModification::AddKeyword {
                         keyword: Keyword::Trample,
                     },
-                ],
-                condition: None,
-                affected_zone: None,
-                effect_zone: None,
-                characteristic_defining: false,
-                description: None,
-            };
+                ]);
             state
                 .objects
                 .get_mut(&source)
@@ -884,16 +891,10 @@ mod tests {
             .push(Keyword::Changeling);
 
         // Add the CDA static definition (as the parser/loader would)
-        let cda = StaticDefinition {
-            mode: StaticMode::Continuous,
-            affected: Some(TargetFilter::SelfRef),
-            modifications: vec![ContinuousModification::AddAllCreatureTypes],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: true,
-            description: None,
-        };
+        let cda = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddAllCreatureTypes])
+            .cda();
         state
             .objects
             .get_mut(&shapeshifter)
@@ -920,18 +921,11 @@ mod tests {
         let lord = make_creature(&mut state, "Changeling Lord", 1, 1, PlayerId(0));
 
         // Lord grants Changeling to all your creatures via AddKeyword (Layer 6)
-        let def = StaticDefinition {
-            mode: StaticMode::Continuous,
-            affected: Some(creature_you_ctrl()),
-            modifications: vec![ContinuousModification::AddKeyword {
+        let def = StaticDefinition::continuous()
+            .affected(creature_you_ctrl())
+            .modifications(vec![ContinuousModification::AddKeyword {
                 keyword: Keyword::Changeling,
-            }],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: None,
-        };
+            }]);
         state
             .objects
             .get_mut(&lord)
@@ -975,30 +969,17 @@ mod tests {
             .push(Keyword::Changeling);
 
         // CDA: add all creature types (characteristic_defining = true)
-        let cda = StaticDefinition {
-            mode: StaticMode::Continuous,
-            affected: Some(TargetFilter::SelfRef),
-            modifications: vec![ContinuousModification::AddAllCreatureTypes],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: true,
-            description: None,
-        };
+        let cda = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddAllCreatureTypes])
+            .cda();
 
         // Non-CDA: also adds a subtype (later timestamp, but same layer)
-        let non_cda = StaticDefinition {
-            mode: StaticMode::Continuous,
-            affected: Some(TargetFilter::SelfRef),
-            modifications: vec![ContinuousModification::AddSubtype {
+        let non_cda = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddSubtype {
                 subtype: "Shapeshifter".to_string(),
-            }],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            characteristic_defining: false,
-            description: None,
-        };
+            }]);
 
         let obj = state.objects.get_mut(&shapeshifter).unwrap();
         obj.static_definitions.push(cda);
@@ -1042,18 +1023,13 @@ mod tests {
             obj.chosen_attributes
                 .push(ChosenAttribute::BasicLandType(BasicLandType::Forest));
             // Add the static definition that reads the chosen type
-            obj.static_definitions.push(StaticDefinition {
-                mode: StaticMode::Continuous,
-                affected: Some(TargetFilter::SelfRef),
-                modifications: vec![ContinuousModification::AddChosenSubtype {
-                    kind: ChosenSubtypeKind::BasicLandType,
-                }],
-                condition: None,
-                affected_zone: None,
-                effect_zone: None,
-                characteristic_defining: false,
-                description: None,
-            });
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![ContinuousModification::AddChosenSubtype {
+                        kind: ChosenSubtypeKind::BasicLandType,
+                    }]),
+            );
         }
 
         state.layers_dirty = true;
@@ -1085,18 +1061,13 @@ mod tests {
                 .core_types
                 .push(crate::types::card_type::CoreType::Land);
             obj.timestamp = ts;
-            obj.static_definitions.push(StaticDefinition {
-                mode: StaticMode::Continuous,
-                affected: Some(TargetFilter::SelfRef),
-                modifications: vec![ContinuousModification::AddChosenSubtype {
-                    kind: ChosenSubtypeKind::BasicLandType,
-                }],
-                condition: None,
-                affected_zone: None,
-                effect_zone: None,
-                characteristic_defining: false,
-                description: None,
-            });
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![ContinuousModification::AddChosenSubtype {
+                        kind: ChosenSubtypeKind::BasicLandType,
+                    }]),
+            );
         }
 
         state.layers_dirty = true;
@@ -1132,18 +1103,13 @@ mod tests {
             obj.timestamp = ts;
             obj.chosen_attributes
                 .push(ChosenAttribute::CreatureType("Elf".to_string()));
-            obj.static_definitions.push(StaticDefinition {
-                mode: StaticMode::Continuous,
-                affected: Some(TargetFilter::SelfRef),
-                modifications: vec![ContinuousModification::AddChosenSubtype {
-                    kind: ChosenSubtypeKind::CreatureType,
-                }],
-                condition: None,
-                affected_zone: None,
-                effect_zone: None,
-                characteristic_defining: false,
-                description: None,
-            });
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![ContinuousModification::AddChosenSubtype {
+                        kind: ChosenSubtypeKind::CreatureType,
+                    }]),
+            );
         }
 
         state.layers_dirty = true;
@@ -1159,6 +1125,118 @@ mod tests {
                 .subtypes
                 .contains(&"Shapeshifter".to_string()),
             "Should retain original subtypes"
+        );
+    }
+
+    #[test]
+    fn test_tarmogoyf_cda_counts_card_types_in_graveyards() {
+        use crate::types::ability::DynamicPTValue;
+
+        let mut state = setup();
+
+        // Create Tarmogoyf with */1+* base P/T and CDA static definition
+        let goyf = make_creature(&mut state, "Tarmogoyf", 0, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&goyf).unwrap();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![
+                        ContinuousModification::SetDynamicPower {
+                            value: DynamicPTValue::CardTypesInAllGraveyards { offset: 0 },
+                        },
+                        ContinuousModification::SetDynamicToughness {
+                            value: DynamicPTValue::CardTypesInAllGraveyards { offset: 1 },
+                        },
+                    ])
+                    .cda(),
+            );
+        }
+
+        // Empty graveyards: 0 card types → P/T = 0/1
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+        let obj = state.objects.get(&goyf).unwrap();
+        assert_eq!(obj.power, Some(0), "No card types in graveyards → power 0");
+        assert_eq!(obj.toughness, Some(1), "No card types → toughness 0+1=1");
+
+        // Add a creature to graveyard: 1 card type → P/T = 1/2
+        let gy_creature = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Dead Bear".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&gy_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.players[0].graveyard.push(gy_creature);
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+        let obj = state.objects.get(&goyf).unwrap();
+        assert_eq!(obj.power, Some(1), "Creature in graveyard → power 1");
+        assert_eq!(
+            obj.toughness,
+            Some(2),
+            "Creature in graveyard → toughness 2"
+        );
+
+        // Add an instant to opponent's graveyard: 2 card types → P/T = 2/3
+        let gy_instant = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(1),
+            "Spent Bolt".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&gy_instant)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+        state.players[1].graveyard.push(gy_instant);
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+        let obj = state.objects.get(&goyf).unwrap();
+        assert_eq!(obj.power, Some(2), "Creature + Instant → power 2");
+        assert_eq!(obj.toughness, Some(3), "Creature + Instant → toughness 3");
+
+        // Add an artifact creature to graveyard: still 2 types (creature already counted), + artifact = 3
+        let gy_artcreature = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Dead Robot".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&gy_artcreature).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        state.players[0].graveyard.push(gy_artcreature);
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+        let obj = state.objects.get(&goyf).unwrap();
+        assert_eq!(
+            obj.power,
+            Some(3),
+            "Creature + Instant + Artifact → power 3"
+        );
+        assert_eq!(
+            obj.toughness,
+            Some(4),
+            "Creature + Instant + Artifact → toughness 4"
         );
     }
 }

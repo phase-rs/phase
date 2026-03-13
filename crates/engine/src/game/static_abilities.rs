@@ -473,16 +473,7 @@ mod tests {
             .get_mut(&source)
             .unwrap()
             .static_definitions
-            .push(StaticDefinition {
-                mode: StaticMode::CantAttack,
-                affected: Some(affected),
-                modifications: vec![],
-                condition: None,
-                affected_zone: None,
-                effect_zone: None,
-                characteristic_defining: false,
-                description: None,
-            });
+            .push(StaticDefinition::new(StaticMode::CantAttack).affected(affected));
 
         let ctx = StaticCheckContext {
             target_id: Some(target),

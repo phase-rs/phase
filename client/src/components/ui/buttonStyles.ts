@@ -30,7 +30,7 @@ const TONE_CLASSES: Record<GameButtonTone, string> = {
   neutral:
     "border-gray-600 bg-gray-700/80 text-gray-100 hover:bg-gray-600/80",
   emerald:
-    "border-emerald-500/60 bg-emerald-700/80 text-emerald-50 hover:bg-emerald-600/80",
+    "border-orange-400/60 bg-orange-600/85 text-orange-50 hover:bg-orange-500/85",
   amber:
     "border-amber-500/60 bg-amber-700/80 text-amber-50 hover:bg-amber-600/80",
   blue: "border-blue-500/60 bg-blue-700/80 text-blue-50 hover:bg-blue-600/80",

@@ -63,6 +63,8 @@ impl ContinuousModification {
             | ContinuousModification::AddToughness { .. } => Layer::ModifyPT,
             ContinuousModification::SetPower { .. }
             | ContinuousModification::SetToughness { .. } => Layer::SetPT,
+            ContinuousModification::SetDynamicPower { .. }
+            | ContinuousModification::SetDynamicToughness { .. } => Layer::CharDef,
             ContinuousModification::AddKeyword { .. }
             | ContinuousModification::RemoveKeyword { .. }
             | ContinuousModification::AddAbility { .. }
