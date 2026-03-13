@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ResolvedAbility, SpellContext, TargetRef,
+    AbilityDefinition, AbilityKind, Effect, ResolvedAbility, SpellContext, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -428,8 +428,10 @@ pub fn handle_select_modes(
         super::layers::evaluate_layers(state);
     }
 
-    // Collect all target filters from the chain
-    let first_filter = super::triggers::extract_target_filter_from_effect(&resolved.effect);
+    // Walk the sub_ability chain to find the first mode with a target filter.
+    // This handles modal spells where mode 1 has no targets but mode 2 does
+    // (e.g., "Draw a card" + "Destroy target creature").
+    let first_filter = find_first_target_filter_in_chain(&resolved);
     if let Some(filter) = first_filter {
         let legal = targeting::find_legal_targets(state, filter, player, pending.object_id);
         if legal.is_empty() {
@@ -502,6 +504,20 @@ fn build_chained_resolved(
     }
 
     result.ok_or_else(|| EngineError::InvalidAction("No modes selected".to_string()))
+}
+
+/// Walk a ResolvedAbility chain (via sub_ability links) to find the first
+/// effect that requires targeting. Returns the TargetFilter if found.
+fn find_first_target_filter_in_chain(ability: &ResolvedAbility) -> Option<&TargetFilter> {
+    // Check this level
+    if let Some(filter) = super::triggers::extract_target_filter_from_effect(&ability.effect) {
+        return Some(filter);
+    }
+    // Walk the sub_ability chain
+    if let Some(ref sub) = ability.sub_ability {
+        return find_first_target_filter_in_chain(sub);
+    }
+    None
 }
 
 /// Handle target selection for a pending cast.

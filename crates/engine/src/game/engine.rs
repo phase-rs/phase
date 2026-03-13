@@ -561,8 +561,11 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             // Resume pending continuation if present
             if let Some(cont) = state.pending_continuation.take() {
                 let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
+                // Clear the choice after the continuation has consumed it
+                state.last_named_choice = None;
                 state.waiting_for.clone()
             } else {
+                state.last_named_choice = None;
                 WaitingFor::Priority { player: p }
             }
         }

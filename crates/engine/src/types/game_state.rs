@@ -454,6 +454,7 @@ impl PartialEq for GameState {
             && self.triggers_fired_this_turn == other.triggers_fired_this_turn
             && self.triggers_fired_this_game == other.triggers_fired_this_game
             && self.pending_continuation == other.pending_continuation
+            && self.last_named_choice == other.last_named_choice
     }
 }
 
