@@ -63,7 +63,14 @@ Requires `wasm-bindgen-cli` (v0.2.114) and optionally `wasm-opt` (binaryen). Out
 
 ### Card Data Pipeline
 ```bash
-./scripts/gen-card-data.sh          # Sparse-clone Forge repo → export cards → client/public/card-data.json
+./scripts/gen-card-data.sh          # export cards → client/public/card-data.json
+```
+
+### Card Data Lookup
+```bash
+jq '.["lightning bolt"]' client/public/card-data.json                    # Full card data
+jq '.["card name"] | .abilities[]' client/public/card-data.json          # Just abilities
+jq '.["card name"] | {abilities: [.abilities[]? | select(.effect.type == "Unimplemented")], triggers: [.triggers[]? | select(.mode == "Unknown")]}' client/public/card-data.json  # Unimplemented gaps
 ```
 
 ### Frontend (client/)

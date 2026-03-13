@@ -179,6 +179,12 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     pos += ctrl_len;
 
     // Check "with power N or less/greater" suffix
+    if let Some((prop, consumed)) = parse_mana_value_suffix(&lower[pos..]) {
+        properties.push(prop);
+        pos += consumed;
+    }
+
+    // Check "with power N or less/greater" suffix
     if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..]) {
         properties.push(prop);
         pos += consumed;
@@ -226,7 +232,7 @@ fn parse_core_type(text: &str) -> (Option<TypeFilter>, Option<String>, usize) {
         ("planeswalker", TypeFilter::Planeswalker),
         ("lands", TypeFilter::Land),
         ("land", TypeFilter::Land),
-        ("spell", TypeFilter::Any),
+        ("spell", TypeFilter::Card),
         ("card", TypeFilter::Card),
     ];
 
@@ -291,6 +297,28 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
         (FilterProp::PowerLE { value }, a)
     } else if let Some(a) = after_num.strip_prefix("or greater") {
         (FilterProp::PowerGE { value }, a)
+    } else {
+        return None;
+    };
+    Some((prop, text.len() - after.len()))
+}
+
+/// Parse "with mana value N or less" / "with mana value N or greater" suffix.
+/// Returns (FilterProp, bytes consumed from the original text).
+fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)> {
+    let trimmed = text.trim_start();
+    let rest = trimmed.strip_prefix("with mana value ")?;
+    let num_end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    if num_end == 0 {
+        return None;
+    }
+    let value: u32 = rest[..num_end].parse().ok()?;
+    let after_num = rest[num_end..].trim_start();
+
+    let (prop, after) = if let Some(a) = after_num.strip_prefix("or greater") {
+        (FilterProp::CmcGE { value }, a)
     } else {
         return None;
     };
@@ -504,12 +532,26 @@ mod tests {
         assert_eq!(
             f,
             TargetFilter::Typed {
-                card_type: Some(TypeFilter::Any),
+                card_type: Some(TypeFilter::Card),
                 subtype: None,
                 controller: None,
                 properties: vec![FilterProp::HasColor {
                     color: "Red".to_string()
                 }],
+            }
+        );
+    }
+
+    #[test]
+    fn spell_with_mana_value_4_or_greater() {
+        let (f, _) = parse_type_phrase("spell with mana value 4 or greater");
+        assert_eq!(
+            f,
+            TargetFilter::Typed {
+                card_type: Some(TypeFilter::Card),
+                subtype: None,
+                controller: None,
+                properties: vec![FilterProp::CmcGE { value: 4 }],
             }
         );
     }

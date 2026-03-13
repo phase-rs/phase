@@ -241,9 +241,7 @@ pub fn handle_cast_spell(
     }
 
     // Targeting: use typed TargetFilter extracted from the effect
-    if let Some(filter) =
-        super::triggers::extract_target_filter_from_effect(&ability_def.effect)
-    {
+    if let Some(filter) = super::triggers::extract_target_filter_from_effect(&ability_def.effect) {
         let legal = targeting::find_legal_targets(state, filter, player, object_id);
         if legal.is_empty() {
             return Err(EngineError::ActionNotAllowed(
@@ -437,9 +435,7 @@ pub fn handle_activate_ability(
     };
 
     // Handle targeting
-    if let Some(filter) =
-        super::triggers::extract_target_filter_from_effect(&ability_def.effect)
-    {
+    if let Some(filter) = super::triggers::extract_target_filter_from_effect(&ability_def.effect) {
         let legal = targeting::find_legal_targets(state, filter, player, source_id);
         if legal.is_empty() {
             return Err(EngineError::ActionNotAllowed(

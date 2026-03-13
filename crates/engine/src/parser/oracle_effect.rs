@@ -160,6 +160,11 @@ fn parse_imperative_effect(text: &str) -> Effect {
     // --- Counter: "counter target spell" ---
     if lower.starts_with("counter ") {
         let (target, _) = parse_target(&text[8..]);
+        let target = if text[8..].to_ascii_lowercase().contains("spell") {
+            constrain_filter_to_stack(target)
+        } else {
+            target
+        };
         return Effect::Counter { target };
     }
 
@@ -2594,6 +2599,37 @@ fn extract_number_before(text: &str, before_word: &str) -> Option<u32> {
     last_word.parse::<u32>().ok()
 }
 
+fn constrain_filter_to_stack(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed {
+            card_type,
+            subtype,
+            controller,
+            mut properties,
+        } => {
+            if !properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))
+            {
+                properties.push(FilterProp::InZone { zone: Zone::Stack });
+            }
+            TargetFilter::Typed {
+                card_type,
+                subtype,
+                controller,
+                properties,
+            }
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters.into_iter().map(constrain_filter_to_stack).collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters.into_iter().map(constrain_filter_to_stack).collect(),
+        },
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2642,7 +2678,43 @@ mod tests {
     #[test]
     fn effect_counterspell() {
         let e = parse_effect("Counter target spell");
-        assert!(matches!(e, Effect::Counter { .. }));
+        assert!(matches!(
+            e,
+            Effect::Counter {
+                target: TargetFilter::Typed { properties, .. }
+            } if properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))
+        ));
+    }
+
+    #[test]
+    fn effect_annul_has_stack_restricted_targets() {
+        let e = parse_effect("Counter target artifact or enchantment spell");
+        assert!(matches!(
+            e,
+            Effect::Counter {
+                target: TargetFilter::Or { filters }
+            } if filters.iter().all(|f| {
+                matches!(
+                    f,
+                    TargetFilter::Typed { properties, .. }
+                        if properties.iter().any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))
+                )
+            })
+        ));
+    }
+
+    #[test]
+    fn effect_disdainful_stroke_has_cmc_and_stack_restriction() {
+        let e = parse_effect("Counter target spell with mana value 4 or greater");
+        assert!(matches!(
+            e,
+            Effect::Counter {
+                target: TargetFilter::Typed { properties, .. }
+            } if properties.iter().any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))
+                && properties.iter().any(|p| matches!(p, FilterProp::CmcGE { value: 4 }))
+        ));
     }
 
     #[test]

@@ -14,7 +14,7 @@ pub fn find_legal_targets(
     source_controller: PlayerId,
     source_id: ObjectId,
 ) -> Vec<TargetRef> {
-    use crate::types::ability::{ControllerRef, TargetFilter, TypeFilter};
+    use crate::types::ability::{ControllerRef, TargetFilter};
     let mut targets = Vec::new();
 
     // Check if filter could match players
@@ -44,17 +44,9 @@ pub fn find_legal_targets(
         return targets;
     }
 
-    // Check if filter could match stack spells (Card type or Any)
-    let matches_stack = matches!(
-        filter,
-        TargetFilter::Any
-            | TargetFilter::Typed {
-                card_type: Some(TypeFilter::Card),
-                ..
-            }
-    );
-    if matches_stack {
-        add_stack_spells(state, &mut targets);
+    // Check stack spells only when the filter explicitly allows stack targets.
+    if filter_targets_stack_spells(filter) {
+        add_stack_spells(state, filter, source_controller, source_id, &mut targets);
     }
 
     // Check battlefield objects using typed filter
@@ -105,14 +97,56 @@ pub fn check_fizzle(original_targets: &[TargetRef], legal_targets: &[TargetRef])
 
 // --- Internal helpers ---
 
-fn add_stack_spells(state: &GameState, targets: &mut Vec<TargetRef>) {
+fn add_stack_spells(
+    state: &GameState,
+    filter: &crate::types::ability::TargetFilter,
+    source_controller: PlayerId,
+    source_id: ObjectId,
+    targets: &mut Vec<TargetRef>,
+) {
     for entry in &state.stack {
-        if matches!(
+        if !matches!(
             entry.kind,
             crate::types::game_state::StackEntryKind::Spell { .. }
         ) {
-            targets.push(TargetRef::Object(entry.id));
+            continue;
         }
+        if super::filter::matches_target_filter_controlled(
+            state,
+            entry.id,
+            filter,
+            source_id,
+            source_controller,
+        ) {
+            let obj = match state.objects.get(&entry.id) {
+                Some(o) => o,
+                None => continue,
+            };
+            if can_target(obj, source_controller, source_id, state) {
+                targets.push(TargetRef::Object(entry.id));
+            }
+        }
+    }
+}
+
+fn filter_targets_stack_spells(filter: &crate::types::ability::TargetFilter) -> bool {
+    use crate::types::ability::{FilterProp, TargetFilter, TypeFilter};
+    match filter {
+        TargetFilter::Typed {
+            card_type,
+            properties,
+            ..
+        } => {
+            let in_stack = properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == crate::types::zones::Zone::Stack));
+            in_stack || matches!(card_type, Some(TypeFilter::Card))
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_targets_stack_spells)
+        }
+        TargetFilter::Not { filter } => filter_targets_stack_spells(filter),
+        _ => false,
     }
 }
 
@@ -212,8 +246,7 @@ mod tests {
     #[test]
     fn find_legal_targets_creature_returns_only_creatures() {
         let (state, c0, c1) = setup_with_creatures();
-        let targets =
-            find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99));
+        let targets = find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(c0)));
         assert!(targets.contains(&TargetRef::Object(c1)));
         assert_eq!(targets.len(), 2);
@@ -229,8 +262,7 @@ mod tests {
             .keywords
             .push(Keyword::Hexproof);
 
-        let targets =
-            find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99));
+        let targets = find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99));
         assert!(!targets.contains(&TargetRef::Object(c1)));
     }
 
@@ -244,8 +276,7 @@ mod tests {
             .keywords
             .push(Keyword::Hexproof);
 
-        let targets =
-            find_legal_targets(&state, &creature_filter(), PlayerId(1), ObjectId(99));
+        let targets = find_legal_targets(&state, &creature_filter(), PlayerId(1), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(c1)));
     }
 
@@ -259,10 +290,8 @@ mod tests {
             .keywords
             .push(Keyword::Shroud);
 
-        let targets_p0 =
-            find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99));
-        let targets_p1 =
-            find_legal_targets(&state, &creature_filter(), PlayerId(1), ObjectId(99));
+        let targets_p0 = find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99));
+        let targets_p1 = find_legal_targets(&state, &creature_filter(), PlayerId(1), ObjectId(99));
         assert!(!targets_p0.contains(&TargetRef::Object(c1)));
         assert!(!targets_p1.contains(&TargetRef::Object(c1)));
     }
@@ -274,8 +303,13 @@ mod tests {
 
         state.battlefield.retain(|id| *id != c1);
 
-        let legal =
-            validate_targets(&state, &original, &creature_filter(), PlayerId(0), ObjectId(99));
+        let legal = validate_targets(
+            &state,
+            &original,
+            &creature_filter(),
+            PlayerId(0),
+            ObjectId(99),
+        );
         assert!(legal.contains(&TargetRef::Object(c0)));
         assert!(!legal.contains(&TargetRef::Object(c1)));
     }
@@ -481,8 +515,7 @@ mod tests {
     #[test]
     fn find_legal_targets_any_returns_creatures_and_players() {
         let (state, c0, c1, land) = setup_with_typed_creatures();
-        let targets =
-            find_legal_targets(&state, &TargetFilter::Any, PlayerId(0), ObjectId(99));
+        let targets = find_legal_targets(&state, &TargetFilter::Any, PlayerId(0), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(c0)));
         assert!(targets.contains(&TargetRef::Object(c1)));
         assert!(targets.contains(&TargetRef::Object(land)));
@@ -493,8 +526,7 @@ mod tests {
     #[test]
     fn find_legal_targets_player_returns_only_players() {
         let (state, _c0, _c1, _land) = setup_with_typed_creatures();
-        let targets =
-            find_legal_targets(&state, &TargetFilter::Player, PlayerId(0), ObjectId(99));
+        let targets = find_legal_targets(&state, &TargetFilter::Player, PlayerId(0), ObjectId(99));
         assert_eq!(targets.len(), 2);
         assert!(targets.contains(&TargetRef::Player(PlayerId(0))));
         assert!(targets.contains(&TargetRef::Player(PlayerId(1))));
@@ -539,7 +571,13 @@ mod tests {
         let (mut state, _c0, _c1, _land) = setup_with_typed_creatures();
         // Add a spell to the stack
         use crate::types::ability::{Effect, ResolvedAbility};
-        let spell_id = ObjectId(100);
+        let spell_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Test Spell".to_string(),
+            Zone::Stack,
+        );
         state.stack.push(crate::types::game_state::StackEntry {
             id: spell_id,
             source_id: spell_id,
@@ -565,5 +603,65 @@ mod tests {
         };
         let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(spell_id)));
+    }
+
+    #[test]
+    fn find_legal_targets_stack_restriction_excludes_battlefield() {
+        use crate::types::ability::FilterProp;
+        let (mut state, c0, _c1, _land) = setup_with_typed_creatures();
+
+        // Make c0 an artifact permanent on the battlefield.
+        state
+            .objects
+            .get_mut(&c0)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Artifact);
+
+        // Add an artifact spell to the stack.
+        use crate::types::ability::{Effect, ResolvedAbility};
+        let spell_id = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(1),
+            "Artifact Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push(crate::types::game_state::StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(1),
+            kind: crate::types::game_state::StackEntryKind::Spell {
+                card_id: CardId(200),
+                ability: ResolvedAbility::new(
+                    Effect::Unimplemented {
+                        name: "test".to_string(),
+                        description: None,
+                    },
+                    vec![],
+                    spell_id,
+                    PlayerId(1),
+                ),
+            },
+        });
+        let spell_obj = state.objects.get_mut(&spell_id).unwrap();
+        spell_obj
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Artifact);
+        spell_obj.zone = crate::types::zones::Zone::Stack;
+
+        let filter = TargetFilter::Typed {
+            card_type: Some(TypeFilter::Artifact),
+            subtype: None,
+            controller: None,
+            properties: vec![FilterProp::InZone {
+                zone: crate::types::zones::Zone::Stack,
+            }],
+        };
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
+        assert!(targets.contains(&TargetRef::Object(spell_id)));
+        assert!(!targets.contains(&TargetRef::Object(c0)));
     }
 }
