@@ -176,9 +176,20 @@ fn normalize_self_refs(text: &str, card_name: &str) -> String {
         .replace("this creature", "~")
         .replace("this enchantment", "~")
         .replace("this artifact", "~")
+        .replace("this land", "~")
+        .replace("this Equipment", "~")
+        .replace("this equipment", "~")
+        .replace("this Aura", "~")
+        .replace("this aura", "~")
+        .replace("this Vehicle", "~")
+        .replace("this vehicle", "~")
         .replace("This creature", "~")
         .replace("This enchantment", "~")
         .replace("This artifact", "~")
+        .replace("This land", "~")
+        .replace("This Equipment", "~")
+        .replace("This Aura", "~")
+        .replace("This Vehicle", "~")
 }
 
 fn split_trigger(lower: &str, original: &str) -> (String, String) {
@@ -402,6 +413,47 @@ fn try_parse_event(
         return Some((TriggerMode::Attacks, def));
     }
 
+    // "leaves the battlefield"
+    if rest.starts_with("leaves the battlefield") || rest.starts_with("leaves") {
+        let mut def = make_base();
+        def.mode = TriggerMode::LeavesBattlefield;
+        def.valid_card = Some(subject.clone());
+        // LTB triggers fire from the graveyard (object has already moved)
+        def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
+        return Some((TriggerMode::LeavesBattlefield, def));
+    }
+
+    // "becomes blocked"
+    if rest.starts_with("becomes blocked") {
+        let mut def = make_base();
+        def.mode = TriggerMode::BecomesBlocked;
+        def.valid_card = Some(subject.clone());
+        return Some((TriggerMode::BecomesBlocked, def));
+    }
+
+    // "is dealt combat damage" / "is dealt damage"
+    if rest.starts_with("is dealt combat damage") {
+        let mut def = make_base();
+        def.mode = TriggerMode::DamageReceived;
+        def.combat_damage = true;
+        def.valid_card = Some(subject.clone());
+        return Some((TriggerMode::DamageReceived, def));
+    }
+    if rest.starts_with("is dealt damage") {
+        let mut def = make_base();
+        def.mode = TriggerMode::DamageReceived;
+        def.valid_card = Some(subject.clone());
+        return Some((TriggerMode::DamageReceived, def));
+    }
+
+    // "becomes tapped"
+    if rest.starts_with("becomes tapped") {
+        let mut def = make_base();
+        def.mode = TriggerMode::Taps;
+        def.valid_card = Some(subject.clone());
+        return Some((TriggerMode::Taps, def));
+    }
+
     // Counter-related events: "a +1/+1 counter is put on ~" / "one or more counters are put on ~"
     if let Some(result) = try_parse_counter_trigger(full_lower) {
         return Some(result);
@@ -484,6 +536,23 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         let mut def = make_base();
         def.mode = TriggerMode::Drawn;
         return Some((TriggerMode::Drawn, def));
+    }
+
+    // "whenever you attack" — player-centric attack trigger
+    if lower.contains("whenever you attack") || lower.contains("when you attack") {
+        let mut def = make_base();
+        def.mode = TriggerMode::YouAttack;
+        return Some((TriggerMode::YouAttack, def));
+    }
+
+    // "when you cast this spell" — self-cast trigger (fires from stack)
+    if lower.contains("when you cast this spell") || lower.contains("when ~ is cast") {
+        let mut def = make_base();
+        def.mode = TriggerMode::SpellCast;
+        def.valid_card = Some(TargetFilter::SelfRef);
+        // Cast triggers fire while the spell is on the stack
+        def.trigger_zones = vec![Zone::Stack];
+        return Some((TriggerMode::SpellCast, def));
     }
 
     None
@@ -925,6 +994,124 @@ mod tests {
                 }],
             })
         );
+    }
+
+    // --- New trigger mode tests ---
+
+    #[test]
+    fn trigger_land_enters() {
+        let def = parse_trigger_line(
+            "When this land enters, you gain 1 life.",
+            "Bloodfell Caves",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_aura_enters() {
+        let def = parse_trigger_line(
+            "When this Aura enters, tap target creature an opponent controls.",
+            "Glaring Aegis",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_equipment_enters() {
+        let def = parse_trigger_line(
+            "When this Equipment enters, attach it to target creature you control.",
+            "Shining Armor",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_vehicle_enters() {
+        let def = parse_trigger_line(
+            "When this Vehicle enters, create a 1/1 white Pilot creature token.",
+            "Some Vehicle",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_leaves_battlefield() {
+        let def = parse_trigger_line(
+            "When Oblivion Ring leaves the battlefield, return the exiled card to the battlefield.",
+            "Oblivion Ring",
+        );
+        assert_eq!(def.mode, TriggerMode::LeavesBattlefield);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(def.trigger_zones.contains(&Zone::Graveyard));
+        assert!(def.trigger_zones.contains(&Zone::Exile));
+    }
+
+    #[test]
+    fn trigger_becomes_blocked() {
+        let def = parse_trigger_line(
+            "Whenever Gustcloak Cavalier becomes blocked, you may untap it and remove it from combat.",
+            "Gustcloak Cavalier",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesBlocked);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_is_dealt_damage() {
+        let def = parse_trigger_line(
+            "Whenever Spitemare is dealt damage, it deals that much damage to any target.",
+            "Spitemare",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageReceived);
+        assert!(!def.combat_damage);
+    }
+
+    #[test]
+    fn trigger_is_dealt_combat_damage() {
+        let def = parse_trigger_line(
+            "Whenever ~ is dealt combat damage, draw a card.",
+            "Some Card",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageReceived);
+        assert!(def.combat_damage);
+    }
+
+    #[test]
+    fn trigger_you_attack() {
+        let def = parse_trigger_line(
+            "Whenever you attack, create a 1/1 white Soldier creature token.",
+            "Some Card",
+        );
+        assert_eq!(def.mode, TriggerMode::YouAttack);
+    }
+
+    #[test]
+    fn trigger_becomes_tapped() {
+        let def = parse_trigger_line(
+            "Whenever Night Market Lookout becomes tapped, each opponent loses 1 life and you gain 1 life.",
+            "Night Market Lookout",
+        );
+        assert_eq!(def.mode, TriggerMode::Taps);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_you_cast_this_spell() {
+        let def = parse_trigger_line(
+            "When you cast this spell, draw cards equal to the greatest power among creatures you control.",
+            "Hydroid Krasis",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(def.trigger_zones.contains(&Zone::Stack));
     }
 
     #[test]

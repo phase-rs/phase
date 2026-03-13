@@ -13,6 +13,7 @@ pub enum TriggerMode {
     ChangesZone,
     ChangesZoneAll,
     ChangesController,
+    LeavesBattlefield,
 
     // Damage
     DamageDone,
@@ -20,6 +21,7 @@ pub enum TriggerMode {
     DamageAll,
     DamageDealtOnce,
     DamageDoneOnceByController,
+    DamageReceived,
     DamagePreventedOnce,
     ExcessDamage,
     ExcessDamageAll,
@@ -38,6 +40,7 @@ pub enum TriggerMode {
     // Combat -- attackers
     Attacks,
     AttackersDeclared,
+    YouAttack,
     AttackersDeclaredOneTarget,
     AttackerBlocked,
     AttackerBlockedOnce,
@@ -48,6 +51,7 @@ pub enum TriggerMode {
     // Combat -- blockers
     Blocks,
     BlockersDeclared,
+    BecomesBlocked,
 
     // Counters
     CounterAdded,
@@ -254,6 +258,7 @@ impl FromStr for TriggerMode {
             "BecomesCrewed" => TriggerMode::BecomesCrewed,
             "BecomesPlotted" => TriggerMode::BecomesPlotted,
             "BecomesSaddled" => TriggerMode::BecomesSaddled,
+            "BecomesBlocked" => TriggerMode::BecomesBlocked,
             "BecomesTarget" => TriggerMode::BecomesTarget,
             "BecomesTargetOnce" => TriggerMode::BecomesTargetOnce,
             "BlockersDeclared" => TriggerMode::BlockersDeclared,
@@ -286,6 +291,7 @@ impl FromStr for TriggerMode {
             "DamageDone" => TriggerMode::DamageDone,
             "DamageDoneOnce" => TriggerMode::DamageDoneOnce,
             "DamageDoneOnceByController" => TriggerMode::DamageDoneOnceByController,
+            "DamageReceived" => TriggerMode::DamageReceived,
             "DamagePreventedOnce" => TriggerMode::DamagePreventedOnce,
             "DayTimeChanges" => TriggerMode::DayTimeChanges,
             "Destroyed" => TriggerMode::Destroyed,
@@ -316,6 +322,7 @@ impl FromStr for TriggerMode {
             "Immediate" => TriggerMode::Immediate,
             "Investigated" => TriggerMode::Investigated,
             "LandPlayed" => TriggerMode::LandPlayed,
+            "LeavesBattlefield" => TriggerMode::LeavesBattlefield,
             "LifeGained" => TriggerMode::LifeGained,
             "LifeLost" => TriggerMode::LifeLost,
             "LifeLostAll" => TriggerMode::LifeLostAll,
@@ -377,6 +384,7 @@ impl FromStr for TriggerMode {
             "Untaps" => TriggerMode::Untaps,
             "VisitAttraction" => TriggerMode::VisitAttraction,
             "Vote" => TriggerMode::Vote,
+            "YouAttack" => TriggerMode::YouAttack,
             "Waterbend" => TriggerMode::Waterbend,
             _ => TriggerMode::Unknown(s.to_string()),
         };
@@ -477,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn trigger_mode_count_at_least_137() {
+    fn trigger_mode_count_at_least_141() {
         // Count all known variants by parsing Forge's trigger mode names
         let forge_modes = [
             "Abandoned",
@@ -496,6 +504,7 @@ mod tests {
             "AttackerUnblocked",
             "AttackerUnblockedOnce",
             "Attacks",
+            "BecomesBlocked",
             "BecomeMonarch",
             "BecomeMonstrous",
             "BecomeRenowned",
@@ -534,6 +543,7 @@ mod tests {
             "DamageDone",
             "DamageDoneOnce",
             "DamageDoneOnceByController",
+            "DamageReceived",
             "DamagePreventedOnce",
             "DayTimeChanges",
             "Destroyed",
@@ -564,6 +574,7 @@ mod tests {
             "Immediate",
             "Investigated",
             "LandPlayed",
+            "LeavesBattlefield",
             "LifeGained",
             "LifeLost",
             "LifeLostAll",
@@ -626,6 +637,7 @@ mod tests {
             "VisitAttraction",
             "Vote",
             "Waterbend",
+            "YouAttack",
         ];
 
         let mut known_count = 0;
@@ -636,8 +648,8 @@ mod tests {
             }
         }
         assert!(
-            known_count >= 137,
-            "Expected 137+ known trigger modes, got {known_count}"
+            known_count >= 141,
+            "Expected 141+ known trigger modes, got {known_count}"
         );
     }
 }

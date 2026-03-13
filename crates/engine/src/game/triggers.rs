@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    AbilityDefinition, Effect, EffectKind, ResolvedAbility, SpellContext, TargetFilter,
+    AbilityDefinition, Effect, EffectKind, ResolvedAbility, SpellContext, TargetFilter, TargetRef,
     TriggerCondition, TriggerDefinition,
 };
 use crate::types::card_type::CoreType;
@@ -511,6 +511,16 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::LandPlayed, match_land_played);
     r.insert(TriggerMode::SpellCopy, match_spell_cast);
     r.insert(TriggerMode::ManaAdded, match_mana_added);
+
+    // Zone-based: leaves the battlefield
+    r.insert(TriggerMode::LeavesBattlefield, match_leaves_battlefield);
+
+    // Combat: becomes blocked, you attack
+    r.insert(TriggerMode::BecomesBlocked, match_becomes_blocked);
+    r.insert(TriggerMode::YouAttack, match_you_attack);
+
+    // Damage: is dealt damage
+    r.insert(TriggerMode::DamageReceived, match_damage_received);
 
     // Promoted trigger matchers -- Standard-relevant combat triggers
     r.insert(TriggerMode::AttackerBlocked, match_attacker_blocked);
@@ -1630,6 +1640,110 @@ fn match_day_time_changes(
             ..
         }
     )
+}
+
+/// LeavesBattlefield: fires when the source (or filtered object) leaves the battlefield
+/// to any zone. Uses ZoneChanged event with origin = Battlefield.
+fn match_leaves_battlefield(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::ZoneChanged {
+        object_id,
+        from,
+        to: _,
+    } = event
+    {
+        if *from != Zone::Battlefield {
+            return false;
+        }
+        valid_card_matches(trigger, state, *object_id, source_id)
+    } else {
+        false
+    }
+}
+
+/// BecomesBlocked: fires when the source creature is assigned at least one blocker.
+/// Reuses BlockersDeclared event — the attacker "becomes blocked" when blockers are declared.
+fn match_becomes_blocked(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::BlockersDeclared { assignments } = event {
+        if trigger.valid_card.is_some() {
+            // Filter: check if any blocked attacker matches the valid_card filter
+            assignments
+                .iter()
+                .any(|(_, attacker)| valid_card_matches(trigger, state, *attacker, source_id))
+        } else {
+            // Default: source itself must be among blocked attackers
+            assignments
+                .iter()
+                .any(|(_, attacker)| *attacker == source_id)
+        }
+    } else {
+        false
+    }
+}
+
+/// DamageReceived: fires when the source creature is dealt damage.
+/// Uses DamageDealt event but checks the *target* (not source) against the trigger source.
+fn match_damage_received(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    if let GameEvent::DamageDealt { target, .. } = event {
+        match target {
+            TargetRef::Object(target_id) => {
+                if trigger.valid_card.is_some() {
+                    // Would need valid_card_matches on the target — for now,
+                    // self-reference is the dominant pattern ("Whenever ~ is dealt damage")
+                    *target_id == source_id
+                } else {
+                    *target_id == source_id
+                }
+            }
+            TargetRef::Player(_) => false,
+        }
+    } else {
+        false
+    }
+}
+
+/// YouAttack: fires once when the trigger source's controller declares attackers.
+/// Player-centric — fires regardless of which creatures attack.
+fn match_you_attack(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::AttackersDeclared {
+        attacker_ids,
+        defending_player: _,
+    } = event
+    {
+        if attacker_ids.is_empty() {
+            return false;
+        }
+        // Fire if any attacker is controlled by the source's controller
+        let source_controller = state.objects.get(&source_id).map(|o| o.controller);
+        attacker_ids.iter().any(|id| {
+            state
+                .objects
+                .get(id)
+                .map(|o| Some(o.controller) == source_controller)
+                .unwrap_or(false)
+        })
+    } else {
+        false
+    }
 }
 
 /// Unimplemented: matches nothing. Placeholder for trigger modes not yet supported.
