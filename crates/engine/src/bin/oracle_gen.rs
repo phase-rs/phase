@@ -9,8 +9,8 @@ use engine::database::legality::{legalities_to_export_map, normalize_legalities}
 use engine::database::mtgjson::{load_atomic_cards, parse_mtgjson_mana_cost, AtomicCard};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaProduction, PtValue,
-    TargetFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, ControllerRef, Effect,
+    ManaProduction, PtValue, TargetFilter, TypedFilter,
 };
 use engine::types::card::{CardFace, CardLayout};
 use engine::types::card_type::{CardType, CoreType, Supertype};
@@ -263,11 +263,12 @@ fn build_oracle_face(mtgjson: &AtomicCard, oracle_id: Option<String>) -> CardFac
         color_override,
         scryfall_oracle_id: oracle_id,
         modal: parsed.modal,
-        optional_cost: parsed.optional_cost,
+        additional_cost: parsed.additional_cost,
     };
 
     synthesize_basic_land_mana(&mut face);
     synthesize_equip(&mut face);
+    synthesize_kicker(&mut face);
     face
 }
 
@@ -396,6 +397,22 @@ fn synthesize_equip(face: &mut CardFace) {
         .collect();
 
     face.abilities.extend(equip_abilities);
+}
+
+fn synthesize_kicker(face: &mut CardFace) {
+    if face.additional_cost.is_some() {
+        return;
+    }
+    if let Some(cost) = face
+        .keywords
+        .iter()
+        .find_map(|k| match k {
+            Keyword::Kicker(cost) => Some(cost.clone()),
+            _ => None,
+        })
+    {
+        face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Mana { cost }));
+    }
 }
 
 fn layout_faces(layout: &CardLayout) -> Vec<&CardFace> {

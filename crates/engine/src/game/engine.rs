@@ -155,6 +155,32 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             casting::handle_cancel_cast(state, pending_cast, &mut events);
             WaitingFor::Priority { player: *player }
         }
+        (
+            WaitingFor::OptionalCostChoice {
+                player,
+                cost,
+                pending_cast,
+            },
+            GameAction::DecideOptionalCost { pay },
+        ) => casting::handle_decide_additional_cost(
+            state,
+            *player,
+            *pending_cast.clone(),
+            cost,
+            pay,
+            &mut events,
+        )?,
+        (
+            WaitingFor::OptionalCostChoice {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => {
+            casting::handle_cancel_cast(state, pending_cast, &mut events);
+            WaitingFor::Priority { player: *player }
+        }
         (WaitingFor::ManaPayment { player }, GameAction::CancelCast) => {
             WaitingFor::Priority { player: *player }
         }

@@ -552,7 +552,7 @@ mod tests {
             color_override: None,
             scryfall_oracle_id: None,
             modal: None,
-            optional_cost: None,
+            additional_cost: None,
         };
 
         let obj_id = create_commander_from_card_face(&mut state, &face, PlayerId(0));

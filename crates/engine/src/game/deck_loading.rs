@@ -215,7 +215,7 @@ pub fn create_object_from_card_face(
     obj.color = color.clone();
     obj.base_color = color;
     obj.modal = card_face.modal.clone();
-    obj.optional_cost = card_face.optional_cost.clone();
+    obj.additional_cost = card_face.additional_cost.clone();
 
     obj_id
 }
@@ -259,7 +259,7 @@ pub fn create_commander_from_card_face(
     obj.base_color = color;
     obj.is_commander = true;
     obj.modal = card_face.modal.clone();
-    obj.optional_cost = card_face.optional_cost.clone();
+    obj.additional_cost = card_face.additional_cost.clone();
 
     obj_id
 }
@@ -402,7 +402,7 @@ mod tests {
             color_override: None,
             scryfall_oracle_id: None,
             modal: None,
-            optional_cost: None,
+            additional_cost: None,
         }
     }
 
@@ -439,7 +439,7 @@ mod tests {
             color_override: None,
             scryfall_oracle_id: None,
             modal: None,
-            optional_cost: None,
+            additional_cost: None,
         }
     }
 

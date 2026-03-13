@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, BasicLandType, ChosenAttribute, ChosenSubtypeKind, ModalChoice,
-    ReplacementDefinition, StaticDefinition, TriggerDefinition,
+    AbilityDefinition, AdditionalCost, BasicLandType, ChosenAttribute, ChosenSubtypeKind,
+    ModalChoice, ReplacementDefinition, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card_type::CardType;
 use crate::types::identifiers::{CardId, ObjectId};
@@ -121,9 +121,9 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modal: Option<ModalChoice>,
 
-    /// Optional additional casting cost. Copied from CardFace at load time.
+    /// Additional casting cost. Copied from CardFace at load time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub optional_cost: Option<AbilityCost>,
+    pub additional_cost: Option<AdditionalCost>,
 
     /// Choices made as this permanent entered (e.g., "choose a color").
     /// Persists for the object's lifetime on the battlefield.
@@ -174,7 +174,7 @@ impl GameObject {
             loyalty_activated_this_turn: false,
             is_commander: false,
             modal: None,
-            optional_cost: None,
+            additional_cost: None,
             chosen_attributes: Vec::new(),
         }
     }

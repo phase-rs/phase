@@ -5,7 +5,7 @@ use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    AbilityCost, ChoiceType, ModalChoice, ResolvedAbility, TargetFilter, TargetRef,
+    AdditionalCost, ChoiceType, ModalChoice, ResolvedAbility, TargetFilter, TargetRef,
     TriggerCondition,
 };
 use super::events::GameEvent;
@@ -180,10 +180,10 @@ pub enum WaitingFor {
         /// The ObjectIds of all cards in the player's hand (the chooseable set).
         cards: Vec<ObjectId>,
     },
-    /// Player may choose to pay an optional additional cost (e.g. kicker, blight).
+    /// Player must decide on an additional casting cost (e.g. kicker, blight, "or pay").
     OptionalCostChoice {
         player: PlayerId,
-        cost: AbilityCost,
+        cost: AdditionalCost,
         pending_cast: Box<PendingCast>,
     },
 }
@@ -667,7 +667,9 @@ mod tests {
             },
             WaitingFor::OptionalCostChoice {
                 player: PlayerId(0),
-                cost: crate::types::ability::AbilityCost::Blight { count: 1 },
+                cost: AdditionalCost::Optional(crate::types::ability::AbilityCost::Blight {
+                    count: 1,
+                }),
                 pending_cast: Box::new(PendingCast {
                     object_id: ObjectId(1),
                     card_id: CardId(1),

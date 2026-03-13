@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ResolvedAbility, TargetFilter, TargetRef,
+    AbilityDefinition, AbilityKind, AdditionalCost, Effect, ResolvedAbility, SpellContext,
+    TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -241,7 +242,7 @@ pub fn handle_cast_spell(
             if legal.len() == 1 {
                 let mut resolved = resolved;
                 resolved.targets = legal;
-                return pay_and_push(
+                return check_additional_cost_or_pay(
                     state, player, object_id, card_id, resolved, &mana_cost, events,
                 );
             } else {
@@ -271,7 +272,7 @@ pub fn handle_cast_spell(
             // Auto-target
             let mut resolved = resolved;
             resolved.targets = legal;
-            return pay_and_push(
+            return check_additional_cost_or_pay(
                 state, player, object_id, card_id, resolved, &mana_cost, events,
             );
         } else {
@@ -289,8 +290,8 @@ pub fn handle_cast_spell(
         }
     }
 
-    // 6. Pay mana cost
-    pay_and_push(
+    // 6. Check additional cost, then pay mana cost
+    check_additional_cost_or_pay(
         state, player, object_id, card_id, resolved, &mana_cost, events,
     )
 }
@@ -431,7 +432,7 @@ pub fn handle_select_modes(
         if legal.len() == 1 {
             let mut resolved = resolved;
             resolved.targets = legal;
-            return pay_and_push(
+            return check_additional_cost_or_pay(
                 state,
                 player,
                 pending.object_id,
@@ -454,8 +455,8 @@ pub fn handle_select_modes(
         }
     }
 
-    // No targets needed -- go straight to payment
-    pay_and_push(
+    // No targets needed -- check additional cost, then pay
+    check_additional_cost_or_pay(
         state,
         player,
         pending.object_id,
@@ -543,7 +544,7 @@ pub fn handle_select_targets(
     let mut ability = pending.ability;
     ability.targets = targets;
 
-    pay_and_push(
+    check_additional_cost_or_pay(
         state,
         player,
         pending.object_id,
@@ -713,7 +714,84 @@ pub fn handle_cancel_cast(
     }
 }
 
-/// Pay the mana cost, move card to stack, push stack entry, emit events.
+/// Handle the player's decision on an additional cost (kicker, blight, "or pay").
+///
+/// For `Optional`: `pay=true` sets `additional_cost_paid`, `pay=false` skips.
+/// For `Choice`: `pay=true` uses first cost (blight), `pay=false` uses second (mana fallback).
+pub fn handle_decide_additional_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    additional_cost: &AdditionalCost,
+    pay: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let mut ability = pending.ability;
+
+    match additional_cost {
+        AdditionalCost::Optional(_cost) => {
+            if pay {
+                ability.context.additional_cost_paid = true;
+                // TODO: actually deduct the cost (blight counters, mana, etc.)
+            }
+        }
+        AdditionalCost::Choice(_preferred, _fallback) => {
+            if pay {
+                ability.context.additional_cost_paid = true;
+                // TODO: deduct preferred cost
+            } else {
+                // TODO: deduct fallback cost
+            }
+        }
+    }
+
+    pay_and_push(
+        state,
+        player,
+        pending.object_id,
+        pending.card_id,
+        ability,
+        &pending.cost,
+        events,
+    )
+}
+
+/// Check for an additional cost on the object being cast. If one exists,
+/// return `WaitingFor::OptionalCostChoice` so the player can decide;
+/// otherwise proceed directly to `pay_and_push`.
+///
+/// This function sits between targeting and payment in the casting pipeline:
+/// `CastSpell → [ModeChoice] → [TargetSelection] → [AdditionalCostChoice] → pay_and_push → Stack`
+fn check_additional_cost_or_pay(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    ability: ResolvedAbility,
+    cost: &crate::types::mana::ManaCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let additional = state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.additional_cost.clone());
+
+    if let Some(additional_cost) = additional {
+        return Ok(WaitingFor::OptionalCostChoice {
+            player,
+            cost: additional_cost,
+            pending_cast: Box::new(PendingCast {
+                object_id,
+                card_id,
+                ability,
+                cost: cost.clone(),
+            }),
+        });
+    }
+
+    pay_and_push(state, player, object_id, card_id, ability, cost, events)
+}
+
 fn pay_and_push(
     state: &mut GameState,
     player: PlayerId,

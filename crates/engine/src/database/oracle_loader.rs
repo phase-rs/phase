@@ -9,8 +9,8 @@ use crate::database::mtgjson::{load_atomic_cards, parse_mtgjson_mana_cost, Atomi
 use crate::game::deck_loading::derive_colors_from_mana_cost;
 use crate::parser::oracle::parse_oracle_text;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Effect,
-    ManaProduction, PtValue, StaticDefinition, TargetFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, ContinuousModification,
+    ControllerRef, Effect, ManaProduction, PtValue, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::card::{CardFace, CardLayout, CardRules};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -148,6 +148,27 @@ fn synthesize_changeling_cda(face: &mut CardFace) {
     }
 }
 
+/// Synthesize `additional_cost` from `Keyword::Kicker(ManaCost)`.
+///
+/// If the card has Kicker and no additional_cost was already parsed from Oracle text
+/// (blight takes precedence since it's parsed from the "as an additional cost" line),
+/// set `additional_cost = Some(AdditionalCost::Optional(AbilityCost::Mana { cost }))`.
+fn synthesize_kicker(face: &mut CardFace) {
+    if face.additional_cost.is_some() {
+        return;
+    }
+    if let Some(cost) = face
+        .keywords
+        .iter()
+        .find_map(|k| match k {
+            Keyword::Kicker(cost) => Some(cost.clone()),
+            _ => None,
+        })
+    {
+        face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Mana { cost }));
+    }
+}
+
 fn build_oracle_face(mtgjson: &AtomicCard, oracle_id: Option<String>) -> CardFace {
     let card_type = build_card_type(mtgjson);
     // Raw MTGJSON keyword names (lowercased) for keyword-only line detection
@@ -224,12 +245,13 @@ fn build_oracle_face(mtgjson: &AtomicCard, oracle_id: Option<String>) -> CardFac
         color_override,
         scryfall_oracle_id: oracle_id,
         modal: parsed.modal,
-        optional_cost: parsed.optional_cost,
+        additional_cost: parsed.additional_cost,
     };
 
     synthesize_basic_land_mana(&mut face);
     synthesize_equip(&mut face);
     synthesize_changeling_cda(&mut face);
+    synthesize_kicker(&mut face);
     face
 }
 

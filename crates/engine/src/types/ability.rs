@@ -662,6 +662,25 @@ pub enum AbilityCost {
 }
 
 // ---------------------------------------------------------------------------
+// AdditionalCost — models the different "as an additional cost" patterns
+// ---------------------------------------------------------------------------
+
+/// An additional cost that a player must decide on during casting.
+///
+/// This is the building block for all "as an additional cost to cast this spell"
+/// patterns, including kicker, blight, and other future cost mechanics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum AdditionalCost {
+    /// "you may [cost]" — player decides whether to pay.
+    /// If paid, `SpellContext::additional_cost_paid` is set to true.
+    Optional(AbilityCost),
+    /// "[cost A] or [cost B]" — player must pay exactly one.
+    /// Choosing the first cost sets `additional_cost_paid = true`.
+    Choice(AbilityCost, AbilityCost),
+}
+
+// ---------------------------------------------------------------------------
 // Effect enum -- typed variants, zero HashMap
 // ---------------------------------------------------------------------------
 

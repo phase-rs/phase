@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, Effect, ModalChoice, ReplacementDefinition,
-    StaticDefinition, TriggerDefinition, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, Effect, ModalChoice,
+    ReplacementDefinition, StaticDefinition, TriggerDefinition, TypedFilter,
 };
 use crate::types::keywords::Keyword;
 
@@ -11,7 +11,7 @@ use super::oracle_effect::parse_effect_chain;
 use super::oracle_replacement::parse_replacement_line;
 use super::oracle_static::parse_static_line;
 use super::oracle_trigger::parse_trigger_line;
-use super::oracle_util::strip_reminder_text;
+use super::oracle_util::{parse_mana_symbols, strip_reminder_text};
 
 /// Collected parsed abilities from Oracle text.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,9 +27,9 @@ pub struct ParsedAbilities {
     /// Modal spell metadata, set when Oracle text begins with "Choose one —" etc.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modal: Option<ModalChoice>,
-    /// Optional additional casting cost parsed from "As an additional cost..." text.
+    /// Additional casting cost parsed from "As an additional cost..." text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub optional_cost: Option<AbilityCost>,
+    pub additional_cost: Option<AdditionalCost>,
 }
 
 /// Parse Oracle text into structured ability definitions.
@@ -59,7 +59,7 @@ pub fn parse_oracle_text(
         replacements: Vec::new(),
         extracted_keywords: Vec::new(),
         modal: None,
-        optional_cost: None,
+        additional_cost: None,
     };
 
     let lines: Vec<&str> = oracle_text.split('\n').collect();
@@ -182,8 +182,9 @@ pub fn parse_oracle_text(
             }
         }
 
-        // Priority 8b: "As an additional cost to cast this spell" — skip (casting modifier, not ability)
+        // Priority 8b: "As an additional cost to cast this spell"
         if lower.starts_with("as an additional cost") {
+            result.additional_cost = parse_additional_cost_line(&lower, &line);
             i += 1;
             continue;
         }
@@ -883,9 +884,51 @@ fn make_unimplemented(line: &str) -> AbilityDefinition {
     .description(line.to_string())
 }
 
+/// Parse "As an additional cost to cast this spell, ..." into an `AdditionalCost`.
+///
+/// Recognized patterns:
+/// - "you may blight N" → `Optional(Blight { count: N })`
+/// - "blight N or pay {M}" → `Choice(Blight { count: N }, Mana { cost: M })`
+fn parse_additional_cost_line(lower: &str, _raw: &str) -> Option<AdditionalCost> {
+    // Pattern: "you may blight N" → Optional
+    if let Some(pos) = lower.find("you may blight ") {
+        let after = &lower[pos + "you may blight ".len()..];
+        let count = parse_blight_count(after);
+        return Some(AdditionalCost::Optional(AbilityCost::Blight { count }));
+    }
+
+    // Pattern: "blight N or pay {M}" → Choice
+    if let Some(pos) = lower.find("blight ") {
+        let after_blight = &lower[pos + "blight ".len()..];
+        let count = parse_blight_count(after_blight);
+
+        if let Some(or_pos) = after_blight.find(" or pay ") {
+            let or_abs_pos = pos + "blight ".len() + or_pos + " or pay ".len();
+            let mana_part = &_raw[or_abs_pos..];
+            if let Some((mana_cost, _)) = parse_mana_symbols(mana_part.trim_end_matches('.')) {
+                return Some(AdditionalCost::Choice(
+                    AbilityCost::Blight { count },
+                    AbilityCost::Mana { cost: mana_cost },
+                ));
+            }
+        }
+    }
+
+    None
+}
+
+/// Extract the blight count (N) from text starting after "blight ".
+fn parse_blight_count(text: &str) -> u32 {
+    text.split(|c: char| !c.is_ascii_digit())
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::mana::ManaCost;
 
     fn parse(
         text: &str,
@@ -1249,5 +1292,75 @@ mod tests {
             parse_modal_choose_count("choose any number of —"),
             (1, usize::MAX)
         );
+    }
+
+    #[test]
+    fn parse_additional_cost_optional_blight() {
+        let lower = "as an additional cost to cast this spell, you may blight 1.";
+        let raw = "As an additional cost to cast this spell, you may blight 1.";
+        let result = parse_additional_cost_line(lower, raw);
+        assert_eq!(
+            result,
+            Some(AdditionalCost::Optional(AbilityCost::Blight { count: 1 }))
+        );
+    }
+
+    #[test]
+    fn parse_additional_cost_optional_blight_2() {
+        let lower = "as an additional cost to cast this spell, you may blight 2.";
+        let raw = "As an additional cost to cast this spell, you may blight 2.";
+        let result = parse_additional_cost_line(lower, raw);
+        assert_eq!(
+            result,
+            Some(AdditionalCost::Optional(AbilityCost::Blight { count: 2 }))
+        );
+    }
+
+    #[test]
+    fn parse_additional_cost_choice_blight_or_pay() {
+        let lower = "as an additional cost to cast this spell, blight 2 or pay {1}.";
+        let raw = "As an additional cost to cast this spell, blight 2 or pay {1}.";
+        let result = parse_additional_cost_line(lower, raw);
+        assert_eq!(
+            result,
+            Some(AdditionalCost::Choice(
+                AbilityCost::Blight { count: 2 },
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        generic: 1,
+                        shards: vec![]
+                    }
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_additional_cost_choice_blight_or_pay_3() {
+        let lower = "as an additional cost to cast this spell, blight 1 or pay {3}.";
+        let raw = "As an additional cost to cast this spell, blight 1 or pay {3}.";
+        let result = parse_additional_cost_line(lower, raw);
+        assert_eq!(
+            result,
+            Some(AdditionalCost::Choice(
+                AbilityCost::Blight { count: 1 },
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        generic: 3,
+                        shards: vec![]
+                    }
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_additional_cost_mandatory_blight_skipped() {
+        // Mandatory blight (no "you may", no "or") — not yet modeled
+        let lower = "as an additional cost to cast this spell, blight 2.";
+        let raw = "As an additional cost to cast this spell, blight 2.";
+        let result = parse_additional_cost_line(lower, raw);
+        // Mandatory without "or" currently falls through (no choice to present)
+        assert!(result.is_none());
     }
 }
