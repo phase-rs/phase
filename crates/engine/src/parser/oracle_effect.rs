@@ -52,6 +52,56 @@ struct AnimationSpec {
     remove_all_abilities: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClauseAst {
+    Imperative {
+        text: String,
+    },
+    SubjectPredicate {
+        subject: SubjectPhraseAst,
+        predicate: PredicateAst,
+    },
+    Conditional {
+        condition_text: String,
+        clause: Box<ClauseAst>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubjectPhraseAst {
+    text: String,
+    affected: TargetFilter,
+    target: Option<TargetFilter>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PredicateAst {
+    Continuous {
+        effect: Effect,
+        duration: Option<Duration>,
+        sub_ability: Option<Box<AbilityDefinition>>,
+    },
+    Become {
+        effect: Effect,
+        duration: Option<Duration>,
+    },
+    Restriction {
+        effect: Effect,
+        duration: Option<Duration>,
+    },
+    ImperativeFallback {
+        text: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClauseContinuation {
+    SearchDestination { destination: Zone },
+    RevealHandFilter { card_filter: TargetFilter },
+    ManaRestriction { restriction: ManaSpendRestriction },
+    CounterSourceStatic { source_static: StaticDefinition },
+}
+
 /// Parse an effect clause from Oracle text into an Effect enum.
 /// This handles the verb-based matching for spell effects, activated ability effects,
 /// and the effect portion of triggered abilities.
@@ -75,28 +125,53 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
         return with_clause_duration(parse_effect_clause(rest), duration);
     }
 
+    let ast = parse_clause_ast(text);
+    lower_clause_ast(ast)
+}
+
+fn parse_clause_ast(text: &str) -> ClauseAst {
+    let text = text.trim();
+
     // Mirror the CubeArtisan grammar's high-level sentence shapes:
     // 1) conditionals ("if X, Y"), 2) subject + verb phrase, 3) bare imperative.
-    if let Some(stripped) = strip_leading_conditional(text) {
-        return parse_effect_clause(&stripped);
+    if let Some((condition_text, remainder)) = split_leading_conditional(text) {
+        return ClauseAst::Conditional {
+            condition_text,
+            clause: Box::new(parse_clause_ast(&remainder)),
+        };
     }
-    if let Some(clause) = try_parse_subject_continuous_clause(text) {
-        return clause;
+
+    if let Some(ast) = try_parse_subject_predicate_ast(text) {
+        return ast;
     }
-    if let Some(clause) = try_parse_subject_become_clause(text) {
-        return clause;
+
+    ClauseAst::Imperative {
+        text: text.to_string(),
     }
-    if let Some(clause) = try_parse_subject_restriction_clause(text) {
-        return clause;
+}
+
+fn lower_clause_ast(ast: ClauseAst) -> ParsedEffectClause {
+    match ast {
+        ClauseAst::Imperative { text } => lower_imperative_clause(&text),
+        ClauseAst::SubjectPredicate { subject, predicate } => {
+            lower_subject_predicate_ast(subject, predicate)
+        }
+        ClauseAst::Conditional {
+            condition_text: _condition_text,
+            clause,
+        } => {
+            // Phase 2 preserves current semantics for generic leading conditionals:
+            // recognize the structure explicitly, but lower only the body.
+            lower_clause_ast(*clause)
+        }
     }
+}
+
+fn lower_imperative_clause(text: &str) -> ParsedEffectClause {
     // "Its controller gains life equal to its power/toughness" — subject must be preserved
     // because the life recipient is not the caster but the targeted permanent's controller.
     if let Some(clause) = try_parse_targeted_controller_gain_life(text) {
         return clause;
-    }
-
-    if let Some(stripped) = strip_subject_clause(text) {
-        return parse_effect_clause(&stripped);
     }
 
     let (stripped, duration) = strip_trailing_duration(text);
@@ -105,6 +180,30 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
         clause.duration = duration;
     }
     clause
+}
+
+fn lower_subject_predicate_ast(
+    _subject: SubjectPhraseAst,
+    predicate: PredicateAst,
+) -> ParsedEffectClause {
+    match predicate {
+        PredicateAst::Continuous {
+            effect,
+            duration,
+            sub_ability,
+        } => ParsedEffectClause {
+            effect,
+            duration,
+            sub_ability,
+        },
+        PredicateAst::Become { effect, duration }
+        | PredicateAst::Restriction { effect, duration } => ParsedEffectClause {
+            effect,
+            duration,
+            sub_ability: None,
+        },
+        PredicateAst::ImperativeFallback { text } => lower_imperative_clause(&text),
+    }
 }
 
 fn parse_imperative_effect(text: &str) -> Effect {
@@ -1059,145 +1158,65 @@ fn all_mana_colors() -> Vec<ManaColor> {
     ]
 }
 
-/// Parse a compound effect chain: split on ". " or ".\n" boundaries and ", then ".
-/// Returns an AbilityDefinition with sub_ability chain for compound effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClauseBoundary {
+    Sentence,
+    Then,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClauseChunk {
+    text: String,
+    boundary_after: Option<ClauseBoundary>,
+}
+
+/// Parse a compound effect chain into an `AbilityDefinition` sub-ability chain.
+///
+/// Phase 1 keeps the existing clause/effect semantics but replaces the fragile
+/// textual `replace(", then ", ". ").split(". ")` logic with a boundary-aware
+/// splitter that preserves whether a chunk ended a sentence or was linked by
+/// `, then`.
 pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
-    let sentences = split_effect_sentences(text);
-    let mut defs: Vec<AbilityDefinition> = sentences
-        .iter()
-        .flat_map(|s| {
-            let (condition, text) = strip_additional_cost_conditional(s);
-            let clause = parse_effect_clause(&text);
-            let mut def = {
-                let mut d = AbilityDefinition::new(kind, clause.effect);
-                if let Some(dur) = clause.duration {
-                    d = d.duration(dur);
-                }
-                if let Some(cond) = condition {
-                    d = d.condition(cond);
-                }
-                d
-            };
-            // If the clause produced a compound sub_ability (e.g., pump "and" life gain),
-            // emit both as separate defs so they chain properly.
-            if let Some(sub) = clause.sub_ability {
-                let sub_def = *sub;
-                def.sub_ability = None;
-                vec![def, sub_def]
-            } else {
-                vec![def]
-            }
-        })
-        .collect();
+    let chunks = split_clause_sequence(text);
+    let mut defs: Vec<AbilityDefinition> = Vec::new();
 
-    // For SearchLibrary: inject ChangeZone sub_ability for the destination,
-    // parsed from the original search sentence text.
-    if !defs.is_empty() && matches!(defs[0].effect, Effect::SearchLibrary { .. }) {
-        let search_text = &sentences[0];
-        let lower = search_text.to_lowercase();
-        let destination = parse_search_destination(&lower);
-        let change_zone = AbilityDefinition::new(
-            kind,
-            Effect::ChangeZone {
-                origin: Some(Zone::Library),
-                destination,
-                target: TargetFilter::Any,
-            },
-        );
-        // Insert ChangeZone as second element (between search and shuffle)
-        defs.insert(1, change_zone);
-    }
+    for chunk in &chunks {
+        let (condition, text) = strip_additional_cost_conditional(&chunk.text);
+        let clause = parse_effect_clause(&text);
+        let mut def = AbilityDefinition::new(kind, clause.effect);
+        if let Some(duration) = clause.duration {
+            def = def.duration(duration);
+        }
+        if let Some(condition) = condition {
+            def = def.condition(condition);
+        }
 
-    // For RevealHand: absorb "choose X card from it" sentences as the card_filter
-    // on the preceding RevealHand, then remove the redundant definition.
-    // "look at target opponent's hand. You may exile a nonland card from it" →
-    //   RevealHand gets card_filter: nonland, ChangeZone stays as sub_ability.
-    // "reveals their hand. You choose an artifact or creature card from it. Exile that card." →
-    //   RevealHand gets card_filter: Or[Artifact, Creature], ChangeZone stays as sub_ability.
-    if !defs.is_empty() && matches!(defs[0].effect, Effect::RevealHand { .. }) {
-        let mut absorbed_index = None;
-        for (idx, sentence) in sentences.iter().enumerate().skip(1) {
-            let sub_lower = sentence.to_lowercase();
-            if sub_lower.contains("card from it") || sub_lower.contains("card from among") {
-                // Choose between sentence-level filter and the independently parsed def's filter
-                let card_filter =
-                    if sub_lower.starts_with("you choose ") || sub_lower.starts_with("choose ") {
-                        // "You choose an artifact or creature card from it" — use parse_choose_filter
-                        // which handles "or" conjunctions properly
-                        parse_choose_filter(&sub_lower)
-                    } else {
-                        parse_choose_filter_from_sentence(&sub_lower)
-                    };
-                if let Effect::RevealHand {
-                    card_filter: ref mut cf,
-                    ..
-                } = defs[0].effect
-                {
-                    *cf = card_filter;
-                }
-                // Mark this sentence's def for removal — it was absorbed into the RevealHand
-                if idx < defs.len() && matches!(defs[idx].effect, Effect::RevealHand { .. }) {
-                    absorbed_index = Some(idx);
-                }
-                break;
-            }
+        let mut current_defs = vec![def];
+        if let Some(sub) = clause.sub_ability {
+            current_defs.push(*sub);
         }
-        if let Some(idx) = absorbed_index {
-            defs.remove(idx);
-        }
-    }
 
-    // For Mana effects: absorb "Spend this mana only to cast..." sentences as restrictions
-    // on the preceding Effect::Mana, then remove the absorbed definition.
-    // "Add one mana of any color. Spend this mana only to cast a creature spell of the chosen type"
-    //   → Effect::Mana gets restrictions: [ChosenCreatureType]
-    if !defs.is_empty() && matches!(defs[0].effect, Effect::Mana { .. }) {
-        let mut absorbed_indices = Vec::new();
-        for (idx, sentence) in sentences.iter().enumerate().skip(1) {
-            let sub_lower = sentence.to_lowercase();
-            if let Some(restriction) = parse_mana_spend_restriction(&sub_lower) {
-                if let Effect::Mana {
-                    restrictions: ref mut rs,
-                    ..
-                } = defs[0].effect
-                {
-                    rs.push(restriction);
-                }
-                absorbed_indices.push(idx);
-            }
+        let followup_continuation = defs
+            .last()
+            .and_then(|previous| parse_followup_continuation(&chunk.text, &previous.effect));
+        let absorb_followup = followup_continuation.as_ref().is_some_and(|continuation| {
+            current_defs
+                .first()
+                .is_some_and(|current| continuation_absorbs_current(continuation, &current.effect))
+        });
+        if let Some(continuation) = followup_continuation {
+            apply_clause_continuation(&mut defs, continuation, kind);
         }
-        // Remove absorbed defs in reverse order to preserve indices
-        for idx in absorbed_indices.into_iter().rev() {
-            if idx < defs.len() {
-                defs.remove(idx);
-            }
+        if absorb_followup {
+            continue;
         }
-    }
 
-    // For Counter effects: absorb "if...countered this way, that permanent loses all
-    // abilities for as long as ~" as a source_static on the Counter effect.
-    if !defs.is_empty() && matches!(defs[0].effect, Effect::Counter { .. }) {
-        let mut absorbed_indices = Vec::new();
-        for (idx, sentence) in sentences.iter().enumerate().skip(1) {
-            let sub_lower = sentence.to_lowercase();
-            if sub_lower.contains("countered this way") && sub_lower.contains("loses all abilities")
-            {
-                if let Effect::Counter {
-                    ref mut source_static,
-                    ..
-                } = defs[0].effect
-                {
-                    *source_static = Some(StaticDefinition::continuous().modifications(vec![
-                        crate::types::ability::ContinuousModification::RemoveAllAbilities,
-                    ]));
-                }
-                absorbed_indices.push(idx);
-            }
-        }
-        for idx in absorbed_indices.into_iter().rev() {
-            if idx < defs.len() {
-                defs.remove(idx);
-            }
+        let intrinsic_continuation =
+            parse_intrinsic_continuation(&chunk.text, &current_defs[0].effect);
+        defs.extend(current_defs);
+
+        if let Some(continuation) = intrinsic_continuation {
+            apply_clause_continuation(&mut defs, continuation, kind);
         }
     }
 
@@ -1223,13 +1242,187 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     }
 }
 
-fn split_effect_sentences(text: &str) -> Vec<String> {
-    text.replace(", then ", ". ")
-        .split(". ")
-        .map(|s| s.trim().trim_end_matches('.').trim())
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .collect()
+fn parse_intrinsic_continuation(text: &str, effect: &Effect) -> Option<ClauseContinuation> {
+    match effect {
+        Effect::SearchLibrary { .. } => Some(ClauseContinuation::SearchDestination {
+            destination: parse_search_destination(&text.to_lowercase()),
+        }),
+        _ => None,
+    }
+}
+
+fn parse_followup_continuation(text: &str, previous_effect: &Effect) -> Option<ClauseContinuation> {
+    let lower = text.to_lowercase();
+
+    match previous_effect {
+        Effect::RevealHand { .. }
+            if lower.contains("card from it") || lower.contains("card from among") =>
+        {
+            let card_filter = if lower.starts_with("you choose ") || lower.starts_with("choose ") {
+                parse_choose_filter(&lower)
+            } else {
+                parse_choose_filter_from_sentence(&lower)
+            };
+            Some(ClauseContinuation::RevealHandFilter { card_filter })
+        }
+        Effect::Mana { .. } => parse_mana_spend_restriction(&lower)
+            .map(|restriction| ClauseContinuation::ManaRestriction { restriction }),
+        Effect::Counter { .. }
+            if lower.contains("countered this way") && lower.contains("loses all abilities") =>
+        {
+            Some(ClauseContinuation::CounterSourceStatic {
+                source_static: StaticDefinition::continuous().modifications(vec![
+                    crate::types::ability::ContinuousModification::RemoveAllAbilities,
+                ]),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn apply_clause_continuation(
+    defs: &mut Vec<AbilityDefinition>,
+    continuation: ClauseContinuation,
+    kind: AbilityKind,
+) {
+    match continuation {
+        ClauseContinuation::SearchDestination { destination } => {
+            defs.push(AbilityDefinition::new(
+                kind,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Library),
+                    destination,
+                    target: TargetFilter::Any,
+                },
+            ));
+        }
+        ClauseContinuation::RevealHandFilter { card_filter } => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            if let Effect::RevealHand {
+                card_filter: existing,
+                ..
+            } = &mut previous.effect
+            {
+                *existing = card_filter;
+            }
+        }
+        ClauseContinuation::ManaRestriction { restriction } => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            if let Effect::Mana { restrictions, .. } = &mut previous.effect {
+                restrictions.push(restriction);
+            }
+        }
+        ClauseContinuation::CounterSourceStatic { source_static } => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            if let Effect::Counter {
+                source_static: existing,
+                ..
+            } = &mut previous.effect
+            {
+                *existing = Some(source_static);
+            }
+        }
+    }
+}
+
+fn continuation_absorbs_current(
+    continuation: &ClauseContinuation,
+    current_effect: &Effect,
+) -> bool {
+    match continuation {
+        ClauseContinuation::RevealHandFilter { .. } => {
+            matches!(current_effect, Effect::RevealHand { .. })
+        }
+        ClauseContinuation::ManaRestriction { .. }
+        | ClauseContinuation::CounterSourceStatic { .. } => true,
+        ClauseContinuation::SearchDestination { .. } => false,
+    }
+}
+
+fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut chars = text.chars().peekable();
+    let mut paren_depth = 0usize;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '(' if !in_single_quote && !in_double_quote => {
+                paren_depth += 1;
+                current.push(ch);
+            }
+            ')' if !in_single_quote && !in_double_quote => {
+                paren_depth = paren_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            '\'' if !in_double_quote => {
+                if is_possessive_apostrophe(&current, chars.peek().copied()) {
+                    current.push(ch);
+                } else {
+                    in_single_quote = !in_single_quote;
+                    current.push(ch);
+                }
+            }
+            '"' if !in_single_quote => {
+                in_double_quote = !in_double_quote;
+                current.push(ch);
+            }
+            ',' if paren_depth == 0 && !in_single_quote && !in_double_quote => {
+                let remainder = chars.clone().collect::<String>();
+                if remainder.to_ascii_lowercase().starts_with(" then ") {
+                    push_clause_chunk(&mut chunks, &current, Some(ClauseBoundary::Then));
+                    current.clear();
+                    for _ in 0..6 {
+                        chars.next();
+                    }
+                } else {
+                    current.push(ch);
+                }
+            }
+            '.' if paren_depth == 0 && !in_single_quote && !in_double_quote => {
+                push_clause_chunk(&mut chunks, &current, Some(ClauseBoundary::Sentence));
+                current.clear();
+                while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
+                    chars.next();
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    push_clause_chunk(&mut chunks, &current, None);
+    chunks
+}
+
+fn is_possessive_apostrophe(current: &str, next: Option<char>) -> bool {
+    let prev = current.chars().last();
+    matches!(
+        (prev, next),
+        (Some(prev), Some(next)) if prev.is_alphanumeric() && next.is_alphanumeric()
+    )
+}
+
+fn push_clause_chunk(
+    chunks: &mut Vec<ClauseChunk>,
+    raw_text: &str,
+    boundary_after: Option<ClauseBoundary>,
+) {
+    let text = raw_text.trim().trim_end_matches('.').trim();
+    if text.is_empty() {
+        return;
+    }
+    chunks.push(ClauseChunk {
+        text: text.to_string(),
+        boundary_after,
+    });
 }
 
 /// Parse a "Spend this mana only to cast..." clause into a `ManaSpendRestriction`.
@@ -1449,7 +1642,93 @@ fn with_clause_duration(mut clause: ParsedEffectClause, duration: Duration) -> P
     clause
 }
 
-fn strip_leading_conditional(text: &str) -> Option<String> {
+fn try_parse_subject_predicate_ast(text: &str) -> Option<ClauseAst> {
+    if try_parse_targeted_controller_gain_life(text).is_some() {
+        return None;
+    }
+
+    if let Some(clause) = try_parse_subject_continuous_clause(text) {
+        return Some(subject_predicate_ast_from_clause(
+            text,
+            clause,
+            |effect, duration, sub_ability| PredicateAst::Continuous {
+                effect,
+                duration,
+                sub_ability,
+            },
+        ));
+    }
+
+    if let Some(clause) = try_parse_subject_become_clause(text) {
+        return Some(subject_predicate_ast_from_clause(
+            text,
+            clause,
+            |effect, duration, _sub_ability| PredicateAst::Become { effect, duration },
+        ));
+    }
+
+    if let Some(clause) = try_parse_subject_restriction_clause(text) {
+        return Some(subject_predicate_ast_from_clause(
+            text,
+            clause,
+            |effect, duration, _sub_ability| PredicateAst::Restriction { effect, duration },
+        ));
+    }
+
+    if let Some(stripped) = strip_subject_clause(text) {
+        let subject_text = extract_subject_text(text)?;
+        let application = parse_subject_application(&subject_text).unwrap_or(SubjectApplication {
+            affected: TargetFilter::Any,
+            target: None,
+        });
+        return Some(ClauseAst::SubjectPredicate {
+            subject: SubjectPhraseAst {
+                text: subject_text,
+                affected: application.affected,
+                target: application.target,
+            },
+            predicate: PredicateAst::ImperativeFallback { text: stripped },
+        });
+    }
+
+    None
+}
+
+fn subject_predicate_ast_from_clause<F>(
+    text: &str,
+    clause: ParsedEffectClause,
+    build_predicate: F,
+) -> ClauseAst
+where
+    F: FnOnce(Effect, Option<Duration>, Option<Box<AbilityDefinition>>) -> PredicateAst,
+{
+    let subject_text = extract_subject_text(text).unwrap_or_default();
+    let application = parse_subject_application(&subject_text).unwrap_or(SubjectApplication {
+        affected: TargetFilter::Any,
+        target: None,
+    });
+
+    ClauseAst::SubjectPredicate {
+        subject: SubjectPhraseAst {
+            text: subject_text,
+            affected: application.affected,
+            target: application.target,
+        },
+        predicate: build_predicate(clause.effect, clause.duration, clause.sub_ability),
+    }
+}
+
+fn extract_subject_text(text: &str) -> Option<String> {
+    let verb_start = find_predicate_start(text)?;
+    let subject = text[..verb_start].trim();
+    if subject.is_empty() {
+        None
+    } else {
+        Some(subject.to_string())
+    }
+}
+
+fn split_leading_conditional(text: &str) -> Option<(String, String)> {
     let lower = text.to_lowercase();
     if !lower.starts_with("if ") {
         return None;
@@ -1464,9 +1743,10 @@ fn strip_leading_conditional(text: &str) -> Option<String> {
             '(' if !in_quotes => paren_depth += 1,
             ')' if !in_quotes => paren_depth = paren_depth.saturating_sub(1),
             ',' if !in_quotes && paren_depth == 0 => {
+                let condition_text = text[..idx].trim().to_string();
                 let rest = text[idx + 1..].trim();
                 if !rest.is_empty() {
-                    return Some(rest.to_string());
+                    return Some((condition_text, rest.to_string()));
                 }
             }
             _ => {}
