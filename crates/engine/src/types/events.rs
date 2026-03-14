@@ -148,6 +148,10 @@ pub enum GameEvent {
     CrimeCommitted {
         player_id: PlayerId,
     },
+    Cycled {
+        player_id: PlayerId,
+        object_id: ObjectId,
+    },
 }
 
 #[cfg(test)]

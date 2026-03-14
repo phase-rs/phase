@@ -592,6 +592,9 @@ pub enum TargetFilter {
     /// Used for duration-based statics that target a specific object
     /// (e.g., "that permanent loses all abilities for as long as ~").
     SpecificObject(ObjectId),
+    /// Matches the permanent that the trigger source (Equipment/Aura) is attached to.
+    /// Used for "equipped creature" / "enchanted creature" trigger subjects.
+    AttachedTo,
 }
 
 /// Condition for static ability applicability.

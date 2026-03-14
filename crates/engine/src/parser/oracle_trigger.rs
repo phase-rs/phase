@@ -342,6 +342,27 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
         return (TargetFilter::SelfRef, "");
     }
 
+    // "equipped creature" / "enchanted creature" — the permanent this card is attached to
+    if let Some(rest) = text.strip_prefix("equipped creature ") {
+        return (TargetFilter::AttachedTo, rest);
+    }
+    if text == "equipped creature" {
+        return (TargetFilter::AttachedTo, "");
+    }
+    if let Some(rest) = text.strip_prefix("enchanted creature ") {
+        return (TargetFilter::AttachedTo, rest);
+    }
+    if text == "enchanted creature" {
+        return (TargetFilter::AttachedTo, "");
+    }
+    // "enchanted permanent" (some aura triggers use this phrasing)
+    if let Some(rest) = text.strip_prefix("enchanted permanent ") {
+        return (TargetFilter::AttachedTo, rest);
+    }
+    if text == "enchanted permanent" {
+        return (TargetFilter::AttachedTo, "");
+    }
+
     // "another <type phrase>" — compose with FilterProp::Another
     if let Some(after_another) = text.strip_prefix("another ") {
         let (filter, rest) = parse_type_phrase(after_another);
@@ -588,6 +609,16 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         // Cast triggers fire while the spell is on the stack
         def.trigger_zones = vec![Zone::Stack];
         return Some((TriggerMode::SpellCast, def));
+    }
+
+    // "when you cycle this card" / "when you cycle ~" — cycling self-trigger
+    // The card is in the graveyard by the time this trigger is checked.
+    if lower.contains("you cycle this card") || lower.contains("you cycle ~") {
+        let mut def = make_base();
+        def.mode = TriggerMode::Cycled;
+        def.valid_card = Some(TargetFilter::SelfRef);
+        def.trigger_zones = vec![Zone::Graveyard];
+        return Some((TriggerMode::Cycled, def));
     }
 
     None
@@ -926,10 +957,7 @@ mod tests {
         let (cleaned, cond) =
             extract_if_condition("draw a card if you've gained 3 or more life this turn.");
         assert_eq!(cleaned, "draw a card");
-        assert_eq!(
-            cond,
-            Some(TriggerCondition::GainedLife { minimum: 3 })
-        );
+        assert_eq!(cond, Some(TriggerCondition::GainedLife { minimum: 3 }));
     }
 
     #[test]
@@ -1230,5 +1258,85 @@ mod tests {
             cond,
             Some(TriggerCondition::ControlCreatures { minimum: 3 })
         );
+    }
+
+    // --- Equipment / Aura subject filter tests ---
+
+    #[test]
+    fn trigger_equipped_creature_attacks() {
+        let def = parse_trigger_line(
+            "Whenever equipped creature attacks, put a +1/+1 counter on it.",
+            "Blackblade Reforged",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+    }
+
+    #[test]
+    fn trigger_equipped_creature_deals_combat_damage() {
+        let def = parse_trigger_line(
+            "Whenever equipped creature deals combat damage to a player, draw a card.",
+            "Shadowspear",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert!(def.combat_damage);
+        assert_eq!(def.valid_source, Some(TargetFilter::AttachedTo));
+    }
+
+    #[test]
+    fn trigger_equipped_creature_dies() {
+        let def = parse_trigger_line(
+            "Whenever equipped creature dies, you gain 2 life.",
+            "Strider Harness",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.origin, Some(Zone::Battlefield));
+        assert_eq!(def.destination, Some(Zone::Graveyard));
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+    }
+
+    #[test]
+    fn trigger_enchanted_creature_attacks() {
+        let def = parse_trigger_line(
+            "Whenever enchanted creature attacks, draw a card.",
+            "Curiosity",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+    }
+
+    #[test]
+    fn trigger_enchanted_creature_dies() {
+        let def = parse_trigger_line(
+            "Whenever enchanted creature dies, return ~ to its owner's hand.",
+            "Angelic Destiny",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.origin, Some(Zone::Battlefield));
+        assert_eq!(def.destination, Some(Zone::Graveyard));
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+    }
+
+    #[test]
+    fn trigger_cycle_this_card() {
+        let def = parse_trigger_line(
+            "When you cycle this card, draw a card.",
+            "Decree of Justice",
+        );
+        assert_eq!(def.mode, TriggerMode::Cycled);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(def.trigger_zones.contains(&Zone::Graveyard));
+    }
+
+    #[test]
+    fn trigger_cycle_self_ref() {
+        let def = parse_trigger_line(
+            "When you cycle ~, you may draw a card.",
+            "Decree of Justice",
+        );
+        assert_eq!(def.mode, TriggerMode::Cycled);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(def.trigger_zones.contains(&Zone::Graveyard));
+        assert!(def.optional);
     }
 }

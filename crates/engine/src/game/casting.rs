@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityCost, AbilityKind, AdditionalCost, Effect, ResolvedAbility,
+    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, Effect, ResolvedAbility,
     TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
@@ -1479,7 +1479,7 @@ mod tests {
 
     // --- Aura casting tests ---
 
-    use crate::types::ability::{TargetFilter, TypedFilter};
+    use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
     use crate::types::keywords::Keyword;
 
     /// Create an Aura enchantment in hand with Enchant creature keyword.
@@ -1590,6 +1590,73 @@ mod tests {
         let mut events = Vec::new();
         let result = handle_cast_spell(&mut state, PlayerId(0), CardId(30), &mut events);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn aura_with_enchant_you_control_rejects_opponent_creatures() {
+        let mut state = setup_game_at_main_phase();
+        let aura_id = create_aura_in_hand(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::White, 1);
+        state.objects.get_mut(&aura_id).unwrap().keywords = vec![Keyword::Enchant(
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        )];
+
+        let creature = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(1),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut events = Vec::new();
+        let result = handle_cast_spell(&mut state, PlayerId(0), CardId(30), &mut events);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn aura_with_enchant_you_control_accepts_own_creature() {
+        let mut state = setup_game_at_main_phase();
+        let aura_id = create_aura_in_hand(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::White, 1);
+        state.objects.get_mut(&aura_id).unwrap().keywords = vec![Keyword::Enchant(
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        )];
+
+        let creature = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Spirit".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut events = Vec::new();
+        let result = handle_cast_spell(&mut state, PlayerId(0), CardId(30), &mut events).unwrap();
+        assert!(matches!(result, WaitingFor::Priority { .. }));
+        assert_eq!(state.stack.len(), 1);
+        if let StackEntryKind::Spell { ability, .. } = &state.stack[0].kind {
+            assert_eq!(
+                ability.targets,
+                vec![crate::types::ability::TargetRef::Object(creature)]
+            );
+        } else {
+            panic!("Expected spell on stack");
+        }
     }
 
     #[test]

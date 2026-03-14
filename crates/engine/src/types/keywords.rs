@@ -4,7 +4,7 @@ use std::str::FromStr;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::ability::{TargetFilter, TypedFilter};
+use super::ability::{ControllerRef, TargetFilter, TypedFilter};
 use super::mana::{ManaColor, ManaCost};
 
 /// What a Protection keyword protects from.
@@ -255,7 +255,17 @@ fn parse_enchant_target(s: &str) -> TargetFilter {
     use super::ability::TypeFilter;
 
     let lower = s.to_ascii_lowercase();
-    let type_filter = match lower.as_str() {
+    let (controller, base) = if let Some(rest) = lower.strip_suffix(" you control") {
+        (Some(ControllerRef::You), rest.trim())
+    } else if let Some(rest) = lower.strip_suffix(" an opponent controls") {
+        (Some(ControllerRef::Opponent), rest.trim())
+    } else if let Some(rest) = lower.strip_suffix(" opponent controls") {
+        (Some(ControllerRef::Opponent), rest.trim())
+    } else {
+        (None, lower.trim())
+    };
+
+    let type_filter = match base {
         "creature" => Some(TypeFilter::Creature),
         "land" => Some(TypeFilter::Land),
         "artifact" => Some(TypeFilter::Artifact),
@@ -266,9 +276,21 @@ fn parse_enchant_target(s: &str) -> TargetFilter {
     };
 
     match type_filter {
-        Some(tf) => TargetFilter::Typed(TypedFilter::new(tf)),
+        Some(tf) => {
+            let mut filter = TypedFilter::new(tf);
+            if let Some(controller) = controller {
+                filter = filter.controller(controller);
+            }
+            TargetFilter::Typed(filter)
+        }
         // If not a recognized type, use a typed filter with the string as subtype
-        None => TargetFilter::Typed(TypedFilter::default().subtype(s.to_string())),
+        None => {
+            let mut filter = TypedFilter::default().subtype(base.to_string());
+            if let Some(controller) = controller {
+                filter = filter.controller(controller);
+            }
+            TargetFilter::Typed(filter)
+        }
     }
 }
 
@@ -836,6 +858,17 @@ mod tests {
                 Some(super::super::ability::TypeFilter::Creature)
             ));
         }
+    }
+
+    #[test]
+    fn parse_enchant_with_controller_restriction() {
+        let enchant = Keyword::from_str("Enchant:creature you control").unwrap();
+        assert_eq!(
+            enchant,
+            Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            ))
+        );
     }
 
     #[test]

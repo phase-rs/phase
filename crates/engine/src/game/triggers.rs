@@ -321,15 +321,13 @@ pub(crate) fn check_trigger_condition(
     controller: PlayerId,
 ) -> bool {
     match condition {
-        TriggerCondition::GainedLife { minimum } => player_field(state, controller, |p| {
-            p.life_gained_this_turn >= *minimum
-        }),
+        TriggerCondition::GainedLife { minimum } => {
+            player_field(state, controller, |p| p.life_gained_this_turn >= *minimum)
+        }
         TriggerCondition::LostLife => {
             player_field(state, controller, |p| p.life_lost_this_turn > 0)
         }
-        TriggerCondition::Descended => {
-            player_field(state, controller, |p| p.descended_this_turn)
-        }
+        TriggerCondition::Descended => player_field(state, controller, |p| p.descended_this_turn),
         TriggerCondition::ControlCreatures { minimum } => {
             let count = state
                 .battlefield
@@ -358,7 +356,7 @@ fn player_field(state: &GameState, controller: PlayerId, f: impl Fn(&Player) -> 
         .players
         .iter()
         .find(|p| p.id == controller)
-        .map(|p| f(p))
+        .map(f)
         .unwrap_or(false)
 }
 
@@ -907,6 +905,14 @@ fn target_filter_matches_object(
         // StackAbility targeting is handled directly in find_legal_targets
         TargetFilter::StackAbility => false,
         TargetFilter::SpecificObject(target_id) => object_id == *target_id,
+        TargetFilter::AttachedTo => {
+            // The trigger source must have attached_to pointing at this object.
+            state
+                .objects
+                .get(&source_id)
+                .and_then(|src| src.attached_to)
+                .is_some_and(|attached| attached == object_id)
+        }
     }
 }
 
@@ -1533,14 +1539,18 @@ fn match_unattach(
     }
 }
 
-/// Cycled: fires on discard events that are part of cycling.
+/// Cycled: fires when a player cycles a card.
 fn match_cycled(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
-    _source_id: ObjectId,
-    _state: &GameState,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
 ) -> bool {
-    matches!(event, GameEvent::Discarded { .. })
+    if let GameEvent::Cycled { object_id, .. } = event {
+        valid_card_matches(trigger, state, *object_id, source_id)
+    } else {
+        false
+    }
 }
 
 /// Shuffled: fires when a library is shuffled.
@@ -3017,6 +3027,73 @@ pub mod tests {
             "Should NOT have pending trigger"
         );
         assert_eq!(state.stack.len(), 0, "Should NOT be on stack");
+    }
+
+    #[test]
+    fn banishing_light_trigger_skips_without_opponent_nonlands() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Banishing Light".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.entered_battlefield_turn = Some(1);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Exile,
+                            target: TargetFilter::Typed(
+                                TypedFilter::permanent()
+                                    .controller(ControllerRef::Opponent)
+                                    .properties(vec![FilterProp::NonType {
+                                        value: "land".to_string(),
+                                    }]),
+                            ),
+                        },
+                    ))
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination(Zone::Battlefield),
+            );
+        }
+
+        let opponent_land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&opponent_land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let events = vec![GameEvent::ZoneChanged {
+            object_id: source,
+            from: Zone::Hand,
+            to: Zone::Battlefield,
+        }];
+
+        process_triggers(&mut state, &events);
+
+        assert!(
+            state.pending_trigger.is_none(),
+            "Should NOT present trigger target selection"
+        );
+        assert_eq!(state.stack.len(), 0, "Should skip the ETB trigger");
     }
 
     #[test]

@@ -617,6 +617,21 @@ mod tests {
     }
 
     #[test]
+    fn find_legal_targets_permanent_opponent_nonland_lowercase() {
+        let (state, _c0, c1, _land) = setup_with_typed_creatures();
+        let filter = TargetFilter::Typed(
+            TypedFilter::permanent()
+                .controller(ControllerRef::Opponent)
+                .properties(vec![FilterProp::NonType {
+                    value: "land".to_string(),
+                }]),
+        );
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
+        assert!(targets.contains(&TargetRef::Object(c1)));
+        assert_eq!(targets.len(), 1);
+    }
+
+    #[test]
     fn find_legal_targets_any_returns_creatures_and_players() {
         let (state, c0, c1, land) = setup_with_typed_creatures();
         let targets = find_legal_targets(&state, &TargetFilter::Any, PlayerId(0), ObjectId(99));

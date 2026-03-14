@@ -82,6 +82,10 @@ pub fn choose_action(
         return Some(actions.into_iter().next().unwrap());
     }
 
+    if let Some(action) = prefer_land_drop(state, ai_player, &actions) {
+        return Some(action);
+    }
+
     // Mulligan decisions: use hand-quality heuristic (search can't evaluate these)
     if let WaitingFor::MulliganDecision {
         player,
@@ -258,6 +262,34 @@ pub fn choose_action(
     };
 
     softmax_select(&scored, config.temperature, rng)
+}
+
+fn prefer_land_drop(
+    state: &GameState,
+    ai_player: PlayerId,
+    actions: &[GameAction],
+) -> Option<GameAction> {
+    let WaitingFor::Priority { player } = &state.waiting_for else {
+        return None;
+    };
+
+    if *player != ai_player
+        || state.active_player != ai_player
+        || !matches!(
+            state.phase,
+            engine::types::phase::Phase::PreCombatMain
+                | engine::types::phase::Phase::PostCombatMain
+        )
+        || !state.stack.is_empty()
+        || state.lands_played_this_turn >= state.max_lands_per_turn
+    {
+        return None;
+    }
+
+    actions
+        .iter()
+        .find(|action| matches!(action, GameAction::PlayLand { .. }))
+        .cloned()
 }
 
 fn search_value(
@@ -616,5 +648,35 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(42);
         let action = choose_action(&state, PlayerId(0), &config, &mut rng);
         assert!(action.is_some());
+    }
+
+    #[test]
+    fn very_hard_prefers_playing_available_land() {
+        let mut state = make_state();
+        let land_id = engine::game::zones::create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Forest".to_string(),
+            engine::types::zones::Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(7);
+        let action = choose_action(&state, PlayerId(0), &config, &mut rng);
+
+        assert_eq!(
+            action,
+            Some(GameAction::PlayLand {
+                card_id: CardId(99)
+            })
+        );
     }
 }

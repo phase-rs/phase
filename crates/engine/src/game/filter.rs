@@ -122,6 +122,11 @@ fn filter_inner(
         // StackAbility targeting is handled directly in find_legal_targets, not via filter
         TargetFilter::StackAbility => false,
         TargetFilter::SpecificObject(target_id) => object_id == *target_id,
+        TargetFilter::AttachedTo => state
+            .objects
+            .get(&source_id)
+            .and_then(|src| src.attached_to)
+            .is_some_and(|attached| attached == object_id),
     }
 }
 
@@ -169,7 +174,20 @@ fn matches_filter_prop(
         FilterProp::Tapped => obj.tapped,
         FilterProp::NonType { value } => {
             // Object does not have this type or subtype
-            let core: Option<CoreType> = value.parse().ok();
+            let core = match value.to_ascii_lowercase().as_str() {
+                "artifact" => Some(CoreType::Artifact),
+                "creature" => Some(CoreType::Creature),
+                "enchantment" => Some(CoreType::Enchantment),
+                "instant" => Some(CoreType::Instant),
+                "land" => Some(CoreType::Land),
+                "planeswalker" => Some(CoreType::Planeswalker),
+                "sorcery" => Some(CoreType::Sorcery),
+                "tribal" => Some(CoreType::Tribal),
+                "battle" => Some(CoreType::Battle),
+                "kindred" => Some(CoreType::Kindred),
+                "dungeon" => Some(CoreType::Dungeon),
+                _ => None,
+            };
             match core {
                 Some(ct) => !obj.card_types.core_types.contains(&ct),
                 None => {
