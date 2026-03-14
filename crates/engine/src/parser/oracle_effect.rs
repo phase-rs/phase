@@ -115,6 +115,7 @@ enum ImperativeAst {
     Numeric(NumericImperativeAst),
     Targeted(TargetedImperativeAst),
     SearchCreation(SearchCreationImperativeAst),
+    HandReveal(HandRevealImperativeAst),
     Utility(UtilityImperativeAst),
 }
 
@@ -154,6 +155,13 @@ enum UtilityImperativeAst {
     Copy { target: TargetFilter },
     Transform { text: String },
     Attach { target: TargetFilter },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HandRevealImperativeAst {
+    LookAtHand { target: TargetFilter },
+    RevealHand,
+    RevealTop { count: u32 },
 }
 
 /// Parse an effect clause from Oracle text into an Effect enum.
@@ -1233,6 +1241,53 @@ fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) -> Effect {
     }
 }
 
+fn parse_hand_reveal_ast(text: &str, lower: &str) -> Option<HandRevealImperativeAst> {
+    if lower.starts_with("look at ") && lower.contains("hand") {
+        if contains_possessive(lower, "look at", "hand") {
+            return Some(HandRevealImperativeAst::LookAtHand {
+                target: TargetFilter::Any,
+            });
+        }
+
+        let after_look_at = &text[8..];
+        let (target, _) = parse_target(after_look_at);
+        return Some(HandRevealImperativeAst::LookAtHand { target });
+    }
+
+    if !lower.starts_with("reveal ") {
+        return None;
+    }
+
+    if lower.contains("hand") {
+        return Some(HandRevealImperativeAst::RevealHand);
+    }
+
+    let count = if let Some(pos) = lower.find("the top ") {
+        let after_top = &lower[pos + 8..];
+        parse_number(after_top).map(|(n, _)| n).unwrap_or(1)
+    } else {
+        1
+    };
+    Some(HandRevealImperativeAst::RevealTop { count })
+}
+
+fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
+    match ast {
+        HandRevealImperativeAst::LookAtHand { target } => Effect::RevealHand {
+            target,
+            card_filter: TargetFilter::Any,
+        },
+        HandRevealImperativeAst::RevealHand => Effect::RevealHand {
+            target: TargetFilter::Any,
+            card_filter: TargetFilter::Any,
+        },
+        HandRevealImperativeAst::RevealTop { count } => Effect::Dig {
+            count,
+            destination: None,
+        },
+    }
+}
+
 fn parse_utility_imperative_ast(text: &str, lower: &str) -> Option<UtilityImperativeAst> {
     if lower.starts_with("prevent ") {
         return Some(UtilityImperativeAst::Prevent {
@@ -1285,6 +1340,7 @@ fn lower_imperative_ast(ast: ImperativeAst) -> Effect {
         ImperativeAst::Numeric(ast) => lower_numeric_imperative_ast(ast),
         ImperativeAst::Targeted(ast) => lower_targeted_action_ast(ast),
         ImperativeAst::SearchCreation(ast) => lower_search_and_creation_ast(ast),
+        ImperativeAst::HandReveal(ast) => lower_hand_reveal_ast(ast),
         ImperativeAst::Utility(ast) => lower_utility_imperative_ast(ast),
     }
 }
@@ -1295,43 +1351,8 @@ fn parse_search_and_creation_effect(text: &str, lower: &str) -> Option<Effect> {
 }
 
 fn parse_hand_reveal_effect(text: &str, lower: &str) -> Option<Effect> {
-    if lower.starts_with("look at ") && lower.contains("hand") {
-        if contains_possessive(&lower, "look at", "hand") {
-            return Some(Effect::RevealHand {
-                target: TargetFilter::Any,
-                card_filter: TargetFilter::Any,
-            });
-        }
-
-        let after_look_at = &text[8..];
-        let (target, _) = parse_target(after_look_at);
-        return Some(Effect::RevealHand {
-            target,
-            card_filter: TargetFilter::Any,
-        });
-    }
-
-    if !lower.starts_with("reveal ") {
-        return None;
-    }
-
-    if lower.contains("hand") {
-        return Some(Effect::RevealHand {
-            target: TargetFilter::Any,
-            card_filter: TargetFilter::Any,
-        });
-    }
-
-    let count = if let Some(pos) = lower.find("the top ") {
-        let after_top = &lower[pos + 8..];
-        parse_number(after_top).map(|(n, _)| n).unwrap_or(1)
-    } else {
-        1
-    };
-    Some(Effect::Dig {
-        count,
-        destination: None,
-    })
+    let ast = ImperativeAst::HandReveal(parse_hand_reveal_ast(text, lower)?);
+    Some(lower_imperative_ast(ast))
 }
 
 fn parse_choose_effect(text: &str, lower: &str) -> Option<Effect> {
