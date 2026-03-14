@@ -137,7 +137,10 @@ enum NumericImperativeAst {
     Draw { count: u32 },
     GainLife { amount: i32 },
     LoseLife { amount: i32 },
-    Pump { effect: Effect },
+    Pump {
+        power: PtValue,
+        toughness: PtValue,
+    },
     Scry { count: u32 },
     Surveil { count: u32 },
     Mill { count: u32 },
@@ -1373,8 +1376,13 @@ fn parse_numeric_imperative_ast(text: &str, lower: &str) -> Option<NumericImpera
         || lower.contains("get +")
         || lower.contains("get -")
     {
-        if let Some(effect) = try_parse_pump(lower, text) {
-            return Some(NumericImperativeAst::Pump { effect });
+        if let Some(Effect::Pump {
+            power,
+            toughness,
+            target: TargetFilter::Any,
+        }) = try_parse_pump(lower, text)
+        {
+            return Some(NumericImperativeAst::Pump { power, toughness });
         }
     }
 
@@ -1434,7 +1442,11 @@ fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect {
             player: GainLifePlayer::Controller,
         },
         NumericImperativeAst::LoseLife { amount } => Effect::LoseLife { amount },
-        NumericImperativeAst::Pump { effect } => effect,
+        NumericImperativeAst::Pump { power, toughness } => Effect::Pump {
+            power,
+            toughness,
+            target: TargetFilter::Any,
+        },
         NumericImperativeAst::Scry { count } => Effect::Scry { count },
         NumericImperativeAst::Surveil { count } => Effect::Surveil { count },
         NumericImperativeAst::Mill { count } => Effect::Mill {
