@@ -13,10 +13,7 @@ pub struct PolicyRegistry {
 impl Default for PolicyRegistry {
     fn default() -> Self {
         Self {
-            policies: vec![
-                Box::new(AntiSelfHarmPolicy),
-                Box::new(EffectTimingPolicy),
-            ],
+            policies: vec![Box::new(AntiSelfHarmPolicy), Box::new(EffectTimingPolicy)],
         }
     }
 }

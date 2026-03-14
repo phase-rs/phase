@@ -46,23 +46,43 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
     match &state.waiting_for {
         WaitingFor::Priority { player } => priority_actions(state, *player),
         WaitingFor::MulliganDecision { .. } => vec![
-            candidate(GameAction::MulliganDecision { keep: true }, TacticalClass::Selection, actor(state)),
-            candidate(GameAction::MulliganDecision { keep: false }, TacticalClass::Selection, actor(state)),
+            candidate(
+                GameAction::MulliganDecision { keep: true },
+                TacticalClass::Selection,
+                actor(state),
+            ),
+            candidate(
+                GameAction::MulliganDecision { keep: false },
+                TacticalClass::Selection,
+                actor(state),
+            ),
         ],
-        WaitingFor::MulliganBottomCards { player, count } => bottom_card_actions(state, *player, *count),
+        WaitingFor::MulliganBottomCards { player, count } => {
+            bottom_card_actions(state, *player, *count)
+        }
         WaitingFor::ManaPayment { player } => mana_payment_actions(state, *player),
         WaitingFor::TargetSelection {
             player,
             target_slots,
             selection,
             ..
-        } => target_step_actions(*player, target_slots, selection.current_slot, &selection.current_legal_targets),
+        } => target_step_actions(
+            *player,
+            target_slots,
+            selection.current_slot,
+            &selection.current_legal_targets,
+        ),
         WaitingFor::TriggerTargetSelection {
             player,
             target_slots,
             selection,
             ..
-        } => target_step_actions(*player, target_slots, selection.current_slot, &selection.current_legal_targets),
+        } => target_step_actions(
+            *player,
+            target_slots,
+            selection.current_slot,
+            &selection.current_legal_targets,
+        ),
         WaitingFor::DeclareAttackers {
             player,
             valid_attacker_ids,
@@ -73,8 +93,18 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
             valid_blocker_ids,
             valid_block_targets,
         } => blocker_actions(*player, valid_blocker_ids, valid_block_targets),
-        WaitingFor::ReplacementChoice { candidate_count, player, .. } => (0..*candidate_count)
-            .map(|i| candidate(GameAction::ChooseReplacement { index: i }, TacticalClass::Replacement, Some(*player)))
+        WaitingFor::ReplacementChoice {
+            candidate_count,
+            player,
+            ..
+        } => (0..*candidate_count)
+            .map(|i| {
+                candidate(
+                    GameAction::ChooseReplacement { index: i },
+                    TacticalClass::Replacement,
+                    Some(*player),
+                )
+            })
             .collect(),
         WaitingFor::EquipTarget {
             player,
@@ -100,18 +130,44 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
             keep_count,
         } => combinations(cards, *keep_count)
             .into_iter()
-            .map(|combo| candidate(GameAction::SelectCards { cards: combo }, TacticalClass::Selection, Some(*player)))
+            .map(|combo| {
+                candidate(
+                    GameAction::SelectCards { cards: combo },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
             .collect(),
         WaitingFor::SurveilChoice { player, cards } => select_cards_variants(*player, cards, None),
-        WaitingFor::RevealChoice { player, cards, .. } => select_cards_variants(*player, cards, Some(1)),
-        WaitingFor::SearchChoice { player, cards, count } => combinations(cards, *count)
+        WaitingFor::RevealChoice { player, cards, .. } => {
+            select_cards_variants(*player, cards, Some(1))
+        }
+        WaitingFor::SearchChoice {
+            player,
+            cards,
+            count,
+        } => combinations(cards, *count)
             .into_iter()
-            .map(|combo| candidate(GameAction::SelectCards { cards: combo }, TacticalClass::Selection, Some(*player)))
+            .map(|combo| {
+                candidate(
+                    GameAction::SelectCards { cards: combo },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
             .collect(),
         WaitingFor::BetweenGamesSideboard { player, .. } => sideboard_actions(state, *player),
         WaitingFor::BetweenGamesChoosePlayDraw { player, .. } => vec![
-            candidate(GameAction::ChoosePlayDraw { play_first: true }, TacticalClass::Selection, Some(*player)),
-            candidate(GameAction::ChoosePlayDraw { play_first: false }, TacticalClass::Selection, Some(*player)),
+            candidate(
+                GameAction::ChoosePlayDraw { play_first: true },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::ChoosePlayDraw { play_first: false },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
         ],
         WaitingFor::NamedChoice {
             player,
@@ -119,24 +175,59 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
             choice_type,
             ..
         } => named_choice_actions(state, *player, options, choice_type),
-        WaitingFor::ModeChoice { player, modal, .. } => mode_actions(*player, modal.mode_count, modal.min_choices, modal.max_choices),
-        WaitingFor::AbilityModeChoice { player, modal, .. } => mode_actions(*player, modal.mode_count, modal.min_choices, modal.max_choices),
-        WaitingFor::DiscardToHandSize { player, count, cards } => combinations(cards, *count)
+        WaitingFor::ModeChoice { player, modal, .. } => mode_actions(
+            *player,
+            modal.mode_count,
+            modal.min_choices,
+            modal.max_choices,
+        ),
+        WaitingFor::AbilityModeChoice { player, modal, .. } => mode_actions(
+            *player,
+            modal.mode_count,
+            modal.min_choices,
+            modal.max_choices,
+        ),
+        WaitingFor::DiscardToHandSize {
+            player,
+            count,
+            cards,
+        } => combinations(cards, *count)
             .into_iter()
-            .map(|combo| candidate(GameAction::SelectCards { cards: combo }, TacticalClass::Selection, Some(*player)))
+            .map(|combo| {
+                candidate(
+                    GameAction::SelectCards { cards: combo },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
             .collect(),
         WaitingFor::OptionalCostChoice { player, .. } => vec![
-            candidate(GameAction::DecideOptionalCost { pay: true }, TacticalClass::Selection, Some(*player)),
-            candidate(GameAction::DecideOptionalCost { pay: false }, TacticalClass::Selection, Some(*player)),
+            candidate(
+                GameAction::DecideOptionalCost { pay: true },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::DecideOptionalCost { pay: false },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
         ],
         WaitingFor::GameOver { .. } => Vec::new(),
     }
 }
 
-fn candidate(action: GameAction, tactical_class: TacticalClass, actor: Option<PlayerId>) -> CandidateAction {
+fn candidate(
+    action: GameAction,
+    tactical_class: TacticalClass,
+    actor: Option<PlayerId>,
+) -> CandidateAction {
     CandidateAction {
         action,
-        metadata: ActionMetadata { actor, tactical_class },
+        metadata: ActionMetadata {
+            actor,
+            tactical_class,
+        },
     }
 }
 
@@ -169,18 +260,32 @@ fn actor(state: &GameState) -> Option<PlayerId> {
 }
 
 fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction> {
-    let mut actions = vec![candidate(GameAction::PassPriority, TacticalClass::Pass, Some(player))];
+    let mut actions = vec![candidate(
+        GameAction::PassPriority,
+        TacticalClass::Pass,
+        Some(player),
+    )];
 
     let p = &state.players[player.0 as usize];
     let is_main_phase = matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain);
     let stack_empty = state.stack.is_empty();
     let is_active = state.active_player == player;
 
-    if is_main_phase && stack_empty && is_active && state.lands_played_this_turn < state.max_lands_per_turn {
+    if is_main_phase
+        && stack_empty
+        && is_active
+        && state.lands_played_this_turn < state.max_lands_per_turn
+    {
         for &obj_id in &p.hand {
             if let Some(obj) = state.objects.get(&obj_id) {
                 if obj.card_types.core_types.contains(&CoreType::Land) {
-                    actions.push(candidate(GameAction::PlayLand { card_id: obj.card_id }, TacticalClass::Land, Some(player)));
+                    actions.push(candidate(
+                        GameAction::PlayLand {
+                            card_id: obj.card_id,
+                        },
+                        TacticalClass::Land,
+                        Some(player),
+                    ));
                 }
             }
         }
@@ -242,11 +347,26 @@ fn target_step_actions(
 
     let mut actions: Vec<CandidateAction> = legal_targets
         .into_iter()
-        .map(|target| candidate(GameAction::ChooseTarget { target: Some(target) }, TacticalClass::Target, Some(player)))
+        .map(|target| {
+            candidate(
+                GameAction::ChooseTarget {
+                    target: Some(target),
+                },
+                TacticalClass::Target,
+                Some(player),
+            )
+        })
         .collect();
 
-    if target_slots.get(current_slot).is_some_and(|slot| slot.optional) {
-        actions.push(candidate(GameAction::ChooseTarget { target: None }, TacticalClass::Target, Some(player)));
+    if target_slots
+        .get(current_slot)
+        .is_some_and(|slot| slot.optional)
+    {
+        actions.push(candidate(
+            GameAction::ChooseTarget { target: None },
+            TacticalClass::Target,
+            Some(player),
+        ));
     }
 
     actions
@@ -259,7 +379,9 @@ fn attacker_actions(
 ) -> Vec<CandidateAction> {
     let default_target = valid_attack_targets.first().cloned();
     let mut actions = vec![candidate(
-        GameAction::DeclareAttackers { attacks: Vec::new() },
+        GameAction::DeclareAttackers {
+            attacks: Vec::new(),
+        },
         TacticalClass::Attack,
         Some(player),
     )];
@@ -281,7 +403,11 @@ fn attacker_actions(
     if valid_attacker_ids.len() > 1 {
         actions.push(candidate(
             GameAction::DeclareAttackers {
-                attacks: valid_attacker_ids.iter().copied().map(|id| (id, target.clone())).collect(),
+                attacks: valid_attacker_ids
+                    .iter()
+                    .copied()
+                    .map(|id| (id, target.clone()))
+                    .collect(),
             },
             TacticalClass::Attack,
             Some(player),
@@ -294,10 +420,15 @@ fn attacker_actions(
 fn blocker_actions(
     player: PlayerId,
     valid_blocker_ids: &[crate::types::identifiers::ObjectId],
-    valid_block_targets: &std::collections::HashMap<crate::types::identifiers::ObjectId, Vec<crate::types::identifiers::ObjectId>>,
+    valid_block_targets: &std::collections::HashMap<
+        crate::types::identifiers::ObjectId,
+        Vec<crate::types::identifiers::ObjectId>,
+    >,
 ) -> Vec<CandidateAction> {
     let mut actions = vec![candidate(
-        GameAction::DeclareBlockers { assignments: Vec::new() },
+        GameAction::DeclareBlockers {
+            assignments: Vec::new(),
+        },
         TacticalClass::Block,
         Some(player),
     )];
@@ -319,18 +450,42 @@ fn blocker_actions(
     actions
 }
 
-fn select_cards_variants(player: PlayerId, cards: &[crate::types::identifiers::ObjectId], exact_count: Option<usize>) -> Vec<CandidateAction> {
+fn select_cards_variants(
+    player: PlayerId,
+    cards: &[crate::types::identifiers::ObjectId],
+    exact_count: Option<usize>,
+) -> Vec<CandidateAction> {
     match exact_count {
         Some(count) => combinations(cards, count)
             .into_iter()
-            .map(|combo| candidate(GameAction::SelectCards { cards: combo }, TacticalClass::Selection, Some(player)))
+            .map(|combo| {
+                candidate(
+                    GameAction::SelectCards { cards: combo },
+                    TacticalClass::Selection,
+                    Some(player),
+                )
+            })
             .collect(),
         None => {
-            let mut actions = vec![candidate(GameAction::SelectCards { cards: Vec::new() }, TacticalClass::Selection, Some(player))];
-            actions.push(candidate(GameAction::SelectCards { cards: cards.to_vec() }, TacticalClass::Selection, Some(player)));
+            let mut actions = vec![candidate(
+                GameAction::SelectCards { cards: Vec::new() },
+                TacticalClass::Selection,
+                Some(player),
+            )];
+            actions.push(candidate(
+                GameAction::SelectCards {
+                    cards: cards.to_vec(),
+                },
+                TacticalClass::Selection,
+                Some(player),
+            ));
             if cards.len() > 1 {
                 for &card in cards {
-                    actions.push(candidate(GameAction::SelectCards { cards: vec![card] }, TacticalClass::Selection, Some(player)));
+                    actions.push(candidate(
+                        GameAction::SelectCards { cards: vec![card] },
+                        TacticalClass::Selection,
+                        Some(player),
+                    ));
                 }
             }
             actions
@@ -338,12 +493,21 @@ fn select_cards_variants(player: PlayerId, cards: &[crate::types::identifiers::O
     }
 }
 
-fn mode_actions(player: PlayerId, mode_count: usize, min: usize, max: usize) -> Vec<CandidateAction> {
+fn mode_actions(
+    player: PlayerId,
+    mode_count: usize,
+    min: usize,
+    max: usize,
+) -> Vec<CandidateAction> {
     let indices: Vec<usize> = (0..mode_count).collect();
     let mut actions = Vec::new();
     for pick_count in min..=max.min(mode_count) {
         for combo in combinations_usize(&indices, pick_count) {
-            actions.push(candidate(GameAction::SelectModes { indices: combo }, TacticalClass::Selection, Some(player)));
+            actions.push(candidate(
+                GameAction::SelectModes { indices: combo },
+                TacticalClass::Selection,
+                Some(player),
+            ));
         }
     }
     actions
@@ -419,12 +583,22 @@ fn bottom_card_actions(state: &GameState, player: PlayerId, count: u8) -> Vec<Ca
     let hand: Vec<_> = p.hand.clone();
 
     if count == 0 || hand.is_empty() {
-        return vec![candidate(GameAction::SelectCards { cards: Vec::new() }, TacticalClass::Selection, Some(player))];
+        return vec![candidate(
+            GameAction::SelectCards { cards: Vec::new() },
+            TacticalClass::Selection,
+            Some(player),
+        )];
     }
 
     combinations(&hand, count as usize)
         .into_iter()
-        .map(|combo| candidate(GameAction::SelectCards { cards: combo }, TacticalClass::Selection, Some(player)))
+        .map(|combo| {
+            candidate(
+                GameAction::SelectCards { cards: combo },
+                TacticalClass::Selection,
+                Some(player),
+            )
+        })
         .collect()
 }
 
@@ -432,8 +606,15 @@ fn mana_payment_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAct
     let mut actions = Vec::new();
     for &obj_id in &state.battlefield {
         if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player && !obj.tapped && obj.card_types.core_types.contains(&CoreType::Land) {
-                actions.push(candidate(GameAction::TapLandForMana { object_id: obj_id }, TacticalClass::Mana, Some(player)));
+            if obj.controller == player
+                && !obj.tapped
+                && obj.card_types.core_types.contains(&CoreType::Land)
+            {
+                actions.push(candidate(
+                    GameAction::TapLandForMana { object_id: obj_id },
+                    TacticalClass::Mana,
+                    Some(player),
+                ));
             }
         }
     }
@@ -452,7 +633,8 @@ fn can_cast(
         return false;
     }
 
-    let is_instant = obj.card_types.core_types.contains(&CoreType::Instant) || obj.has_keyword(&Keyword::Flash);
+    let is_instant =
+        obj.card_types.core_types.contains(&CoreType::Instant) || obj.has_keyword(&Keyword::Flash);
     if !(is_instant || is_main_phase && stack_empty && is_active) {
         return false;
     }
@@ -502,10 +684,18 @@ fn compute_available_mana(state: &GameState, player: PlayerId) -> AvailableMana 
 
     for &obj_id in &state.battlefield {
         if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller != player || obj.tapped || !obj.card_types.core_types.contains(&CoreType::Land) {
+            if obj.controller != player
+                || obj.tapped
+                || !obj.card_types.core_types.contains(&CoreType::Land)
+            {
                 continue;
             }
-            if let Some(mana_type) = obj.card_types.subtypes.iter().find_map(|s| mana_payment::land_subtype_to_mana_type(s)) {
+            if let Some(mana_type) = obj
+                .card_types
+                .subtypes
+                .iter()
+                .find_map(|s| mana_payment::land_subtype_to_mana_type(s))
+            {
                 match mana_type {
                     ManaType::White => available.white += 1,
                     ManaType::Blue => available.blue += 1,
@@ -556,27 +746,48 @@ fn can_afford_with(available: &AvailableMana, cost: &ManaCost) -> bool {
 
 fn shard_to_mana_type(shard: &ManaCostShard) -> ManaType {
     match shard {
-        ManaCostShard::White | ManaCostShard::PhyrexianWhite | ManaCostShard::TwoWhite => ManaType::White,
-        ManaCostShard::Blue | ManaCostShard::PhyrexianBlue | ManaCostShard::TwoBlue => ManaType::Blue,
-        ManaCostShard::Black | ManaCostShard::PhyrexianBlack | ManaCostShard::TwoBlack => ManaType::Black,
+        ManaCostShard::White | ManaCostShard::PhyrexianWhite | ManaCostShard::TwoWhite => {
+            ManaType::White
+        }
+        ManaCostShard::Blue | ManaCostShard::PhyrexianBlue | ManaCostShard::TwoBlue => {
+            ManaType::Blue
+        }
+        ManaCostShard::Black | ManaCostShard::PhyrexianBlack | ManaCostShard::TwoBlack => {
+            ManaType::Black
+        }
         ManaCostShard::Red | ManaCostShard::PhyrexianRed | ManaCostShard::TwoRed => ManaType::Red,
-        ManaCostShard::Green | ManaCostShard::PhyrexianGreen | ManaCostShard::TwoGreen => ManaType::Green,
+        ManaCostShard::Green | ManaCostShard::PhyrexianGreen | ManaCostShard::TwoGreen => {
+            ManaType::Green
+        }
         ManaCostShard::Colorless => ManaType::Colorless,
-        ManaCostShard::WhiteBlue | ManaCostShard::PhyrexianWhiteBlue | ManaCostShard::ColorlessWhite => ManaType::White,
+        ManaCostShard::WhiteBlue
+        | ManaCostShard::PhyrexianWhiteBlue
+        | ManaCostShard::ColorlessWhite => ManaType::White,
         ManaCostShard::WhiteBlack | ManaCostShard::PhyrexianWhiteBlack => ManaType::White,
-        ManaCostShard::BlueBlack | ManaCostShard::PhyrexianBlueBlack | ManaCostShard::ColorlessBlue => ManaType::Blue,
+        ManaCostShard::BlueBlack
+        | ManaCostShard::PhyrexianBlueBlack
+        | ManaCostShard::ColorlessBlue => ManaType::Blue,
         ManaCostShard::BlueRed | ManaCostShard::PhyrexianBlueRed => ManaType::Blue,
-        ManaCostShard::BlackRed | ManaCostShard::PhyrexianBlackRed | ManaCostShard::ColorlessBlack => ManaType::Black,
+        ManaCostShard::BlackRed
+        | ManaCostShard::PhyrexianBlackRed
+        | ManaCostShard::ColorlessBlack => ManaType::Black,
         ManaCostShard::BlackGreen | ManaCostShard::PhyrexianBlackGreen => ManaType::Black,
-        ManaCostShard::RedWhite | ManaCostShard::PhyrexianRedWhite | ManaCostShard::ColorlessRed => ManaType::Red,
+        ManaCostShard::RedWhite
+        | ManaCostShard::PhyrexianRedWhite
+        | ManaCostShard::ColorlessRed => ManaType::Red,
         ManaCostShard::RedGreen | ManaCostShard::PhyrexianRedGreen => ManaType::Red,
-        ManaCostShard::GreenWhite | ManaCostShard::PhyrexianGreenWhite | ManaCostShard::ColorlessGreen => ManaType::Green,
+        ManaCostShard::GreenWhite
+        | ManaCostShard::PhyrexianGreenWhite
+        | ManaCostShard::ColorlessGreen => ManaType::Green,
         ManaCostShard::GreenBlue | ManaCostShard::PhyrexianGreenBlue => ManaType::Green,
         ManaCostShard::X | ManaCostShard::Snow => ManaType::Colorless,
     }
 }
 
-fn combinations(items: &[crate::types::identifiers::ObjectId], k: usize) -> Vec<Vec<crate::types::identifiers::ObjectId>> {
+fn combinations(
+    items: &[crate::types::identifiers::ObjectId],
+    k: usize,
+) -> Vec<Vec<crate::types::identifiers::ObjectId>> {
     if k == 0 {
         return vec![Vec::new()];
     }
@@ -629,8 +840,20 @@ mod tests {
     fn target_selection_uses_current_slot_legality() {
         let mut state = GameState::new_two_player(42);
         let p0 = PlayerId(0);
-        let target_a = create_object(&mut state, CardId(1), p0, "A".to_string(), Zone::Battlefield);
-        let target_b = create_object(&mut state, CardId(2), PlayerId(1), "B".to_string(), Zone::Battlefield);
+        let target_a = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "A".to_string(),
+            Zone::Battlefield,
+        );
+        let target_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "B".to_string(),
+            Zone::Battlefield,
+        );
 
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: p0,
@@ -652,7 +875,10 @@ mod tests {
         let state = GameState {
             waiting_for: WaitingFor::DeclareAttackers {
                 player: PlayerId(0),
-                valid_attacker_ids: vec![crate::types::identifiers::ObjectId(1), crate::types::identifiers::ObjectId(2)],
+                valid_attacker_ids: vec![
+                    crate::types::identifiers::ObjectId(1),
+                    crate::types::identifiers::ObjectId(2),
+                ],
                 valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
             },
             ..GameState::new_two_player(42)

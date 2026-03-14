@@ -105,7 +105,8 @@ pub fn get_ai_action(
         _ => AiDifficulty::Medium,
     };
 
-    let config = create_config_for_players(ai_difficulty, Platform::Native, game.players.len() as u8);
+    let config =
+        create_config_for_players(ai_difficulty, Platform::Native, game.players.len() as u8);
     let mut rng = rand::rng();
 
     Ok(choose_action(game, PlayerId(1), &config, &mut rng))

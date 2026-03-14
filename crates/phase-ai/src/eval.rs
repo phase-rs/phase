@@ -32,6 +32,14 @@ impl Default for EvalWeights {
 const WIN_SCORE: f64 = 10000.0;
 const LOSS_SCORE: f64 = -10000.0;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrategicIntent {
+    PushLethal,
+    Stabilize,
+    PreserveAdvantage,
+    Develop,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EvaluationBreakdown {
     pub life: f64,
@@ -50,6 +58,37 @@ impl EvaluationBreakdown {
             + self.board_toughness
             + self.hand_size
             + self.aggression
+    }
+}
+
+pub fn strategic_intent(state: &GameState, player: PlayerId) -> StrategicIntent {
+    let opponents = players::opponents(state, player);
+    if opponents.is_empty() {
+        return StrategicIntent::PreserveAdvantage;
+    }
+
+    let (_, my_power, _) = board_stats(state, player);
+    let total_opp_power: i32 = opponents.iter().map(|&opp| board_stats(state, opp).1).sum();
+    let min_opp_life = opponents
+        .iter()
+        .map(|&opp| state.players[opp.0 as usize].life)
+        .min()
+        .unwrap_or(i32::MAX);
+    let my_life = state.players[player.0 as usize].life;
+    let avg_opp_life = opponents
+        .iter()
+        .map(|&opp| state.players[opp.0 as usize].life)
+        .sum::<i32>() as f64
+        / opponents.len() as f64;
+
+    if min_opp_life > 0 && my_power >= min_opp_life {
+        StrategicIntent::PushLethal
+    } else if my_life <= total_opp_power.max(1) {
+        StrategicIntent::Stabilize
+    } else if my_power >= total_opp_power && my_life as f64 >= avg_opp_life {
+        StrategicIntent::PreserveAdvantage
+    } else {
+        StrategicIntent::Develop
     }
 }
 
@@ -440,5 +479,42 @@ mod tests {
         // Score should reflect being behind the strongest opponent
         // (threat-weighted, so player 1's stats dominate)
         assert!(score.is_finite());
+    }
+
+    #[test]
+    fn strategic_intent_pushes_lethal_when_board_represents_kill() {
+        let mut state = make_state();
+        state.players[1].life = 4;
+        add_creature(&mut state, PlayerId(0), 3, 3, vec![]);
+        add_creature(&mut state, PlayerId(0), 2, 2, vec![]);
+
+        assert_eq!(
+            strategic_intent(&state, PlayerId(0)),
+            StrategicIntent::PushLethal
+        );
+    }
+
+    #[test]
+    fn strategic_intent_stabilizes_under_pressure() {
+        let mut state = make_state();
+        state.players[0].life = 3;
+        add_creature(&mut state, PlayerId(1), 4, 4, vec![]);
+
+        assert_eq!(
+            strategic_intent(&state, PlayerId(0)),
+            StrategicIntent::Stabilize
+        );
+    }
+
+    #[test]
+    fn strategic_intent_preserves_advantage_when_ahead() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(0), 5, 5, vec![]);
+        add_creature(&mut state, PlayerId(1), 2, 2, vec![]);
+
+        assert_eq!(
+            strategic_intent(&state, PlayerId(0)),
+            StrategicIntent::PreserveAdvantage
+        );
     }
 }

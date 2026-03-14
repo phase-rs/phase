@@ -5,14 +5,22 @@ use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
+use crate::config::AiConfig;
+use crate::eval::{strategic_intent, StrategicIntent};
+
 pub struct PolicyContext<'a> {
     pub state: &'a GameState,
     pub decision: &'a AiDecisionContext,
     pub candidate: &'a CandidateAction,
     pub ai_player: PlayerId,
+    pub config: &'a AiConfig,
 }
 
 impl<'a> PolicyContext<'a> {
+    pub fn strategic_intent(&self) -> StrategicIntent {
+        strategic_intent(self.state, self.ai_player)
+    }
+
     pub fn source_object(&self) -> Option<&'a GameObject> {
         match &self.candidate.action {
             GameAction::CastSpell { card_id, .. } => self

@@ -28,6 +28,23 @@ pub struct SearchConfig {
     pub rollout_samples: u32,
 }
 
+#[derive(Debug, Clone)]
+pub struct AiProfile {
+    pub risk_tolerance: f64,
+    pub interaction_patience: f64,
+    pub stabilize_bias: f64,
+}
+
+impl Default for AiProfile {
+    fn default() -> Self {
+        Self {
+            risk_tolerance: 0.6,
+            interaction_patience: 0.75,
+            stabilize_bias: 1.0,
+        }
+    }
+}
+
 impl Default for SearchConfig {
     fn default() -> Self {
         SearchConfig {
@@ -46,6 +63,7 @@ impl Default for SearchConfig {
 pub struct AiConfig {
     pub difficulty: AiDifficulty,
     pub temperature: f64,
+    pub profile: AiProfile,
     pub play_lookahead: bool,
     pub combat_lookahead: bool,
     pub search: SearchConfig,
@@ -65,9 +83,14 @@ impl Default for AiConfig {
 /// Five presets scale from random play (VeryEasy) to deterministic best-move (VeryHard).
 /// WASM platform reduces search budgets to fit within browser constraints.
 pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
-    let (temperature, play_lookahead, combat_lookahead, search) = match difficulty {
+    let (temperature, profile, play_lookahead, combat_lookahead, search) = match difficulty {
         AiDifficulty::VeryEasy => (
             4.0,
+            AiProfile {
+                risk_tolerance: 0.9,
+                interaction_patience: 0.2,
+                stabilize_bias: 0.8,
+            },
             false,
             false,
             SearchConfig {
@@ -81,6 +104,11 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
         ),
         AiDifficulty::Easy => (
             2.0,
+            AiProfile {
+                risk_tolerance: 0.8,
+                interaction_patience: 0.4,
+                stabilize_bias: 0.9,
+            },
             true,
             false,
             SearchConfig {
@@ -94,6 +122,11 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
         ),
         AiDifficulty::Medium => (
             1.0,
+            AiProfile {
+                risk_tolerance: 0.65,
+                interaction_patience: 0.7,
+                stabilize_bias: 1.0,
+            },
             true,
             true,
             SearchConfig {
@@ -107,6 +140,11 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
         ),
         AiDifficulty::Hard => (
             0.5,
+            AiProfile {
+                risk_tolerance: 0.55,
+                interaction_patience: 0.9,
+                stabilize_bias: 1.1,
+            },
             true,
             true,
             SearchConfig {
@@ -120,6 +158,11 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
         ),
         AiDifficulty::VeryHard => (
             0.01,
+            AiProfile {
+                risk_tolerance: 0.45,
+                interaction_patience: 1.0,
+                stabilize_bias: 1.2,
+            },
             true,
             true,
             SearchConfig {
@@ -136,6 +179,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
     let mut config = AiConfig {
         difficulty,
         temperature,
+        profile,
         play_lookahead,
         combat_lookahead,
         search,
@@ -199,6 +243,7 @@ mod tests {
     fn very_easy_has_high_temperature() {
         let config = create_config(AiDifficulty::VeryEasy, Platform::Native);
         assert_eq!(config.temperature, 4.0);
+        assert!(config.profile.risk_tolerance > 0.8);
         assert!(!config.search.enabled);
         assert!(!config.play_lookahead);
     }
@@ -207,6 +252,7 @@ mod tests {
     fn easy_has_play_lookahead() {
         let config = create_config(AiDifficulty::Easy, Platform::Native);
         assert_eq!(config.temperature, 2.0);
+        assert!(config.profile.interaction_patience < 0.5);
         assert!(config.play_lookahead);
         assert!(!config.search.enabled);
     }
@@ -216,6 +262,7 @@ mod tests {
         let config = create_config(AiDifficulty::Medium, Platform::Native);
         assert_eq!(config.temperature, 1.0);
         assert!(config.search.enabled);
+        assert!(config.profile.interaction_patience >= 0.7);
         assert_eq!(config.search.max_depth, 2);
         assert_eq!(config.search.max_nodes, 24);
         assert_eq!(config.search.rollout_depth, 1);
@@ -225,6 +272,7 @@ mod tests {
     fn hard_increases_depth() {
         let config = create_config(AiDifficulty::Hard, Platform::Native);
         assert_eq!(config.temperature, 0.5);
+        assert!(config.profile.stabilize_bias > 1.0);
         assert_eq!(config.search.max_depth, 3);
         assert_eq!(config.search.max_nodes, 48);
         assert_eq!(config.search.rollout_depth, 2);

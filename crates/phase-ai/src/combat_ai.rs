@@ -7,6 +7,7 @@ use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
+use crate::config::AiProfile;
 use crate::eval::{evaluate_creature, threat_level};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +26,14 @@ pub fn choose_attackers_with_targets(
     state: &GameState,
     player: PlayerId,
 ) -> Vec<(ObjectId, AttackTarget)> {
+    choose_attackers_with_targets_with_profile(state, player, &AiProfile::default())
+}
+
+pub fn choose_attackers_with_targets_with_profile(
+    state: &GameState,
+    player: PlayerId,
+    profile: &AiProfile,
+) -> Vec<(ObjectId, AttackTarget)> {
     let opponents = players::opponents(state, player);
     if opponents.is_empty() {
         return Vec::new();
@@ -42,15 +51,14 @@ pub fn choose_attackers_with_targets(
             }
         })
         .collect();
-    let objective = determine_attack_objective(state, player, &opponents, &candidates);
-
-    // Collect blockers per opponent
+    let preferred_opponent = preferred_attack_opponent(state, player, &opponents, &candidates);
+    // Collect blockers for the most likely attack target rather than the whole table.
     let opponent_blockers: Vec<ObjectId> = state
         .battlefield
         .iter()
         .filter_map(|&id| {
             let obj = state.objects.get(&id)?;
-            if opponents.contains(&obj.controller)
+            if Some(obj.controller) == preferred_opponent
                 && obj.card_types.core_types.contains(&CoreType::Creature)
                 && !obj.tapped
             {
@@ -60,6 +68,14 @@ pub fn choose_attackers_with_targets(
             }
         })
         .collect();
+    let objective = determine_attack_objective(
+        state,
+        player,
+        &opponents,
+        &candidates,
+        &opponent_blockers,
+        profile,
+    );
 
     // Determine which creatures should attack (same logic as before)
     let mut attacking_ids = Vec::new();
@@ -113,7 +129,7 @@ pub fn choose_attackers_with_targets(
                 let free_damage = kills_blocker && attacker_survives;
                 // Favorable trade: attacker kills blocker and is worth less (trading up)
                 let favorable_trade = kills_blocker && my_value <= blocker_value;
-                if should_attack_given_objective(objective, free_damage, favorable_trade) {
+                if should_attack_given_objective(objective, free_damage, favorable_trade, profile) {
                     attacking_ids.push(id);
                 }
             }
@@ -131,6 +147,38 @@ pub fn choose_attackers_with_targets(
 
     // Multi-opponent: assign attack targets
     assign_attack_targets(state, player, &opponents, attacking_ids)
+}
+
+fn preferred_attack_opponent(
+    state: &GameState,
+    player: PlayerId,
+    opponents: &[PlayerId],
+    candidate_attackers: &[ObjectId],
+) -> Option<PlayerId> {
+    if opponents.is_empty() {
+        return None;
+    }
+    if opponents.len() == 1 {
+        return Some(opponents[0]);
+    }
+
+    let total_attack_power = sum_power(state, candidate_attackers);
+    let weakest = opponents
+        .iter()
+        .min_by_key(|&&opp| state.players[opp.0 as usize].life)
+        .copied();
+    if let Some(weakest) = weakest {
+        let weak_life = state.players[weakest.0 as usize].life;
+        if weak_life > 0 && total_attack_power >= weak_life {
+            return Some(weakest);
+        }
+    }
+
+    opponents.iter().copied().max_by(|&a, &b| {
+        threat_level(state, player, a)
+            .partial_cmp(&threat_level(state, player, b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })
 }
 
 /// Assign each attacker to an opponent based on threat and lethal detection.
@@ -217,9 +265,18 @@ pub fn choose_blockers(
     player: PlayerId,
     attacker_ids: &[ObjectId],
 ) -> Vec<(ObjectId, ObjectId)> {
+    choose_blockers_with_profile(state, player, attacker_ids, &AiProfile::default())
+}
+
+pub fn choose_blockers_with_profile(
+    state: &GameState,
+    player: PlayerId,
+    attacker_ids: &[ObjectId],
+    profile: &AiProfile,
+) -> Vec<(ObjectId, ObjectId)> {
     let mut assignments = Vec::new();
     let mut used_blockers = Vec::new();
-    let objective = determine_block_objective(state, player, attacker_ids);
+    let objective = determine_block_objective(state, player, attacker_ids, profile);
 
     // Collect available blockers
     let available_blockers: Vec<ObjectId> = state
@@ -330,6 +387,8 @@ fn determine_attack_objective(
     player: PlayerId,
     opponents: &[PlayerId],
     candidate_attackers: &[ObjectId],
+    opponent_blockers: &[ObjectId],
+    profile: &AiProfile,
 ) -> CombatObjective {
     let my_life = state.players[player.0 as usize].life;
     let min_opp_life = opponents
@@ -338,16 +397,22 @@ fn determine_attack_objective(
         .min()
         .unwrap_or(20);
     let total_attack_power = sum_power(state, candidate_attackers);
-    if min_opp_life > 0 && total_attack_power >= min_opp_life {
+    if min_opp_life > 0 && total_attack_power >= min_opp_life && opponent_blockers.is_empty() {
         return CombatObjective::PushLethal;
     }
 
     let my_board_power = battlefield_power(state, player);
-    let opp_board_power: i32 = opponents.iter().map(|&opp| battlefield_power(state, opp)).sum();
+    let opp_board_power: i32 = opponents
+        .iter()
+        .map(|&opp| battlefield_power(state, opp))
+        .sum();
 
-    if my_life <= opp_board_power.max(0) {
+    if my_life as f64 <= opp_board_power.max(0) as f64 * profile.stabilize_bias {
         CombatObjective::Stabilize
-    } else if my_board_power >= opp_board_power && my_life >= min_opp_life {
+    } else if my_board_power as f64
+        >= opp_board_power as f64 * (1.0 - (profile.risk_tolerance * 0.2))
+        && my_life >= min_opp_life
+    {
         CombatObjective::PreserveAdvantage
     } else {
         CombatObjective::Race
@@ -358,10 +423,11 @@ fn determine_block_objective(
     state: &GameState,
     player: PlayerId,
     attacker_ids: &[ObjectId],
+    profile: &AiProfile,
 ) -> CombatObjective {
     let life = state.players[player.0 as usize].life;
     let incoming_power = sum_power(state, attacker_ids);
-    if life <= incoming_power {
+    if life as f64 <= incoming_power as f64 * profile.stabilize_bias {
         CombatObjective::Stabilize
     } else {
         CombatObjective::PreserveAdvantage
@@ -372,12 +438,13 @@ fn should_attack_given_objective(
     objective: CombatObjective,
     free_damage: bool,
     favorable_trade: bool,
+    profile: &AiProfile,
 ) -> bool {
     match objective {
         CombatObjective::PushLethal => true,
-        CombatObjective::Stabilize => free_damage,
+        CombatObjective::Stabilize => free_damage && profile.risk_tolerance < 0.8,
         CombatObjective::PreserveAdvantage => free_damage || favorable_trade,
-        CombatObjective::Race => free_damage || favorable_trade,
+        CombatObjective::Race => free_damage || favorable_trade || profile.risk_tolerance > 0.75,
     }
 }
 
@@ -387,7 +454,8 @@ fn battlefield_power(state: &GameState, player: PlayerId) -> i32 {
         .iter()
         .filter_map(|&id| {
             let object = state.objects.get(&id)?;
-            if object.controller == player && object.card_types.core_types.contains(&CoreType::Creature)
+            if object.controller == player
+                && object.card_types.core_types.contains(&CoreType::Creature)
             {
                 Some(object.power.unwrap_or(0))
             } else {
@@ -399,7 +467,12 @@ fn battlefield_power(state: &GameState, player: PlayerId) -> i32 {
 
 fn sum_power(state: &GameState, ids: &[ObjectId]) -> i32 {
     ids.iter()
-        .filter_map(|&id| state.objects.get(&id).map(|object| object.power.unwrap_or(0)))
+        .filter_map(|&id| {
+            state
+                .objects
+                .get(&id)
+                .map(|object| object.power.unwrap_or(0))
+        })
         .sum()
 }
 
@@ -538,6 +611,21 @@ mod tests {
         assert!(
             !attackers.contains(&small),
             "Should skip 1/1 into 5/5 when life is equal"
+        );
+    }
+
+    #[test]
+    fn lethal_objective_does_not_ignore_available_blockers() {
+        let mut state = setup();
+        state.players[1].life = 3;
+        let attacker = add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+        add_creature(&mut state, PlayerId(1), "Wall", 0, 4, vec![]);
+
+        let attackers = choose_attackers(&state, PlayerId(0));
+
+        assert!(
+            !attackers.contains(&attacker),
+            "Should not alpha-strike into a blocker just because raw power equals life"
         );
     }
 

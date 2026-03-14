@@ -16,9 +16,10 @@ impl TacticalPolicy for AntiSelfHarmPolicy {
             GameAction::ChooseTarget { target } => target
                 .as_ref()
                 .map_or(-0.25, |target| score_target_ref(ctx, target)),
-            GameAction::SelectTargets { targets } => {
-                targets.iter().map(|target| score_target_ref(ctx, target)).sum()
-            }
+            GameAction::SelectTargets { targets } => targets
+                .iter()
+                .map(|target| score_target_ref(ctx, target))
+                .sum(),
             _ => 0.0,
         }
     }
