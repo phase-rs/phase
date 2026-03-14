@@ -116,6 +116,7 @@ enum ImperativeAst {
     Targeted(TargetedImperativeAst),
     SearchCreation(SearchCreationImperativeAst),
     HandReveal(HandRevealImperativeAst),
+    Choose(ChooseImperativeAst),
     Utility(UtilityImperativeAst),
 }
 
@@ -162,6 +163,14 @@ enum HandRevealImperativeAst {
     LookAtHand { target: TargetFilter },
     RevealHand,
     RevealTop { count: u32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChooseImperativeAst {
+    TargetOnly { target: TargetFilter },
+    Reparse { effect: Effect },
+    NamedChoice { choice_type: ChoiceType },
+    RevealHandFilter { card_filter: TargetFilter },
 }
 
 /// Parse an effect clause from Oracle text into an Effect enum.
@@ -1288,6 +1297,47 @@ fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
     }
 }
 
+fn parse_choose_ast(text: &str, lower: &str) -> Option<ChooseImperativeAst> {
+    if let Some(rest) = lower.strip_prefix("choose ") {
+        if is_choose_as_targeting(rest) {
+            let stripped = &text["choose ".len()..];
+            let inner = parse_effect(stripped);
+            if !matches!(inner, Effect::Unimplemented { .. }) {
+                return Some(ChooseImperativeAst::Reparse { effect: inner });
+            }
+            let (target, _) = parse_target(stripped);
+            return Some(ChooseImperativeAst::TargetOnly { target });
+        }
+    }
+
+    if let Some(choice_type) = try_parse_named_choice(lower) {
+        return Some(ChooseImperativeAst::NamedChoice { choice_type });
+    }
+
+    if lower.starts_with("choose ") && lower.contains("card from it") {
+        return Some(ChooseImperativeAst::RevealHandFilter {
+            card_filter: parse_choose_filter(lower),
+        });
+    }
+
+    None
+}
+
+fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
+    match ast {
+        ChooseImperativeAst::TargetOnly { target } => Effect::TargetOnly { target },
+        ChooseImperativeAst::Reparse { effect } => effect,
+        ChooseImperativeAst::NamedChoice { choice_type } => Effect::Choose {
+            choice_type,
+            persist: false,
+        },
+        ChooseImperativeAst::RevealHandFilter { card_filter } => Effect::RevealHand {
+            target: TargetFilter::Any,
+            card_filter,
+        },
+    }
+}
+
 fn parse_utility_imperative_ast(text: &str, lower: &str) -> Option<UtilityImperativeAst> {
     if lower.starts_with("prevent ") {
         return Some(UtilityImperativeAst::Prevent {
@@ -1341,6 +1391,7 @@ fn lower_imperative_ast(ast: ImperativeAst) -> Effect {
         ImperativeAst::Targeted(ast) => lower_targeted_action_ast(ast),
         ImperativeAst::SearchCreation(ast) => lower_search_and_creation_ast(ast),
         ImperativeAst::HandReveal(ast) => lower_hand_reveal_ast(ast),
+        ImperativeAst::Choose(ast) => lower_choose_ast(ast),
         ImperativeAst::Utility(ast) => lower_utility_imperative_ast(ast),
     }
 }
@@ -1356,34 +1407,8 @@ fn parse_hand_reveal_effect(text: &str, lower: &str) -> Option<Effect> {
 }
 
 fn parse_choose_effect(text: &str, lower: &str) -> Option<Effect> {
-    if let Some(rest) = lower.strip_prefix("choose ") {
-        if is_choose_as_targeting(rest) {
-            let stripped = &text["choose ".len()..];
-            let inner = parse_effect(stripped);
-            if !matches!(inner, Effect::Unimplemented { .. }) {
-                return Some(inner);
-            }
-            let (target, _) = parse_target(stripped);
-            return Some(Effect::TargetOnly { target });
-        }
-    }
-
-    if let Some(choice_type) = try_parse_named_choice(lower) {
-        return Some(Effect::Choose {
-            choice_type,
-            persist: false,
-        });
-    }
-
-    if lower.starts_with("choose ") && lower.contains("card from it") {
-        let filter = parse_choose_filter(lower);
-        return Some(Effect::RevealHand {
-            target: TargetFilter::Any,
-            card_filter: filter,
-        });
-    }
-
-    None
+    let ast = ImperativeAst::Choose(parse_choose_ast(text, lower)?);
+    Some(lower_imperative_ast(ast))
 }
 
 fn parse_put_effect(text: &str, lower: &str) -> Option<Effect> {
