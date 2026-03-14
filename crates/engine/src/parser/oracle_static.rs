@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use super::oracle_target::parse_type_phrase;
 use super::oracle_util::strip_reminder_text;
 use crate::types::ability::{
     ChosenSubtypeKind, ContinuousModification, ControllerRef, DynamicPTValue, FilterProp,
@@ -7,6 +8,15 @@ use crate::types::ability::{
 };
 use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuleStaticPredicate {
+    CantUntap,
+    MustAttack,
+    Shroud,
+    MayLookAtTopOfLibrary,
+    LoseAllAbilities,
+}
 
 /// Parse a static/continuous ability line into a StaticDefinition.
 /// Handles: "Enchanted creature gets +N/+M", "has {keyword}",
@@ -17,34 +27,41 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
 
     // --- "Enchanted creature gets +N/+M" or "has {keyword}" ---
     if lower.starts_with("enchanted creature ") {
-        return parse_continuous_gets_has(
+        if let Some(def) = parse_continuous_gets_has(
             &text[19..],
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])),
-        );
+        ) {
+            return Some(def);
+        }
     }
 
     // --- "Enchanted permanent gets/has ..." ---
     if lower.starts_with("enchanted permanent ") {
-        return parse_continuous_gets_has(
+        if let Some(def) = parse_continuous_gets_has(
             &text[20..],
             TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy])),
-        );
+        ) {
+            return Some(def);
+        }
     }
 
     // --- "Equipped creature gets +N/+M" ---
     if lower.starts_with("equipped creature ") {
-        return parse_continuous_gets_has(
+        if let Some(def) = parse_continuous_gets_has(
             &text[18..],
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy])),
-        );
+        ) {
+            return Some(def);
+        }
     }
 
     // --- "All creatures get/have ..." ---
     if lower.starts_with("all creatures ") {
-        return parse_continuous_gets_has(
-            &text[14..],
-            TargetFilter::Typed(TypedFilter::creature()),
-        );
+        if let Some(def) =
+            parse_continuous_gets_has(&text[14..], TargetFilter::Typed(TypedFilter::creature()))
+        {
+            return Some(def);
+        }
     }
 
     // --- "Other [Subtype] creatures you control get/have..." ---
@@ -63,18 +80,26 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
 
     // --- "Creatures you control get +N/+M" ---
     if lower.starts_with("creatures you control ") {
-        return parse_continuous_gets_has(
+        if let Some(def) = parse_continuous_gets_has(
             &text[22..],
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-        );
+        ) {
+            return Some(def);
+        }
     }
 
     // --- "Other creatures you control get +N/+M" ---
     if lower.starts_with("other creatures you control ") {
-        return parse_continuous_gets_has(
+        if let Some(def) = parse_continuous_gets_has(
             &text[28..],
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-        );
+        ) {
+            return Some(def);
+        }
+    }
+
+    if let Some(def) = parse_subject_continuous_static(&text) {
+        return Some(def);
     }
 
     // --- "Lands you control have '[type]'" ---
@@ -132,6 +157,10 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
                 );
             }
         }
+    }
+
+    if let Some(def) = parse_subject_rule_static(&text) {
+        return Some(def);
     }
 
     // --- "~ is the chosen type in addition to its other types" ---
@@ -277,8 +306,19 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     // --- "~ doesn't untap during your untap step" ---
     if lower.contains("doesn't untap during") || lower.contains("doesn\u{2019}t untap during") {
         return Some(
-            StaticDefinition::continuous()
+            StaticDefinition::new(StaticMode::Other("CantUntap".to_string()))
                 .affected(TargetFilter::SelfRef)
+                .description(text.to_string()),
+        );
+    }
+
+    // --- "You may look at the top card of your library any time." ---
+    if lower.starts_with("you may look at the top card of your library") {
+        return Some(
+            StaticDefinition::new(StaticMode::Other("MayLookAtTopOfLibrary".to_string()))
+                .affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                ))
                 .description(text.to_string()),
         );
     }
@@ -390,6 +430,263 @@ fn parse_typed_you_control(text: &str, lower: &str, _is_other: bool) -> Option<S
     None
 }
 
+fn parse_subject_rule_static(text: &str) -> Option<StaticDefinition> {
+    let lower = text.to_lowercase();
+    let (affected, predicate_text) = strip_rule_static_subject(text, &lower)?;
+    let predicate = parse_rule_static_predicate(predicate_text)?;
+    Some(lower_rule_static(predicate, affected, text))
+}
+
+fn parse_subject_continuous_static(text: &str) -> Option<StaticDefinition> {
+    let lower = text.to_lowercase();
+
+    let subject_end = find_continuous_predicate_start(&lower)?;
+    let subject = text[..subject_end].trim();
+    let predicate = text[subject_end + 1..].trim();
+    if parse_rule_static_predicate(predicate).is_some() {
+        return None;
+    }
+    let affected = parse_continuous_subject_filter(subject)?;
+    let modifications = parse_continuous_modifications(predicate);
+    if !modifications.is_empty() {
+        return Some(
+            StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(modifications)
+                .description(text.to_string()),
+        );
+    }
+
+    None
+}
+
+fn find_continuous_predicate_start(lower: &str) -> Option<usize> {
+    [
+        " gets ", " get ", " gains ", " gain ", " has ", " have ", " loses ", " lose ",
+    ]
+    .into_iter()
+    .filter_map(|marker| lower.find(marker))
+    .min()
+}
+
+fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
+    let trimmed = subject.trim();
+    let lower = trimmed.to_lowercase();
+
+    if lower.starts_with("other ") {
+        let original_rest = trimmed[6..].trim();
+        return parse_continuous_subject_filter(original_rest).map(add_another_filter);
+    }
+
+    if let Some(filter) = parse_creature_subject_filter(trimmed) {
+        return Some(filter);
+    }
+
+    parse_rule_static_subject_filter(trimmed)
+}
+
+fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
+    let trimmed = subject.trim();
+    let lower = trimmed.to_lowercase();
+
+    let (descriptor, plural_suffix) = if let Some(prefix) = trimmed.strip_suffix(" creatures") {
+        (prefix.trim(), false)
+    } else if !trimmed.contains(' ') && lower.ends_with('s') {
+        (trimmed.trim_end_matches('s').trim(), true)
+    } else {
+        return None;
+    };
+
+    if descriptor.is_empty() {
+        return None;
+    }
+
+    if let Some(color) = parse_named_color(descriptor) {
+        return Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::HasColor {
+                color: color.to_string(),
+            }],
+        )));
+    }
+
+    if is_capitalized_words(descriptor) {
+        let subtype = if plural_suffix {
+            descriptor.to_string()
+        } else {
+            descriptor.to_string()
+        };
+        return Some(TargetFilter::Typed(
+            TypedFilter::creature().subtype(subtype),
+        ));
+    }
+
+    None
+}
+
+fn add_another_filter(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            typed.properties.push(FilterProp::Another);
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters.into_iter().map(add_another_filter).collect(),
+        },
+        other => TargetFilter::And {
+            filters: vec![
+                other,
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Another])),
+            ],
+        },
+    }
+}
+
+fn strip_rule_static_subject<'a>(text: &'a str, lower: &str) -> Option<(TargetFilter, &'a str)> {
+    for marker in [
+        " doesn't untap during ",
+        " doesn’t untap during ",
+        " don't untap during ",
+        " don’t untap during ",
+        " attacks each combat if able",
+        " has shroud",
+        " have shroud",
+        " may look at the top card of your library",
+        " loses all abilities",
+        " lose all abilities",
+    ] {
+        let Some(subject_end) = lower.find(marker) else {
+            continue;
+        };
+        let subject = text[..subject_end].trim();
+        let predicate = text[subject_end + 1..].trim();
+        let affected = parse_rule_static_subject_filter(subject)?;
+        return Some((affected, predicate));
+    }
+
+    None
+}
+
+fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFilter> {
+    let lower = subject.to_lowercase();
+
+    if matches!(
+        lower.as_str(),
+        "~" | "this"
+            | "it"
+            | "this card"
+            | "this creature"
+            | "this permanent"
+            | "this artifact"
+            | "this land"
+    ) {
+        return Some(TargetFilter::SelfRef);
+    }
+
+    if lower == "you" {
+        return Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You),
+        ));
+    }
+
+    if lower == "enchanted creature" {
+        return Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+        ));
+    }
+
+    if lower == "enchanted permanent" {
+        return Some(TargetFilter::Typed(
+            TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy]),
+        ));
+    }
+
+    if lower == "equipped creature" {
+        return Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
+        ));
+    }
+
+    let (filter, rest) = parse_type_phrase(subject);
+    if rest.trim().is_empty() {
+        return Some(filter);
+    }
+
+    None
+}
+
+fn parse_rule_static_predicate(text: &str) -> Option<RuleStaticPredicate> {
+    let lower = text.to_lowercase();
+
+    if lower.starts_with("doesn't untap during")
+        || lower.starts_with("doesn\u{2019}t untap during")
+        || lower.starts_with("don't untap during")
+        || lower.starts_with("don\u{2019}t untap during")
+    {
+        return Some(RuleStaticPredicate::CantUntap);
+    }
+
+    if matches!(
+        lower.as_str(),
+        "attacks each combat if able" | "attacks each combat if able."
+    ) {
+        return Some(RuleStaticPredicate::MustAttack);
+    }
+
+    if matches!(
+        lower.as_str(),
+        "has shroud" | "has shroud." | "have shroud" | "have shroud."
+    ) {
+        return Some(RuleStaticPredicate::Shroud);
+    }
+
+    if lower.starts_with("may look at the top card of your library") {
+        return Some(RuleStaticPredicate::MayLookAtTopOfLibrary);
+    }
+
+    if matches!(
+        lower.as_str(),
+        "lose all abilities"
+            | "lose all abilities."
+            | "loses all abilities"
+            | "loses all abilities."
+    ) {
+        return Some(RuleStaticPredicate::LoseAllAbilities);
+    }
+
+    None
+}
+
+fn lower_rule_static(
+    predicate: RuleStaticPredicate,
+    affected: TargetFilter,
+    description: &str,
+) -> StaticDefinition {
+    match predicate {
+        RuleStaticPredicate::CantUntap => {
+            StaticDefinition::new(StaticMode::Other("CantUntap".to_string()))
+                .affected(affected)
+                .description(description.to_string())
+        }
+        RuleStaticPredicate::MustAttack => StaticDefinition::new(StaticMode::MustAttack)
+            .affected(affected)
+            .description(description.to_string()),
+        RuleStaticPredicate::Shroud => {
+            StaticDefinition::new(StaticMode::Other("Shroud".to_string()))
+                .affected(affected)
+                .description(description.to_string())
+        }
+        RuleStaticPredicate::MayLookAtTopOfLibrary => {
+            StaticDefinition::new(StaticMode::Other("MayLookAtTopOfLibrary".to_string()))
+                .affected(affected)
+                .description(description.to_string())
+        }
+        RuleStaticPredicate::LoseAllAbilities => StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(vec![ContinuousModification::RemoveAllAbilities])
+            .description(description.to_string()),
+    }
+}
+
 fn parse_named_color(text: &str) -> Option<&'static str> {
     match text.trim().to_ascii_lowercase().as_str() {
         "white" => Some("White"),
@@ -429,6 +726,10 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     let lower = text.to_lowercase();
     let mut modifications = Vec::new();
 
+    if lower.contains("lose all abilities") {
+        modifications.push(ContinuousModification::RemoveAllAbilities);
+    }
+
     if lower.starts_with("gets ") || lower.starts_with("get ") {
         let offset = if lower.starts_with("gets ") { 5 } else { 4 };
         let after = &text[offset..].trim();
@@ -436,6 +737,11 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
             modifications.push(ContinuousModification::AddPower { value: p });
             modifications.push(ContinuousModification::AddToughness { value: t });
         }
+    }
+
+    if let Some((power, toughness)) = parse_base_pt_mod(text) {
+        modifications.push(ContinuousModification::SetPower { value: power });
+        modifications.push(ContinuousModification::SetToughness { value: toughness });
     }
 
     if let Some(keyword_text) = extract_keyword_clause(text) {
@@ -447,6 +753,13 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     }
 
     modifications
+}
+
+fn parse_base_pt_mod(text: &str) -> Option<(i32, i32)> {
+    let lower = text.to_lowercase();
+    let pos = lower.find("base power and toughness ")?;
+    let pt_text = text[pos + "base power and toughness ".len()..].trim();
+    parse_pt_mod(pt_text)
 }
 
 /// Split a keyword list like "flying and trample" or "flying, trample, and haste".
@@ -515,10 +828,24 @@ fn map_keyword(text: &str) -> Option<Keyword> {
     if word.is_empty() {
         return None;
     }
+    if let Some(keyword) = parse_landwalk_keyword(word) {
+        return Some(keyword);
+    }
     match Keyword::from_str(word) {
         Ok(Keyword::Unknown(_)) => None,
         Ok(kw) => Some(kw),
         Err(_) => None, // Infallible, but satisfy the compiler
+    }
+}
+
+fn parse_landwalk_keyword(text: &str) -> Option<Keyword> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "plainswalk" => Some(Keyword::Landwalk("Plains".to_string())),
+        "islandwalk" => Some(Keyword::Landwalk("Island".to_string())),
+        "swampwalk" => Some(Keyword::Landwalk("Swamp".to_string())),
+        "mountainwalk" => Some(Keyword::Landwalk("Mountain".to_string())),
+        "forestwalk" => Some(Keyword::Landwalk("Forest".to_string())),
+        _ => None,
     }
 }
 
@@ -716,7 +1043,7 @@ mod tests {
     fn static_doesnt_untap() {
         let def =
             parse_static_line("Darksteel Sentinel doesn't untap during your untap step.").unwrap();
-        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.mode, StaticMode::Other("CantUntap".to_string()));
         assert!(def.description.is_some());
     }
 
@@ -929,5 +1256,189 @@ mod tests {
             .contains(&ContinuousModification::SetDynamicToughness {
                 value: DynamicPTValue::CardTypesInAllGraveyards { offset: 1 },
             }));
+    }
+
+    #[test]
+    fn static_enchanted_creature_doesnt_untap() {
+        let def = parse_static_line(
+            "Enchanted creature doesn't untap during its controller's untap step.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Other("CantUntap".to_string()));
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            ))
+        );
+    }
+
+    #[test]
+    fn static_creatures_with_counters_dont_untap() {
+        let def = parse_static_line(
+            "Creatures with ice counters on them don't untap during their controllers' untap steps.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Other("CantUntap".to_string()));
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![FilterProp::CountersGE {
+                    counter_type: "ice".to_string(),
+                    count: 1,
+                },]
+            )))
+        );
+    }
+
+    #[test]
+    fn static_this_creature_attacks_each_combat_if_able() {
+        let def = parse_static_line("This creature attacks each combat if able.").unwrap();
+        assert_eq!(def.mode, StaticMode::MustAttack);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn static_enchanted_creature_attacks_each_combat_if_able() {
+        let def = parse_static_line("Enchanted creature attacks each combat if able.").unwrap();
+        assert_eq!(def.mode, StaticMode::MustAttack);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            ))
+        );
+    }
+
+    #[test]
+    fn static_you_have_shroud() {
+        let def = parse_static_line("You have shroud.").unwrap();
+        assert_eq!(def.mode, StaticMode::Other("Shroud".to_string()));
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ))
+        );
+    }
+
+    #[test]
+    fn static_you_may_look_at_top_card_of_library() {
+        let def =
+            parse_static_line("You may look at the top card of your library any time.").unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::Other("MayLookAtTopOfLibrary".to_string())
+        );
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ))
+        );
+    }
+
+    #[test]
+    fn static_cards_in_graveyards_lose_all_abilities() {
+        let def = parse_static_line("Cards in graveyards lose all abilities.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::InZone {
+                    zone: crate::types::zones::Zone::Graveyard,
+                },
+            ])))
+        );
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::RemoveAllAbilities]
+        );
+    }
+
+    #[test]
+    fn static_black_creatures_get_plus_one_plus_one() {
+        let def = parse_static_line("Black creatures get +1/+1.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![FilterProp::HasColor {
+                    color: "Black".to_string(),
+                },]
+            )))
+        );
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 1 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 1 }));
+    }
+
+    #[test]
+    fn static_creatures_you_control_with_mana_value_filter() {
+        let def = parse_static_line("Creatures you control with mana value 3 or less get +1/+0.")
+            .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::CmcLE { value: 3 }]),
+            ))
+        );
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 1 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 0 }));
+    }
+
+    #[test]
+    fn static_other_zombie_creatures_have_swampwalk() {
+        let def = parse_static_line("Other Zombie creatures have swampwalk.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .subtype("Zombie".to_string())
+                    .properties(vec![FilterProp::Another]),
+            ))
+        );
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Landwalk("Swamp".to_string()),
+            }));
+    }
+
+    #[test]
+    fn static_creature_tokens_you_control_lose_all_abilities_and_have_base_pt() {
+        let def = parse_static_line(
+            "Creature tokens you control lose all abilities and have base power and toughness 3/3.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Token]),
+            ))
+        );
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::RemoveAllAbilities));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::SetPower { value: 3 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::SetToughness { value: 3 }));
     }
 }

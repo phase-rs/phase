@@ -98,6 +98,11 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     let offset = lower.len() - lower_trimmed.len();
     pos += offset;
 
+    if let Some((prop, consumed)) = parse_combat_status_prefix(&lower[pos..]) {
+        properties.push(prop);
+        pos += consumed;
+    }
+
     // Handle color prefix: "white creature", "red spell", etc.
     let color_prop = parse_color_prefix(&lower[pos..]);
     if let Some((ref prop, color_len)) = color_prop {
@@ -117,6 +122,11 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
 
     if let Some(neg) = negated_type {
         properties.push(FilterProp::NonType { value: neg });
+    }
+
+    if let Some(consumed) = parse_token_suffix(&lower[pos..]) {
+        properties.push(FilterProp::Token);
+        pos += consumed;
     }
 
     // Check for "or" combinator: "artifact or enchantment", "creature or artifact you control"
@@ -169,6 +179,12 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
 
     // Check "with power N or less/greater" suffix
     if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..]) {
+        properties.push(prop);
+        pos += consumed;
+    }
+
+    // Check "with [counter] counter(s) on it/them" suffix
+    if let Some((prop, consumed)) = parse_counter_suffix(&lower[pos..]) {
         properties.push(prop);
         pos += consumed;
     }
@@ -236,7 +252,9 @@ fn parse_core_type(text: &str) -> (Option<TypeFilter>, Option<String>, usize) {
         ("planeswalker", TypeFilter::Planeswalker),
         ("lands", TypeFilter::Land),
         ("land", TypeFilter::Land),
+        ("spells", TypeFilter::Card),
         ("spell", TypeFilter::Card),
+        ("cards", TypeFilter::Card),
         ("card", TypeFilter::Card),
     ];
 
@@ -260,6 +278,22 @@ fn parse_controller_suffix(text: &str) -> Option<ControllerRef> {
     }
 }
 
+fn parse_token_suffix(text: &str) -> Option<usize> {
+    let trimmed = text.trim_start();
+
+    for prefix in ["tokens", "token"] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            if rest.is_empty()
+                || rest.starts_with(|c: char| c.is_whitespace() || c == ',' || c == '.')
+            {
+                return Some(text.len() - rest.len());
+            }
+        }
+    }
+
+    None
+}
+
 /// Parse a color adjective prefix: "white ", "blue ", "black ", "red ", "green ".
 /// Returns (FilterProp::HasColor, bytes consumed including trailing space).
 fn parse_color_prefix(text: &str) -> Option<(FilterProp, usize)> {
@@ -280,6 +314,16 @@ fn parse_color_prefix(text: &str) -> Option<(FilterProp, usize)> {
             ));
         }
     }
+    None
+}
+
+fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usize)> {
+    for (prefix, prop) in [("attacking ", FilterProp::Attacking)] {
+        if text.starts_with(prefix) {
+            return Some((prop, prefix.len()));
+        }
+    }
+
     None
 }
 
@@ -331,6 +375,45 @@ fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)> {
     Some((prop, text.len() - after.len()))
 }
 
+/// Parse "with [counter] counter(s) on it/them".
+/// Returns (FilterProp, bytes consumed from the original text).
+fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
+    let trimmed = text.trim_start();
+    let rest = trimmed.strip_prefix("with ")?;
+
+    for suffix in [
+        " counters on them",
+        " counters on it",
+        " counter on them",
+        " counter on it",
+    ] {
+        let Some(counter_end) = rest.find(suffix) else {
+            continue;
+        };
+        let mut counter_type = rest[..counter_end].trim();
+        counter_type = counter_type
+            .strip_prefix("an ")
+            .or_else(|| counter_type.strip_prefix("a "))
+            .unwrap_or(counter_type)
+            .trim();
+
+        if counter_type.is_empty() {
+            continue;
+        }
+
+        let consumed = text.len() - rest[counter_end + suffix.len()..].len();
+        return Some((
+            FilterProp::CountersGE {
+                counter_type: counter_type.to_string(),
+                count: 1,
+            },
+            consumed,
+        ));
+    }
+
+    None
+}
+
 fn typed(
     card_type: TypeFilter,
     subtype: Option<String>,
@@ -366,15 +449,15 @@ fn parse_zone_suffix(text: &str) -> Option<(FilterProp, Option<ControllerRef>, u
         (trimmed, 0)
     };
 
-    let zones: &[(&str, Zone)] = &[
-        ("graveyard", Zone::Graveyard),
-        ("exile", Zone::Exile),
-        ("hand", Zone::Hand),
-        ("library", Zone::Library),
+    let zones: &[(&str, &str, Zone)] = &[
+        ("graveyard", "graveyards", Zone::Graveyard),
+        ("exile", "exiles", Zone::Exile),
+        ("hand", "hands", Zone::Hand),
+        ("library", "libraries", Zone::Library),
     ];
 
     for prep in &["from", "in"] {
-        for &(zone_word, ref zone) in zones {
+        for &(zone_word, zone_plural, ref zone) in zones {
             // Possessive: "from your graveyard", "from their graveyard"
             if contains_possessive(after_card, prep, zone_word) {
                 let pattern = format!("{prep} your {zone_word}");
@@ -406,19 +489,23 @@ fn parse_zone_suffix(text: &str) -> Option<(FilterProp, Option<ControllerRef>, u
                 ));
             }
 
-            // Direct (no article): "from exile", "in exile"
-            let direct = format!("{prep} {zone_word}");
-            if after_card.to_lowercase().starts_with(&direct) {
-                // Make sure it's not a possessive that we missed
-                let after = &after_card[direct.len()..];
-                if after.is_empty()
-                    || after.starts_with(|c: char| c.is_whitespace() || c == ',' || c == '.')
-                {
-                    return Some((
-                        FilterProp::InZone { zone: *zone },
-                        None,
-                        leading_ws + card_skip + direct.len(),
-                    ));
+            // Direct (no article): "from exile", "in graveyards"
+            for direct in [
+                format!("{prep} {zone_word}"),
+                format!("{prep} {zone_plural}"),
+            ] {
+                if after_card.to_lowercase().starts_with(&direct) {
+                    // Make sure it's not a possessive that we missed
+                    let after = &after_card[direct.len()..];
+                    if after.is_empty()
+                        || after.starts_with(|c: char| c.is_whitespace() || c == ',' || c == '.')
+                    {
+                        return Some((
+                            FilterProp::InZone { zone: *zone },
+                            None,
+                            leading_ws + card_skip + direct.len(),
+                        ));
+                    }
                 }
             }
         }
@@ -451,6 +538,34 @@ mod tests {
             f,
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
         );
+    }
+
+    #[test]
+    fn attacking_creatures_you_control() {
+        let (f, rest) = parse_type_phrase("attacking creatures you control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Attacking])
+            )
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn creature_tokens_you_control() {
+        let (f, rest) = parse_type_phrase("creature tokens you control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Token])
+            )
+        );
+        assert_eq!(rest, "");
     }
 
     #[test]
@@ -615,6 +730,31 @@ mod tests {
             TargetFilter::Typed(
                 TypedFilter::creature().properties(vec![FilterProp::PowerGE { value: 3 }])
             )
+        );
+    }
+
+    #[test]
+    fn creatures_with_ice_counters_on_them() {
+        let (f, _) = parse_type_phrase("creatures with ice counters on them");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::CountersGE {
+                    counter_type: "ice".to_string(),
+                    count: 1,
+                },])
+            )
+        );
+    }
+
+    #[test]
+    fn cards_in_graveyards() {
+        let (f, _) = parse_type_phrase("cards in graveyards");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }]))
         );
     }
 

@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use super::oracle_static::parse_continuous_modifications;
-use super::oracle_target::parse_target;
+use super::oracle_target::{parse_target, parse_type_phrase};
 use super::oracle_util::{
     contains_object_pronoun, contains_possessive, parse_mana_production, parse_number,
     starts_with_possessive, strip_reminder_text,
@@ -924,6 +924,7 @@ fn all_mana_colors() -> Vec<ManaColor> {
 enum ClauseBoundary {
     Sentence,
     Then,
+    Comma,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1894,10 +1895,12 @@ fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
             }
             ',' if paren_depth == 0 && !in_single_quote && !in_double_quote => {
                 let remainder = chars.clone().collect::<String>();
-                if remainder.to_ascii_lowercase().starts_with(" then ") {
-                    push_clause_chunk(&mut chunks, &current, Some(ClauseBoundary::Then));
+                if let Some((boundary, chars_to_skip)) =
+                    split_comma_clause_boundary(&current, &remainder)
+                {
+                    push_clause_chunk(&mut chunks, &current, Some(boundary));
                     current.clear();
-                    for _ in 0..6 {
+                    for _ in 0..chars_to_skip {
                         chars.next();
                     }
                 } else {
@@ -1917,6 +1920,86 @@ fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
 
     push_clause_chunk(&mut chunks, &current, None);
     chunks
+}
+
+fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(ClauseBoundary, usize)> {
+    let current_lower = current.trim().to_ascii_lowercase();
+    let trimmed = remainder.trim_start();
+    let whitespace_len = remainder.len() - trimmed.len();
+    let trimmed_lower = trimmed.to_ascii_lowercase();
+
+    if starts_prefix_clause(&current_lower) {
+        return None;
+    }
+
+    if current_lower.starts_with("search ")
+        && (trimmed_lower.starts_with("reveal ") || trimmed_lower.starts_with("put "))
+    {
+        return None;
+    }
+
+    if let Some(after_then) = trimmed.strip_prefix("then ") {
+        if starts_clause_text(after_then) {
+            return Some((ClauseBoundary::Then, whitespace_len + "then ".len()));
+        }
+    }
+
+    if starts_clause_text(trimmed) {
+        return Some((ClauseBoundary::Comma, whitespace_len));
+    }
+
+    None
+}
+
+fn starts_prefix_clause(current_lower: &str) -> bool {
+    current_lower.starts_with("until ") || current_lower.starts_with("if ")
+}
+
+fn starts_clause_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let prefixes = [
+        "add ",
+        "all ",
+        "attach ",
+        "counter ",
+        "create ",
+        "deal ",
+        "destroy ",
+        "discard ",
+        "draw ",
+        "each ",
+        "each player ",
+        "each opponent ",
+        "exile ",
+        "explore",
+        "fight ",
+        "gain control ",
+        "gain ",
+        "look at ",
+        "lose ",
+        "mill ",
+        "proliferate",
+        "put ",
+        "return ",
+        "reveal ",
+        "sacrifice ",
+        "scry ",
+        "search ",
+        "shuffle ",
+        "surveil ",
+        "tap ",
+        "that ",
+        "this ",
+        "those ",
+        "they ",
+        "target ",
+        "untap ",
+        "you may ",
+        "you ",
+        "it ",
+    ];
+
+    prefixes.iter().any(|prefix| lower.starts_with(prefix))
 }
 
 fn is_possessive_apostrophe(current: &str, next: Option<char>) -> bool {
@@ -2392,6 +2475,12 @@ fn parse_subject_application(subject: &str) -> Option<SubjectApplication> {
             affected: TargetFilter::SelfRef,
             target: None,
         });
+    }
+
+    let (filter, rest) = parse_type_phrase(subject);
+    if rest.trim().is_empty() && !matches!(filter, TargetFilter::Player | TargetFilter::Controller)
+    {
+        return subject_filter_application(filter, false);
     }
 
     None
@@ -4153,6 +4242,40 @@ mod tests {
     }
 
     #[test]
+    fn search_chain_with_intermediate_comma_clause() {
+        let def = parse_effect_chain(
+            "Search your library for a card, put that card into your hand, discard a card at random, then shuffle your library",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(def.effect, Effect::SearchLibrary { .. }));
+
+        let sub1 = def
+            .sub_ability
+            .as_ref()
+            .expect("search should chain into change-zone");
+        assert!(matches!(
+            sub1.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Hand,
+                ..
+            }
+        ));
+
+        let sub2 = sub1
+            .sub_ability
+            .as_ref()
+            .expect("change-zone should chain into discard");
+        assert!(matches!(sub2.effect, Effect::Discard { count: 1, .. }));
+
+        let sub3 = sub2
+            .sub_ability
+            .as_ref()
+            .expect("discard should chain into shuffle");
+        assert!(matches!(sub3.effect, Effect::Shuffle { .. }));
+    }
+
+    #[test]
     fn effect_reveal_top_cards() {
         let e = parse_effect("Reveal the top 3 cards of your library");
         assert!(matches!(e, Effect::Dig { count: 3, .. }));
@@ -4641,6 +4764,24 @@ mod tests {
                 }),
             } if value == "the number of cards in your hand"
                 && value2 == "the number of cards in your hand"
+        ));
+    }
+
+    #[test]
+    fn effect_attacking_creatures_you_control_get_pump() {
+        let e = parse_effect("Attacking creatures you control get +1/+1 until end of turn");
+        assert!(matches!(
+            e,
+            Effect::PumpAll {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                target: TargetFilter::Typed(TypedFilter {
+                    card_type: Some(TypeFilter::Creature),
+                    controller: Some(ControllerRef::You),
+                    properties,
+                    ..
+                }),
+            } if properties == vec![FilterProp::Attacking]
         ));
     }
 

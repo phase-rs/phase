@@ -34,13 +34,18 @@ pub struct ParsedAbilities {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OracleBlockAst {
+    ActivatedModal {
+        cost_text: String,
+        header: ModalHeaderAst,
+        modes: Vec<ModeAst>,
+    },
     Modal {
-        header: String,
+        header: ModalHeaderAst,
         modes: Vec<ModeAst>,
     },
     TriggeredModal {
         trigger_line: String,
-        header: String,
+        header: ModalHeaderAst,
         modes: Vec<ModeAst>,
     },
 }
@@ -50,6 +55,13 @@ struct ModeAst {
     raw: String,
     label: Option<String>,
     body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModalHeaderAst {
+    raw: String,
+    min_choices: usize,
+    max_choices: usize,
 }
 
 /// Parse Oracle text into structured ability definitions.
@@ -140,25 +152,6 @@ pub fn parse_oracle_text(
             let cost_text = line[..colon_pos].trim();
             let effect_text = line[colon_pos + 1..].trim();
             let cost = parse_oracle_cost(cost_text);
-            let effect_lower = effect_text.to_lowercase();
-
-            // Modal activated ability: effect text starts with "Choose one —" etc.
-            if is_modal_header_text(&effect_lower) {
-                let modes = collect_mode_asts(&lines, i + 1);
-                let j = i + 1 + modes.len();
-
-                if modes.is_empty() {
-                    let mut def = make_unimplemented(effect_text);
-                    def.cost = Some(cost);
-                    result.abilities.push(def);
-                } else {
-                    let mut def = build_modal_ability(AbilityKind::Activated, effect_text, &modes);
-                    def.cost = Some(cost);
-                    result.abilities.push(def);
-                }
-                i = j;
-                continue;
-            }
 
             let mut def = parse_effect_chain(effect_text, AbilityKind::Activated);
             def.cost = Some(cost);
@@ -663,6 +656,7 @@ fn is_static_pattern(lower: &str) -> bool {
         || lower.contains("can't be sacrificed")
         || lower.contains("doesn't untap")
         || lower.contains("don't untap")
+        || lower.contains("attacks each combat if able")
         || lower.starts_with("as long as ")
         || lower.starts_with("enchanted ")
         || lower.starts_with("equipped ")
@@ -670,10 +664,12 @@ fn is_static_pattern(lower: &str) -> bool {
         || lower.starts_with("all permanents ")
         || lower.starts_with("other ")
         || lower.starts_with("each creature ")
+        || lower.starts_with("cards in ")
         || lower.starts_with("creatures you control ")
         || lower.starts_with("creatures your opponents control ")
         || lower.starts_with("spells you cast ")
         || lower.starts_with("spells your opponents cast ")
+        || lower.starts_with("you may look at the top card of your library")
         || (lower.contains("enters with ") && !lower.contains("counter"))
         || lower.contains("cost {")
         || lower.contains("costs {")
@@ -682,6 +678,7 @@ fn is_static_pattern(lower: &str) -> bool {
         || lower.contains("costs less")
         || lower.contains("costs more")
         || lower.contains("is the chosen type")
+        || lower.contains("lose all abilities")
         || lower.contains("power is equal to")
         || lower.contains("power and toughness are each equal to")
 }
@@ -786,21 +783,7 @@ fn is_keyword_cost_line(lower: &str) -> bool {
 /// "Landfall — Whenever a land enters..." → "Whenever a land enters..."
 /// "Spell mastery — If there are two or more..." → "If there are two or more..."
 fn strip_ability_word(line: &str) -> Option<String> {
-    // Look for " — " (em dash with spaces) or " — " variants
-    for sep in &[" — ", " – ", " - "] {
-        if let Some(pos) = line.find(sep) {
-            let prefix = &line[..pos];
-            // Ability words are short (1-3 words), no punctuation
-            let word_count = prefix.split_whitespace().count();
-            if (1..=4).contains(&word_count) && !prefix.contains('{') && !prefix.contains(':') {
-                let rest = line[pos + sep.len()..].trim();
-                if !rest.is_empty() {
-                    return Some(rest.to_string());
-                }
-            }
-        }
-    }
-    None
+    split_short_label_prefix(line, 4).map(|(_, rest)| rest.to_string())
 }
 
 fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(OracleBlockAst, usize)> {
@@ -809,28 +792,42 @@ fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(OracleBlockAst, u
         return None;
     }
 
-    let candidate = strip_ability_word(&line).unwrap_or_else(|| line.clone());
-
     let modes = collect_mode_asts(lines, start + 1);
     if modes.is_empty() {
         return None;
     }
 
-    let lower = candidate.to_lowercase();
     let next = start + 1 + modes.len();
 
-    if is_modal_header_text(&lower) {
-        return Some((
-            OracleBlockAst::Modal {
-                header: candidate,
-                modes,
-            },
-            next,
-        ));
+    if let Some(colon_pos) = find_activated_colon(&line) {
+        let cost_text = line[..colon_pos].trim();
+        let effect_text = line[colon_pos + 1..].trim();
+        if let Some(header) = parse_modal_header_ast(effect_text) {
+            return Some((
+                OracleBlockAst::ActivatedModal {
+                    cost_text: cost_text.to_string(),
+                    header,
+                    modes,
+                },
+                next,
+            ));
+        }
     }
 
-    if lower.starts_with("when ") || lower.starts_with("whenever ") || lower.starts_with("at ") {
-        if let Some((trigger_line, header)) = split_triggered_modal_header(&candidate) {
+    let candidate = strip_ability_word(&line).unwrap_or_else(|| line.clone());
+    let lower = candidate.to_lowercase();
+
+    if let Some(header) = parse_modal_header_ast(&candidate) {
+        if !lower.starts_with("when ")
+            && !lower.starts_with("whenever ")
+            && !lower.starts_with("at ")
+        {
+            return Some((OracleBlockAst::Modal { header, modes }, next));
+        }
+    }
+
+    if let Some((trigger_line, header)) = split_triggered_modal_header(&candidate) {
+        if let Some(header) = parse_modal_header_ast(&header) {
             return Some((
                 OracleBlockAst::TriggeredModal {
                     trigger_line,
@@ -860,11 +857,11 @@ fn collect_mode_asts(lines: &[&str], start: usize) -> Vec<ModeAst> {
 }
 
 fn parse_mode_ast(text: &str) -> ModeAst {
-    if let Some((label, body)) = split_mode_label(text) {
+    if let Some((label, body)) = split_short_label_prefix(text, 4) {
         return ModeAst {
             raw: text.to_string(),
-            label: Some(label),
-            body,
+            label: Some(label.to_string()),
+            body: body.to_string(),
         };
     }
 
@@ -875,18 +872,18 @@ fn parse_mode_ast(text: &str) -> ModeAst {
     }
 }
 
-fn split_mode_label(text: &str) -> Option<(String, String)> {
+fn split_short_label_prefix<'a>(text: &'a str, max_words: usize) -> Option<(&'a str, &'a str)> {
     for sep in [" — ", " – ", " - "] {
         if let Some(pos) = text.find(sep) {
             let prefix = text[..pos].trim();
             let rest = text[pos + sep.len()..].trim();
             let word_count = prefix.split_whitespace().count();
-            if (1..=4).contains(&word_count)
+            if (1..=max_words).contains(&word_count)
                 && !prefix.contains('{')
                 && !prefix.contains(':')
                 && !rest.is_empty()
             {
-                return Some((prefix.to_string(), rest.to_string()));
+                return Some((prefix, rest));
             }
         }
     }
@@ -897,6 +894,20 @@ fn split_mode_label(text: &str) -> Option<(String, String)> {
 fn is_modal_header_text(lower: &str) -> bool {
     let lower = lower.trim();
     lower.starts_with("choose ") || (lower.starts_with("if ") && lower.contains("choose "))
+}
+
+fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
+    let lower = text.to_lowercase();
+    if !is_modal_header_text(&lower) {
+        return None;
+    }
+
+    let (min_choices, max_choices) = parse_modal_choose_count(&lower);
+    Some(ModalHeaderAst {
+        raw: text.to_string(),
+        min_choices,
+        max_choices,
+    })
 }
 
 fn split_triggered_modal_header(line: &str) -> Option<(String, String)> {
@@ -913,6 +924,15 @@ fn split_triggered_modal_header(line: &str) -> Option<(String, String)> {
 
 fn lower_oracle_block(block: OracleBlockAst, card_name: &str, result: &mut ParsedAbilities) {
     match block {
+        OracleBlockAst::ActivatedModal {
+            cost_text,
+            header,
+            modes,
+        } => {
+            let def = build_modal_ability(AbilityKind::Activated, &header, &modes)
+                .cost(parse_oracle_cost(&cost_text));
+            result.abilities.push(def);
+        }
         OracleBlockAst::Modal { header, modes } => {
             let modal = build_modal_choice(&header, &modes);
             let mode_abilities = lower_mode_abilities(&modes, AbilityKind::Spell);
@@ -935,24 +955,29 @@ fn lower_oracle_block(block: OracleBlockAst, card_name: &str, result: &mut Parse
     }
 }
 
-fn build_modal_ability(kind: AbilityKind, header: &str, modes: &[ModeAst]) -> AbilityDefinition {
-    AbilityDefinition::new(kind, modal_marker_effect(header))
-        .with_modal(build_modal_choice(header, modes), lower_mode_abilities(modes, kind))
+fn build_modal_ability(
+    kind: AbilityKind,
+    header: &ModalHeaderAst,
+    modes: &[ModeAst],
+) -> AbilityDefinition {
+    AbilityDefinition::new(kind, modal_marker_effect(header)).with_modal(
+        build_modal_choice(header, modes),
+        lower_mode_abilities(modes, kind),
+    )
 }
 
-fn modal_marker_effect(header: &str) -> Effect {
-    Effect::Unimplemented {
-        name: "modal".to_string(),
-        description: Some(header.to_string()),
+fn modal_marker_effect(_header: &ModalHeaderAst) -> Effect {
+    Effect::GenericEffect {
+        static_abilities: vec![],
+        duration: None,
+        target: None,
     }
 }
 
-fn build_modal_choice(header: &str, modes: &[ModeAst]) -> ModalChoice {
-    let lower = header.to_lowercase();
-    let (min_choices, max_choices) = parse_modal_choose_count(&lower);
+fn build_modal_choice(header: &ModalHeaderAst, modes: &[ModeAst]) -> ModalChoice {
     ModalChoice {
-        min_choices,
-        max_choices: max_choices.min(modes.len()),
+        min_choices: header.min_choices,
+        max_choices: header.max_choices.min(modes.len()),
         mode_count: modes.len(),
         mode_descriptions: modes.iter().map(|mode| mode.raw.clone()).collect(),
     }
@@ -1246,6 +1271,105 @@ mod tests {
     }
 
     #[test]
+    fn player_shroud_routes_to_static_parser() {
+        let r = parse("You have shroud.", "Ivory Mask", &[], &["Enchantment"], &[]);
+        assert!(r.abilities.is_empty());
+        assert_eq!(r.statics.len(), 1);
+        assert_eq!(
+            r.statics[0].mode,
+            crate::types::statics::StaticMode::Other("Shroud".to_string())
+        );
+    }
+
+    #[test]
+    fn top_of_library_peek_routes_to_static_parser() {
+        let r = parse(
+            "You may look at the top card of your library any time.",
+            "Bolas's Citadel",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+        assert!(r.abilities.is_empty());
+        assert_eq!(r.statics.len(), 1);
+        assert_eq!(
+            r.statics[0].mode,
+            crate::types::statics::StaticMode::Other("MayLookAtTopOfLibrary".to_string())
+        );
+    }
+
+    #[test]
+    fn lose_all_abilities_routes_to_static_parser() {
+        let r = parse(
+            "Cards in graveyards lose all abilities.",
+            "Yixlid Jailer",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert!(r.abilities.is_empty());
+        assert_eq!(r.statics.len(), 1);
+        assert!(r.statics[0]
+            .modifications
+            .contains(&crate::types::ability::ContinuousModification::RemoveAllAbilities));
+    }
+
+    #[test]
+    fn colored_creature_lord_routes_to_static_parser() {
+        let r = parse(
+            "Black creatures get +1/+1.",
+            "Bad Moon",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        assert!(r.abilities.is_empty());
+        assert_eq!(r.statics.len(), 1);
+        assert!(r.statics[0]
+            .modifications
+            .contains(&crate::types::ability::ContinuousModification::AddPower { value: 1 }));
+    }
+
+    #[test]
+    fn filtered_creatures_you_control_route_to_static_parser() {
+        let r = parse(
+            "Creatures you control with mana value 3 or less get +1/+0.",
+            "Hero of the Dunes",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert!(r.abilities.is_empty());
+        assert_eq!(r.statics.len(), 1);
+        assert!(matches!(
+            r.statics[0].affected,
+            Some(crate::types::ability::TargetFilter::Typed(
+                crate::types::ability::TypedFilter {
+                    controller: Some(crate::types::ability::ControllerRef::You),
+                    ..
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn must_attack_routes_to_static_parser() {
+        let r = parse(
+            "This creature attacks each combat if able.",
+            "Primordial Ooze",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert!(r.abilities.is_empty());
+        assert_eq!(r.statics.len(), 1);
+        assert_eq!(
+            r.statics[0].mode,
+            crate::types::statics::StaticMode::MustAttack
+        );
+    }
+
+    #[test]
     fn goblin_chainwhirler_etb_trigger() {
         let r = parse(
             "First strike\nWhen Goblin Chainwhirler enters the battlefield, it deals 1 damage to each opponent and each creature and planeswalker they control.",
@@ -1472,7 +1596,10 @@ mod tests {
         assert!(matches!(r.abilities[0].effect, Effect::Draw { count: 1 }));
         assert!(matches!(
             r.abilities[1].effect,
-            Effect::GainLife { amount: crate::types::ability::LifeAmount::Fixed(3), .. }
+            Effect::GainLife {
+                amount: crate::types::ability::LifeAmount::Fixed(3),
+                ..
+            }
         ));
     }
 
@@ -1492,7 +1619,10 @@ mod tests {
         assert!(matches!(r.abilities[0].effect, Effect::Draw { count: 1 }));
         assert!(matches!(
             r.abilities[1].effect,
-            Effect::GainLife { amount: crate::types::ability::LifeAmount::Fixed(3), .. }
+            Effect::GainLife {
+                amount: crate::types::ability::LifeAmount::Fixed(3),
+                ..
+            }
         ));
     }
 
@@ -1509,13 +1639,19 @@ mod tests {
         assert!(matches!(r.abilities[0].effect, Effect::Draw { count: 1 }));
         assert!(matches!(
             r.abilities[1].effect,
-            Effect::GainLife { amount: crate::types::ability::LifeAmount::Fixed(3), .. }
+            Effect::GainLife {
+                amount: crate::types::ability::LifeAmount::Fixed(3),
+                ..
+            }
         ));
 
         let modal = r.modal.expect("should have modal metadata");
         assert_eq!(
             modal.mode_descriptions,
-            vec!["Alpha — Draw a card.".to_string(), "Beta — Gain 3 life.".to_string()]
+            vec![
+                "Alpha — Draw a card.".to_string(),
+                "Beta — Gain 3 life.".to_string()
+            ]
         );
     }
 
@@ -1534,7 +1670,18 @@ mod tests {
         let trigger = &r.triggers[0];
         assert!(matches!(trigger.mode, TriggerMode::Unknown(_)));
 
-        let execute = trigger.execute.as_ref().expect("trigger should have execute");
+        let execute = trigger
+            .execute
+            .as_ref()
+            .expect("trigger should have execute");
+        assert!(matches!(
+            execute.effect,
+            Effect::GenericEffect {
+                ref static_abilities,
+                duration: None,
+                target: None,
+            } if static_abilities.is_empty()
+        ));
         let modal = execute.modal.as_ref().expect("execute should be modal");
         assert_eq!(modal.mode_count, 2);
         assert_eq!(execute.mode_abilities.len(), 2);
@@ -1676,6 +1823,37 @@ mod tests {
         assert_eq!(modal.mode_count, 2);
         // Spell-level modal should NOT be set (this is an activated ability modal)
         assert!(r.modal.is_none(), "spell-level modal should be None");
+    }
+
+    #[test]
+    fn modal_activated_ability_uses_normalized_mode_bodies() {
+        let r = parse(
+            "{1}, {T}: Choose one —\n• Alpha — Draw a card.\n• Beta — Gain 3 life.",
+            "Test Relic",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let modal_def = &r.abilities[0];
+        let modal = modal_def
+            .modal
+            .as_ref()
+            .expect("should have modal metadata");
+        assert_eq!(modal.mode_count, 2);
+        assert_eq!(modal_def.mode_abilities.len(), 2);
+        assert!(matches!(
+            modal_def.mode_abilities[0].effect,
+            Effect::Draw { count: 1 }
+        ));
+        assert!(matches!(
+            modal_def.mode_abilities[1].effect,
+            Effect::GainLife {
+                amount: crate::types::ability::LifeAmount::Fixed(3),
+                ..
+            }
+        ));
+        assert!(modal_def.cost.is_some(), "should preserve activated cost");
     }
 
     #[test]
