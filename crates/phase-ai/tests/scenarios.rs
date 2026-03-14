@@ -170,3 +170,33 @@ fn scenario_multiplayer_attacks_to_finish_exposed_player() {
     assert!(attacks.iter().any(|(id, _)| *id == attacker_a));
     assert!(attacks.iter().any(|(id, _)| *id == attacker_b));
 }
+
+#[test]
+fn scenario_mcts_plays_available_land_deterministically() {
+    let mut state = make_state();
+    let land_id = create_object(
+        &mut state,
+        CardId(99),
+        PlayerId(0),
+        "Forest".to_string(),
+        Zone::Hand,
+    );
+    state
+        .objects
+        .get_mut(&land_id)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+
+    let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+    let mut rng = SmallRng::seed_from_u64(15);
+    let action = choose_action(&state, PlayerId(0), &config, &mut rng);
+
+    assert_eq!(
+        action,
+        Some(engine::types::actions::GameAction::PlayLand {
+            card_id: CardId(99),
+        })
+    );
+}

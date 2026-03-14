@@ -5,6 +5,8 @@ use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
 
+use crate::planner::ValueEstimate;
+
 /// Weights for board evaluation heuristics.
 #[derive(Debug, Clone)]
 pub struct EvalWeights {
@@ -141,6 +143,18 @@ pub fn evaluate_state(state: &GameState, player: PlayerId, weights: &EvalWeights
     evaluate_state_breakdown(state, player, weights)
         .map(|breakdown| breakdown.total())
         .unwrap_or_else(|terminal| terminal)
+}
+
+pub fn evaluate_for_planner(
+    state: &GameState,
+    player: PlayerId,
+    weights: &EvalWeights,
+) -> ValueEstimate {
+    let value = evaluate_state(state, player, weights);
+    ValueEstimate {
+        value,
+        intent: strategic_intent(state, player),
+    }
 }
 
 pub fn evaluate_state_breakdown(

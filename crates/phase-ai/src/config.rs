@@ -24,8 +24,42 @@ pub struct SearchConfig {
     pub max_depth: u32,
     pub max_nodes: u32,
     pub max_branching: u32,
+    pub planner_mode: PlannerMode,
     pub rollout_depth: u32,
     pub rollout_samples: u32,
+    pub mcts: Option<MctsConfig>,
+    pub hidden_info_mode: HiddenInfoMode,
+    pub opponent_model: OpponentModel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlannerMode {
+    BeamOnly,
+    BeamPlusRollout,
+    BeamPlusMcts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HiddenInfoMode {
+    PerfectInfo,
+    Determinized,
+    RevealedOnlyBias,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpponentModel {
+    DeterministicBestReply,
+    ThreatWeightedReply,
+    SampledReply,
+}
+
+#[derive(Debug, Clone)]
+pub struct MctsConfig {
+    pub simulations: u32,
+    pub c_puct: f64,
+    pub rollout_depth: u32,
+    pub exploration_fraction: f64,
+    pub dirichlet_alpha: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,8 +86,12 @@ impl Default for SearchConfig {
             max_depth: 0,
             max_nodes: 0,
             max_branching: 5,
+            planner_mode: PlannerMode::BeamOnly,
             rollout_depth: 0,
             rollout_samples: 0,
+            mcts: None,
+            hidden_info_mode: HiddenInfoMode::PerfectInfo,
+            opponent_model: OpponentModel::DeterministicBestReply,
         }
     }
 }
@@ -98,8 +136,12 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 max_depth: 0,
                 max_nodes: 0,
                 max_branching: 5,
+                planner_mode: PlannerMode::BeamOnly,
                 rollout_depth: 0,
                 rollout_samples: 0,
+                mcts: None,
+                hidden_info_mode: HiddenInfoMode::PerfectInfo,
+                opponent_model: OpponentModel::DeterministicBestReply,
             },
         ),
         AiDifficulty::Easy => (
@@ -116,8 +158,12 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 max_depth: 0,
                 max_nodes: 0,
                 max_branching: 5,
+                planner_mode: PlannerMode::BeamOnly,
                 rollout_depth: 0,
                 rollout_samples: 0,
+                mcts: None,
+                hidden_info_mode: HiddenInfoMode::PerfectInfo,
+                opponent_model: OpponentModel::DeterministicBestReply,
             },
         ),
         AiDifficulty::Medium => (
@@ -134,8 +180,12 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 max_depth: 2,
                 max_nodes: 24,
                 max_branching: 5,
+                planner_mode: PlannerMode::BeamPlusRollout,
                 rollout_depth: 1,
                 rollout_samples: 1,
+                mcts: None,
+                hidden_info_mode: HiddenInfoMode::PerfectInfo,
+                opponent_model: OpponentModel::DeterministicBestReply,
             },
         ),
         AiDifficulty::Hard => (
@@ -152,8 +202,12 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 max_depth: 3,
                 max_nodes: 48,
                 max_branching: 5,
+                planner_mode: PlannerMode::BeamPlusRollout,
                 rollout_depth: 2,
                 rollout_samples: 1,
+                mcts: None,
+                hidden_info_mode: HiddenInfoMode::PerfectInfo,
+                opponent_model: OpponentModel::ThreatWeightedReply,
             },
         ),
         AiDifficulty::VeryHard => (
@@ -170,8 +224,18 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 max_depth: 3,
                 max_nodes: 64,
                 max_branching: 6,
+                planner_mode: PlannerMode::BeamPlusMcts,
                 rollout_depth: 2,
                 rollout_samples: 2,
+                mcts: Some(MctsConfig {
+                    simulations: 48,
+                    c_puct: 1.25,
+                    rollout_depth: 2,
+                    exploration_fraction: 0.0,
+                    dirichlet_alpha: None,
+                }),
+                hidden_info_mode: HiddenInfoMode::PerfectInfo,
+                opponent_model: OpponentModel::ThreatWeightedReply,
             },
         ),
     };
@@ -192,6 +256,10 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
         config.search.max_depth = config.search.max_depth.min(2);
         config.search.max_nodes = config.search.max_nodes * 2 / 3;
         config.search.rollout_depth = config.search.rollout_depth.min(1);
+        if matches!(config.search.planner_mode, PlannerMode::BeamPlusMcts) {
+            config.search.planner_mode = PlannerMode::BeamPlusRollout;
+            config.search.mcts = None;
+        }
     }
 
     config
@@ -218,6 +286,10 @@ pub fn create_config_for_players(
             config.search.max_nodes = config.search.max_nodes * 2 / 3;
             config.search.max_branching = config.search.max_branching.min(4);
             config.search.rollout_depth = config.search.rollout_depth.min(1);
+            if let Some(mcts) = &mut config.search.mcts {
+                mcts.simulations = mcts.simulations.saturating_mul(2) / 3;
+                mcts.rollout_depth = mcts.rollout_depth.min(1);
+            }
         }
         _ => {
             // 5-6+ players: heuristic-only or minimal search
@@ -228,6 +300,10 @@ pub fn create_config_for_players(
                 config.search.max_nodes /= 3;
                 config.search.max_branching = config.search.max_branching.min(3);
                 config.search.rollout_depth = config.search.rollout_depth.min(1);
+                if let Some(mcts) = &mut config.search.mcts {
+                    mcts.simulations /= 2;
+                    mcts.rollout_depth = mcts.rollout_depth.min(1);
+                }
             }
         }
     }
@@ -262,6 +338,7 @@ mod tests {
         let config = create_config(AiDifficulty::Medium, Platform::Native);
         assert_eq!(config.temperature, 1.0);
         assert!(config.search.enabled);
+        assert_eq!(config.search.planner_mode, PlannerMode::BeamPlusRollout);
         assert!(config.profile.interaction_patience >= 0.7);
         assert_eq!(config.search.max_depth, 2);
         assert_eq!(config.search.max_nodes, 24);
@@ -282,6 +359,8 @@ mod tests {
     fn very_hard_is_near_deterministic() {
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
         assert!(config.temperature < 0.1);
+        assert_eq!(config.search.planner_mode, PlannerMode::BeamPlusMcts);
+        assert!(config.search.mcts.is_some());
         assert_eq!(config.search.max_depth, 3);
         assert_eq!(config.search.max_nodes, 64);
         assert_eq!(config.search.max_branching, 6);
@@ -302,6 +381,8 @@ mod tests {
     fn wasm_caps_depth_at_two() {
         let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
         assert_eq!(config.search.max_depth, 2);
+        assert_eq!(config.search.planner_mode, PlannerMode::BeamPlusRollout);
+        assert!(config.search.mcts.is_none());
     }
 
     #[test]
@@ -331,6 +412,7 @@ mod tests {
         let config = create_config_for_players(AiDifficulty::Hard, Platform::Native, 4);
         assert!(config.search.max_depth <= 2);
         assert!(config.search.enabled);
+        assert_eq!(config.search.planner_mode, PlannerMode::BeamPlusRollout);
     }
 
     #[test]
@@ -351,6 +433,17 @@ mod tests {
         let config = create_config_for_players(AiDifficulty::Hard, Platform::Native, 6);
         assert!(config.search.enabled);
         assert_eq!(config.search.max_depth, 1);
+    }
+
+    #[test]
+    fn four_player_very_hard_keeps_mcts_with_lower_budget() {
+        let config = create_config_for_players(AiDifficulty::VeryHard, Platform::Native, 4);
+        assert_eq!(config.search.planner_mode, PlannerMode::BeamPlusMcts);
+        assert!(config
+            .search
+            .mcts
+            .as_ref()
+            .is_some_and(|mcts| mcts.simulations < 48));
     }
 
     #[test]

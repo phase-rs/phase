@@ -10,12 +10,12 @@ pub mod search;
 pub use card_hints::should_play_now;
 pub use combat_ai::{choose_attackers, choose_attackers_with_targets, choose_blockers};
 pub use config::{
-    create_config, create_config_for_players, AiConfig, AiDifficulty, AiProfile, Platform,
-    SearchConfig,
+    create_config, create_config_for_players, AiConfig, AiDifficulty, AiProfile, HiddenInfoMode,
+    MctsConfig, OpponentModel, PlannerMode, Platform, SearchConfig,
 };
 pub use eval::{
-    evaluate_creature, evaluate_state, evaluate_state_breakdown, strategic_intent, threat_level,
-    EvalWeights, EvaluationBreakdown, StrategicIntent,
+    evaluate_creature, evaluate_for_planner, evaluate_state, evaluate_state_breakdown,
+    strategic_intent, threat_level, EvalWeights, EvaluationBreakdown, StrategicIntent,
 };
 pub use legal_actions::get_legal_actions;
 pub use search::choose_action;

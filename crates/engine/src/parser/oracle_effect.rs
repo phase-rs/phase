@@ -250,6 +250,11 @@ enum ZoneCounterImperativeAst {
         count: i32,
         target: TargetFilter,
     },
+    RemoveCounter {
+        counter_type: String,
+        count: i32,
+        target: TargetFilter,
+    },
 }
 
 /// Parse an effect clause from Oracle text into an Effect enum.
@@ -1254,6 +1259,20 @@ fn parse_zone_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterImperati
             _ => None,
         };
     }
+    if lower.starts_with("remove ") && lower.contains("counter") {
+        return match try_parse_remove_counter(lower) {
+            Some(Effect::RemoveCounter {
+                counter_type,
+                count,
+                target,
+            }) => Some(ZoneCounterImperativeAst::RemoveCounter {
+                counter_type,
+                count,
+                target,
+            }),
+            _ => None,
+        };
+    }
     None
 }
 
@@ -1297,6 +1316,15 @@ fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             count,
             target,
         } => Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        },
+        ZoneCounterImperativeAst::RemoveCounter {
+            counter_type,
+            count,
+            target,
+        } => Effect::RemoveCounter {
             counter_type,
             count,
             target,
@@ -2910,6 +2938,39 @@ fn try_parse_put_counter(lower: &str, _text: &str) -> Option<Effect> {
     };
 
     Some(Effect::PutCounter {
+        counter_type,
+        count: count as i32,
+        target,
+    })
+}
+
+fn try_parse_remove_counter(lower: &str) -> Option<Effect> {
+    // "remove N {type} counter(s) from {target}"
+    let after_remove = lower[7..].trim();
+    let (count, rest) = parse_number(after_remove)?;
+    let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+    let raw_type = &rest[..type_end];
+    let counter_type = normalize_counter_type(raw_type);
+
+    let after_type = rest[type_end..].trim_start();
+    let after_counter_word = after_type
+        .strip_prefix("counters")
+        .or_else(|| after_type.strip_prefix("counter"))
+        .map(|s| s.trim_start())?;
+
+    let target_text = after_counter_word.strip_prefix("from ")?.trim();
+    let target = if target_text.starts_with("this ")
+        || target_text.starts_with("~")
+        || target_text == "it"
+        || target_text.starts_with("it ")
+        || target_text.starts_with("itself")
+    {
+        TargetFilter::SelfRef
+    } else {
+        parse_target(target_text).0
+    };
+
+    Some(Effect::RemoveCounter {
         counter_type,
         count: count as i32,
         target,
@@ -5181,6 +5242,47 @@ mod tests {
             panic!("Expected PutCounter");
         };
         assert_eq!(counter_type, "charge");
+    }
+
+    #[test]
+    fn remove_counter_from_it_is_self_ref() {
+        let e = parse_effect("remove a time counter from it");
+        assert!(matches!(
+            e,
+            Effect::RemoveCounter {
+                counter_type,
+                count: 1,
+                target: TargetFilter::SelfRef,
+            } if counter_type == "time"
+        ));
+    }
+
+    #[test]
+    fn remove_counter_from_target_creature_is_typed() {
+        let e = parse_effect("remove a -1/-1 counter from target creature");
+        assert!(matches!(
+            e,
+            Effect::RemoveCounter {
+                counter_type,
+                target: TargetFilter::Typed(TypedFilter {
+                    card_type: Some(TypeFilter::Creature),
+                    ..
+                }),
+                ..
+            } if counter_type == "M1M1"
+        ));
+    }
+
+    #[test]
+    fn remove_all_counters_falls_back() {
+        let e = parse_effect("remove all tide counters from it");
+        assert!(matches!(
+            e,
+            Effect::Unimplemented {
+                name,
+                description: Some(description),
+            } if name == "remove" && description == "remove all tide counters from it"
+        ));
     }
 
     #[test]

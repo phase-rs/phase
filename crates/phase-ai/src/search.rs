@@ -1,23 +1,16 @@
 use rand::Rng;
 
-use engine::ai_support::{
-    build_decision_context, AiDecisionContext, CandidateAction, TacticalClass,
-};
-use engine::game::engine::apply;
+use engine::ai_support::{build_decision_context, CandidateAction};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
 
-use crate::card_hints::should_play_now;
 use crate::combat_ai::{choose_attackers_with_targets_with_profile, choose_blockers_with_profile};
 use crate::config::AiConfig;
-use crate::eval::{evaluate_state, strategic_intent, StrategicIntent};
 use crate::planner::{
-    apply_candidate, rank_candidates, search_frontier, HeuristicRollout, PlannerContext,
-    SearchBudget,
+    apply_candidate, build_continuation_planner, rank_candidates, PlannerServices, SearchBudget,
 };
-use crate::policies::context::PolicyContext;
 use crate::policies::PolicyRegistry;
 
 struct ScoredCandidate {
@@ -27,22 +20,6 @@ struct ScoredCandidate {
 
 /// Filter candidate actions by testing each against the engine.
 /// Any candidate the engine rejects is dropped before scoring.
-fn validate_candidates(
-    state: &GameState,
-    candidates: Vec<CandidateAction>,
-) -> Vec<CandidateAction> {
-    candidates
-        .into_iter()
-        .filter(|candidate| match &candidate.action {
-            GameAction::PassPriority | GameAction::ChooseTarget { .. } => true,
-            _ => {
-                let mut sim = state.clone();
-                apply(&mut sim, candidate.action.clone()).is_ok()
-            }
-        })
-        .collect()
-}
-
 /// Choose the best action for the AI player given the current game state.
 ///
 /// - For 0 or 1 legal actions, returns immediately.
@@ -57,7 +34,8 @@ pub fn choose_action(
 ) -> Option<GameAction> {
     let ctx = build_decision_context(state);
     let policies = PolicyRegistry::default();
-    let candidates = validate_candidates(state, ctx.candidates.clone());
+    let mut services = PlannerServices::new(ai_player, config, &policies);
+    let candidates = services.validate_candidates(state, ctx.candidates.clone());
     let actions: Vec<GameAction> = candidates
         .iter()
         .map(|candidate| candidate.action.clone())
@@ -204,58 +182,20 @@ pub fn choose_action(
 
     // Score actions
     let scored: Vec<ScoredCandidate> = if config.search.enabled {
-        // Alpha-beta search for each candidate action
         let mut budget = SearchBudget::new(config.search.max_nodes);
-        let depth = config.search.max_depth;
         let branching = config.search.max_branching as usize;
-        let rollout = HeuristicRollout {
-            depth: config.search.rollout_depth,
-        };
+        let mut planner = build_continuation_planner(config);
 
-        // Limit branching: take top N actions by heuristic
         rank_candidates(
             candidates,
-            |candidate| score_candidate(state, &ctx, candidate, ai_player, config, &policies),
+            |candidate| services.tactical_score(state, &ctx, candidate, ai_player),
             branching,
         )
         .into_iter()
         .map(|ranked| {
             let score = if let Some(sim) = apply_candidate(state, &ranked.candidate) {
-                let mut score_fn = |sim_state: &GameState,
-                                    sim_ctx: &AiDecisionContext,
-                                    sim_candidate: &CandidateAction,
-                                    scoring_player: PlayerId| {
-                    score_candidate(
-                        sim_state,
-                        sim_ctx,
-                        sim_candidate,
-                        scoring_player,
-                        config,
-                        &policies,
-                    )
-                };
-                let mut eval_fn = |sim_state: &GameState, player: PlayerId| {
-                    evaluate_state(sim_state, player, &config.weights)
-                };
-                let mut actor_fn = acting_player;
-                let mut validate_fn = validate_candidates;
-                let mut planner_context = PlannerContext {
-                    ai_player,
-                    config,
-                    score_candidate: &mut score_fn,
-                    static_eval: &mut eval_fn,
-                    acting_player: &mut actor_fn,
-                    validate_candidates: &mut validate_fn,
-                };
-                let continuation_score = search_frontier(
-                    &sim,
-                    depth.saturating_sub(1),
-                    f64::NEG_INFINITY,
-                    f64::INFINITY,
-                    &mut budget,
-                    &rollout,
-                    &mut planner_context,
-                );
+                let continuation_score =
+                    planner.evaluate_after_action(&sim, &mut services, &mut budget);
                 continuation_score + (ranked.score * 0.1)
             } else {
                 ranked.score
@@ -271,7 +211,7 @@ pub fn choose_action(
         candidates
             .into_iter()
             .map(|candidate| {
-                let score = score_candidate(state, &ctx, &candidate, ai_player, config, &policies);
+                let score = services.tactical_score(state, &ctx, &candidate, ai_player);
                 ScoredCandidate { candidate, score }
             })
             .collect()
@@ -306,73 +246,6 @@ fn prefer_land_drop(
         .iter()
         .find(|action| matches!(action, GameAction::PlayLand { .. }))
         .cloned()
-}
-
-fn acting_player(state: &GameState) -> Option<PlayerId> {
-    match &state.waiting_for {
-        WaitingFor::Priority { player }
-        | WaitingFor::MulliganDecision { player, .. }
-        | WaitingFor::MulliganBottomCards { player, .. }
-        | WaitingFor::ManaPayment { player }
-        | WaitingFor::TargetSelection { player, .. }
-        | WaitingFor::DeclareAttackers { player, .. }
-        | WaitingFor::DeclareBlockers { player, .. }
-        | WaitingFor::ReplacementChoice { player, .. }
-        | WaitingFor::EquipTarget { player, .. }
-        | WaitingFor::ScryChoice { player, .. }
-        | WaitingFor::DigChoice { player, .. }
-        | WaitingFor::SurveilChoice { player, .. }
-        | WaitingFor::RevealChoice { player, .. }
-        | WaitingFor::SearchChoice { player, .. }
-        | WaitingFor::TriggerTargetSelection { player, .. }
-        | WaitingFor::BetweenGamesSideboard { player, .. }
-        | WaitingFor::BetweenGamesChoosePlayDraw { player, .. }
-        | WaitingFor::NamedChoice { player, .. }
-        | WaitingFor::ModeChoice { player, .. }
-        | WaitingFor::DiscardToHandSize { player, .. }
-        | WaitingFor::OptionalCostChoice { player, .. }
-        | WaitingFor::AbilityModeChoice { player, .. } => Some(*player),
-        WaitingFor::GameOver { .. } => None,
-    }
-}
-
-fn score_candidate(
-    state: &GameState,
-    ctx: &AiDecisionContext,
-    candidate: &CandidateAction,
-    ai_player: PlayerId,
-    config: &AiConfig,
-    policies: &PolicyRegistry,
-) -> f64 {
-    let mut score = should_play_now(state, &candidate.action, ai_player);
-    let intent = strategic_intent(state, ai_player);
-    let policy_ctx = PolicyContext {
-        state,
-        decision: ctx,
-        candidate,
-        ai_player,
-        config,
-    };
-    score += policies.score(&policy_ctx);
-
-    match candidate.metadata.tactical_class {
-        TacticalClass::Pass => {
-            score -= 0.1;
-            if matches!(
-                intent,
-                StrategicIntent::Develop | StrategicIntent::PushLethal
-            ) {
-                score -= 0.15;
-            }
-        }
-        TacticalClass::Mana => score -= 0.05,
-        TacticalClass::Land if matches!(intent, StrategicIntent::Develop) => score += 0.2,
-        TacticalClass::Attack if matches!(intent, StrategicIntent::PushLethal) => score += 0.3,
-        TacticalClass::Block if matches!(intent, StrategicIntent::Stabilize) => score += 0.25,
-        _ => {}
-    }
-
-    score
 }
 
 /// Decide whether to keep the current hand based on land/spell ratio.
@@ -492,7 +365,7 @@ fn softmax_select(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::ai_support::{ActionMetadata, CandidateAction};
+    use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::TargetRef;
     use engine::types::card_type::CoreType;
@@ -504,6 +377,7 @@ mod tests {
     use rand::SeedableRng;
 
     use crate::config::{create_config, AiDifficulty, Platform};
+    use crate::policies::context::PolicyContext;
 
     fn make_state() -> GameState {
         let mut state = GameState::new_two_player(42);

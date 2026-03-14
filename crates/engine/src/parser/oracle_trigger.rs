@@ -526,12 +526,27 @@ fn try_parse_event(
         return Some((TriggerMode::LeavesBattlefield, def));
     }
 
+    if rest.starts_with("is put into a graveyard from anywhere") {
+        let mut def = make_base();
+        def.mode = TriggerMode::ChangesZone;
+        def.destination = Some(Zone::Graveyard);
+        def.valid_card = Some(subject.clone());
+        return Some((TriggerMode::ChangesZone, def));
+    }
+
     // "becomes blocked"
     if rest.starts_with("becomes blocked") {
         let mut def = make_base();
         def.mode = TriggerMode::BecomesBlocked;
         def.valid_card = Some(subject.clone());
         return Some((TriggerMode::BecomesBlocked, def));
+    }
+
+    if rest.starts_with("becomes the target of a spell or ability") {
+        let mut def = make_base();
+        def.mode = TriggerMode::BecomesTarget;
+        def.valid_card = Some(subject.clone());
+        return Some((TriggerMode::BecomesTarget, def));
     }
 
     // "is dealt combat damage" / "is dealt damage"
@@ -619,6 +634,25 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
 fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     if let Some(result) = try_parse_self_or_another_controlled_subtype_enters(lower) {
         return Some(result);
+    }
+
+    if matches!(
+        lower,
+        "whenever you commit a crime" | "when you commit a crime"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::CommitCrime;
+        return Some((TriggerMode::CommitCrime, def));
+    }
+
+    if matches!(
+        lower,
+        "whenever day becomes night or night becomes day"
+            | "when day becomes night or night becomes day"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::DayTimeChanges;
+        return Some((TriggerMode::DayTimeChanges, def));
     }
 
     if matches!(
@@ -740,6 +774,13 @@ fn canonicalize_subtype_name(text: &str) -> String {
 
 /// Parse phase triggers: "At the beginning of your upkeep/end step/combat/draw step"
 fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    if matches!(lower, "at end of combat" | "at the end of combat") {
+        let mut def = make_base();
+        def.mode = TriggerMode::Phase;
+        def.phase = Some(Phase::EndCombat);
+        return Some((TriggerMode::Phase, def));
+    }
+
     let stripped = lower.strip_prefix("at the beginning of")?;
     let phase_text = stripped.trim();
     let mut def = make_base();
@@ -772,6 +813,65 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // "whenever you draw your Nth card each turn" — must precede generic "you draw a card"
     if let Some(result) = try_parse_nth_draw_trigger(lower) {
         return Some(result);
+    }
+
+    if matches!(
+        lower,
+        "whenever you discard a card" | "when you discard a card"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::Discarded;
+        def.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Card).controller(ControllerRef::You),
+        ));
+        return Some((TriggerMode::Discarded, def));
+    }
+
+    if matches!(
+        lower,
+        "whenever an opponent discards a card" | "when an opponent discards a card"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::Discarded;
+        def.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Card).controller(ControllerRef::Opponent),
+        ));
+        return Some((TriggerMode::Discarded, def));
+    }
+
+    if matches!(
+        lower,
+        "whenever you sacrifice another permanent" | "when you sacrifice another permanent"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::Sacrificed;
+        def.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Permanent)
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::Another]),
+        ));
+        return Some((TriggerMode::Sacrificed, def));
+    }
+
+    if matches!(
+        lower,
+        "whenever you sacrifice a permanent" | "when you sacrifice a permanent"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::Sacrificed;
+        def.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You),
+        ));
+        return Some((TriggerMode::Sacrificed, def));
+    }
+
+    if matches!(
+        lower,
+        "whenever a player cycles a card" | "when a player cycles a card"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::Cycled;
+        return Some((TriggerMode::Cycled, def));
     }
 
     if lower.contains("you cast a") || lower.contains("you cast an") {
@@ -1751,6 +1851,109 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::TurnFaceUp);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_commit_crime_mode() {
+        let def = parse_trigger_line("Whenever you commit a crime, draw a card.", "At Knifepoint");
+        assert_eq!(def.mode, TriggerMode::CommitCrime);
+    }
+
+    #[test]
+    fn trigger_day_night_changes_mode() {
+        let def = parse_trigger_line(
+            "Whenever day becomes night or night becomes day, draw a card.",
+            "Firmament Sage",
+        );
+        assert_eq!(def.mode, TriggerMode::DayTimeChanges);
+    }
+
+    #[test]
+    fn trigger_end_of_combat_phase() {
+        let def = parse_trigger_line(
+            "At end of combat, sacrifice this creature.",
+            "Ball Lightning",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::EndCombat));
+    }
+
+    #[test]
+    fn trigger_becomes_target_mode() {
+        let def = parse_trigger_line(
+            "When this creature becomes the target of a spell or ability, sacrifice it.",
+            "Frost Walker",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesTarget);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_put_into_graveyard_from_anywhere() {
+        let def = parse_trigger_line(
+            "When this card is put into a graveyard from anywhere, draw a card.",
+            "Dread",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Graveyard));
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(def.origin, None);
+    }
+
+    #[test]
+    fn trigger_you_discard_a_card() {
+        let def = parse_trigger_line(
+            "Whenever you discard a card, draw a card.",
+            "Bag of Holding",
+        );
+        assert_eq!(def.mode, TriggerMode::Discarded);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Card).controller(ControllerRef::You)
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_opponent_discards_a_card() {
+        let def = parse_trigger_line(
+            "Whenever an opponent discards a card, draw a card.",
+            "Geth's Grimoire",
+        );
+        assert_eq!(def.mode, TriggerMode::Discarded);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Card).controller(ControllerRef::Opponent)
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_you_sacrifice_another_permanent() {
+        let def = parse_trigger_line(
+            "Whenever you sacrifice another permanent, draw a card.",
+            "Furnace Celebration",
+        );
+        assert_eq!(def.mode, TriggerMode::Sacrificed);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Permanent)
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another])
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_player_cycles_a_card() {
+        let def = parse_trigger_line(
+            "Whenever a player cycles a card, draw a card.",
+            "Astral Slide",
+        );
+        assert_eq!(def.mode, TriggerMode::Cycled);
     }
 
     #[test]
