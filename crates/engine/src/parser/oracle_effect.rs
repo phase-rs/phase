@@ -440,44 +440,9 @@ fn parse_imperative_effect(text: &str) -> Effect {
         };
     }
 
-    // --- Look at hand: "look at target opponent's hand" / "look at your hand" → RevealHand ---
-    if lower.starts_with("look at ") && lower.contains("hand") {
-        // Possessive form: "look at your/their hand" → no targeting needed
-        if contains_possessive(&lower, "look at", "hand") {
-            return Effect::RevealHand {
-                target: TargetFilter::Any,
-                card_filter: TargetFilter::Any,
-            };
-        }
-        // Targeting form: "look at target opponent's hand"
-        let after_look_at = &text[8..]; // skip "look at "
-        let (target, _) = parse_target(after_look_at);
-        return Effect::RevealHand {
-            target,
-            card_filter: TargetFilter::Any,
-        };
-    }
-
-    // --- Reveal ---
-    if lower.starts_with("reveal ") {
-        // "reveal their/your hand" → RevealHand
-        if lower.contains("hand") {
-            return Effect::RevealHand {
-                target: TargetFilter::Any,
-                card_filter: TargetFilter::Any,
-            };
-        }
-        // "reveal the top N cards of your library" → Dig
-        let count = if lower.contains("the top ") {
-            let after_top = &lower[lower.find("the top ").unwrap() + 8..];
-            parse_number(after_top).map(|(n, _)| n).unwrap_or(1)
-        } else {
-            1
-        };
-        return Effect::Dig {
-            count,
-            destination: None,
-        };
+    // --- Hand / reveal family ---
+    if let Some(effect) = parse_hand_reveal_effect(text, &lower) {
+        return effect;
     }
 
     // --- Prevent damage ---
@@ -548,39 +513,9 @@ fn parse_imperative_effect(text: &str) -> Effect {
         return parse_effect(&text[8..]);
     }
 
-    // --- "Choose target X" / "Choose up to N target X" — synonym for targeting ---
-    // Strips "choose " prefix and either re-parses (if the remainder has a verb) or
-    // produces a TargetOnly effect (if it's a bare target designation).
-    if let Some(rest) = lower.strip_prefix("choose ") {
-        if is_choose_as_targeting(rest) {
-            let stripped = &text["choose ".len()..];
-            let inner = parse_effect(stripped);
-            // If re-parsing produced a real effect (e.g. "choose target creature.
-            // Untap it" where parse_effect handles the verb), return it directly.
-            // Otherwise the remainder is a bare target phrase — extract the target.
-            if !matches!(inner, Effect::Unimplemented { .. }) {
-                return inner;
-            }
-            let (target, _) = parse_target(stripped);
-            return Effect::TargetOnly { target };
-        }
-    }
-
-    // --- Named choices: "choose a creature type", "choose a color", etc. ---
-    if let Some(choice_type) = try_parse_named_choice(&lower) {
-        return Effect::Choose {
-            choice_type,
-            persist: false,
-        };
-    }
-
-    // --- Choose card from revealed hand (absorbed into RevealHand filter) ---
-    if lower.starts_with("choose ") && lower.contains("card from it") {
-        let filter = parse_choose_filter(&lower);
-        return Effect::RevealHand {
-            target: TargetFilter::Any,
-            card_filter: filter,
-        };
+    // --- Choose family ---
+    if let Some(effect) = parse_choose_effect(text, &lower) {
+        return effect;
     }
 
     // --- Fallback ---
@@ -1307,6 +1242,77 @@ fn parse_counter_effect(text: &str, lower: &str) -> Option<Effect> {
         target,
         source_static: None,
     })
+}
+
+fn parse_hand_reveal_effect(text: &str, lower: &str) -> Option<Effect> {
+    if lower.starts_with("look at ") && lower.contains("hand") {
+        if contains_possessive(&lower, "look at", "hand") {
+            return Some(Effect::RevealHand {
+                target: TargetFilter::Any,
+                card_filter: TargetFilter::Any,
+            });
+        }
+
+        let after_look_at = &text[8..];
+        let (target, _) = parse_target(after_look_at);
+        return Some(Effect::RevealHand {
+            target,
+            card_filter: TargetFilter::Any,
+        });
+    }
+
+    if !lower.starts_with("reveal ") {
+        return None;
+    }
+
+    if lower.contains("hand") {
+        return Some(Effect::RevealHand {
+            target: TargetFilter::Any,
+            card_filter: TargetFilter::Any,
+        });
+    }
+
+    let count = if let Some(pos) = lower.find("the top ") {
+        let after_top = &lower[pos + 8..];
+        parse_number(after_top).map(|(n, _)| n).unwrap_or(1)
+    } else {
+        1
+    };
+    Some(Effect::Dig {
+        count,
+        destination: None,
+    })
+}
+
+fn parse_choose_effect(text: &str, lower: &str) -> Option<Effect> {
+    if let Some(rest) = lower.strip_prefix("choose ") {
+        if is_choose_as_targeting(rest) {
+            let stripped = &text["choose ".len()..];
+            let inner = parse_effect(stripped);
+            if !matches!(inner, Effect::Unimplemented { .. }) {
+                return Some(inner);
+            }
+            let (target, _) = parse_target(stripped);
+            return Some(Effect::TargetOnly { target });
+        }
+    }
+
+    if let Some(choice_type) = try_parse_named_choice(lower) {
+        return Some(Effect::Choose {
+            choice_type,
+            persist: false,
+        });
+    }
+
+    if lower.starts_with("choose ") && lower.contains("card from it") {
+        let filter = parse_choose_filter(lower);
+        return Some(Effect::RevealHand {
+            target: TargetFilter::Any,
+            card_filter: filter,
+        });
+    }
+
+    None
 }
 
 fn lower_continuation_ast(ast: ContinuationAst) -> Option<ClauseContinuation> {
