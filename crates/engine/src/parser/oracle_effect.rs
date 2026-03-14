@@ -232,33 +232,14 @@ fn parse_imperative_effect(text: &str) -> Effect {
         return dmg;
     }
 
-    // --- Destroy: "destroy target/all {filter}" ---
-    if lower.starts_with("destroy all ") || lower.starts_with("destroy each ") {
-        let (target, _) = parse_target(&text[8..]); // skip "destroy "
-        return Effect::DestroyAll { target };
-    }
-    if lower.starts_with("destroy ") {
-        let (target, _) = parse_target(&text[8..]);
-        return Effect::Destroy { target };
+    // --- Destroy family ---
+    if let Some(effect) = parse_destroy_effect(text, &lower) {
+        return effect;
     }
 
-    // --- Exile: "exile target/all {filter}" ---
-    if lower.starts_with("exile all ") || lower.starts_with("exile each ") {
-        let (target, _) = parse_target(&text[6..]);
-        return Effect::ChangeZoneAll {
-            origin: None,
-            destination: Zone::Exile,
-            target,
-        };
-    }
-    if let Some(rest_lower) = lower.strip_prefix("exile ") {
-        let (target, _) = parse_target(&text[6..]);
-        let origin = infer_origin_zone(rest_lower);
-        return Effect::ChangeZone {
-            origin,
-            destination: Zone::Exile,
-            target,
-        };
+    // --- Exile family ---
+    if let Some(effect) = parse_exile_effect(text, &lower) {
+        return effect;
     }
 
     // --- Draw: "draw N card(s)" ---
@@ -267,25 +248,9 @@ fn parse_imperative_effect(text: &str) -> Effect {
         return Effect::Draw { count };
     }
 
-    // --- Counter: "counter target spell" / "counter up to one target activated or triggered ability" ---
-    if let Some(rest) = lower.strip_prefix("counter ") {
-        // "counter up to one target activated or triggered ability"
-        if rest.contains("activated or triggered ability") {
-            return Effect::Counter {
-                target: TargetFilter::StackAbility,
-                source_static: None,
-            };
-        }
-        let (target, _) = parse_target(&text[8..]);
-        let target = if rest.contains("spell") {
-            constrain_filter_to_stack(target)
-        } else {
-            target
-        };
-        return Effect::Counter {
-            target,
-            source_static: None,
-        };
+    // --- Counter family ---
+    if let Some(effect) = parse_counter_effect(text, &lower) {
+        return effect;
     }
 
     // --- Life: "gain N life" / "you gain N life" ---
@@ -1289,6 +1254,59 @@ fn parse_followup_continuation_ast(
         }
         _ => None,
     }
+}
+
+fn parse_destroy_effect(text: &str, lower: &str) -> Option<Effect> {
+    if lower.starts_with("destroy all ") || lower.starts_with("destroy each ") {
+        let (target, _) = parse_target(&text[8..]);
+        return Some(Effect::DestroyAll { target });
+    }
+    if lower.starts_with("destroy ") {
+        let (target, _) = parse_target(&text[8..]);
+        return Some(Effect::Destroy { target });
+    }
+    None
+}
+
+fn parse_exile_effect(text: &str, lower: &str) -> Option<Effect> {
+    if lower.starts_with("exile all ") || lower.starts_with("exile each ") {
+        let (target, _) = parse_target(&text[6..]);
+        return Some(Effect::ChangeZoneAll {
+            origin: None,
+            destination: Zone::Exile,
+            target,
+        });
+    }
+
+    let rest_lower = lower.strip_prefix("exile ")?;
+    let (target, _) = parse_target(&text[6..]);
+    let origin = infer_origin_zone(rest_lower);
+    Some(Effect::ChangeZone {
+        origin,
+        destination: Zone::Exile,
+        target,
+    })
+}
+
+fn parse_counter_effect(text: &str, lower: &str) -> Option<Effect> {
+    let rest = lower.strip_prefix("counter ")?;
+    if rest.contains("activated or triggered ability") {
+        return Some(Effect::Counter {
+            target: TargetFilter::StackAbility,
+            source_static: None,
+        });
+    }
+
+    let (target, _) = parse_target(&text[8..]);
+    let target = if rest.contains("spell") {
+        constrain_filter_to_stack(target)
+    } else {
+        target
+    };
+    Some(Effect::Counter {
+        target,
+        source_static: None,
+    })
 }
 
 fn lower_continuation_ast(ast: ContinuationAst) -> Option<ClauseContinuation> {
