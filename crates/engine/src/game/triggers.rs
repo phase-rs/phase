@@ -9,7 +9,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
-use crate::types::player::PlayerId;
+use crate::types::player::{Player, PlayerId};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
@@ -312,25 +312,25 @@ fn check_trigger_constraint(
 
 /// Check whether an intervening-if condition is satisfied.
 /// Used both at fire-time and resolution-time.
+///
+/// Predicates check player/game state directly.
+/// Combinators (`And`/`Or`) recurse into their children.
 pub(crate) fn check_trigger_condition(
     state: &GameState,
     condition: &TriggerCondition,
     controller: PlayerId,
 ) -> bool {
     match condition {
-        TriggerCondition::LifeGainedThisTurn { minimum } => state
-            .players
-            .iter()
-            .find(|p| p.id == controller)
-            .map(|p| p.life_gained_this_turn >= *minimum)
-            .unwrap_or(false),
-        TriggerCondition::DescendedThisTurn => state
-            .players
-            .iter()
-            .find(|p| p.id == controller)
-            .map(|p| p.descended_this_turn)
-            .unwrap_or(false),
-        TriggerCondition::ControlCreatureCount { minimum } => {
+        TriggerCondition::GainedLife { minimum } => player_field(state, controller, |p| {
+            p.life_gained_this_turn >= *minimum
+        }),
+        TriggerCondition::LostLife => {
+            player_field(state, controller, |p| p.life_lost_this_turn > 0)
+        }
+        TriggerCondition::Descended => {
+            player_field(state, controller, |p| p.descended_this_turn)
+        }
+        TriggerCondition::ControlCreatures { minimum } => {
             let count = state
                 .battlefield
                 .iter()
@@ -343,7 +343,23 @@ pub(crate) fn check_trigger_condition(
                 .count();
             count >= *minimum as usize
         }
+        TriggerCondition::And { conditions } => conditions
+            .iter()
+            .all(|c| check_trigger_condition(state, c, controller)),
+        TriggerCondition::Or { conditions } => conditions
+            .iter()
+            .any(|c| check_trigger_condition(state, c, controller)),
     }
+}
+
+/// Helper to check a predicate against the controller's player state.
+fn player_field(state: &GameState, controller: PlayerId, f: impl Fn(&Player) -> bool) -> bool {
+    state
+        .players
+        .iter()
+        .find(|p| p.id == controller)
+        .map(|p| f(p))
+        .unwrap_or(false)
 }
 
 /// Record that a constrained trigger has fired.

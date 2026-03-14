@@ -1370,15 +1370,34 @@ pub struct SpellContext {
 
 /// Intervening-if condition for triggered abilities.
 /// Checked both when the trigger would fire and when it resolves on the stack.
+///
+/// Predicates are leaf conditions ("you gained life", "you descended").
+/// `And`/`Or` compose multiple predicates for compound conditions
+/// ("if you gained and lost life this turn").
+///
+/// Adding a new condition:
+/// 1. Add a variant here with the predicate's natural subject baked in
+/// 2. Add a match arm in `check_trigger_condition` (game/triggers.rs)
+/// 3. Add parser support in `extract_if_condition` (parser/oracle_trigger.rs)
+/// 4. Add any per-turn tracking fields to `Player` / `GameState` if needed
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum TriggerCondition {
+    // -- Predicates (leaf conditions) --
     /// "if you gained life this turn" / "if you've gained N or more life this turn"
-    LifeGainedThisTurn { minimum: u32 },
+    GainedLife { minimum: u32 },
+    /// "if you lost life this turn"
+    LostLife,
     /// "if you descended this turn" (a permanent card was put into your graveyard)
-    DescendedThisTurn,
+    Descended,
     /// "if you control N or more creatures"
-    ControlCreatureCount { minimum: u32 },
+    ControlCreatures { minimum: u32 },
+
+    // -- Combinators --
+    /// All conditions must be true ("if you gained and lost life this turn")
+    And { conditions: Vec<TriggerCondition> },
+    /// Any condition must be true
+    Or { conditions: Vec<TriggerCondition> },
 }
 
 /// Condition that gates whether a replacement effect applies.

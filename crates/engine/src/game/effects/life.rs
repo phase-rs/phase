@@ -119,6 +119,7 @@ pub fn apply_damage_life_loss(
             {
                 if let Some(player) = state.players.iter_mut().find(|p| p.id == pid) {
                     player.life -= loss_amount as i32;
+                    player.life_lost_this_turn += loss_amount;
                 }
                 events.push(GameEvent::LifeChanged {
                     player_id: pid,
@@ -134,6 +135,7 @@ pub fn apply_damage_life_loss(
             // Multiple replacement choices for life loss from damage; apply unmodified for now
             if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
                 player.life -= amount as i32;
+                player.life_lost_this_turn += amount;
             }
             events.push(GameEvent::LifeChanged {
                 player_id,
@@ -188,6 +190,7 @@ pub fn resolve_lose(
                     .find(|p| p.id == player_id)
                     .ok_or(EffectError::PlayerNotFound)?;
                 player.life -= loss_amount as i32;
+                player.life_lost_this_turn += loss_amount;
 
                 events.push(GameEvent::LifeChanged {
                     player_id,

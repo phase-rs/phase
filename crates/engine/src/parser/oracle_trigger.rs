@@ -100,92 +100,99 @@ fn strip_constraint_sentences(text: &str) -> String {
     }
 }
 
-/// Extract an "if you've gained N or more life this turn" condition from effect text.
+/// Extract an intervening-if condition from effect text.
 /// Returns (cleaned effect text, optional condition).
+///
+/// Supports composable predicates: single conditions and compound "X and Y" forms.
+/// Each predicate is parsed independently, then composed with `And`/`Or` if needed.
 fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     let lower = text.to_lowercase();
 
-    // Patterns: "if you've gained N or more life this turn" / "if you gained N or more life this turn"
-    // Also: "if you've gained life this turn" (minimum = 1, no number)
-    let if_patterns = [
+    // Compound: "if you gained and lost life this turn"
+    if let Some(pos) = lower.find("if you gained and lost life this turn") {
+        let condition = TriggerCondition::And {
+            conditions: vec![
+                TriggerCondition::GainedLife { minimum: 1 },
+                TriggerCondition::LostLife,
+            ],
+        };
+        return (
+            strip_condition_clause(text, pos, "if you gained and lost life this turn".len()),
+            Some(condition),
+        );
+    }
+
+    // "if you gained N or more life this turn" / "if you gained life this turn"
+    let gained_patterns = [
         "if you've gained ",
         "if you gained ",
         "if you've gained life this turn",
         "if you gained life this turn",
     ];
-
-    for pattern in &if_patterns {
+    for pattern in &gained_patterns {
         if let Some(pos) = lower.find(pattern) {
             let after = &lower[pos + pattern.len()..];
 
-            // "if you've gained life this turn" (no number → minimum 1)
             if pattern.ends_with("life this turn") {
-                let cleaned = text[..pos].trim_end().to_string();
                 return (
-                    cleaned,
-                    Some(TriggerCondition::LifeGainedThisTurn { minimum: 1 }),
+                    strip_condition_clause(text, pos, pattern.len()),
+                    Some(TriggerCondition::GainedLife { minimum: 1 }),
                 );
             }
 
-            // Try to parse "N or more life this turn"
             if let Some(minimum) = parse_life_threshold(after) {
-                // Strip the entire "if..." clause from the effect text
-                let cleaned = text[..pos].trim_end().to_string();
+                // Clause extends to end of text (e.g., "draw a card if you've gained 3 or more life this turn.")
                 return (
-                    cleaned,
-                    Some(TriggerCondition::LifeGainedThisTurn { minimum }),
+                    strip_condition_clause(text, pos, text.len() - pos),
+                    Some(TriggerCondition::GainedLife { minimum }),
                 );
             }
 
-            // "life this turn" without a number → minimum 1
             if after.starts_with("life this turn") {
-                let cleaned = text[..pos].trim_end().to_string();
                 return (
-                    cleaned,
-                    Some(TriggerCondition::LifeGainedThisTurn { minimum: 1 }),
+                    strip_condition_clause(text, pos, text.len() - pos),
+                    Some(TriggerCondition::GainedLife { minimum: 1 }),
                 );
             }
         }
     }
 
-    // Pattern: "if you descended this turn"
+    // "if you descended this turn"
     if let Some(pos) = lower.find("if you descended this turn") {
-        let pattern_len = "if you descended this turn".len();
-        let before = text[..pos].trim_end().trim_end_matches(',');
-        let after = text[pos + pattern_len..]
-            .trim_start_matches(',')
-            .trim_start()
-            .trim_end_matches('.')
-            .trim();
-        let cleaned = if before.is_empty() {
-            after.to_string()
-        } else if after.is_empty() {
-            before.to_string()
-        } else {
-            format!("{before} {after}")
-        };
-        return (cleaned, Some(TriggerCondition::DescendedThisTurn));
+        return (
+            strip_condition_clause(text, pos, "if you descended this turn".len()),
+            Some(TriggerCondition::Descended),
+        );
     }
 
-    // Pattern: "if you control N or more creatures, {effect}"
+    // "if you control N or more creatures"
     if let Some((condition, end_pos)) = parse_control_count_condition(&lower) {
-        // Strip the "if you control N or more creatures" clause and keep the rest.
-        // The text before the clause + the text after the clause = the effect.
-        let before = text[..lower.find("if you control ").unwrap()]
-            .trim_end()
-            .trim_end_matches(',');
-        let after = text[end_pos..].trim_start_matches(',').trim_start();
-        let cleaned = if before.is_empty() {
-            after.to_string()
-        } else if after.is_empty() {
-            before.to_string()
-        } else {
-            format!("{before} {after}")
-        };
-        return (cleaned, Some(condition));
+        let start = lower.find("if you control ").unwrap();
+        return (
+            strip_condition_clause(text, start, end_pos - start),
+            Some(condition),
+        );
     }
 
     (text.to_string(), None)
+}
+
+/// Strip a condition clause from text, joining the before and after portions.
+/// Handles the clause appearing at the start, end, or middle of the text.
+fn strip_condition_clause(text: &str, clause_start: usize, clause_len: usize) -> String {
+    let before = text[..clause_start].trim_end().trim_end_matches(',');
+    let after = text[clause_start + clause_len..]
+        .trim_start_matches(',')
+        .trim_start()
+        .trim_end_matches('.')
+        .trim();
+    if before.is_empty() {
+        after.to_string()
+    } else if after.is_empty() {
+        before.to_string()
+    } else {
+        format!("{before} {after}")
+    }
 }
 
 /// Parse "if you control N or more creatures" → (condition, end_byte_offset)
@@ -198,7 +205,7 @@ fn parse_control_count_condition(lower: &str) -> Option<(TriggerCondition, usize
             + "if you control ".len()
             + (after_prefix.len() - rest.len())
             + "or more creatures".len();
-        return Some((TriggerCondition::ControlCreatureCount { minimum: n }, end));
+        return Some((TriggerCondition::ControlCreatures { minimum: n }, end));
     }
     None
 }
@@ -872,7 +879,7 @@ mod tests {
         assert_eq!(def.phase, Some(Phase::End));
         assert_eq!(
             def.condition,
-            Some(TriggerCondition::LifeGainedThisTurn { minimum: 3 })
+            Some(TriggerCondition::GainedLife { minimum: 3 })
         );
         // Effect should be just "draw a card" with condition stripped
         assert!(def.execute.is_some());
@@ -886,7 +893,7 @@ mod tests {
         );
         assert_eq!(
             def.condition,
-            Some(TriggerCondition::LifeGainedThisTurn { minimum: 1 })
+            Some(TriggerCondition::GainedLife { minimum: 1 })
         );
     }
 
@@ -898,7 +905,7 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::Phase);
         assert_eq!(def.phase, Some(Phase::End));
-        assert_eq!(def.condition, Some(TriggerCondition::DescendedThisTurn));
+        assert_eq!(def.condition, Some(TriggerCondition::Descended));
         assert!(def.execute.is_some());
     }
 
@@ -910,7 +917,7 @@ mod tests {
         );
         assert_eq!(
             def.condition,
-            Some(TriggerCondition::LifeGainedThisTurn { minimum: 5 })
+            Some(TriggerCondition::GainedLife { minimum: 5 })
         );
     }
 
@@ -921,8 +928,26 @@ mod tests {
         assert_eq!(cleaned, "draw a card");
         assert_eq!(
             cond,
-            Some(TriggerCondition::LifeGainedThisTurn { minimum: 3 })
+            Some(TriggerCondition::GainedLife { minimum: 3 })
         );
+    }
+
+    #[test]
+    fn trigger_if_gained_and_lost_life_compound() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if you gained and lost life this turn, create a 1/1 black Bat creature token with flying.",
+            "Some Card",
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::And {
+                conditions: vec![
+                    TriggerCondition::GainedLife { minimum: 1 },
+                    TriggerCondition::LostLife,
+                ]
+            })
+        );
+        assert!(def.execute.is_some());
     }
 
     // --- Counter placement with "you put" pattern ---
@@ -1159,7 +1184,7 @@ mod tests {
         );
     }
 
-    // --- ControlCreatureCount condition tests ---
+    // --- ControlCreatures condition tests ---
 
     #[test]
     fn trigger_leonin_vanguard_control_creature_count() {
@@ -1171,7 +1196,7 @@ mod tests {
         assert_eq!(def.phase, Some(Phase::BeginCombat));
         assert_eq!(
             def.condition,
-            Some(TriggerCondition::ControlCreatureCount { minimum: 3 })
+            Some(TriggerCondition::ControlCreatures { minimum: 3 })
         );
         // Effect: pump self +1/+1 with life gain sub_ability
         let exec = def.execute.as_ref().expect("should have execute");
@@ -1203,7 +1228,7 @@ mod tests {
         assert_eq!(cleaned, "~ gets +1/+1 until end of turn");
         assert_eq!(
             cond,
-            Some(TriggerCondition::ControlCreatureCount { minimum: 3 })
+            Some(TriggerCondition::ControlCreatures { minimum: 3 })
         );
     }
 }
