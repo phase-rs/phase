@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use tsify::Tsify;
 use wasm_bindgen::prelude::*;
 
+use engine::ai_support::legal_actions;
 use engine::database::CardDatabase;
 use engine::game::engine::apply;
 use engine::game::{
@@ -19,9 +20,7 @@ use engine::types::{
 };
 
 use phase_ai::choose_action;
-use phase_ai::config::{create_config, AiDifficulty, Platform};
-use phase_ai::legal_actions::get_legal_actions;
-
+use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
 thread_local! {
     static GAME_STATE: RefCell<Option<GameState>> = const { RefCell::new(None) };
     static CARD_DB: RefCell<Option<CardDatabase>> = const { RefCell::new(None) };
@@ -181,7 +180,7 @@ pub fn get_legal_actions_js() -> JsValue {
         let state_ref = gs.borrow();
         match state_ref.as_ref() {
             Some(state) => {
-                let actions = get_legal_actions(state);
+                let actions = legal_actions(state);
                 serde_wasm_bindgen::to_value(&actions).unwrap()
             }
             None => JsValue::NULL,
@@ -217,13 +216,13 @@ pub fn get_ai_action(difficulty: &str, player_id: u8) -> Result<JsValue, JsValue
         _ => AiDifficulty::Medium,
     };
 
-    let config = create_config(ai_difficulty, Platform::Wasm);
-
     GAME_STATE.with(|gs: &RefCell<Option<GameState>>| {
         let state_ref = gs.borrow();
         let state = state_ref
             .as_ref()
             .ok_or_else(|| JsValue::from_str("Game not initialized"))?;
+        let config =
+            create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
 
         let ai_player = PlayerId(player_id);
         let mut rng = rand::rng();

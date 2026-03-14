@@ -1,16 +1,18 @@
 use rand::Rng;
 
+use engine::ai_support::{build_decision_context, AiDecisionContext, CandidateAction, TacticalClass};
 use engine::game::engine::apply;
 use engine::types::actions::GameAction;
+use engine::types::ability::TargetRef;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
 use crate::card_hints::should_play_now;
 use crate::combat_ai::{choose_attackers_with_targets, choose_blockers};
 use crate::config::AiConfig;
-use crate::eval::evaluate_state;
-use crate::legal_actions::get_legal_actions;
+use crate::eval::{evaluate_creature, evaluate_state, threat_level};
 
 struct SearchBudget {
     max_nodes: u32,
@@ -27,21 +29,21 @@ impl SearchBudget {
     }
 }
 
-struct ScoredAction {
-    action: GameAction,
+struct ScoredCandidate {
+    candidate: CandidateAction,
     score: f64,
 }
 
-/// Filter actions by testing each against the engine.
-/// Any action the engine rejects is dropped before scoring.
-fn validate_actions(state: &GameState, actions: Vec<GameAction>) -> Vec<GameAction> {
-    actions
+/// Filter candidate actions by testing each against the engine.
+/// Any candidate the engine rejects is dropped before scoring.
+fn validate_candidates(state: &GameState, candidates: Vec<CandidateAction>) -> Vec<CandidateAction> {
+    candidates
         .into_iter()
-        .filter(|action| match action {
-            GameAction::PassPriority => true,
+        .filter(|candidate| match &candidate.action {
+            GameAction::PassPriority | GameAction::ChooseTarget { .. } => true,
             _ => {
                 let mut sim = state.clone();
-                apply(&mut sim, action.clone()).is_ok()
+                apply(&mut sim, candidate.action.clone()).is_ok()
             }
         })
         .collect()
@@ -59,7 +61,9 @@ pub fn choose_action(
     config: &AiConfig,
     rng: &mut impl Rng,
 ) -> Option<GameAction> {
-    let actions = validate_actions(state, get_legal_actions(state));
+    let ctx = build_decision_context(state);
+    let candidates = validate_candidates(state, ctx.candidates.clone());
+    let actions: Vec<GameAction> = candidates.iter().map(|candidate| candidate.action.clone()).collect();
 
     if actions.is_empty() {
         return None;
@@ -200,7 +204,7 @@ pub fn choose_action(
     }
 
     // Score actions
-    let scored: Vec<ScoredAction> = if config.search.enabled {
+    let scored: Vec<ScoredCandidate> = if config.search.enabled {
         // Alpha-beta search for each candidate action
         let mut budget = SearchBudget {
             max_nodes: config.search.max_nodes,
@@ -210,12 +214,12 @@ pub fn choose_action(
         let branching = config.search.max_branching as usize;
 
         // Limit branching: take top N actions by heuristic
-        let mut heuristic_scored: Vec<ScoredAction> = actions
+        let mut heuristic_scored: Vec<ScoredCandidate> = candidates
             .into_iter()
-            .map(|a| {
-                let h = should_play_now(state, &a, ai_player);
-                ScoredAction {
-                    action: a,
+            .map(|candidate| {
+                let h = score_candidate(state, &ctx, &candidate, ai_player);
+                ScoredCandidate {
+                    candidate,
                     score: h,
                 }
             })
@@ -231,8 +235,8 @@ pub fn choose_action(
             .into_iter()
             .map(|sa| {
                 let mut sim = state.clone();
-                let score = if apply(&mut sim, sa.action.clone()).is_ok() {
-                    search_value(
+                let score = if apply(&mut sim, sa.candidate.action.clone()).is_ok() {
+                    let continuation_score = search_value(
                         &sim,
                         ai_player,
                         depth.saturating_sub(1),
@@ -240,23 +244,24 @@ pub fn choose_action(
                         f64::INFINITY,
                         config,
                         &mut budget,
-                    )
+                    );
+                    continuation_score + (sa.score * 0.1)
                 } else {
-                    f64::NEG_INFINITY
+                    sa.score
                 };
-                ScoredAction {
-                    action: sa.action,
+                ScoredCandidate {
+                    candidate: sa.candidate,
                     score,
                 }
             })
             .collect()
     } else {
         // Heuristic-only scoring
-        actions
+        candidates
             .into_iter()
-            .map(|a| {
-                let score = should_play_now(state, &a, ai_player);
-                ScoredAction { action: a, score }
+            .map(|candidate| {
+                let score = score_candidate(state, &ctx, &candidate, ai_player);
+                ScoredCandidate { candidate, score }
             })
             .collect()
     };
@@ -311,27 +316,33 @@ fn search_value(
         return evaluate_state(state, ai_player, &config.weights);
     }
 
-    let actions = get_legal_actions(state);
-    if actions.is_empty() {
+    let ctx = build_decision_context(state);
+    let candidates = validate_candidates(state, ctx.candidates.clone());
+    if candidates.is_empty() {
         return evaluate_state(state, ai_player, &config.weights);
     }
 
     // Determine if this is a maximizing or minimizing node
-    let is_maximizing = match &state.waiting_for {
-        WaitingFor::Priority { player } => *player == ai_player,
-        WaitingFor::DeclareAttackers { player, .. } => *player == ai_player,
-        WaitingFor::DeclareBlockers { player, .. } => *player == ai_player,
-        WaitingFor::MulliganDecision { player, .. } => *player == ai_player,
-        _ => true,
-    };
+    let is_maximizing = acting_player(state).is_none_or(|player| player == ai_player);
 
     // Limit branching factor
     let max_branch = config.search.max_branching as usize;
-    let actions_to_search: Vec<_> = if actions.len() > max_branch {
-        actions.into_iter().take(max_branch).collect()
-    } else {
-        actions
-    };
+    let mut scored_candidates: Vec<_> = candidates
+        .into_iter()
+        .map(|candidate| {
+            let score = score_candidate(state, &ctx, &candidate, ai_player);
+            (candidate, score)
+        })
+        .collect();
+    scored_candidates.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let actions_to_search: Vec<_> = scored_candidates
+        .into_iter()
+        .take(max_branch)
+        .map(|(candidate, _)| candidate.action)
+        .collect();
 
     if is_maximizing {
         let mut best = f64::NEG_INFINITY;
@@ -362,6 +373,107 @@ fn search_value(
         }
         best
     }
+}
+
+fn acting_player(state: &GameState) -> Option<PlayerId> {
+    match &state.waiting_for {
+        WaitingFor::Priority { player }
+        | WaitingFor::MulliganDecision { player, .. }
+        | WaitingFor::MulliganBottomCards { player, .. }
+        | WaitingFor::ManaPayment { player }
+        | WaitingFor::TargetSelection { player, .. }
+        | WaitingFor::DeclareAttackers { player, .. }
+        | WaitingFor::DeclareBlockers { player, .. }
+        | WaitingFor::ReplacementChoice { player, .. }
+        | WaitingFor::EquipTarget { player, .. }
+        | WaitingFor::ScryChoice { player, .. }
+        | WaitingFor::DigChoice { player, .. }
+        | WaitingFor::SurveilChoice { player, .. }
+        | WaitingFor::RevealChoice { player, .. }
+        | WaitingFor::SearchChoice { player, .. }
+        | WaitingFor::TriggerTargetSelection { player, .. }
+        | WaitingFor::BetweenGamesSideboard { player, .. }
+        | WaitingFor::BetweenGamesChoosePlayDraw { player, .. }
+        | WaitingFor::NamedChoice { player, .. }
+        | WaitingFor::ModeChoice { player, .. }
+        | WaitingFor::DiscardToHandSize { player, .. }
+        | WaitingFor::OptionalCostChoice { player, .. }
+        | WaitingFor::AbilityModeChoice { player, .. } => Some(*player),
+        WaitingFor::GameOver { .. } => None,
+    }
+}
+
+fn score_candidate(
+    state: &GameState,
+    ctx: &AiDecisionContext,
+    candidate: &CandidateAction,
+    ai_player: PlayerId,
+) -> f64 {
+    let mut score = should_play_now(state, &candidate.action, ai_player);
+    let is_targeting_context = matches!(
+        ctx.waiting_for,
+        WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. }
+    );
+
+    match candidate.metadata.tactical_class {
+        TacticalClass::Target if !is_targeting_context => {
+            score += score_targeting_candidate(state, candidate, ai_player)
+        }
+        TacticalClass::Pass => score -= 0.1,
+        TacticalClass::Mana => score -= 0.05,
+        _ => {}
+    }
+
+    if is_targeting_context {
+        score += score_targeting_candidate(state, candidate, ai_player);
+    }
+
+    score
+}
+
+fn score_targeting_candidate(
+    state: &GameState,
+    candidate: &CandidateAction,
+    ai_player: PlayerId,
+) -> f64 {
+    match &candidate.action {
+        GameAction::ChooseTarget { target } => target
+            .as_ref()
+            .map_or(-0.25, |target| score_target_ref(state, target, ai_player)),
+        GameAction::SelectTargets { targets } => targets
+            .iter()
+            .map(|target| score_target_ref(state, target, ai_player))
+            .sum(),
+        _ => 0.0,
+    }
+}
+
+fn score_target_ref(state: &GameState, target: &TargetRef, ai_player: PlayerId) -> f64 {
+    match target {
+        TargetRef::Player(player_id) => {
+            if *player_id == ai_player {
+                -100.0
+            } else {
+                4.0 + threat_level(state, ai_player, *player_id) * 8.0
+            }
+        }
+        TargetRef::Object(object_id) => score_target_object(state, *object_id, ai_player),
+    }
+}
+
+fn score_target_object(state: &GameState, object_id: ObjectId, ai_player: PlayerId) -> f64 {
+    let Some(object) = state.objects.get(&object_id) else {
+        return -10.0;
+    };
+
+    let controller_delta = if object.controller == ai_player { -1.0 } else { 1.0 };
+    let mut score = controller_delta * 2.0;
+
+    if object.card_types.core_types.contains(&CoreType::Creature) {
+        score += controller_delta * evaluate_creature(state, object_id);
+    }
+
+    score
 }
 
 /// Decide whether to keep the current hand based on land/spell ratio.
@@ -430,7 +542,7 @@ fn evaluate_card_value(state: &GameState, obj_id: engine::types::identifiers::Ob
 }
 
 fn softmax_select(
-    scored: &[ScoredAction],
+    scored: &[ScoredCandidate],
     temperature: f64,
     rng: &mut impl Rng,
 ) -> Option<GameAction> {
@@ -438,7 +550,7 @@ fn softmax_select(
         return None;
     }
     if scored.len() == 1 {
-        return Some(scored[0].action.clone());
+        return Some(scored[0].candidate.action.clone());
     }
 
     // Numerical stability: subtract max score
@@ -462,20 +574,20 @@ fn softmax_select(
                     .partial_cmp(&b.score)
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
-            .map(|s| s.action.clone());
+            .map(|s| s.candidate.action.clone());
     }
 
     let threshold: f64 = rng.random::<f64>() * total;
     let mut cumulative = 0.0;
     for (i, w) in weights.iter().enumerate() {
         cumulative += w;
-        if cumulative >= threshold {
-            return Some(scored[i].action.clone());
-        }
+            if cumulative >= threshold {
+            return Some(scored[i].candidate.action.clone());
+            }
     }
 
     // Fallback to last
-    Some(scored.last().unwrap().action.clone())
+    Some(scored.last().unwrap().candidate.action.clone())
 }
 
 #[cfg(test)]
@@ -561,12 +673,24 @@ mod tests {
     #[test]
     fn softmax_low_temp_picks_highest() {
         let scored = vec![
-            ScoredAction {
-                action: GameAction::PassPriority,
+            ScoredCandidate {
+                candidate: CandidateAction {
+                    action: GameAction::PassPriority,
+                    metadata: engine::ai_support::ActionMetadata {
+                        actor: Some(PlayerId(0)),
+                        tactical_class: TacticalClass::Pass,
+                    },
+                },
                 score: 1.0,
             },
-            ScoredAction {
-                action: GameAction::PlayLand { card_id: CardId(1) },
+            ScoredCandidate {
+                candidate: CandidateAction {
+                    action: GameAction::PlayLand { card_id: CardId(1) },
+                    metadata: engine::ai_support::ActionMetadata {
+                        actor: Some(PlayerId(0)),
+                        tactical_class: TacticalClass::Land,
+                    },
+                },
                 score: 10.0,
             },
         ];
@@ -587,12 +711,24 @@ mod tests {
     #[test]
     fn softmax_high_temp_is_more_random() {
         let scored = vec![
-            ScoredAction {
-                action: GameAction::PassPriority,
+            ScoredCandidate {
+                candidate: CandidateAction {
+                    action: GameAction::PassPriority,
+                    metadata: engine::ai_support::ActionMetadata {
+                        actor: Some(PlayerId(0)),
+                        tactical_class: TacticalClass::Pass,
+                    },
+                },
                 score: 1.0,
             },
-            ScoredAction {
-                action: GameAction::PlayLand { card_id: CardId(1) },
+            ScoredCandidate {
+                candidate: CandidateAction {
+                    action: GameAction::PlayLand { card_id: CardId(1) },
+                    metadata: engine::ai_support::ActionMetadata {
+                        actor: Some(PlayerId(0)),
+                        tactical_class: TacticalClass::Land,
+                    },
+                },
                 score: 2.0,
             },
         ];
@@ -677,6 +813,73 @@ mod tests {
             Some(GameAction::PlayLand {
                 card_id: CardId(99)
             })
+        );
+    }
+
+    #[test]
+    fn self_targeting_is_penalized() {
+        let state = make_state();
+        let self_score = score_target_ref(&state, &TargetRef::Player(PlayerId(0)), PlayerId(0));
+        let opp_score = score_target_ref(&state, &TargetRef::Player(PlayerId(1)), PlayerId(0));
+        assert!(self_score < opp_score);
+        assert!(self_score < -50.0);
+    }
+
+    #[test]
+    fn target_selection_prefers_opponent_over_self() {
+        let mut state = make_state();
+        state.waiting_for = WaitingFor::TriggerTargetSelection {
+            player: PlayerId(0),
+            target_slots: vec![engine::types::game_state::TargetSelectionSlot {
+                legal_targets: vec![
+                    TargetRef::Player(PlayerId(0)),
+                    TargetRef::Player(PlayerId(1)),
+                ],
+                optional: false,
+            }],
+            target_constraints: Vec::new(),
+            selection: engine::types::game_state::TargetSelectionProgress {
+                current_slot: 0,
+                selected_slots: Vec::new(),
+                current_legal_targets: vec![
+                    TargetRef::Player(PlayerId(0)),
+                    TargetRef::Player(PlayerId(1)),
+                ],
+            },
+        };
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(9);
+        let action = choose_action(&state, PlayerId(0), &config, &mut rng);
+
+        assert_eq!(
+            action,
+            Some(GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(1))),
+            })
+        );
+    }
+
+    #[test]
+    fn optional_target_selection_can_skip_when_no_targets_exist() {
+        let mut state = make_state();
+        state.waiting_for = WaitingFor::TriggerTargetSelection {
+            player: PlayerId(0),
+            target_slots: vec![engine::types::game_state::TargetSelectionSlot {
+                legal_targets: Vec::new(),
+                optional: true,
+            }],
+            target_constraints: Vec::new(),
+            selection: Default::default(),
+        };
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(10);
+        let action = choose_action(&state, PlayerId(0), &config, &mut rng);
+
+        assert_eq!(
+            action,
+            Some(GameAction::ChooseTarget { target: None })
         );
     }
 }

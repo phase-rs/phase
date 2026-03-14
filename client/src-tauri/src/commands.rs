@@ -1,5 +1,6 @@
 use std::sync::Mutex;
 
+use engine::ai_support::legal_actions;
 use engine::game::combat::has_summoning_sickness;
 use engine::game::coverage::unimplemented_mechanics;
 use engine::game::engine::apply;
@@ -11,7 +12,7 @@ use engine::types::player::PlayerId;
 use engine::types::{GameAction, GameState};
 
 use phase_ai::choose_action;
-use phase_ai::config::{create_config, AiDifficulty, Platform};
+use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
 
 pub struct AppState {
     pub game: Mutex<Option<GameState>>,
@@ -84,7 +85,7 @@ pub fn get_legal_actions(state: tauri::State<AppState>) -> Result<Vec<GameAction
     let guard = state.game.lock().map_err(|e| e.to_string())?;
     let game = guard.as_ref().ok_or("Game not initialized")?;
 
-    Ok(phase_ai::legal_actions::get_legal_actions(game))
+    Ok(legal_actions(game))
 }
 
 #[tauri::command]
@@ -104,7 +105,7 @@ pub fn get_ai_action(
         _ => AiDifficulty::Medium,
     };
 
-    let config = create_config(ai_difficulty, Platform::Native);
+    let config = create_config_for_players(ai_difficulty, Platform::Native, game.players.len() as u8);
     let mut rng = rand::rng();
 
     Ok(choose_action(game, PlayerId(1), &config, &mut rng))

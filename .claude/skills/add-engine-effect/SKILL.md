@@ -106,16 +106,26 @@ Only needed if the effect has a `target: TargetFilter` field that isn't `None`/`
 
 **Goal:** Oracle text for this effect produces the correct typed `Effect` variant.
 
-- [ ] **`crates/engine/src/parser/oracle_effect.rs` — `parse_imperative_effect()`**
-  Add pattern matching for the bare verb form (e.g., `starts_with("reveal ")`). This handles the most common Oracle text form.
+- [ ] **`crates/engine/src/parser/oracle_effect.rs` — the right `parse_*_ast()` helper**
+  Most new effect parser work now belongs in a typed imperative-family helper, not directly in a flat verb list. Register the pattern in the smallest matching parser:
+  - `parse_numeric_imperative_ast()`
+  - `parse_zone_counter_ast()`
+  - `parse_cost_resource_ast()`
+  - `parse_targeted_action_ast()`
+  - `parse_search_and_creation_ast()`
+  - `parse_hand_reveal_ast()`
+  - `parse_choose_ast()`
+  - `parse_put_ast()`
+  - `parse_shuffle_ast()`
+  - `parse_utility_imperative_ast()`
 
 - [ ] **`crates/engine/src/parser/oracle_effect.rs` — subject-preserving helpers (if needed)**
-  If the subject of the sentence carries game-relevant information (who does it, who it targets), add a `try_parse_*` helper called **before** `strip_subject_clause()` in `parse_effect_clause()`. See `docs/parser-instructions.md` § "Subject Stripping" for the full rationale.
+  If the subject of the sentence carries game-relevant information (who does it, who it targets), preserve it before fallback subject stripping. The current pattern is `try_parse_targeted_controller_gain_life()` in `lower_imperative_clause()`. See `docs/parser-instructions.md` § "Subject Stripping" for the full rationale.
 
 - [ ] **`crates/engine/src/parser/oracle_effect.rs` — `parse_effect_chain()` integration**
   If the effect commonly appears as part of a multi-sentence ability (e.g., "Look at target opponent's hand. You may choose a nonland card from it. Exile that card."), ensure the sentence splitting and `sub_ability` chaining produces the right structure. The engine composes effects via `sub_ability` chains — don't create mega-effects that do multiple things.
 
-  **Absorption pattern:** Some sentences modify a preceding effect rather than creating a new sub_ability. Examples: RevealHand absorbs card filters, SearchLibrary absorbs destinations, and `Effect::Mana` absorbs "Spend this mana only to cast..." clauses as `ManaSpendRestriction` on its `restrictions` field (via `parse_mana_spend_restriction()`). If your new effect has modifier sentences, add absorption logic in `parse_effect_chain()` — don't emit them as separate sub_abilities.
+  **Absorption pattern:** Some sentences modify a preceding effect rather than creating a new sub_ability. Examples: RevealHand absorbs card filters, SearchLibrary absorbs destinations, `Effect::Mana` absorbs "Spend this mana only to cast..." clauses as `ManaSpendRestriction`, and `Effect::Counter` can absorb follow-up `source_static`. If your new effect has modifier sentences, add absorption logic in `parse_effect_chain()` — don't emit them as separate sub_abilities.
 
 - [ ] **`crates/engine/src/parser/oracle_effect.rs` — parser tests**
   Every new pattern **must** have a `#[test]` in the inline test module:
@@ -185,7 +195,10 @@ Only needed if the effect pauses for player input.
   Add the TypeScript discriminated union variant. Note: `tsify` auto-generates types from Rust, but the `types.ts` file may have manual overrides — check both.
 
 - [ ] **`client/src/components/` — UI for the choice**
-  Build (or extend) a component that renders when `waitingFor.type === "YourChoice"`. Look at how `ScryOverlay`, `DigOverlay`, `SurveilOverlay` work for patterns.
+  Build (or extend) a component that renders when `waitingFor.type === "YourChoice"`. Current patterns:
+  - `client/src/components/modal/CardChoiceModal.tsx` for `ScryChoice`, `DigChoice`, `SurveilChoice`, `RevealChoice`, `SearchChoice`, `DiscardToHandSize`
+  - `client/src/components/modal/NamedChoiceModal.tsx` for `NamedChoice`
+  - `client/src/components/modal/ModeChoiceModal.tsx` for `ModeChoice` and `AbilityModeChoice`
 
 ### Phase 5b — Multiplayer State Filtering (if applicable)
 
@@ -240,7 +253,8 @@ Only needed if the effect reveals or hides information (hands, face-down cards, 
 | Missing `extract_target_filter_from_effect` arm in `stack.rs` | Spells don't fizzle when targets become illegal | Ensure the effect's `TargetFilter` is returned by `extract_target_filter_from_effect` |
 | Creating a mega-effect instead of composing | One-off solution that handles one card pattern | Decompose into building blocks with `sub_ability` chains |
 | Boolean flags on `Effect` variants | Undefined combinations, unclear intent | Use enum variants (see `DamageAmount`, `LifeAmount`) |
-| `parse_imperative_effect` only, no subject interception | "Its controller gains life equal to its power" loses context | Add `try_parse_*` before `strip_subject_clause` |
+| Added parser logic in the wrong AST helper | Pattern parses inconsistently or bypasses continuation absorption | Register it in the smallest matching `parse_*_ast()` helper |
+| Imperative fallback only, no subject preservation | "Its controller gains life equal to its power" loses context | Preserve the subject before fallback subject stripping |
 | Using `parse_target` for possessive forms ("your hand") | Silently produces no target or `Unimplemented` | Use `contains_possessive` → `target: Controller` instead |
 | Using `contains_possessive` for targeting forms ("target opponent's hand") | Skips targeting phase, effect fires with no target | Use `parse_target` → `TargetFilter::Typed { controller: Opponent }` |
 | Hardcoding `amount: 1` as fallback | Silently wrong behavior, not visible in coverage | Return `Unimplemented` so the gap shows up |

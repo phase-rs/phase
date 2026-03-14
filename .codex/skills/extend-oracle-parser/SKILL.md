@@ -93,28 +93,65 @@ ChangeZone { ..., sub_ability: Some(GainLife { ... }) }
 - **SearchLibrary**: Injects `ChangeZone` sub_ability for the destination ("put it into your hand")
 - **RevealHand**: Extracts card filter from follow-up sentence ("you may choose a nonland card")
 - **Mana restrictions**: Absorbs "Spend this mana only to cast..." sentences as `ManaSpendRestriction` on the preceding `Effect::Mana` (e.g., Cavern of Souls, Unclaimed Territory). Uses `parse_mana_spend_restriction()` helper.
-- **Shuffle**: Detected from ", then shuffle" suffix and appended to chain
+- **Counter side-static**: Absorbs follow-up text that augments `Effect::Counter { source_static }`
+- **Shuffle**: Parsed as its own imperative family and chained only when it is a real subsequent action
+
+### Clause AST + lowering
+
+Single clauses now go through an explicit parse/lower split:
+
+```rust
+parse_effect_clause()
+  -> parse_clause_ast()
+  -> lower_clause_ast()
+  -> lower_imperative_clause()
+  -> parse_imperative_effect()
+  -> parse_imperative_family_ast()
+  -> lower_imperative_family_ast()
+```
+
+`parse_imperative_family_ast()` groups related patterns before lowering:
+
+- `CostResource`
+- `ZoneCounter`
+- `Numeric`
+- `Targeted`
+- `SearchCreation`
+- `HandReveal`
+- `Choose`
+- `Utility`
+- `Shuffle`
+- `Put`
+- `YouMay`
+
+When adding a pattern, first decide whether it belongs in an existing family. Only add a new family when the sentence shape is genuinely different.
 
 ### `parse_effect_clause()` — same file
 
-The decision tree for a single clause. Processing order:
+Current processing order:
 
-1. Strip leading duration: `"until end of turn, X"` → parse duration + recurse on X
-2. Strip leading conditional: `"if X, Y"` → parse condition + recurse on Y
-3. **Try subject-specific patterns** (BEFORE stripping):
-   - `try_parse_subject_continuous_clause()` — "Target creature gets +1/+1"
-   - `try_parse_subject_become_clause()` — "~ becomes a 3/3 creature"
-   - `try_parse_subject_restriction_clause()` — "That creature can't block"
-   - `try_parse_targeted_controller_gain_life()` — "Its controller gains life..."
-4. Strip subject clause → recurse on predicate
-5. Strip trailing duration: `"... this turn"` → attach duration
-6. `parse_imperative_effect()` — bare verb matching
+1. Strip leading sequence connectors / trailing period
+2. Strip leading duration: `"until end of turn, X"` → recurse on `X`
+3. Build `ClauseAst`
+4. Lower the AST
+5. For imperative clauses, strip trailing duration and lower through imperative-family parsing
 
 ### `parse_imperative_effect()` — same file
 
-Matches bare verb forms in priority order. Add new patterns here. Current verbs (in order):
+`parse_imperative_effect()` still owns the imperative fallback, but most work now belongs in the typed `parse_*_ast()` helpers under `parse_imperative_family_ast()`.
 
-`activate only` → `add {mana}` → `deals damage` → `destroy all/each` → `destroy target` → `exile` → `draw` → `counter` → `gain/lose life` → `gets +N/+M` → `scry/surveil/mill` → `tap/untap` → `sacrifice` → `discard` → `put counter` → `return/bounce` → `search` → `dig/look at top` → `fight` → `gain control` → `create token` → `explore/proliferate` → `shuffle` → `look at hand` → `reveal` → `copy` → `attach` → `"you may" prefix` → **fallback: Unimplemented**
+Use these registration points:
+
+- `parse_numeric_imperative_ast()` — draw/gain-life/lose-life/pump/scry/surveil/mill
+- `parse_zone_counter_ast()` — destroy/exile/counter/put-counter
+- `parse_cost_resource_ast()` — mana, damage, "activate only" restrictions
+- `parse_targeted_action_ast()` — tap/untap/sacrifice/discard/return/fight/gain control
+- `parse_search_and_creation_ast()` — search/dig/token creation/copy-token-of
+- `parse_hand_reveal_ast()` — look/reveal-hand / reveal-top
+- `parse_choose_ast()` — named choice / choose-as-targeting / reveal-hand follow-up filters
+- `parse_put_ast()` — "put ... into/on top of ..."
+- `parse_shuffle_ast()` — shuffle / move back to library
+- `parse_utility_imperative_ast()` — attach/copy/transform-like fallbacks
 
 ---
 
@@ -124,7 +161,7 @@ Matches bare verb forms in priority order. Add new patterns here. Current verbs 
 
 ### What it does
 
-`strip_subject_clause()` removes the grammatical subject ("target creature", "you", "that player") from a sentence, leaving just the predicate verb phrase.
+`strip_subject_clause()` is now a fallback helper, not the primary sentence model. The parser first tries to build a `SubjectPredicate` AST; only the fallback path strips the grammatical subject and lowers the remainder as an imperative.
 
 ```
 "Target creature gets +2/+2"  →  "gets +2/+2"
@@ -138,16 +175,15 @@ Subject stripping **discards semantic information**. In the third example, we lo
 
 ### The `try_parse_*` intercept pattern
 
-**If the subject carries game-relevant information, intercept BEFORE `strip_subject_clause()`.**
+**If the subject carries game-relevant information, preserve it before falling back to `strip_subject_clause()`.**
 
-The intercept functions run at step 3 of `parse_effect_clause()`, before subject stripping:
+Today the main preserved case is still `try_parse_targeted_controller_gain_life()`, which runs in `lower_imperative_clause()` before fallback subject stripping:
 
 ```rust
-// Step 3: Try subject-specific patterns FIRST
 if let Some(effect) = try_parse_targeted_controller_gain_life(text) {
     return Some(effect);  // Preserved: who gains life + amount source
 }
-// Step 4: THEN strip subject (information already lost at this point)
+// THEN fall back to stripping subject if needed
 if let Some(predicate) = strip_subject_clause(text) {
     return parse_effect_clause(predicate, card_types);
 }
@@ -233,7 +269,7 @@ Getting this wrong produces **silent** failures:
 
 Determine which parser module handles your text:
 
-- **Imperative verb** ("exile", "draw", "create") → `parse_imperative_effect()` in `oracle_effect.rs`
+- **Imperative verb/family** ("exile", "draw", "create", "choose", "put", "shuffle") → the relevant `parse_*_ast()` helper in `oracle_effect.rs`
 - **Subject + predicate** ("Target creature gets...") → `try_parse_*` or subject stripping in `oracle_effect.rs`
 - **Trigger** ("When/Whenever/At") → `parse_trigger_line()` in `oracle_trigger.rs`
 - **Static** ("has/gets/can't") → `parse_static_line()` in `oracle_static.rs`
@@ -246,7 +282,7 @@ Determine which parser module handles your text:
   ```rust
   #[test]
   fn effect_your_new_pattern() {
-      let e = parse_imperative_effect("your oracle text here");
+      let e = parse_effect("your oracle text here");
       assert!(matches!(e, Effect::YourEffect { field: expected, .. }));
   }
   ```
@@ -265,7 +301,7 @@ Determine which parser module handles your text:
 ### Phase 3 — Handle the Subject (if predicate pattern)
 
 - [ ] **Decide: intercept or strip?**
-  - Does the subject carry game-relevant info? → Write a `try_parse_*` function before `strip_subject_clause()`
+  - Does the subject carry game-relevant info? → Preserve it before fallback subject stripping
   - Is the subject just "you" or boilerplate? → Let subject stripping handle it
 
 ### Phase 4 — Chain Composition (if multi-sentence)
@@ -322,7 +358,8 @@ All parsers receive `~`-normalized text. `parse_target()` maps `~` → `TargetFi
 | Using `contains_possessive` for targeting forms | Targeting phase skipped, wrong player affected | Use `parse_target()` → full targeting |
 | Not stripping reminder text | Parenthesized text breaks pattern matching | `strip_reminder_text()` is called by the entry point — verify your caller does it |
 | Hardcoding amount as 1 instead of `parse_number()` | "Draw three cards" parses as draw 1 | Always use `parse_number()` for count extraction |
-| Subject carries info but gets stripped | "Its controller gains life" → caster gains life | Add `try_parse_*` interceptor before `strip_subject_clause()` |
+| Subject carries info but gets stripped | "Its controller gains life" → caster gains life | Preserve the subject before fallback subject stripping |
+| Added pattern to wrong AST family | Text lowers to the wrong `Effect` or misses continuation absorption | Register it in the smallest matching `parse_*_ast()` helper |
 | Not checking `parse_effect_chain()` composition | "Search... put into hand... shuffle" parses as 3 separate abilities instead of chained | Add composition logic in `parse_effect_chain()` |
 | Returning `Unimplemented` with misleading `name` | Coverage report miscategorizes the gap | Use the actual verb as `name`, full text as `description` |
 
@@ -334,7 +371,7 @@ After completing work using this skill:
 
 1. **Verify references** with the check below
 2. **Update the priority table** if parsing order changed
-3. **Update the imperative verb order** if new verbs were added
+3. **Update the AST family guidance** if new imperative families or continuation absorptions were added
 4. **Add new phrase helpers** to the helper module table
 
 ### Verification

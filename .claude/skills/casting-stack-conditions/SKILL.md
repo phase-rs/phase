@@ -273,31 +273,37 @@ pub struct ModalChoice {
 
 **Frontend** (`ModeChoiceModal.tsx`): Renders `mode_descriptions` as clickable buttons, tracks selected indices, enforces min/max constraints. Single-choice modals auto-submit on click.
 
-### Resolution-time modals (NOT YET SUPPORTED)
+### Resolution-time modals (now supported via `AbilityModeChoice`)
 
-~37 permanent-based cards have "Choose one —" on activated/triggered abilities (Bow of Nylea, Cankerbloom, Breya, Disciple of the Ring, etc.) plus ~48 spell modals with complex patterns the parser doesn't yet handle. These all fall to `Unimplemented("choose")`.
+Activated and triggered modal abilities are no longer forced through `PendingCast`. The current path is:
 
-**Why they don't work today:**
-- Activated/triggered abilities have no `modal` field — only `CardFace`/`GameObject` do
-- `WaitingFor::ModeChoice` requires `PendingCast` — inapplicable to resolution-time
-- No mechanism to associate mode definitions with a specific ability on a permanent
-- Parser doesn't extract modal metadata from activated/triggered ability lines
+```rust
+AbilityDefinition.modal
+  -> WaitingFor::AbilityModeChoice {
+       player,
+       modal,
+       source_id,
+       mode_abilities,
+       is_activated,
+       ability_index,
+       ability_cost,
+     }
+  -> GameAction::SelectModes { indices }
+  -> engine.rs validates indices + target constraints
+  -> build_chained_resolved(mode_abilities, indices)
+  -> push to stack (activated) or replace pending trigger ability (triggered)
+```
 
-**To support resolution-time modals, needed changes:**
-1. **Store modal metadata on ability definitions** — `AbilityDefinition` needs an optional `ModalChoice`
-2. **New WaitingFor variant** — decouple from `PendingCast`:
-   ```rust
-   // Possible design:
-   WaitingFor::AbilityModeChoice {
-       player: PlayerId,
-       modal: ModalChoice,
-       source_id: ObjectId,
-       mode_abilities: Vec<AbilityDefinition>,  // the mode options
-   }
-   ```
-3. **Reuse `build_chained_resolved()`** — it already accepts `&[AbilityDefinition]` + `&[usize]`; just need to supply mode abilities from the ability definition instead of `card.abilities`
-4. **Route resolution differently** — instead of returning to casting pipeline, push directly to stack or resolve inline depending on context (activated ability vs trigger)
-5. **Parser changes** — detect modal patterns in activated/triggered ability text, store as ability-level modal metadata
+This is the correct extension point for permanent-based "Choose one/Choose one or more" abilities. Do not try to squeeze them through `WaitingFor::ModeChoice`.
+
+### Target constraints on modal choices
+
+Modal abilities can now carry cross-target rules such as `DifferentTargetPlayers`.
+
+- `game/ability_utils.rs::target_constraints_from_modal()` derives them from `ModalChoice`
+- `generate_modal_index_sequences()` is used to enumerate valid mode combinations
+- `validate_selected_targets()` / `choose_target()` enforce them during selection
+- Triggered modal abilities carry the same constraints through `TriggerTargetSelection`
 
 ---
 
@@ -311,7 +317,7 @@ if lower.starts_with("you may ") {
 }
 ```
 
-**The optionality is lost** — effects become mandatory. No `optional` flag exists on `AbilityDefinition` or `ResolvedAbility`.
+`ImperativeFamilyAst::YouMay` still reparses the inner text directly. Optionality is therefore still lost for generic "you may ..." imperative clauses unless another system models it explicitly (for example, replacement `Optional` mode or trigger `optional` handling). Do not assume bare `"you may"` effect text is semantically optional end-to-end.
 
 ---
 
@@ -326,7 +332,7 @@ if lower.starts_with("you may ") {
 | Condition check only at resolution, not at trigger time | Violates MTG intervening-if rules (triggers only) |
 | New interactive state without `pending_continuation` support | Sub_ability chain breaks when player choice interrupts resolution |
 | Modifying `abilities[0]` selection in casting.rs | Changes which ability goes on stack for ALL spells |
-| Modal spell targeting only checks first mode | Modes after the first with targets will skip targeting — use `find_first_target_filter_in_chain()` |
+| Modal spell/ability targeting ignores modal target constraints | Illegal same-player or same-object selections slip through | Derive constraints with `target_constraints_from_modal()` and validate them during selection |
 
 ---
 

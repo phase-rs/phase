@@ -14,7 +14,7 @@ The core mechanism is the **continuation pattern**: `resolve_ability_chain()` de
 - Engine handler: `engine.rs` — `(WaitingFor::ScryChoice, GameAction::SelectCards)` arm
 - Continuation: `pending_continuation` resumed after player selects
 - AI: `legal_actions.rs` — generates legal card selections
-- Frontend: `ScryOverlay` component
+- Frontend: `CardChoiceModal` → `ScryModal`
 
 ---
 
@@ -57,6 +57,7 @@ if matches!(state.waiting_for,
     | WaitingFor::SurveilChoice { .. }
     | WaitingFor::RevealChoice { .. }
     | WaitingFor::SearchChoice { .. }
+    | WaitingFor::TriggerTargetSelection { .. }
     | WaitingFor::NamedChoice { .. }
     // ← ADD YOUR NEW VARIANT HERE
 ) {
@@ -198,11 +199,12 @@ When the continuation is created, parent targets propagate down if the sub-abili
 
 - [ ] **`client/src/pages/GamePage.tsx` or `client/src/components/` — UI component**
   Render the choice when `waitingFor.type === "YourChoice"`. Follow existing patterns:
-  - `ScryOverlay` — card reordering (top/bottom)
-  - `DigOverlay` — card selection (keep N)
-  - `SurveilOverlay` — binary per-card choice (library/graveyard)
+  - `CardChoiceModal` → `ScryModal` — card reordering (top/bottom)
+  - `CardChoiceModal` → `DigModal` — card selection (keep N)
+  - `CardChoiceModal` → `SurveilModal` — binary per-card choice (library/graveyard)
   - `ChoiceModal` — simple option selection (buttons)
-  - `SearchOverlay` — filtered card selection from list
+  - `CardChoiceModal` → `SearchModal` — filtered card selection from list
+  - `NamedChoiceModal` — named choices including `CardName`, `NumberRange`, `Labeled`, and `LandType`
 
 ### Phase 7 — Multiplayer State Filtering (if hidden info)
 
@@ -236,7 +238,7 @@ The `NamedChoice` system is a well-contained interactive pattern with low blast 
 | 2 | `crates/engine/src/game/effects/choose.rs` — `compute_options()` | Add match arm to generate options for the new variant |
 | 3 | `crates/engine/src/game/engine.rs` — `ChooseOption` handler | May need custom validation (e.g., NumberRange validates parsed u8 in range) |
 | 4 | `client/src/adapter/types.ts` | Already generic (`choice_type: string`, `options: string[]`) — **no change needed** |
-| 5 | `client/src/components/modal/NamedChoiceModal.tsx` | Add rendering branch (e.g., NumberRange needs a number input, not buttons) |
+| 5 | `client/src/components/modal/NamedChoiceModal.tsx` | Add rendering branch only if the existing button grid / card-name search is insufficient |
 | 6 | `client/src/components/modal/NamedChoiceModal.tsx` — `CHOICE_TYPE_LABELS` | Add user-facing label for the new type |
 | 7 | `crates/phase-ai/src/legal_actions.rs` — `NamedChoice` arm | Already generates one action per option — works for any choice type with populated options |
 | 8 | `crates/engine/src/parser/oracle_effect.rs` | Add parser patterns (e.g., `"choose a number between"`, `"choose left or right"`) |
@@ -245,7 +247,7 @@ The `NamedChoice` system is a well-contained interactive pattern with low blast 
 ### Key design decisions
 
 - **`last_named_choice: Option<String>`** stores the result for continuations. For `NumberRange`, the stored string is the number as text (e.g., `"3"`). Continuations parse it as needed. This avoids changing the continuation protocol.
-- **Frontend `options: Vec<String>`** — for `NumberRange`, `compute_options()` generates `["0", "1", "2", ..., "7"]`. The ButtonGrid renderer already works. A dedicated number input is optional UX polish.
+- **Frontend `options: Vec<String>`** — for `NumberRange`, `compute_options()` generates `["0", "1", "2", ..., "7"]`. The current `ButtonGrid` renderer already works; a dedicated number input is optional UX polish, not required.
 - **`Labeled { options }` carries its options in the enum variant** — unlike `Color` or `CreatureType` where options are hardcoded in `compute_options()`, `Labeled` options come from the parser (card-specific text like "fame" / "fortune").
 - **Multiplayer filtering**: No changes needed — `NamedChoice` is public information, not filtered by `filter_state_for_player()`.
 - **`source_id` / `persist`**: Existing mechanism for storing choice on the source object via `ChosenAttribute`. New choice types may not need persistence — use `persist: false` unless the choice must be remembered across turns.

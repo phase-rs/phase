@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use engine::ai_support::legal_actions as engine_legal_actions;
 use engine::game::deck_loading::{load_deck_into_state, DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{apply, start_game};
 use engine::types::actions::GameAction;
@@ -9,7 +10,6 @@ use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::match_config::MatchConfig;
 use engine::types::player::PlayerId;
-use phase_ai::get_legal_actions;
 use rand::Rng;
 
 use crate::filter::filter_state_for_player;
@@ -267,7 +267,7 @@ impl SessionManager {
         }
 
         // Validate action is legal
-        let legal_actions = get_legal_actions(&session.state);
+        let legal_actions = engine_legal_actions(&session.state);
         if !legal_actions.contains(&action) {
             return Err(format!("Illegal action: {:?}", action));
         }
@@ -283,7 +283,7 @@ impl SessionManager {
                 (pid, filter_state_for_player(&session.state, pid))
             })
             .collect();
-        let new_legal_actions = get_legal_actions(&session.state);
+        let new_legal_actions = engine_legal_actions(&session.state);
 
         Ok((filtered_states, result.events, new_legal_actions))
     }
@@ -400,6 +400,8 @@ mod tests {
                     scryfall_oracle_id: None,
                     modal: None,
                     additional_cost: None,
+                    casting_restrictions: vec![],
+                    casting_options: vec![],
                 },
                 count: 10,
             }],

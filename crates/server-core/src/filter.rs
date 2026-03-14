@@ -227,6 +227,8 @@ mod tests {
                 scryfall_oracle_id: None,
                 modal: None,
                 additional_cost: None,
+                casting_restrictions: vec![],
+                casting_options: vec![],
             },
             count: 4,
         };

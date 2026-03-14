@@ -25,9 +25,10 @@ HashMap<String, Vec<AtomicCard>>
     │   ├─ parse_oracle_text() → ParsedAbilities { abilities, triggers, statics, replacements }
     │   ├─ synthesize_basic_land_mana()
     │   ├─ synthesize_equip()
-    │   └─ synthesize_changeling_cda()
+    │   ├─ synthesize_changeling_cda()
+    │   └─ synthesize_kicker()
     ↓ export: crates/engine/src/bin/oracle_gen.rs
-client/public/card-data.json (symlinked from data/card-data.json, ~47 MB)
+client/public/card-data.json (~49 MB in the current export)
     ↓ consume (three loading paths):
     ├─ WASM: CardDatabase::from_json_str()  [browser, via engine-wasm]
     ├─ Server: CardDatabase::from_export()   [phase-server, multiplayer]
@@ -98,6 +99,7 @@ pub struct AtomicCard {
 3. `synthesize_basic_land_mana()` — injects tap-for-mana for Plains/Island/Swamp/Mountain/Forest
 4. `synthesize_equip()` — converts `Keyword::Equip(cost)` → activated `Effect::Attach`
 5. `synthesize_changeling_cda()` — converts `Keyword::Changeling` → CDA static ability
+6. `synthesize_kicker()` — converts `Keyword::Kicker(cost)` into `additional_cost`
 
 ### Export Binary — `crates/engine/src/bin/oracle_gen.rs`
 
@@ -106,7 +108,7 @@ Orchestrates the full export:
 2. For each card: `build_oracle_face()` per face
 3. Map layout to `CardLayout` enum (Single, Split, Transform, etc.)
 4. Normalize legalities
-5. Flatten to `HashMap<String, CardExportEntry>` (key = lowercase face name)
+5. Flatten to `HashMap<String, CardExportEntry>` (key = lowercase face name, value = flattened `CardFace` + `legalities`)
 6. Serialize to JSON → stdout
 
 ### Card Database — `crates/engine/src/database/card_db.rs`
@@ -115,16 +117,17 @@ Three loading methods:
 
 | Method | Used By | What It Loads |
 |--------|---------|--------------|
-| `from_mtgjson(path)` | `oracle_gen`, tests | Full parse — runs Oracle parser on all cards |
-| `from_export(path)` | `phase-server`, `coverage-report` | Pre-processed `card-data.json` — fast, read-only |
-| `from_json_str(json)` | `engine-wasm` (browser) | Same as `from_export` but takes string (from JS fetch) |
+| `from_mtgjson(path)` | `oracle_gen`, tests | Full parse — runs Oracle parser on raw MTGJSON |
+| `from_export(path)` | `phase-server`, `coverage-report` | Pre-processed `card-data.json` with flattened face entries + legalities |
+| `from_json_str(json)` | `engine-wasm` (browser), deck validation tests | Same as `from_export` but takes string input |
 
 **Internal structure:**
 ```rust
 pub struct CardDatabase {
-    pub cards: HashMap<String, CardRules>,     // Full card (layout + faces) — only from_mtgjson
-    pub face_index: HashMap<String, CardFace>, // Individual face lookup — all paths
+    pub cards: HashMap<String, CardRules>,     // Populated by from_mtgjson
+    pub face_index: HashMap<String, CardFace>, // Populated by all loading paths
     pub legalities: HashMap<String, CardLegalities>,
+    pub errors: Vec<(PathBuf, String)>,
 }
 ```
 
@@ -142,13 +145,19 @@ pub struct CardFace {
     pub loyalty: Option<String>,
     pub defense: Option<String>,
     pub oracle_text: Option<String>,
+    pub non_ability_text: Option<String>,
+    pub flavor_name: Option<String>,
     pub keywords: Vec<Keyword>,
     pub abilities: Vec<AbilityDefinition>,
     pub triggers: Vec<TriggerDefinition>,
     pub static_abilities: Vec<StaticDefinition>,
     pub replacements: Vec<ReplacementDefinition>,
-    pub color_override: Option<Vec<Color>>,
+    pub color_override: Option<Vec<ManaColor>>,
     pub scryfall_oracle_id: Option<String>,
+    pub modal: Option<ModalChoice>,
+    pub additional_cost: Option<AdditionalCost>,
+    pub casting_restrictions: Vec<CastingRestriction>,
+    pub casting_options: Vec<SpellCastingOption>,
 }
 ```
 
@@ -161,6 +170,11 @@ Checks each card face for:
 - Unrecognized `StaticMode` → unsupported static
 
 Outputs JSON summary: `{ total_cards, supported_cards, coverage_pct, cards: [...], missing_handler_frequency: [...] }`
+
+Important current behavior:
+- `coverage-report` loads `card-data.json` via `CardDatabase::from_export()`, not raw MTGJSON
+- Without `--all`, it filters to `standard-cards.txt`
+- It strips known-benign MTGJSON keyword mismatches (bare parameterized keywords like `Keyword:Ward` and action-keyword noise like `Keyword:Scry`) before computing final manifest coverage
 
 CI mode (`--ci`): exits 1 if any Standard-legal cards have gaps.
 
@@ -209,11 +223,11 @@ When a keyword or ability implies game mechanics that Oracle text doesn't make e
 
 When a parser change affects the structure of `ParsedAbilities`:
 
-- [ ] **Update all three loading paths** — `from_mtgjson`, `from_export`, and `from_json_str` all deserialize the same `CardFace`. If you add/rename fields, all paths must handle the change.
+- [ ] **Update all three loading paths** — `from_mtgjson`, `from_export`, and `from_json_str` all need to understand the serialized `CardFace` shape. If you add/rename fields, verify both raw-MTGJSON loading and flattened export loading.
 
 - [ ] **Regenerate card-data.json** — Always regenerate after parser changes.
 
-- [ ] **Update coverage report** — If the parser now recognizes previously-unimplemented patterns, coverage numbers will change. Run the report to verify improvements.
+- [ ] **Update coverage report** — If the parser now recognizes previously-unimplemented patterns, coverage numbers will change. Run the report to verify improvements, and update any benign-keyword filtering in `coverage_report.rs` if the mismatch profile changed.
 
 - [ ] **Update snapshot tests** — `crates/engine/tests/oracle_parser.rs` has `insta` snapshots that must be updated: `cargo insta review`.
 
@@ -232,7 +246,7 @@ Understanding how card data reaches the browser:
 1. **Build time**: `oracle-gen` produces `client/public/card-data.json`
 2. **Runtime**: Frontend fetches `/card-data.json` via HTTP
 3. **WASM init**: `load_card_database(json_str)` in `crates/engine-wasm/src/lib.rs`
-4. **Parse**: `CardDatabase::from_json_str()` → populates `face_index` HashMap
+4. **Parse**: `CardDatabase::from_json_str()` → deserializes flattened export entries into `face_index` + normalized `legalities`
 5. **Storage**: Thread-local `CARD_DB: RefCell<Option<CardDatabase>>`
 6. **Usage**: `initialize_game()` resolves deck card names via `face_index` lookup
 
@@ -251,7 +265,7 @@ Understanding how card data reaches the browser:
 | Modifying `CardFace` but only testing `from_mtgjson` path | `from_export` and `from_json_str` may fail differently | Test all three paths |
 | Adding a card to `standard-cards.txt` before it's fully supported | CI breaks | Only add fully-supported cards |
 | Forgetting to regenerate after parser changes | Card-data.json contains stale parsed data | Run `oracle-gen` after any parser modification |
-| Parser produces new `Effect` variant but coverage report doesn't recognize it | Coverage appears worse than it is | Ensure new variants aren't matched as `Unimplemented` |
+| Parser produces new support but coverage still looks wrong | Manifest filtering or benign MTGJSON keyword mismatches hide the real result | Check `coverage_report.rs` filtering before assuming the parser regressed |
 
 ---
 

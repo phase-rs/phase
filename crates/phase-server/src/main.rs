@@ -8,9 +8,9 @@ use axum::extract::{State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
+use engine::ai_support::legal_actions as engine_legal_actions;
 use engine::database::CardDatabase;
 use engine::types::player::PlayerId;
-use phase_ai::get_legal_actions;
 use server_core::lobby::LobbyManager;
 use server_core::protocol::{ClientMessage, ServerMessage};
 use server_core::resolve_deck;
@@ -379,7 +379,7 @@ async fn handle_client_message(
 
                     // Only send GameStarted when the game is full (all seats claimed)
                     if session.is_full() {
-                        let legal_actions = get_legal_actions(&session.state);
+                        let legal_actions = engine_legal_actions(&session.state);
                         let actor = server_core::acting_player(&session.state.waiting_for);
                         let player_names = session.display_names.clone();
 
@@ -520,7 +520,7 @@ async fn handle_client_message(
                             }
                         });
 
-                    let legal_actions_all = get_legal_actions(&session.state);
+                    let legal_actions_all = engine_legal_actions(&session.state);
                     let actor = server_core::acting_player(&session.state.waiting_for);
                     let player_legals = if actor == Some(player) {
                         legal_actions_all
@@ -738,7 +738,7 @@ async fn handle_client_message(
 
                     // Only send GameStarted when the game is full
                     if session.is_full() {
-                        let legal_actions = get_legal_actions(&session.state);
+                        let legal_actions = engine_legal_actions(&session.state);
                         let actor = server_core::acting_player(&session.state.waiting_for);
 
                         // Find first opponent name for backward compat
