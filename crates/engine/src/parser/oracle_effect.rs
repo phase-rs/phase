@@ -95,6 +95,14 @@ enum PredicateAst {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum ContinuationAst {
+    SearchDestination { text: String },
+    RevealHandFilter { text: String },
+    ManaRestriction { text: String },
+    CounterSourceStatic { text: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ClauseContinuation {
     SearchDestination { destination: Zone },
     RevealHandFilter { card_filter: TargetFilter },
@@ -1198,7 +1206,8 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
 
         let followup_continuation = defs
             .last()
-            .and_then(|previous| parse_followup_continuation(&chunk.text, &previous.effect));
+            .and_then(|previous| parse_followup_continuation_ast(&chunk.text, &previous.effect))
+            .and_then(lower_continuation_ast);
         let absorb_followup = followup_continuation.as_ref().is_some_and(|continuation| {
             current_defs
                 .first()
@@ -1212,7 +1221,8 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
         }
 
         let intrinsic_continuation =
-            parse_intrinsic_continuation(&chunk.text, &current_defs[0].effect);
+            parse_intrinsic_continuation_ast(&chunk.text, &current_defs[0].effect)
+                .and_then(lower_continuation_ast);
         defs.extend(current_defs);
 
         if let Some(continuation) = intrinsic_continuation {
@@ -1242,22 +1252,54 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     }
 }
 
-fn parse_intrinsic_continuation(text: &str, effect: &Effect) -> Option<ClauseContinuation> {
+fn parse_intrinsic_continuation_ast(text: &str, effect: &Effect) -> Option<ContinuationAst> {
     match effect {
-        Effect::SearchLibrary { .. } => Some(ClauseContinuation::SearchDestination {
-            destination: parse_search_destination(&text.to_lowercase()),
+        Effect::SearchLibrary { .. } => Some(ContinuationAst::SearchDestination {
+            text: text.to_string(),
         }),
         _ => None,
     }
 }
 
-fn parse_followup_continuation(text: &str, previous_effect: &Effect) -> Option<ClauseContinuation> {
+fn parse_followup_continuation_ast(
+    text: &str,
+    previous_effect: &Effect,
+) -> Option<ContinuationAst> {
     let lower = text.to_lowercase();
 
     match previous_effect {
         Effect::RevealHand { .. }
             if lower.contains("card from it") || lower.contains("card from among") =>
         {
+            Some(ContinuationAst::RevealHandFilter {
+                text: text.to_string(),
+            })
+        }
+        Effect::Mana { .. } if parse_mana_spend_restriction(&lower).is_some() => {
+            Some(ContinuationAst::ManaRestriction {
+                text: text.to_string(),
+            })
+        }
+        Effect::Counter { .. }
+            if lower.contains("countered this way") && lower.contains("loses all abilities") =>
+        {
+            Some(ContinuationAst::CounterSourceStatic {
+                text: text.to_string(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn lower_continuation_ast(ast: ContinuationAst) -> Option<ClauseContinuation> {
+    match ast {
+        ContinuationAst::SearchDestination { text } => {
+            Some(ClauseContinuation::SearchDestination {
+                destination: parse_search_destination(&text.to_lowercase()),
+            })
+        }
+        ContinuationAst::RevealHandFilter { text } => {
+            let lower = text.to_lowercase();
             let card_filter = if lower.starts_with("you choose ") || lower.starts_with("choose ") {
                 parse_choose_filter(&lower)
             } else {
@@ -1265,18 +1307,17 @@ fn parse_followup_continuation(text: &str, previous_effect: &Effect) -> Option<C
             };
             Some(ClauseContinuation::RevealHandFilter { card_filter })
         }
-        Effect::Mana { .. } => parse_mana_spend_restriction(&lower)
-            .map(|restriction| ClauseContinuation::ManaRestriction { restriction }),
-        Effect::Counter { .. }
-            if lower.contains("countered this way") && lower.contains("loses all abilities") =>
-        {
+        ContinuationAst::ManaRestriction { text } => {
+            parse_mana_spend_restriction(&text.to_lowercase())
+                .map(|restriction| ClauseContinuation::ManaRestriction { restriction })
+        }
+        ContinuationAst::CounterSourceStatic { text: _text } => {
             Some(ClauseContinuation::CounterSourceStatic {
                 source_static: StaticDefinition::continuous().modifications(vec![
                     crate::types::ability::ContinuousModification::RemoveAllAbilities,
                 ]),
             })
         }
-        _ => None,
     }
 }
 
