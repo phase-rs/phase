@@ -121,6 +121,17 @@ enum ImperativeAst {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum ImperativeFamilyAst {
+    Structured(ImperativeAst),
+    RawEffect { effect: Effect },
+    Explore,
+    Proliferate,
+    Shuffle { effect: Effect },
+    Put { effect: Effect },
+    YouMay { text: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum NumericImperativeAst {
     Draw { count: u32 },
     GainLife { amount: i32 },
@@ -279,63 +290,8 @@ fn lower_subject_predicate_ast(
 
 fn parse_imperative_effect(text: &str) -> Effect {
     let lower = text.to_lowercase();
-
-    if let Some(effect) = parse_cost_and_resource_effect(text, &lower) {
-        return effect;
-    }
-
-    if let Some(effect) = parse_zone_and_counter_effect(text, &lower) {
-        return effect;
-    }
-
-    if let Some(effect) = parse_numeric_imperative_effect(text, &lower) {
-        return effect;
-    }
-
-    if let Some(effect) = parse_targeted_action_effect(text, &lower) {
-        return effect;
-    }
-
-    if let Some(effect) = parse_search_and_creation_effect(text, &lower) {
-        return effect;
-    }
-
-    // --- Single-word effects ---
-    if lower == "explore" || lower.starts_with("explore.") {
-        return Effect::Explore;
-    }
-    if lower == "proliferate" || lower.starts_with("proliferate.") {
-        return Effect::Proliferate;
-    }
-
-    // --- Shuffle family ---
-    if let Some(effect) = parse_shuffle_effect(text, &lower) {
-        return effect;
-    }
-
-    // --- Hand / reveal family ---
-    if let Some(effect) = parse_hand_reveal_effect(text, &lower) {
-        return effect;
-    }
-
-    // --- Utility verb family ---
-    if let Some(effect) = parse_utility_imperative_effect(text, &lower) {
-        return effect;
-    }
-
-    // --- Put family ---
-    if let Some(effect) = parse_put_effect(text, &lower) {
-        return effect;
-    }
-
-    // --- "you may " prefix stripping ---
-    if lower.starts_with("you may ") {
-        return parse_effect(&text[8..]);
-    }
-
-    // --- Choose family ---
-    if let Some(effect) = parse_choose_effect(text, &lower) {
-        return effect;
+    if let Some(ast) = parse_imperative_family_ast(text, &lower) {
+        return lower_imperative_family_ast(ast);
     }
 
     // --- Fallback ---
@@ -1077,6 +1033,68 @@ fn parse_cost_and_resource_effect(text: &str, lower: &str) -> Option<Effect> {
     None
 }
 
+fn parse_imperative_family_ast(text: &str, lower: &str) -> Option<ImperativeFamilyAst> {
+    if let Some(effect) = parse_cost_and_resource_effect(text, lower) {
+        return Some(ImperativeFamilyAst::RawEffect { effect });
+    }
+    if let Some(effect) = parse_zone_and_counter_effect(text, lower) {
+        return Some(ImperativeFamilyAst::RawEffect { effect });
+    }
+    if let Some(ast) = parse_numeric_imperative_ast(text, lower) {
+        return Some(ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)));
+    }
+    if let Some(ast) = parse_targeted_action_ast(text, lower) {
+        return Some(ImperativeFamilyAst::Structured(ImperativeAst::Targeted(
+            ast,
+        )));
+    }
+    if let Some(ast) = parse_search_and_creation_ast(text, lower) {
+        return Some(ImperativeFamilyAst::Structured(
+            ImperativeAst::SearchCreation(ast),
+        ));
+    }
+    if lower == "explore" || lower.starts_with("explore.") {
+        return Some(ImperativeFamilyAst::Explore);
+    }
+    if lower == "proliferate" || lower.starts_with("proliferate.") {
+        return Some(ImperativeFamilyAst::Proliferate);
+    }
+    if let Some(effect) = parse_shuffle_effect(text, lower) {
+        return Some(ImperativeFamilyAst::Shuffle { effect });
+    }
+    if let Some(ast) = parse_hand_reveal_ast(text, lower) {
+        return Some(ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(
+            ast,
+        )));
+    }
+    if let Some(ast) = parse_utility_imperative_ast(text, lower) {
+        return Some(ImperativeFamilyAst::Structured(ImperativeAst::Utility(ast)));
+    }
+    if let Some(effect) = parse_put_effect(text, lower) {
+        return Some(ImperativeFamilyAst::Put { effect });
+    }
+    if let Some(stripped) = text.strip_prefix("you may ") {
+        return Some(ImperativeFamilyAst::YouMay {
+            text: stripped.to_string(),
+        });
+    }
+    if let Some(ast) = parse_choose_ast(text, lower) {
+        return Some(ImperativeFamilyAst::Structured(ImperativeAst::Choose(ast)));
+    }
+    None
+}
+
+fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> Effect {
+    match ast {
+        ImperativeFamilyAst::Structured(ast) => lower_imperative_ast(ast),
+        ImperativeFamilyAst::RawEffect { effect } => effect,
+        ImperativeFamilyAst::Explore => Effect::Explore,
+        ImperativeFamilyAst::Proliferate => Effect::Proliferate,
+        ImperativeFamilyAst::Shuffle { effect } | ImperativeFamilyAst::Put { effect } => effect,
+        ImperativeFamilyAst::YouMay { text } => parse_effect(&text),
+    }
+}
+
 fn parse_zone_and_counter_effect(text: &str, lower: &str) -> Option<Effect> {
     if let Some(effect) = parse_destroy_effect(text, lower) {
         return Some(effect);
@@ -1091,11 +1109,6 @@ fn parse_zone_and_counter_effect(text: &str, lower: &str) -> Option<Effect> {
         return try_parse_put_counter(lower, text);
     }
     None
-}
-
-fn parse_numeric_imperative_effect(text: &str, lower: &str) -> Option<Effect> {
-    let ast = ImperativeAst::Numeric(parse_numeric_imperative_ast(text, lower)?);
-    Some(lower_imperative_ast(ast))
 }
 
 fn parse_numeric_imperative_ast(text: &str, lower: &str) -> Option<NumericImperativeAst> {
@@ -1147,11 +1160,6 @@ fn parse_numeric_imperative_ast(text: &str, lower: &str) -> Option<NumericImpera
     }
 
     None
-}
-
-fn parse_targeted_action_effect(text: &str, lower: &str) -> Option<Effect> {
-    let ast = ImperativeAst::Targeted(parse_targeted_action_ast(text, lower)?);
-    Some(lower_imperative_ast(ast))
 }
 
 fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<TargetedImperativeAst> {
@@ -1396,21 +1404,6 @@ fn lower_imperative_ast(ast: ImperativeAst) -> Effect {
     }
 }
 
-fn parse_search_and_creation_effect(text: &str, lower: &str) -> Option<Effect> {
-    let ast = ImperativeAst::SearchCreation(parse_search_and_creation_ast(text, lower)?);
-    Some(lower_imperative_ast(ast))
-}
-
-fn parse_hand_reveal_effect(text: &str, lower: &str) -> Option<Effect> {
-    let ast = ImperativeAst::HandReveal(parse_hand_reveal_ast(text, lower)?);
-    Some(lower_imperative_ast(ast))
-}
-
-fn parse_choose_effect(text: &str, lower: &str) -> Option<Effect> {
-    let ast = ImperativeAst::Choose(parse_choose_ast(text, lower)?);
-    Some(lower_imperative_ast(ast))
-}
-
 fn parse_put_effect(text: &str, lower: &str) -> Option<Effect> {
     if !lower.starts_with("put ") {
         return None;
@@ -1483,11 +1476,6 @@ fn parse_shuffle_effect(text: &str, lower: &str) -> Option<Effect> {
         name: "shuffle".to_string(),
         description: Some(text.to_string()),
     })
-}
-
-fn parse_utility_imperative_effect(text: &str, lower: &str) -> Option<Effect> {
-    let ast = ImperativeAst::Utility(parse_utility_imperative_ast(text, lower)?);
-    Some(lower_imperative_ast(ast))
 }
 
 fn lower_continuation_ast(ast: ContinuationAst) -> Option<ClauseContinuation> {
