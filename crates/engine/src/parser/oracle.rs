@@ -32,6 +32,26 @@ pub struct ParsedAbilities {
     pub additional_cost: Option<AdditionalCost>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OracleBlockAst {
+    Modal {
+        header: String,
+        modes: Vec<ModeAst>,
+    },
+    TriggeredModal {
+        trigger_line: String,
+        header: String,
+        modes: Vec<ModeAst>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModeAst {
+    raw: String,
+    label: Option<String>,
+    body: String,
+}
+
 /// Parse Oracle text into structured ability definitions.
 ///
 /// Splits on newlines, strips reminder text, then classifies each line
@@ -86,6 +106,12 @@ pub fn parse_oracle_text(
             continue;
         }
 
+        if let Some((block, next_i)) = parse_oracle_block(&lines, i) {
+            lower_oracle_block(block, card_name, &mut result);
+            i = next_i;
+            continue;
+        }
+
         let lower = line.to_lowercase();
 
         // Priority 2: "Enchant {filter}" — skip (handled externally)
@@ -102,40 +128,6 @@ pub fn parse_oracle_text(
                 continue;
             }
         }
-
-        // Priority 10: Modal "Choose one —" / "Choose two —" etc.
-        if lower.starts_with("choose ") && (lower.contains(" —") || lower.contains(" -")) {
-            let (min_choices, max_choices) = parse_modal_choose_count(&lower);
-            let mut bullets = Vec::new();
-            let mut j = i + 1;
-            while j < lines.len() {
-                let bullet = lines[j].trim();
-                if let Some(stripped) = bullet.strip_prefix('•') {
-                    bullets.push(stripped.trim().to_string());
-                    j += 1;
-                } else {
-                    break;
-                }
-            }
-            // Parse each bullet as a spell effect
-            for bullet in &bullets {
-                let def = parse_effect_chain(bullet, AbilityKind::Spell);
-                result.abilities.push(def);
-            }
-            if bullets.is_empty() {
-                result.abilities.push(make_unimplemented(&line));
-            } else {
-                result.modal = Some(ModalChoice {
-                    min_choices,
-                    max_choices: max_choices.min(bullets.len()),
-                    mode_count: bullets.len(),
-                    mode_descriptions: bullets.clone(),
-                });
-            }
-            i = j;
-            continue;
-        }
-
         // Priority 11: Planeswalker loyalty abilities: +N:, −N:, 0:, [+N]:, [−N]:, [0]:
         if let Some(ability) = try_parse_loyalty_line(&line) {
             result.abilities.push(ability);
@@ -151,46 +143,16 @@ pub fn parse_oracle_text(
             let effect_lower = effect_text.to_lowercase();
 
             // Modal activated ability: effect text starts with "Choose one —" etc.
-            if effect_lower.starts_with("choose ")
-                && (effect_lower.contains(" —") || effect_lower.contains(" -"))
-            {
-                let (min_choices, max_choices) = parse_modal_choose_count(&effect_lower);
-                let mut bullets = Vec::new();
-                let mut j = i + 1;
-                while j < lines.len() {
-                    let bullet = lines[j].trim();
-                    if let Some(stripped) = bullet.strip_prefix('•') {
-                        bullets.push(stripped.trim().to_string());
-                        j += 1;
-                    } else {
-                        break;
-                    }
-                }
+            if is_modal_header_text(&effect_lower) {
+                let modes = collect_mode_asts(&lines, i + 1);
+                let j = i + 1 + modes.len();
 
-                if bullets.is_empty() {
+                if modes.is_empty() {
                     let mut def = make_unimplemented(effect_text);
                     def.cost = Some(cost);
                     result.abilities.push(def);
                 } else {
-                    let mode_abilities: Vec<AbilityDefinition> = bullets
-                        .iter()
-                        .map(|b| parse_effect_chain(b, AbilityKind::Activated))
-                        .collect();
-                    let modal = ModalChoice {
-                        min_choices,
-                        max_choices: max_choices.min(bullets.len()),
-                        mode_count: bullets.len(),
-                        mode_descriptions: bullets,
-                    };
-                    // Primary effect is Unimplemented — actual effects live in mode_abilities
-                    let mut def = AbilityDefinition::new(
-                        AbilityKind::Activated,
-                        Effect::Unimplemented {
-                            name: "modal".to_string(),
-                            description: Some(effect_text.to_string()),
-                        },
-                    )
-                    .with_modal(modal, mode_abilities);
+                    let mut def = build_modal_ability(AbilityKind::Activated, effect_text, &modes);
                     def.cost = Some(cost);
                     result.abilities.push(def);
                 }
@@ -841,6 +803,168 @@ fn strip_ability_word(line: &str) -> Option<String> {
     None
 }
 
+fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(OracleBlockAst, usize)> {
+    let line = strip_reminder_text(lines.get(start)?.trim());
+    if line.is_empty() {
+        return None;
+    }
+
+    let candidate = strip_ability_word(&line).unwrap_or_else(|| line.clone());
+
+    let modes = collect_mode_asts(lines, start + 1);
+    if modes.is_empty() {
+        return None;
+    }
+
+    let lower = candidate.to_lowercase();
+    let next = start + 1 + modes.len();
+
+    if is_modal_header_text(&lower) {
+        return Some((
+            OracleBlockAst::Modal {
+                header: candidate,
+                modes,
+            },
+            next,
+        ));
+    }
+
+    if lower.starts_with("when ") || lower.starts_with("whenever ") || lower.starts_with("at ") {
+        if let Some((trigger_line, header)) = split_triggered_modal_header(&candidate) {
+            return Some((
+                OracleBlockAst::TriggeredModal {
+                    trigger_line,
+                    header,
+                    modes,
+                },
+                next,
+            ));
+        }
+    }
+
+    None
+}
+
+fn collect_mode_asts(lines: &[&str], start: usize) -> Vec<ModeAst> {
+    let mut modes = Vec::new();
+
+    for raw in lines.iter().skip(start) {
+        let line = strip_reminder_text(raw.trim());
+        let Some(stripped) = line.strip_prefix('•') else {
+            break;
+        };
+        modes.push(parse_mode_ast(stripped.trim()));
+    }
+
+    modes
+}
+
+fn parse_mode_ast(text: &str) -> ModeAst {
+    if let Some((label, body)) = split_mode_label(text) {
+        return ModeAst {
+            raw: text.to_string(),
+            label: Some(label),
+            body,
+        };
+    }
+
+    ModeAst {
+        raw: text.to_string(),
+        label: None,
+        body: text.to_string(),
+    }
+}
+
+fn split_mode_label(text: &str) -> Option<(String, String)> {
+    for sep in [" — ", " – ", " - "] {
+        if let Some(pos) = text.find(sep) {
+            let prefix = text[..pos].trim();
+            let rest = text[pos + sep.len()..].trim();
+            let word_count = prefix.split_whitespace().count();
+            if (1..=4).contains(&word_count)
+                && !prefix.contains('{')
+                && !prefix.contains(':')
+                && !rest.is_empty()
+            {
+                return Some((prefix.to_string(), rest.to_string()));
+            }
+        }
+    }
+
+    None
+}
+
+fn is_modal_header_text(lower: &str) -> bool {
+    let lower = lower.trim();
+    lower.starts_with("choose ") || (lower.starts_with("if ") && lower.contains("choose "))
+}
+
+fn split_triggered_modal_header(line: &str) -> Option<(String, String)> {
+    for (comma_pos, _) in line.match_indices(", ") {
+        let trigger_line = line[..comma_pos].trim();
+        let header = line[comma_pos + 2..].trim();
+        if is_modal_header_text(&header.to_lowercase()) {
+            return Some((trigger_line.to_string(), header.to_string()));
+        }
+    }
+
+    None
+}
+
+fn lower_oracle_block(block: OracleBlockAst, card_name: &str, result: &mut ParsedAbilities) {
+    match block {
+        OracleBlockAst::Modal { header, modes } => {
+            let modal = build_modal_choice(&header, &modes);
+            let mode_abilities = lower_mode_abilities(&modes, AbilityKind::Spell);
+            result.abilities.extend(mode_abilities);
+            result.modal = Some(modal);
+        }
+        OracleBlockAst::TriggeredModal {
+            trigger_line,
+            header,
+            modes,
+        } => {
+            let mut trigger = parse_trigger_line(&trigger_line, card_name);
+            trigger.execute = Some(Box::new(build_modal_ability(
+                AbilityKind::Spell,
+                &header,
+                &modes,
+            )));
+            result.triggers.push(trigger);
+        }
+    }
+}
+
+fn build_modal_ability(kind: AbilityKind, header: &str, modes: &[ModeAst]) -> AbilityDefinition {
+    AbilityDefinition::new(kind, modal_marker_effect(header))
+        .with_modal(build_modal_choice(header, modes), lower_mode_abilities(modes, kind))
+}
+
+fn modal_marker_effect(header: &str) -> Effect {
+    Effect::Unimplemented {
+        name: "modal".to_string(),
+        description: Some(header.to_string()),
+    }
+}
+
+fn build_modal_choice(header: &str, modes: &[ModeAst]) -> ModalChoice {
+    let lower = header.to_lowercase();
+    let (min_choices, max_choices) = parse_modal_choose_count(&lower);
+    ModalChoice {
+        min_choices,
+        max_choices: max_choices.min(modes.len()),
+        mode_count: modes.len(),
+        mode_descriptions: modes.iter().map(|mode| mode.raw.clone()).collect(),
+    }
+}
+
+fn lower_mode_abilities(modes: &[ModeAst], kind: AbilityKind) -> Vec<AbilityDefinition> {
+    modes
+        .iter()
+        .map(|mode| parse_effect_chain(&mode.body, kind))
+        .collect()
+}
+
 /// Check if an AbilityDefinition (or its sub_ability chain) contains Unimplemented effects.
 fn has_unimplemented(def: &AbilityDefinition) -> bool {
     if matches!(def.effect, Effect::Unimplemented { .. }) {
@@ -908,6 +1032,18 @@ fn is_effect_sentence_candidate(lower: &str) -> bool {
 /// - "choose one or more —" → (1, usize::MAX) (capped to mode_count at construction)
 /// - "choose any number of —" → (1, usize::MAX)
 fn parse_modal_choose_count(lower: &str) -> (usize, usize) {
+    if lower.contains("choose any number instead") {
+        return (1, usize::MAX);
+    }
+    if lower.contains("choose both instead") {
+        return (1, 2);
+    }
+    if lower.contains("choose two instead") {
+        return (1, 2);
+    }
+    if lower.contains("choose three instead") {
+        return (1, 3);
+    }
     if lower.contains("one or both") {
         return (1, 2);
     }
@@ -981,6 +1117,8 @@ fn parse_blight_count(text: &str) -> u32 {
 mod tests {
     use super::*;
     use crate::types::mana::ManaCost;
+    use crate::types::triggers::TriggerMode;
+    use crate::types::zones::Zone;
 
     fn parse(
         text: &str,
@@ -1316,6 +1454,159 @@ mod tests {
         assert_eq!(modal.min_choices, 1);
         assert_eq!(modal.max_choices, 2);
         assert_eq!(modal.mode_count, 2);
+    }
+
+    #[test]
+    fn choose_one_conditional_choose_both_modal_metadata() {
+        let r = parse(
+            "Choose one. If you control a commander as you cast this spell, you may choose both instead.\n• Draw a card.\n• Gain 3 life.",
+            "Will Test",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        let modal = r.modal.expect("should have modal metadata");
+        assert_eq!(modal.min_choices, 1);
+        assert_eq!(modal.max_choices, 2);
+        assert_eq!(modal.mode_count, 2);
+        assert!(matches!(r.abilities[0].effect, Effect::Draw { count: 1 }));
+        assert!(matches!(
+            r.abilities[1].effect,
+            Effect::GainLife { amount: crate::types::ability::LifeAmount::Fixed(3), .. }
+        ));
+    }
+
+    #[test]
+    fn ability_word_modal_block_strips_prefix_before_modal_parse() {
+        let r = parse(
+            "Delirium — Choose one. If there are four or more card types among cards in your graveyard, choose both instead.\n• Draw a card.\n• Gain 3 life.",
+            "Test Delirium",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        let modal = r.modal.expect("should have modal metadata");
+        assert_eq!(modal.min_choices, 1);
+        assert_eq!(modal.max_choices, 2);
+        assert_eq!(modal.mode_count, 2);
+        assert!(matches!(r.abilities[0].effect, Effect::Draw { count: 1 }));
+        assert!(matches!(
+            r.abilities[1].effect,
+            Effect::GainLife { amount: crate::types::ability::LifeAmount::Fixed(3), .. }
+        ));
+    }
+
+    #[test]
+    fn labeled_modal_bullets_use_effect_bodies() {
+        let r = parse(
+            "Choose one —\n• Alpha — Draw a card.\n• Beta — Gain 3 life.",
+            "Test Charm",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 2);
+        assert!(matches!(r.abilities[0].effect, Effect::Draw { count: 1 }));
+        assert!(matches!(
+            r.abilities[1].effect,
+            Effect::GainLife { amount: crate::types::ability::LifeAmount::Fixed(3), .. }
+        ));
+
+        let modal = r.modal.expect("should have modal metadata");
+        assert_eq!(
+            modal.mode_descriptions,
+            vec!["Alpha — Draw a card.".to_string(), "Beta — Gain 3 life.".to_string()]
+        );
+    }
+
+    #[test]
+    fn triggered_modal_block_routes_modes_through_effect_parser() {
+        let r = parse(
+            "When you set this scheme in motion, choose one —\n• Search your library for a creature card, reveal it, put it into your hand, then shuffle.\n• You may put a creature card from your hand onto the battlefield.",
+            "Introductions Are In Order",
+            &[],
+            &["Scheme"],
+            &[],
+        );
+        assert!(r.abilities.is_empty());
+        assert_eq!(r.triggers.len(), 1);
+
+        let trigger = &r.triggers[0];
+        assert!(matches!(trigger.mode, TriggerMode::Unknown(_)));
+
+        let execute = trigger.execute.as_ref().expect("trigger should have execute");
+        let modal = execute.modal.as_ref().expect("execute should be modal");
+        assert_eq!(modal.mode_count, 2);
+        assert_eq!(execute.mode_abilities.len(), 2);
+
+        assert!(matches!(
+            execute.mode_abilities[0].effect,
+            Effect::SearchLibrary { .. }
+        ));
+        let search_sub = execute.mode_abilities[0]
+            .sub_ability
+            .as_ref()
+            .expect("search mode should have change-zone followup");
+        assert!(matches!(
+            search_sub.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Hand,
+                ..
+            }
+        ));
+
+        assert!(matches!(
+            execute.mode_abilities[1].effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn triggered_modal_labeled_modes_strip_labels_before_effect_parse() {
+        let r = parse(
+            "At the beginning of your upkeep, choose one that hasn't been chosen —\n• Buffet — Create three Food tokens.\n• See a Show — Create two 2/2 white Performer creature tokens.\n• Play Games — Search your library for a card, put that card into your hand, discard a card at random, then shuffle.\n• Go to Sleep — You lose 15 life. Sacrifice Night Out in Vegas.",
+            "Night Out in Vegas",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        assert!(r.abilities.is_empty());
+        assert_eq!(r.triggers.len(), 1);
+
+        let execute = r.triggers[0]
+            .execute
+            .as_ref()
+            .expect("trigger should have execute");
+        let modal = execute.modal.as_ref().expect("execute should be modal");
+        assert_eq!(modal.mode_count, 4);
+        assert_eq!(execute.mode_abilities.len(), 4);
+
+        assert!(matches!(
+            execute.mode_abilities[2].effect,
+            Effect::SearchLibrary { .. }
+        ));
+        let search_sub = execute.mode_abilities[2]
+            .sub_ability
+            .as_ref()
+            .expect("play games mode should have change-zone followup");
+        assert!(matches!(
+            search_sub.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Hand,
+                ..
+            }
+        ));
+
+        assert!(matches!(
+            execute.mode_abilities[3].effect,
+            Effect::LoseLife { amount: 15 }
+        ));
     }
 
     #[test]

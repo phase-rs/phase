@@ -1972,22 +1972,6 @@ fn parse_mana_spend_restriction(lower: &str) -> Option<ManaSpendRestriction> {
 
 // --- Search library parser ---
 
-/// Parse "search your library for X" Oracle text into Effect::SearchLibrary.
-///
-/// Extracts the card filter from the "for a/an <type> card" clause,
-/// detects reveal, and identifies the destination from "put it into/onto" text.
-/// The destination and shuffle are handled by `parse_effect_chain`'s sentence
-/// splitting — ", then shuffle" becomes a chained sub_ability automatically.
-fn parse_search_library(_text: &str, lower: &str) -> Effect {
-    let details = parse_search_library_details(lower);
-
-    Effect::SearchLibrary {
-        filter: details.filter,
-        count: details.count,
-        reveal: details.reveal,
-    }
-}
-
 fn parse_search_library_details(lower: &str) -> SearchLibraryDetails {
     let filter = if let Some(for_idx) = lower.find("for a ") {
         let after_for = &lower[for_idx + 6..];
