@@ -17,7 +17,7 @@ A Rust-native MTG engine compiling to native and WASM, powering a Tauri desktop 
 ## Features
 
 - **Rules engine** — Turns, priority, stack, combat, state-based actions, layers, triggers, replacement effects
-- **32,300+ cards** — Parsed from Forge's card definitions with typed ability JSON
+- **32,300+ cards** — Parsed from MTGJSON
 - **AI opponent** — Per-card decision logic, game tree search, and evaluation heuristics
 - **Game UI** — Battlefield, hand, stack, targeting overlays, mana payment, and animations
 - **Multiplayer** — WebSocket server with hidden information and lobby system
@@ -46,7 +46,7 @@ cd client && pnpm dev  # Start dev server at localhost:5173
 ### Manual Steps
 
 ```bash
-./scripts/gen-card-data.sh            # Download Forge cards + generate card-data.json
+./scripts/gen-card-data.sh            # generate card-data.json
 ./scripts/build-wasm.sh               # Build WASM bindings
 cd client && pnpm install && pnpm dev # Start frontend
 ```
@@ -79,7 +79,6 @@ Transport-agnostic `EngineAdapter` interface with three implementations:
 - **Pure reducers** — `apply(state, action) -> ActionResult` with no mutation
 - **Discriminated unions** — Rust enums serialize to tagged TS unions via serde + tsify
 - **Structural sharing** — Immutable state via rpds persistent data structures
-- **Forge compatibility** — Card definitions parsed from Forge's upstream format
 
 ## Development
 
@@ -126,7 +125,6 @@ crates/
   phase-server/       Axum WebSocket server
 client/               React frontend
 scripts/              Build and setup scripts
-data/                 Downloaded Forge card files (gitignored)
 .planning/            Project planning docs
 ```
 
