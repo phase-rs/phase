@@ -156,9 +156,24 @@ enum TargetedImperativeAst {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SearchCreationImperativeAst {
-    SearchLibrary { effect: Effect },
-    Dig { count: u32 },
-    Token { effect: Effect },
+    SearchLibrary {
+        filter: TargetFilter,
+        count: u32,
+        reveal: bool,
+    },
+    Dig {
+        count: u32,
+    },
+    Token {
+        name: String,
+        power: PtValue,
+        toughness: PtValue,
+        types: Vec<String>,
+        colors: Vec<ManaColor>,
+        keywords: Vec<Keyword>,
+        tapped: bool,
+        count: CountValue,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,8 +202,14 @@ enum ChooseImperativeAst {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PutImperativeAst {
-    Mill { count: u32 },
-    ZoneChange { effect: Effect },
+    Mill {
+        count: u32,
+    },
+    ZoneChange {
+        origin: Option<Zone>,
+        destination: Zone,
+        target: TargetFilter,
+    },
     TopOfLibrary,
 }
 
@@ -202,17 +223,40 @@ enum ShuffleImperativeAst {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CostResourceImperativeAst {
-    ActivateOnly { effect: Effect },
-    Mana { effect: Effect },
-    Damage { effect: Effect },
+    ActivateOnlyIfControlsLandSubtypeAny {
+        subtypes: Vec<String>,
+    },
+    Mana {
+        produced: ManaProduction,
+        restrictions: Vec<ManaSpendRestriction>,
+    },
+    Damage {
+        amount: DamageAmount,
+        target: TargetFilter,
+        all: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ZoneCounterImperativeAst {
-    Destroy { effect: Effect },
-    Exile { effect: Effect },
-    Counter { effect: Effect },
-    PutCounter { effect: Effect },
+    Destroy {
+        target: TargetFilter,
+        all: bool,
+    },
+    Exile {
+        origin: Option<Zone>,
+        target: TargetFilter,
+        all: bool,
+    },
+    Counter {
+        target: TargetFilter,
+        source_static: Option<StaticDefinition>,
+    },
+    PutCounter {
+        counter_type: String,
+        count: i32,
+        target: TargetFilter,
+    },
 }
 
 /// Parse an effect clause from Oracle text into an Effect enum.
@@ -1052,24 +1096,75 @@ fn parse_counter_effect(text: &str, lower: &str) -> Option<Effect> {
 }
 
 fn parse_cost_resource_ast(text: &str, lower: &str) -> Option<CostResourceImperativeAst> {
-    if let Some(effect) = try_parse_activate_only_condition(text) {
-        return Some(CostResourceImperativeAst::ActivateOnly { effect });
+    if let Some(Effect::Unimplemented {
+        name,
+        description: Some(description),
+    }) = try_parse_activate_only_condition(text)
+    {
+        if name == "activate_only_if_controls_land_subtype_any" {
+            return Some(
+                CostResourceImperativeAst::ActivateOnlyIfControlsLandSubtypeAny {
+                    subtypes: description.split('|').map(ToString::to_string).collect(),
+                },
+            );
+        }
     }
     if lower.starts_with("add ") {
-        return try_parse_add_mana_effect(text)
-            .map(|effect| CostResourceImperativeAst::Mana { effect });
+        return match try_parse_add_mana_effect(text) {
+            Some(Effect::Mana {
+                produced,
+                restrictions,
+            }) => Some(CostResourceImperativeAst::Mana {
+                produced,
+                restrictions,
+            }),
+            _ => None,
+        };
     }
     if let Some(effect) = try_parse_damage(lower, text) {
-        return Some(CostResourceImperativeAst::Damage { effect });
+        return match effect {
+            Effect::DealDamage { amount, target } => Some(CostResourceImperativeAst::Damage {
+                amount,
+                target,
+                all: false,
+            }),
+            Effect::DamageAll { amount, target } => Some(CostResourceImperativeAst::Damage {
+                amount,
+                target,
+                all: true,
+            }),
+            _ => None,
+        };
     }
     None
 }
 
 fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect {
     match ast {
-        CostResourceImperativeAst::ActivateOnly { effect }
-        | CostResourceImperativeAst::Mana { effect }
-        | CostResourceImperativeAst::Damage { effect } => effect,
+        CostResourceImperativeAst::ActivateOnlyIfControlsLandSubtypeAny { subtypes } => {
+            Effect::Unimplemented {
+                name: "activate_only_if_controls_land_subtype_any".to_string(),
+                description: Some(subtypes.join("|")),
+            }
+        }
+        CostResourceImperativeAst::Mana {
+            produced,
+            restrictions,
+        } => Effect::Mana {
+            produced,
+            restrictions,
+        },
+        CostResourceImperativeAst::Damage {
+            amount,
+            target,
+            all,
+        } => {
+            if all {
+                Effect::DamageAll { amount, target }
+            } else {
+                Effect::DealDamage { amount, target }
+            }
+        }
     }
 }
 
@@ -1139,27 +1234,112 @@ fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> Effect {
 
 fn parse_zone_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
     if let Some(effect) = parse_destroy_effect(text, lower) {
-        return Some(ZoneCounterImperativeAst::Destroy { effect });
+        return match effect {
+            Effect::DestroyAll { target } => {
+                Some(ZoneCounterImperativeAst::Destroy { target, all: true })
+            }
+            Effect::Destroy { target } => {
+                Some(ZoneCounterImperativeAst::Destroy { target, all: false })
+            }
+            _ => None,
+        };
     }
     if let Some(effect) = parse_exile_effect(text, lower) {
-        return Some(ZoneCounterImperativeAst::Exile { effect });
+        return match effect {
+            Effect::ChangeZoneAll {
+                origin,
+                destination: Zone::Exile,
+                target,
+            } => Some(ZoneCounterImperativeAst::Exile {
+                origin,
+                target,
+                all: true,
+            }),
+            Effect::ChangeZone {
+                origin,
+                destination: Zone::Exile,
+                target,
+            } => Some(ZoneCounterImperativeAst::Exile {
+                origin,
+                target,
+                all: false,
+            }),
+            _ => None,
+        };
     }
     if let Some(effect) = parse_counter_effect(text, lower) {
-        return Some(ZoneCounterImperativeAst::Counter { effect });
+        return match effect {
+            Effect::Counter {
+                target,
+                source_static,
+            } => Some(ZoneCounterImperativeAst::Counter {
+                target,
+                source_static,
+            }),
+            _ => None,
+        };
     }
     if lower.starts_with("put ") && lower.contains("counter") {
-        return try_parse_put_counter(lower, text)
-            .map(|effect| ZoneCounterImperativeAst::PutCounter { effect });
+        return match try_parse_put_counter(lower, text) {
+            Some(Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            }) => Some(ZoneCounterImperativeAst::PutCounter {
+                counter_type,
+                count,
+                target,
+            }),
+            _ => None,
+        };
     }
     None
 }
 
 fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
     match ast {
-        ZoneCounterImperativeAst::Destroy { effect }
-        | ZoneCounterImperativeAst::Exile { effect }
-        | ZoneCounterImperativeAst::Counter { effect }
-        | ZoneCounterImperativeAst::PutCounter { effect } => effect,
+        ZoneCounterImperativeAst::Destroy { target, all } => {
+            if all {
+                Effect::DestroyAll { target }
+            } else {
+                Effect::Destroy { target }
+            }
+        }
+        ZoneCounterImperativeAst::Exile {
+            origin,
+            target,
+            all,
+        } => {
+            if all {
+                Effect::ChangeZoneAll {
+                    origin,
+                    destination: Zone::Exile,
+                    target,
+                }
+            } else {
+                Effect::ChangeZone {
+                    origin,
+                    destination: Zone::Exile,
+                    target,
+                }
+            }
+        }
+        ZoneCounterImperativeAst::Counter {
+            target,
+            source_static,
+        } => Effect::Counter {
+            target,
+            source_static,
+        },
+        ZoneCounterImperativeAst::PutCounter {
+            counter_type,
+            count,
+            target,
+        } => Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        },
     }
 }
 
@@ -1284,29 +1464,85 @@ fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
 
 fn parse_search_and_creation_ast(text: &str, lower: &str) -> Option<SearchCreationImperativeAst> {
     if starts_with_possessive(lower, "search", "library") {
-        return Some(SearchCreationImperativeAst::SearchLibrary {
-            effect: parse_search_library(text, lower),
-        });
+        if let Effect::SearchLibrary {
+            filter,
+            count,
+            reveal,
+        } = parse_search_library(text, lower)
+        {
+            return Some(SearchCreationImperativeAst::SearchLibrary {
+                filter,
+                count,
+                reveal,
+            });
+        }
+        return None;
     }
     if lower.starts_with("look at the top ") {
         let count = parse_number(&text[16..]).map(|(n, _)| n).unwrap_or(1);
         return Some(SearchCreationImperativeAst::Dig { count });
     }
     if lower.starts_with("create ") {
-        return try_parse_token(lower, text)
-            .map(|effect| SearchCreationImperativeAst::Token { effect });
+        return match try_parse_token(lower, text) {
+            Some(Effect::Token {
+                name,
+                power,
+                toughness,
+                types,
+                colors,
+                keywords,
+                tapped,
+                count,
+            }) => Some(SearchCreationImperativeAst::Token {
+                name,
+                power,
+                toughness,
+                types,
+                colors,
+                keywords,
+                tapped,
+                count,
+            }),
+            _ => None,
+        };
     }
     None
 }
 
 fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) -> Effect {
     match ast {
-        SearchCreationImperativeAst::SearchLibrary { effect } => effect,
+        SearchCreationImperativeAst::SearchLibrary {
+            filter,
+            count,
+            reveal,
+        } => Effect::SearchLibrary {
+            filter,
+            count,
+            reveal,
+        },
         SearchCreationImperativeAst::Dig { count } => Effect::Dig {
             count,
             destination: None,
         },
-        SearchCreationImperativeAst::Token { effect } => effect,
+        SearchCreationImperativeAst::Token {
+            name,
+            power,
+            toughness,
+            types,
+            colors,
+            keywords,
+            tapped,
+            count,
+        } => Effect::Token {
+            name,
+            power,
+            toughness,
+            types,
+            colors,
+            keywords,
+            tapped,
+            count,
+        },
     }
 }
 
@@ -1467,8 +1703,17 @@ fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst> {
         return Some(PutImperativeAst::Mill { count });
     }
 
-    if let Some(effect) = try_parse_put_zone_change(lower, text) {
-        return Some(PutImperativeAst::ZoneChange { effect });
+    if let Some(Effect::ChangeZone {
+        origin,
+        destination,
+        target,
+    }) = try_parse_put_zone_change(lower, text)
+    {
+        return Some(PutImperativeAst::ZoneChange {
+            origin,
+            destination,
+            target,
+        });
     }
 
     if lower.starts_with("put ") && lower.contains("on top of") && lower.contains("library") {
@@ -1484,7 +1729,15 @@ fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             count,
             target: TargetFilter::Any,
         },
-        PutImperativeAst::ZoneChange { effect } => effect,
+        PutImperativeAst::ZoneChange {
+            origin,
+            destination,
+            target,
+        } => Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+        },
         PutImperativeAst::TopOfLibrary => Effect::ChangeZone {
             origin: None,
             destination: Zone::Library,
