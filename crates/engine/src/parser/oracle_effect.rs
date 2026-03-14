@@ -126,8 +126,8 @@ enum ImperativeFamilyAst {
     RawEffect { effect: Effect },
     Explore,
     Proliferate,
-    Shuffle { effect: Effect },
-    Put { effect: Effect },
+    Shuffle(ShuffleImperativeAst),
+    Put(PutImperativeAst),
     YouMay { text: String },
 }
 
@@ -182,6 +182,21 @@ enum ChooseImperativeAst {
     Reparse { effect: Effect },
     NamedChoice { choice_type: ChoiceType },
     RevealHandFilter { card_filter: TargetFilter },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PutImperativeAst {
+    Mill { count: u32 },
+    ZoneChange { effect: Effect },
+    TopOfLibrary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShuffleImperativeAst {
+    ShuffleLibrary { target: TargetFilter },
+    ChangeZoneToLibrary,
+    ChangeZoneAllToLibrary { origin: Zone },
+    Unimplemented { text: String },
 }
 
 /// Parse an effect clause from Oracle text into an Effect enum.
@@ -1059,8 +1074,8 @@ fn parse_imperative_family_ast(text: &str, lower: &str) -> Option<ImperativeFami
     if lower == "proliferate" || lower.starts_with("proliferate.") {
         return Some(ImperativeFamilyAst::Proliferate);
     }
-    if let Some(effect) = parse_shuffle_effect(text, lower) {
-        return Some(ImperativeFamilyAst::Shuffle { effect });
+    if let Some(ast) = parse_shuffle_ast(text, lower) {
+        return Some(ImperativeFamilyAst::Shuffle(ast));
     }
     if let Some(ast) = parse_hand_reveal_ast(text, lower) {
         return Some(ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(
@@ -1070,8 +1085,8 @@ fn parse_imperative_family_ast(text: &str, lower: &str) -> Option<ImperativeFami
     if let Some(ast) = parse_utility_imperative_ast(text, lower) {
         return Some(ImperativeFamilyAst::Structured(ImperativeAst::Utility(ast)));
     }
-    if let Some(effect) = parse_put_effect(text, lower) {
-        return Some(ImperativeFamilyAst::Put { effect });
+    if let Some(ast) = parse_put_ast(text, lower) {
+        return Some(ImperativeFamilyAst::Put(ast));
     }
     if let Some(stripped) = text.strip_prefix("you may ") {
         return Some(ImperativeFamilyAst::YouMay {
@@ -1090,7 +1105,8 @@ fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::RawEffect { effect } => effect,
         ImperativeFamilyAst::Explore => Effect::Explore,
         ImperativeFamilyAst::Proliferate => Effect::Proliferate,
-        ImperativeFamilyAst::Shuffle { effect } | ImperativeFamilyAst::Put { effect } => effect,
+        ImperativeFamilyAst::Shuffle(ast) => lower_shuffle_ast(ast),
+        ImperativeFamilyAst::Put(ast) => lower_put_ast(ast),
         ImperativeFamilyAst::YouMay { text } => parse_effect(&text),
     }
 }
@@ -1404,7 +1420,7 @@ fn lower_imperative_ast(ast: ImperativeAst) -> Effect {
     }
 }
 
-fn parse_put_effect(text: &str, lower: &str) -> Option<Effect> {
+fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst> {
     if !lower.starts_with("put ") {
         return None;
     }
@@ -1412,70 +1428,87 @@ fn parse_put_effect(text: &str, lower: &str) -> Option<Effect> {
     if lower.starts_with("put the top ") && lower.contains("graveyard") {
         let after = &lower[12..];
         let count = parse_number(after).map(|(n, _)| n).unwrap_or(1);
-        return Some(Effect::Mill {
-            count,
-            target: TargetFilter::Any,
-        });
+        return Some(PutImperativeAst::Mill { count });
     }
 
     if let Some(effect) = try_parse_put_zone_change(lower, text) {
-        return Some(effect);
+        return Some(PutImperativeAst::ZoneChange { effect });
     }
 
     if lower.starts_with("put ") && lower.contains("on top of") && lower.contains("library") {
-        return Some(Effect::ChangeZone {
-            origin: None,
-            destination: Zone::Library,
-            target: TargetFilter::Any,
-        });
+        return Some(PutImperativeAst::TopOfLibrary);
     }
 
     None
 }
 
-fn parse_shuffle_effect(text: &str, lower: &str) -> Option<Effect> {
+fn lower_put_ast(ast: PutImperativeAst) -> Effect {
+    match ast {
+        PutImperativeAst::Mill { count } => Effect::Mill {
+            count,
+            target: TargetFilter::Any,
+        },
+        PutImperativeAst::ZoneChange { effect } => effect,
+        PutImperativeAst::TopOfLibrary => Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Library,
+            target: TargetFilter::Any,
+        },
+    }
+}
+
+fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImperativeAst> {
     if !lower.starts_with("shuffle") || !lower.contains("library") {
         return None;
     }
 
     if lower == "shuffle your library" {
-        return Some(Effect::Shuffle {
+        return Some(ShuffleImperativeAst::ShuffleLibrary {
             target: TargetFilter::Controller,
         });
     }
     if lower == "shuffle their library" {
-        return Some(Effect::Shuffle {
+        return Some(ShuffleImperativeAst::ShuffleLibrary {
             target: TargetFilter::Player,
         });
     }
     if contains_object_pronoun(lower, "shuffle", "into")
         || contains_object_pronoun(lower, "shuffles", "into")
     {
-        return Some(Effect::ChangeZone {
-            origin: None,
-            destination: Zone::Library,
-            target: TargetFilter::Any,
-        });
+        return Some(ShuffleImperativeAst::ChangeZoneToLibrary);
     }
     if contains_possessive(lower, "shuffle", "graveyard") {
-        return Some(Effect::ChangeZoneAll {
-            origin: Some(Zone::Graveyard),
-            destination: Zone::Library,
-            target: TargetFilter::Controller,
+        return Some(ShuffleImperativeAst::ChangeZoneAllToLibrary {
+            origin: Zone::Graveyard,
         });
     }
     if contains_possessive(lower, "shuffle", "hand") {
-        return Some(Effect::ChangeZoneAll {
-            origin: Some(Zone::Hand),
-            destination: Zone::Library,
-            target: TargetFilter::Controller,
-        });
+        return Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origin: Zone::Hand });
     }
 
-    Some(Effect::Unimplemented {
-        name: "shuffle".to_string(),
-        description: Some(text.to_string()),
+    Some(ShuffleImperativeAst::Unimplemented {
+        text: text.to_string(),
     })
+}
+
+fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> Effect {
+    match ast {
+        ShuffleImperativeAst::ShuffleLibrary { target } => Effect::Shuffle { target },
+        ShuffleImperativeAst::ChangeZoneToLibrary => Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Library,
+            target: TargetFilter::Any,
+        },
+        ShuffleImperativeAst::ChangeZoneAllToLibrary { origin } => Effect::ChangeZoneAll {
+            origin: Some(origin),
+            destination: Zone::Library,
+            target: TargetFilter::Controller,
+        },
+        ShuffleImperativeAst::Unimplemented { text } => Effect::Unimplemented {
+            name: "shuffle".to_string(),
+            description: Some(text),
+        },
+    }
 }
 
 fn lower_continuation_ast(ast: ContinuationAst) -> Option<ClauseContinuation> {
