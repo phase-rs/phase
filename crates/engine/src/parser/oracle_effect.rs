@@ -53,6 +53,13 @@ struct AnimationSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchLibraryDetails {
+    filter: TargetFilter,
+    count: u32,
+    reveal: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ClauseAst {
     Imperative {
         text: String,
@@ -1466,19 +1473,12 @@ fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
 
 fn parse_search_and_creation_ast(text: &str, lower: &str) -> Option<SearchCreationImperativeAst> {
     if starts_with_possessive(lower, "search", "library") {
-        if let Effect::SearchLibrary {
-            filter,
-            count,
-            reveal,
-        } = parse_search_library(text, lower)
-        {
-            return Some(SearchCreationImperativeAst::SearchLibrary {
-                filter,
-                count,
-                reveal,
-            });
-        }
-        return None;
+        let details = parse_search_library_details(lower);
+        return Some(SearchCreationImperativeAst::SearchLibrary {
+            filter: details.filter,
+            count: details.count,
+            reveal: details.reveal,
+        });
     }
     if lower.starts_with("look at the top ") {
         let count = parse_number(&text[16..]).map(|(n, _)| n).unwrap_or(1);
@@ -2009,12 +2009,21 @@ fn parse_mana_spend_restriction(lower: &str) -> Option<ManaSpendRestriction> {
 /// The destination and shuffle are handled by `parse_effect_chain`'s sentence
 /// splitting — ", then shuffle" becomes a chained sub_ability automatically.
 fn parse_search_library(_text: &str, lower: &str) -> Effect {
-    // Extract what we're searching for: "for a <type> card" or "for a card"
+    let details = parse_search_library_details(lower);
+
+    Effect::SearchLibrary {
+        filter: details.filter,
+        count: details.count,
+        reveal: details.reveal,
+    }
+}
+
+fn parse_search_library_details(lower: &str) -> SearchLibraryDetails {
     let filter = if let Some(for_idx) = lower.find("for a ") {
-        let after_for = &lower[for_idx + 6..]; // skip "for a "
+        let after_for = &lower[for_idx + 6..];
         parse_search_filter(after_for)
     } else if let Some(for_idx) = lower.find("for an ") {
-        let after_for = &lower[for_idx + 7..]; // skip "for an "
+        let after_for = &lower[for_idx + 7..];
         parse_search_filter(after_for)
     } else {
         TargetFilter::Any
@@ -2029,7 +2038,7 @@ fn parse_search_library(_text: &str, lower: &str) -> Effect {
         1
     };
 
-    Effect::SearchLibrary {
+    SearchLibraryDetails {
         filter,
         count,
         reveal,
