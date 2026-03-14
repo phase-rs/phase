@@ -137,10 +137,7 @@ enum NumericImperativeAst {
     Draw { count: u32 },
     GainLife { amount: i32 },
     LoseLife { amount: i32 },
-    Pump {
-        power: PtValue,
-        toughness: PtValue,
-    },
+    Pump { power: PtValue, toughness: PtValue },
     Scry { count: u32 },
     Surveil { count: u32 },
     Mill { count: u32 },
@@ -198,7 +195,7 @@ enum HandRevealImperativeAst {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ChooseImperativeAst {
     TargetOnly { target: TargetFilter },
-    Reparse { effect: Effect },
+    Reparse { text: String },
     NamedChoice { choice_type: ChoiceType },
     RevealHandFilter { card_filter: TargetFilter },
 }
@@ -1611,7 +1608,9 @@ fn parse_choose_ast(text: &str, lower: &str) -> Option<ChooseImperativeAst> {
             let stripped = &text["choose ".len()..];
             let inner = parse_effect(stripped);
             if !matches!(inner, Effect::Unimplemented { .. }) {
-                return Some(ChooseImperativeAst::Reparse { effect: inner });
+                return Some(ChooseImperativeAst::Reparse {
+                    text: stripped.to_string(),
+                });
             }
             let (target, _) = parse_target(stripped);
             return Some(ChooseImperativeAst::TargetOnly { target });
@@ -1634,7 +1633,7 @@ fn parse_choose_ast(text: &str, lower: &str) -> Option<ChooseImperativeAst> {
 fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
     match ast {
         ChooseImperativeAst::TargetOnly { target } => Effect::TargetOnly { target },
-        ChooseImperativeAst::Reparse { effect } => effect,
+        ChooseImperativeAst::Reparse { text } => parse_effect(&text),
         ChooseImperativeAst::NamedChoice { choice_type } => Effect::Choose {
             choice_type,
             persist: false,
