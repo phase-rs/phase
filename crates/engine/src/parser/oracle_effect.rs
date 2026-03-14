@@ -217,173 +217,24 @@ fn lower_subject_predicate_ast(
 fn parse_imperative_effect(text: &str) -> Effect {
     let lower = text.to_lowercase();
 
-    // --- Activation restrictions carried in ability sub-chains ---
-    if let Some(effect) = try_parse_activate_only_condition(text) {
+    if let Some(effect) = parse_cost_and_resource_effect(text, &lower) {
         return effect;
     }
 
-    // --- Mana production ---
-    if let Some(mana_effect) = try_parse_add_mana_effect(text) {
-        return mana_effect;
-    }
-
-    // --- Damage: "~ deals N damage to {target}" ---
-    if let Some(dmg) = try_parse_damage(&lower, text) {
-        return dmg;
-    }
-
-    // --- Destroy family ---
-    if let Some(effect) = parse_destroy_effect(text, &lower) {
+    if let Some(effect) = parse_zone_and_counter_effect(text, &lower) {
         return effect;
     }
 
-    // --- Exile family ---
-    if let Some(effect) = parse_exile_effect(text, &lower) {
+    if let Some(effect) = parse_numeric_imperative_effect(text, &lower) {
         return effect;
     }
 
-    // --- Draw: "draw N card(s)" ---
-    if lower.starts_with("draw ") {
-        let count = parse_number(&text[5..]).map(|(n, _)| n).unwrap_or(1);
-        return Effect::Draw { count };
-    }
-
-    // --- Counter family ---
-    if let Some(effect) = parse_counter_effect(text, &lower) {
+    if let Some(effect) = parse_targeted_action_effect(text, &lower) {
         return effect;
     }
 
-    // --- Life: "gain N life" / "you gain N life" ---
-    if lower.contains("gain") && lower.contains("life") {
-        let after_gain = if lower.starts_with("you gain ") {
-            &text[9..]
-        } else if lower.starts_with("gain ") {
-            &text[5..]
-        } else {
-            ""
-        };
-        if !after_gain.is_empty() {
-            let amount = parse_number(after_gain).map(|(n, _)| n as i32).unwrap_or(1);
-            return Effect::GainLife {
-                amount: LifeAmount::Fixed(amount),
-                player: GainLifePlayer::Controller,
-            };
-        }
-    }
-
-    // --- Life loss: "lose N life" / "each opponent loses N life" ---
-    if lower.contains("lose") && lower.contains("life") {
-        // Extract the number before "life"
-        let amount = extract_number_before(&lower, "life").unwrap_or(1) as i32;
-        return Effect::LoseLife { amount };
-    }
-
-    // --- Pump: "{target} gets +N/+M [until end of turn]" ---
-    if lower.contains("gets +")
-        || lower.contains("gets -")
-        || lower.contains("get +")
-        || lower.contains("get -")
-    {
-        if let Some(pump) = try_parse_pump(&lower, text) {
-            return pump;
-        }
-    }
-
-    // --- Scry ---
-    if lower.starts_with("scry ") {
-        let count = parse_number(&text[5..]).map(|(n, _)| n).unwrap_or(1);
-        return Effect::Scry { count };
-    }
-
-    // --- Surveil ---
-    if lower.starts_with("surveil ") {
-        let count = parse_number(&text[8..]).map(|(n, _)| n).unwrap_or(1);
-        return Effect::Surveil { count };
-    }
-
-    // --- Mill ---
-    if lower.starts_with("mill ") {
-        let count = parse_number(&text[5..]).map(|(n, _)| n).unwrap_or(1);
-        return Effect::Mill {
-            count,
-            target: TargetFilter::Any,
-        };
-    }
-
-    // --- Tap/Untap ---
-    if lower.starts_with("tap ") {
-        let (target, _) = parse_target(&text[4..]);
-        return Effect::Tap { target };
-    }
-    if lower.starts_with("untap ") {
-        let (target, _) = parse_target(&text[6..]);
-        return Effect::Untap { target };
-    }
-
-    // --- Sacrifice ---
-    if lower.starts_with("sacrifice ") {
-        let (target, _) = parse_target(&text[10..]);
-        return Effect::Sacrifice { target };
-    }
-
-    // --- Discard ---
-    // NOTE: Engine has both Effect::Discard and Effect::DiscardCard.
-    // Oracle parser always emits Effect::Discard per spec convention.
-    if lower.starts_with("discard ") {
-        let count = parse_number(&text[8..]).map(|(n, _)| n).unwrap_or(1);
-        return Effect::Discard {
-            count,
-            target: TargetFilter::Any,
-        };
-    }
-
-    // --- Put counter ---
-    if lower.starts_with("put ") && lower.contains("counter") {
-        if let Some(counter) = try_parse_put_counter(&lower, text) {
-            return counter;
-        }
-    }
-
-    // --- Return / Bounce ---
-    if lower.starts_with("return ") {
-        let (target, _) = parse_target(&text[7..]);
-        return Effect::Bounce {
-            target,
-            destination: None,
-        };
-    }
-
-    // --- Search library ---
-    if starts_with_possessive(&lower, "search", "library") {
-        return parse_search_library(text, &lower);
-    }
-
-    // --- Look at top N / Dig ---
-    if lower.starts_with("look at the top ") {
-        let count = parse_number(&text[16..]).map(|(n, _)| n).unwrap_or(1);
-        return Effect::Dig {
-            count,
-            destination: None,
-        };
-    }
-
-    // --- Fight ---
-    if lower.starts_with("fight ") {
-        let (target, _) = parse_target(&text[6..]);
-        return Effect::Fight { target };
-    }
-
-    // --- Gain control ---
-    if lower.starts_with("gain control of ") {
-        let (target, _) = parse_target(&text[16..]);
-        return Effect::GainControl { target };
-    }
-
-    // --- Token creation: "create N {P/T} {color} {type} creature token(s)" ---
-    if lower.starts_with("create ") {
-        if let Some(token) = try_parse_token(&lower, text) {
-            return token;
-        }
+    if let Some(effect) = parse_search_and_creation_effect(text, &lower) {
+        return effect;
     }
 
     // --- Single-word effects ---
@@ -394,50 +245,9 @@ fn parse_imperative_effect(text: &str) -> Effect {
         return Effect::Proliferate;
     }
 
-    // --- Shuffle ---
-    if lower.starts_with("shuffle") && lower.contains("library") {
-        if lower == "shuffle your library" {
-            return Effect::Shuffle {
-                target: TargetFilter::Controller,
-            };
-        }
-        if lower == "shuffle their library" {
-            return Effect::Shuffle {
-                target: TargetFilter::Player,
-            };
-        }
-        // "shuffle it/them/that card into its owner's library" → ChangeZone to Library.
-        // The pronoun target is inherited from the parent ability chain.
-        if contains_object_pronoun(&lower, "shuffle", "into")
-            || contains_object_pronoun(&lower, "shuffles", "into")
-        {
-            return Effect::ChangeZone {
-                origin: None,
-                destination: Zone::Library,
-                target: TargetFilter::Any,
-            };
-        }
-        // "shuffle your/their graveyard into your/their library"
-        if contains_possessive(&lower, "shuffle", "graveyard") {
-            return Effect::ChangeZoneAll {
-                origin: Some(Zone::Graveyard),
-                destination: Zone::Library,
-                target: TargetFilter::Controller,
-            };
-        }
-        // "shuffle your/their hand into your/their library"
-        if contains_possessive(&lower, "shuffle", "hand") {
-            return Effect::ChangeZoneAll {
-                origin: Some(Zone::Hand),
-                destination: Zone::Library,
-                target: TargetFilter::Controller,
-            };
-        }
-        // Unrecognized compound shuffle
-        return Effect::Unimplemented {
-            name: "shuffle".to_string(),
-            description: Some(text.to_string()),
-        };
+    // --- Shuffle family ---
+    if let Some(effect) = parse_shuffle_effect(text, &lower) {
+        return effect;
     }
 
     // --- Hand / reveal family ---
@@ -445,67 +255,14 @@ fn parse_imperative_effect(text: &str) -> Effect {
         return effect;
     }
 
-    // --- Prevent damage ---
-    if lower.starts_with("prevent ") {
-        return Effect::Unimplemented {
-            name: "prevent".to_string(),
-            description: Some(text.to_string()),
-        };
+    // --- Utility verb family ---
+    if let Some(effect) = parse_utility_imperative_effect(text, &lower) {
+        return effect;
     }
 
-    // --- Regenerate ---
-    if lower.starts_with("regenerate ") {
-        return Effect::Unimplemented {
-            name: "regenerate".to_string(),
-            description: Some(text.to_string()),
-        };
-    }
-
-    // --- Copy ---
-    if lower.starts_with("copy ") {
-        let (target, _) = parse_target(&text[5..]);
-        return Effect::CopySpell { target };
-    }
-
-    // --- Transform ---
-    if lower.starts_with("transform ") || lower == "transform" {
-        return Effect::Unimplemented {
-            name: "transform".to_string(),
-            description: Some(text.to_string()),
-        };
-    }
-
-    // --- Attach ---
-    if lower.starts_with("attach ") {
-        let to_pos = lower.find(" to ").map(|p| p + 4).unwrap_or(7);
-        let (target, _) = parse_target(&text[to_pos..]);
-        return Effect::Attach { target };
-    }
-
-    // --- Put (mill variant): "put the top N cards ... into ... graveyard" ---
-    if lower.starts_with("put the top ") && lower.contains("graveyard") {
-        let after = &lower[12..];
-        let count = parse_number(after).map(|(n, _)| n).unwrap_or(1);
-        return Effect::Mill {
-            count,
-            target: TargetFilter::Any,
-        };
-    }
-
-    // --- Put {target} onto/in/on {zone} ---
-    if lower.starts_with("put ") {
-        if let Some(effect) = try_parse_put_zone_change(&lower, text) {
-            return effect;
-        }
-    }
-
-    // --- Put card on top of library ---
-    if lower.starts_with("put ") && lower.contains("on top of") && lower.contains("library") {
-        return Effect::ChangeZone {
-            origin: None,
-            destination: Zone::Library,
-            target: TargetFilter::Any,
-        };
+    // --- Put family ---
+    if let Some(effect) = parse_put_effect(text, &lower) {
+        return effect;
     }
 
     // --- "you may " prefix stripping ---
@@ -1244,6 +1001,147 @@ fn parse_counter_effect(text: &str, lower: &str) -> Option<Effect> {
     })
 }
 
+fn parse_cost_and_resource_effect(text: &str, lower: &str) -> Option<Effect> {
+    if let Some(effect) = try_parse_activate_only_condition(text) {
+        return Some(effect);
+    }
+    if lower.starts_with("add ") {
+        return try_parse_add_mana_effect(text);
+    }
+    if let Some(effect) = try_parse_damage(lower, text) {
+        return Some(effect);
+    }
+    None
+}
+
+fn parse_zone_and_counter_effect(text: &str, lower: &str) -> Option<Effect> {
+    if let Some(effect) = parse_destroy_effect(text, lower) {
+        return Some(effect);
+    }
+    if let Some(effect) = parse_exile_effect(text, lower) {
+        return Some(effect);
+    }
+    if let Some(effect) = parse_counter_effect(text, lower) {
+        return Some(effect);
+    }
+    if lower.starts_with("put ") && lower.contains("counter") {
+        return try_parse_put_counter(lower, text);
+    }
+    None
+}
+
+fn parse_numeric_imperative_effect(text: &str, lower: &str) -> Option<Effect> {
+    if lower.starts_with("draw ") {
+        let count = parse_number(&text[5..]).map(|(n, _)| n).unwrap_or(1);
+        return Some(Effect::Draw { count });
+    }
+
+    if lower.contains("gain") && lower.contains("life") {
+        let after_gain = if lower.starts_with("you gain ") {
+            &text[9..]
+        } else if lower.starts_with("gain ") {
+            &text[5..]
+        } else {
+            ""
+        };
+        if !after_gain.is_empty() {
+            let amount = parse_number(after_gain).map(|(n, _)| n as i32).unwrap_or(1);
+            return Some(Effect::GainLife {
+                amount: LifeAmount::Fixed(amount),
+                player: GainLifePlayer::Controller,
+            });
+        }
+    }
+
+    if lower.contains("lose") && lower.contains("life") {
+        let amount = extract_number_before(lower, "life").unwrap_or(1) as i32;
+        return Some(Effect::LoseLife { amount });
+    }
+
+    if lower.contains("gets +")
+        || lower.contains("gets -")
+        || lower.contains("get +")
+        || lower.contains("get -")
+    {
+        if let Some(effect) = try_parse_pump(lower, text) {
+            return Some(effect);
+        }
+    }
+
+    if lower.starts_with("scry ") {
+        let count = parse_number(&text[5..]).map(|(n, _)| n).unwrap_or(1);
+        return Some(Effect::Scry { count });
+    }
+    if lower.starts_with("surveil ") {
+        let count = parse_number(&text[8..]).map(|(n, _)| n).unwrap_or(1);
+        return Some(Effect::Surveil { count });
+    }
+    if lower.starts_with("mill ") {
+        let count = parse_number(&text[5..]).map(|(n, _)| n).unwrap_or(1);
+        return Some(Effect::Mill {
+            count,
+            target: TargetFilter::Any,
+        });
+    }
+
+    None
+}
+
+fn parse_targeted_action_effect(text: &str, lower: &str) -> Option<Effect> {
+    if lower.starts_with("tap ") {
+        let (target, _) = parse_target(&text[4..]);
+        return Some(Effect::Tap { target });
+    }
+    if lower.starts_with("untap ") {
+        let (target, _) = parse_target(&text[6..]);
+        return Some(Effect::Untap { target });
+    }
+    if lower.starts_with("sacrifice ") {
+        let (target, _) = parse_target(&text[10..]);
+        return Some(Effect::Sacrifice { target });
+    }
+    if lower.starts_with("discard ") {
+        let count = parse_number(&text[8..]).map(|(n, _)| n).unwrap_or(1);
+        return Some(Effect::Discard {
+            count,
+            target: TargetFilter::Any,
+        });
+    }
+    if lower.starts_with("return ") {
+        let (target, _) = parse_target(&text[7..]);
+        return Some(Effect::Bounce {
+            target,
+            destination: None,
+        });
+    }
+    if lower.starts_with("fight ") {
+        let (target, _) = parse_target(&text[6..]);
+        return Some(Effect::Fight { target });
+    }
+    if lower.starts_with("gain control of ") {
+        let (target, _) = parse_target(&text[16..]);
+        return Some(Effect::GainControl { target });
+    }
+    None
+}
+
+fn parse_search_and_creation_effect(text: &str, lower: &str) -> Option<Effect> {
+    if starts_with_possessive(lower, "search", "library") {
+        return Some(parse_search_library(text, lower));
+    }
+    if lower.starts_with("look at the top ") {
+        let count = parse_number(&text[16..]).map(|(n, _)| n).unwrap_or(1);
+        return Some(Effect::Dig {
+            count,
+            destination: None,
+        });
+    }
+    if lower.starts_with("create ") {
+        return try_parse_token(lower, text);
+    }
+    None
+}
+
 fn parse_hand_reveal_effect(text: &str, lower: &str) -> Option<Effect> {
     if lower.starts_with("look at ") && lower.contains("hand") {
         if contains_possessive(&lower, "look at", "hand") {
@@ -1310,6 +1208,112 @@ fn parse_choose_effect(text: &str, lower: &str) -> Option<Effect> {
             target: TargetFilter::Any,
             card_filter: filter,
         });
+    }
+
+    None
+}
+
+fn parse_put_effect(text: &str, lower: &str) -> Option<Effect> {
+    if lower.starts_with("put the top ") && lower.contains("graveyard") {
+        let after = &lower[12..];
+        let count = parse_number(after).map(|(n, _)| n).unwrap_or(1);
+        return Some(Effect::Mill {
+            count,
+            target: TargetFilter::Any,
+        });
+    }
+
+    if let Some(effect) = try_parse_put_zone_change(lower, text) {
+        return Some(effect);
+    }
+
+    if lower.starts_with("put ") && lower.contains("on top of") && lower.contains("library") {
+        return Some(Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Library,
+            target: TargetFilter::Any,
+        });
+    }
+
+    None
+}
+
+fn parse_shuffle_effect(text: &str, lower: &str) -> Option<Effect> {
+    if !lower.starts_with("shuffle") || !lower.contains("library") {
+        return None;
+    }
+
+    if lower == "shuffle your library" {
+        return Some(Effect::Shuffle {
+            target: TargetFilter::Controller,
+        });
+    }
+    if lower == "shuffle their library" {
+        return Some(Effect::Shuffle {
+            target: TargetFilter::Player,
+        });
+    }
+    if contains_object_pronoun(lower, "shuffle", "into")
+        || contains_object_pronoun(lower, "shuffles", "into")
+    {
+        return Some(Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Library,
+            target: TargetFilter::Any,
+        });
+    }
+    if contains_possessive(lower, "shuffle", "graveyard") {
+        return Some(Effect::ChangeZoneAll {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Library,
+            target: TargetFilter::Controller,
+        });
+    }
+    if contains_possessive(lower, "shuffle", "hand") {
+        return Some(Effect::ChangeZoneAll {
+            origin: Some(Zone::Hand),
+            destination: Zone::Library,
+            target: TargetFilter::Controller,
+        });
+    }
+
+    Some(Effect::Unimplemented {
+        name: "shuffle".to_string(),
+        description: Some(text.to_string()),
+    })
+}
+
+fn parse_utility_imperative_effect(text: &str, lower: &str) -> Option<Effect> {
+    if lower.starts_with("prevent ") {
+        return Some(Effect::Unimplemented {
+            name: "prevent".to_string(),
+            description: Some(text.to_string()),
+        });
+    }
+
+    if lower.starts_with("regenerate ") {
+        return Some(Effect::Unimplemented {
+            name: "regenerate".to_string(),
+            description: Some(text.to_string()),
+        });
+    }
+
+    if lower.starts_with("copy ") {
+        let (target, _) = parse_target(&text[5..]);
+        return Some(Effect::CopySpell { target });
+    }
+
+    if lower.starts_with("transform ") || lower == "transform" {
+        return Some(Effect::Unimplemented {
+            name: "transform".to_string(),
+            description: Some(text.to_string()),
+        });
+    }
+
+    if lower.starts_with("attach ") {
+        let to_pos = lower.find(" to ").map(|p| p + 4).unwrap_or(7);
+        let (target, _) = parse_target(&text[to_pos..]);
+        return Some(Effect::Attach { target });
     }
 
     None
