@@ -1,6 +1,6 @@
 use super::oracle_effect::parse_effect_chain;
 use super::oracle_target::parse_type_phrase;
-use super::oracle_util::{parse_number, strip_reminder_text};
+use super::oracle_util::{parse_number, parse_ordinal, strip_reminder_text};
 use crate::types::ability::{
     AbilityKind, ControllerRef, FilterProp, TargetFilter, TriggerCondition, TriggerConstraint,
     TriggerDefinition, TypedFilter,
@@ -53,8 +53,10 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     def.optional = optional;
     def.condition = if_condition;
 
-    // Check for constraint phrases in the full text
-    def.constraint = parse_trigger_constraint(&lower);
+    // Check for constraint phrases in the full text.
+    // Text-based constraints take precedence; fall back to any constraint already set
+    // by the trigger condition parser (e.g. NthSpellThisTurn from try_parse_nth_spell_trigger).
+    def.constraint = parse_trigger_constraint(&lower).or(def.constraint.take());
 
     def
 }
@@ -440,8 +442,11 @@ fn try_parse_event(
         return Some((TriggerMode::ChangesZone, def));
     }
 
-    // "dies"
-    if rest.starts_with("dies") {
+    // "dies" / "is put into a graveyard from the battlefield" (synonym per MTG rule 700.4)
+    if rest.starts_with("dies")
+        || rest.starts_with("is put into a graveyard from the battlefield")
+        || rest.starts_with("are put into a graveyard from the battlefield")
+    {
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZone;
         def.origin = Some(Zone::Battlefield);
@@ -473,6 +478,15 @@ fn try_parse_event(
         def.mode = TriggerMode::Attacks;
         def.valid_card = Some(subject.clone());
         return Some((TriggerMode::Attacks, def));
+    }
+
+    // "blocks" — fires for the blocking creature.
+    // "blocks or becomes blocked" is parsed as Blocks only (blocker side).
+    if rest.starts_with("blocks") {
+        let mut def = make_base();
+        def.mode = TriggerMode::Blocks;
+        def.valid_card = Some(subject.clone());
+        return Some((TriggerMode::Blocks, def));
     }
 
     // "leaves the battlefield"
@@ -554,6 +568,16 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::LifeGained, def));
     }
 
+    // "whenever you cast your Nth spell each turn" — must precede generic "you cast a"
+    if let Some(result) = try_parse_nth_spell_trigger(lower) {
+        return Some(result);
+    }
+
+    // "whenever you draw your Nth card each turn" — must precede generic "you draw a card"
+    if let Some(result) = try_parse_nth_draw_trigger(lower) {
+        return Some(result);
+    }
+
     if lower.contains("you cast a") || lower.contains("you cast an") {
         let mut def = make_base();
         def.mode = TriggerMode::SpellCast;
@@ -622,6 +646,54 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     }
 
     None
+}
+
+/// Parse "whenever you cast your Nth spell each turn" (or "in a turn") into a SpellCast
+/// trigger with a NthSpellThisTurn constraint.
+fn try_parse_nth_spell_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    // Pattern: "you cast your <ordinal> [noncreature] spell each turn" / "in a turn"
+    let prefix = "you cast your ";
+    let pos = lower.find(prefix)?;
+    let after = &lower[pos + prefix.len()..];
+    let (n, rest) = parse_ordinal(after)?;
+    // skip optional type qualifier (e.g. "noncreature")
+    let after_qualifier = skip_to_word(rest, "spell");
+    if after_qualifier.starts_with("spell each turn")
+        || after_qualifier.starts_with("spell in a turn")
+    {
+        let mut def = make_base();
+        def.mode = TriggerMode::SpellCast;
+        def.constraint = Some(TriggerConstraint::NthSpellThisTurn { n });
+        return Some((TriggerMode::SpellCast, def));
+    }
+    None
+}
+
+/// Parse "whenever you draw your Nth card each turn" (or "in a turn") into a Drawn trigger
+/// with a NthDrawThisTurn constraint.
+fn try_parse_nth_draw_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    // Pattern: "you draw your <ordinal> card each turn" / "in a turn"
+    let prefix = "you draw your ";
+    let pos = lower.find(prefix)?;
+    let after = &lower[pos + prefix.len()..];
+    let (n, rest) = parse_ordinal(after)?;
+    if rest.starts_with("card each turn") || rest.starts_with("card in a turn") {
+        let mut def = make_base();
+        def.mode = TriggerMode::Drawn;
+        def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n });
+        return Some((TriggerMode::Drawn, def));
+    }
+    None
+}
+
+/// Skip past words before a target word, returning the text from that word onward.
+/// If the target word is not found, returns the original text.
+fn skip_to_word<'a>(text: &'a str, word: &str) -> &'a str {
+    if let Some(pos) = text.find(word) {
+        &text[pos..]
+    } else {
+        text
+    }
 }
 
 /// Parse counter-placement triggers from Oracle text.
@@ -1338,5 +1410,119 @@ mod tests {
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         assert!(def.trigger_zones.contains(&Zone::Graveyard));
         assert!(def.optional);
+    }
+
+    #[test]
+    fn trigger_nth_spell_second() {
+        let def = parse_trigger_line(
+            "Whenever you cast your second spell each turn, draw a card.",
+            "Spectral Sailor",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::NthSpellThisTurn { n: 2 })
+        );
+    }
+
+    #[test]
+    fn trigger_nth_spell_third() {
+        let def = parse_trigger_line(
+            "Whenever you cast your third spell each turn, create a 1/1 token.",
+            "Some Card",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::NthSpellThisTurn { n: 3 })
+        );
+    }
+
+    #[test]
+    fn trigger_nth_draw_second() {
+        let def = parse_trigger_line(
+            "Whenever you draw your second card each turn, you gain 1 life.",
+            "Some Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Drawn);
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::NthDrawThisTurn { n: 2 })
+        );
+    }
+
+    #[test]
+    fn trigger_put_into_graveyard_from_battlefield_self() {
+        // "is put into a graveyard from the battlefield" is a synonym for "dies" (MTG rule 700.4)
+        let def = parse_trigger_line(
+            "When ~ is put into a graveyard from the battlefield, return ~ to its owner's hand.",
+            "Rancor",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.origin, Some(Zone::Battlefield));
+        assert_eq!(def.destination, Some(Zone::Graveyard));
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_put_into_graveyard_from_battlefield_another_creature() {
+        // plural "are put into a graveyard from the battlefield"
+        let def = parse_trigger_line(
+            "Whenever a creature you control is put into a graveyard from the battlefield, you gain 1 life.",
+            "Some Card",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.origin, Some(Zone::Battlefield));
+        assert_eq!(def.destination, Some(Zone::Graveyard));
+    }
+
+    #[test]
+    fn trigger_blocks_self() {
+        let def = parse_trigger_line(
+            "Whenever Sustainer of the Realm blocks, it gains +0/+2 until end of turn.",
+            "Sustainer of the Realm",
+        );
+        assert_eq!(def.mode, TriggerMode::Blocks);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_blocks_when_prefix() {
+        let def = parse_trigger_line(
+            "When Stoic Ephemera blocks, it deals 5 damage to each creature blocking or blocked by it.",
+            "Stoic Ephemera",
+        );
+        assert_eq!(def.mode, TriggerMode::Blocks);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_blocks_a_creature() {
+        let def = parse_trigger_line(
+            "Whenever Wall of Frost blocks a creature, that creature doesn't untap during its controller's next untap step.",
+            "Wall of Frost",
+        );
+        assert_eq!(def.mode, TriggerMode::Blocks);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_blocks_or_becomes_blocked() {
+        // "blocks or becomes blocked" — parsed as Blocks (blocker side)
+        let def = parse_trigger_line(
+            "Whenever Karn, Silver Golem blocks or becomes blocked, it gets -4/+4 until end of turn.",
+            "Karn, Silver Golem",
+        );
+        assert_eq!(def.mode, TriggerMode::Blocks);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_creature_you_control_blocks() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control blocks, draw a card.",
+            "Some Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Blocks);
     }
 }

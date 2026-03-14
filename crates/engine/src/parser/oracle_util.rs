@@ -82,6 +82,43 @@ pub fn parse_number(text: &str) -> Option<(u32, &str)> {
     None
 }
 
+/// Parse an English ordinal number word at the start of text.
+/// Returns (value, remaining_text) or None.
+/// Handles "second" = 2, "third" = 3, "fourth" = 4, etc.
+pub fn parse_ordinal(text: &str) -> Option<(u32, &str)> {
+    let text = text.trim_start();
+    let ordinals: &[(&str, u32)] = &[
+        ("twentieth", 20),
+        ("nineteenth", 19),
+        ("eighteenth", 18),
+        ("seventeenth", 17),
+        ("sixteenth", 16),
+        ("fifteenth", 15),
+        ("fourteenth", 14),
+        ("thirteenth", 13),
+        ("twelfth", 12),
+        ("eleventh", 11),
+        ("tenth", 10),
+        ("ninth", 9),
+        ("eighth", 8),
+        ("seventh", 7),
+        ("sixth", 6),
+        ("fifth", 5),
+        ("fourth", 4),
+        ("third", 3),
+        ("second", 2),
+        ("first", 1),
+    ];
+    let lower = text.to_lowercase();
+    for &(word, val) in ordinals {
+        if lower.starts_with(word) {
+            let rest = &text[word.len()..];
+            return Some((val, rest.trim_start()));
+        }
+    }
+    None
+}
+
 /// Parse mana symbols like `{2}{W}{U}` at the start of text.
 /// Returns (ManaCost, remaining_text) or None.
 pub fn parse_mana_symbols(text: &str) -> Option<(ManaCost, &str)> {

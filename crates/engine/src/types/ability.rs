@@ -1424,6 +1424,12 @@ pub enum TriggerConstraint {
     OncePerGame,
     /// "This ability triggers only during your turn."
     OnlyDuringYourTurn,
+    /// "Whenever you cast your Nth spell each turn" — fires exactly when
+    /// the controller's `spells_cast_this_turn` equals `n`.
+    NthSpellThisTurn { n: u32 },
+    /// "Whenever you draw your Nth card each turn" — fires exactly when
+    /// the controller's `cards_drawn_this_turn` equals `n`.
+    NthDrawThisTurn { n: u32 },
 }
 
 /// Trigger definition with typed fields. Zero params HashMap.

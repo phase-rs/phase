@@ -76,6 +76,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         player.life_gained_this_turn = 0;
         player.life_lost_this_turn = 0;
         player.descended_this_turn = false;
+        player.cards_drawn_this_turn = 0;
     }
 
     // Reset loyalty_activated_this_turn for all permanents controlled by the active player
@@ -154,6 +155,7 @@ pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) {
         .find(|p| p.id == active)
         .expect("active player exists");
     player.has_drawn_this_turn = true;
+    player.cards_drawn_this_turn = player.cards_drawn_this_turn.saturating_add(1);
 }
 
 /// Execute the cleanup step. Returns `Some(WaitingFor)` if the player must

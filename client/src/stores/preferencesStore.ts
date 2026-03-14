@@ -16,6 +16,7 @@ export type BoardBackground = "auto-wubrg" | "none" | (string & {});
 interface PreferencesState {
   cardSize: CardSizePreference;
   hudLayout: HudLayout;
+  followActiveOpponent: boolean;
   logDefaultState: LogDefaultState;
   boardBackground: BoardBackground;
   vfxQuality: VfxQuality;
@@ -35,6 +36,7 @@ interface PreferencesState {
 interface PreferencesActions {
   setCardSize: (size: CardSizePreference) => void;
   setHudLayout: (layout: HudLayout) => void;
+  setFollowActiveOpponent: (enabled: boolean) => void;
   setLogDefaultState: (state: LogDefaultState) => void;
   setBoardBackground: (bg: BoardBackground) => void;
   setVfxQuality: (quality: VfxQuality) => void;
@@ -56,6 +58,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     (set) => ({
       cardSize: "medium",
       hudLayout: "inline",
+      followActiveOpponent: false,
       logDefaultState: "closed",
       boardBackground: "auto-wubrg",
       vfxQuality: "full",
@@ -73,6 +76,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
 
       setCardSize: (size) => set({ cardSize: size }),
       setHudLayout: (layout) => set({ hudLayout: layout }),
+      setFollowActiveOpponent: (enabled) => set({ followActiveOpponent: enabled }),
       setLogDefaultState: (state) => set({ logDefaultState: state }),
       setBoardBackground: (bg) => set({ boardBackground: bg }),
       setVfxQuality: (quality) => set({ vfxQuality: quality }),

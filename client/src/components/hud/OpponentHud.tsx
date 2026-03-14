@@ -1,8 +1,9 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 
 import type { PlayerId } from "../../adapter/types.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { partitionByType } from "../../viewmodel/battlefieldProps.ts";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
@@ -16,6 +17,8 @@ export function OpponentHud({ opponentName }: OpponentHudProps) {
   const playerId = usePlayerId();
   const focusedOpponent = useUiStore((s) => s.focusedOpponent) as PlayerId | null;
   const setFocusedOpponent = useUiStore((s) => s.setFocusedOpponent);
+  const followActiveOpponent = usePreferencesStore((s) => s.followActiveOpponent);
+  const setFollowActiveOpponent = usePreferencesStore((s) => s.setFollowActiveOpponent);
   const gameState = useGameStore((s) => s.gameState);
 
   const teamBased = gameState?.format_config?.team_based ?? false;
@@ -29,6 +32,24 @@ export function OpponentHud({ opponentName }: OpponentHudProps) {
   const eliminated = gameState?.eliminated_players ?? [];
   const liveOpponents = allOpponents.filter((id) => !eliminated.includes(id));
   const isMultiplayer = allOpponents.length > 1;
+
+  useEffect(() => {
+    const activeOpponentId = gameState?.active_player;
+    if (!followActiveOpponent || !isMultiplayer || activeOpponentId == null) {
+      return;
+    }
+    if (!liveOpponents.includes(activeOpponentId) || focusedOpponent === activeOpponentId) {
+      return;
+    }
+    setFocusedOpponent(activeOpponentId);
+  }, [
+    followActiveOpponent,
+    focusedOpponent,
+    gameState?.active_player,
+    isMultiplayer,
+    liveOpponents,
+    setFocusedOpponent,
+  ]);
 
   if (!isMultiplayer) {
     // 1v1: single opponent pill (existing design)
@@ -63,6 +84,18 @@ export function OpponentHud({ opponentName }: OpponentHudProps) {
           onClick={() => setFocusedOpponent(opId)}
         />
       ))}
+      <button
+        type="button"
+        aria-pressed={followActiveOpponent}
+        onClick={() => setFollowActiveOpponent(!followActiveOpponent)}
+        className={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${
+          followActiveOpponent
+            ? "border-amber-400 bg-amber-400/15 text-amber-200"
+            : "border-gray-600 bg-gray-900/80 text-gray-400 hover:border-gray-400 hover:text-gray-200"
+        }`}
+      >
+        Follow
+      </button>
     </div>
   );
 }

@@ -6,9 +6,7 @@ expression: result
   "abilities": [],
   "triggers": [
     {
-      "mode": {
-        "Unknown": "When ~ is put into a graveyard from the battlefield"
-      },
+      "mode": "ChangesZone",
       "execute": {
         "kind": "Spell",
         "effect": {
@@ -27,9 +25,11 @@ expression: result
         "condition": null,
         "optional_targeting": false
       },
-      "valid_card": null,
-      "origin": null,
-      "destination": null,
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "origin": "Battlefield",
+      "destination": "Graveyard",
       "trigger_zones": [
         "Battlefield"
       ],
@@ -39,7 +39,7 @@ expression: result
       "secondary": false,
       "valid_target": null,
       "valid_source": null,
-      "description": "When ~ is put into a graveyard from the battlefield",
+      "description": null,
       "constraint": null,
       "condition": null
     }

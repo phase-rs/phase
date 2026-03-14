@@ -10,6 +10,7 @@ describe("preferencesStore", () => {
       usePreferencesStore.setState({
         cardSize: "medium",
         hudLayout: "inline",
+        followActiveOpponent: false,
         logDefaultState: "closed",
         boardBackground: "auto-wubrg",
         vfxQuality: "full",
@@ -31,6 +32,7 @@ describe("preferencesStore", () => {
 
     expect(state.cardSize).toBe("medium");
     expect(state.hudLayout).toBe("inline");
+    expect(state.followActiveOpponent).toBe(false);
     expect(state.logDefaultState).toBe("closed");
     expect(state.boardBackground).toBe("auto-wubrg");
   });
@@ -49,6 +51,14 @@ describe("preferencesStore", () => {
     });
 
     expect(usePreferencesStore.getState().hudLayout).toBe("floating");
+  });
+
+  it("setFollowActiveOpponent updates the value", () => {
+    act(() => {
+      usePreferencesStore.getState().setFollowActiveOpponent(true);
+    });
+
+    expect(usePreferencesStore.getState().followActiveOpponent).toBe(true);
   });
 
   it("setLogDefaultState updates log default state", () => {
@@ -119,6 +129,7 @@ describe("preferencesStore", () => {
   it("persists to localStorage with phase-preferences key", () => {
     act(() => {
       usePreferencesStore.getState().setCardSize("small");
+      usePreferencesStore.getState().setFollowActiveOpponent(true);
     });
 
     // Zustand persist writes to localStorage
@@ -127,6 +138,7 @@ describe("preferencesStore", () => {
 
     const parsed = JSON.parse(stored!);
     expect(parsed.state.cardSize).toBe("small");
+    expect(parsed.state.followActiveOpponent).toBe(true);
   });
 
   // --- Audio preferences ---
@@ -222,6 +234,7 @@ describe("preferencesStore", () => {
       state: {
         cardSize: "large",
         hudLayout: "floating",
+        followActiveOpponent: true,
         logDefaultState: "open",
         boardBackground: "green",
       },
@@ -237,6 +250,7 @@ describe("preferencesStore", () => {
     const state = usePreferencesStore.getState();
     expect(state.cardSize).toBe("large");
     expect(state.hudLayout).toBe("floating");
+    expect(state.followActiveOpponent).toBe(true);
     expect(state.logDefaultState).toBe("open");
     expect(state.boardBackground).toBe("green");
   });

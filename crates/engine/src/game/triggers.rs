@@ -307,6 +307,12 @@ fn check_trigger_constraint(
         TriggerConstraint::OncePerTurn => !state.triggers_fired_this_turn.contains(&key),
         TriggerConstraint::OncePerGame => !state.triggers_fired_this_game.contains(&key),
         TriggerConstraint::OnlyDuringYourTurn => state.active_player == controller,
+        TriggerConstraint::NthSpellThisTurn { n } => state.spells_cast_this_turn as u32 == *n,
+        TriggerConstraint::NthDrawThisTurn { n } => state
+            .players
+            .iter()
+            .find(|p| p.id == controller)
+            .is_some_and(|p| p.cards_drawn_this_turn == *n),
     }
 }
 
@@ -383,8 +389,10 @@ fn record_trigger_fired(
         TriggerConstraint::OncePerGame => {
             state.triggers_fired_this_game.insert(key);
         }
-        TriggerConstraint::OnlyDuringYourTurn => {
-            // No tracking needed — checked at fire time via active_player
+        TriggerConstraint::OnlyDuringYourTurn
+        | TriggerConstraint::NthSpellThisTurn { .. }
+        | TriggerConstraint::NthDrawThisTurn { .. } => {
+            // No tracking needed — checked at fire time via game/player state
         }
     }
 }
@@ -1082,13 +1090,22 @@ fn match_attackers_declared(
 
 fn match_blocks(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
+    trigger: &TriggerDefinition,
     source_id: ObjectId,
-    _state: &GameState,
+    state: &GameState,
 ) -> bool {
     if let GameEvent::BlockersDeclared { assignments } = event {
-        // Blocks trigger: source creature is among blockers
-        assignments.iter().any(|(blocker, _)| *blocker == source_id)
+        if trigger.valid_card.is_some() {
+            // valid_card filter: check if any blocker in the assignments matches.
+            // For self-reference ("Whenever ~ blocks"), this fires when source_id is a blocker.
+            // For typed filters ("Whenever a creature you control blocks"), check each blocker.
+            assignments
+                .iter()
+                .any(|(blocker, _)| valid_card_matches(trigger, state, *blocker, source_id))
+        } else {
+            // No filter: fire if source itself is among blockers
+            assignments.iter().any(|(blocker, _)| *blocker == source_id)
+        }
     } else {
         false
     }

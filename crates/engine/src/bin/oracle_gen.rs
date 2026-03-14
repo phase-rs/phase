@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use engine::database::legality::{legalities_to_export_map, normalize_legalities};
 use engine::database::mtgjson::{load_atomic_cards, parse_mtgjson_mana_cost, AtomicCard};
+use engine::game::coverage::card_face_has_unimplemented_parts;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, ControllerRef, Effect,
@@ -131,7 +132,7 @@ fn main() {
             if stats {
                 let has_unimplemented = layout_faces(&layout)
                     .iter()
-                    .any(|f| face_has_unimplemented(f));
+                    .any(|f| card_face_has_unimplemented_parts(f));
                 if has_unimplemented {
                     cards_with_unimplemented += 1;
                 }
@@ -153,7 +154,7 @@ fn main() {
             let key = face.name.to_lowercase();
             let legalities = legalities_to_export_map(&normalize_legalities(&faces[0].legalities));
 
-            if stats && face_has_unimplemented(&face) {
+            if stats && card_face_has_unimplemented_parts(&face) {
                 cards_with_unimplemented += 1;
             }
 
@@ -270,17 +271,6 @@ fn build_oracle_face(mtgjson: &AtomicCard, oracle_id: Option<String>) -> CardFac
     synthesize_equip(&mut face);
     synthesize_kicker(&mut face);
     face
-}
-
-fn face_has_unimplemented(face: &CardFace) -> bool {
-    face.abilities
-        .iter()
-        .any(|a| matches!(&a.effect, Effect::Unimplemented { .. }))
-        || face.triggers.iter().any(|t| {
-            t.execute
-                .as_ref()
-                .is_some_and(|a| matches!(&a.effect, Effect::Unimplemented { .. }))
-        })
 }
 
 // ---------------------------------------------------------------------------

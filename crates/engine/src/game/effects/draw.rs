@@ -50,6 +50,10 @@ pub fn resolve(
                         player_id,
                         object_id: obj_id,
                     });
+                    if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
+                        player.cards_drawn_this_turn =
+                            player.cards_drawn_this_turn.saturating_add(1);
+                    }
                 }
             }
         }

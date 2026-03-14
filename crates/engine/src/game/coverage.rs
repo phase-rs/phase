@@ -2,7 +2,11 @@ use crate::database::CardDatabase;
 use crate::game::game_object::GameObject;
 use crate::game::static_abilities::{build_static_registry, StaticAbilityHandler};
 use crate::game::triggers::build_trigger_registry;
-use crate::types::ability::{AbilityDefinition, Effect, StaticDefinition, TriggerDefinition};
+use crate::types::ability::{
+    AbilityCost, AbilityDefinition, AdditionalCost, Effect, ReplacementDefinition, ReplacementMode,
+    StaticDefinition, TriggerDefinition,
+};
+use crate::types::card::CardFace;
 use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
@@ -84,6 +88,9 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         // Check abilities
         check_abilities(&face.abilities, &mut missing);
 
+        // Check additional cost
+        check_additional_cost(&face.additional_cost, &mut missing);
+
         // Check triggers
         check_triggers(&face.triggers, &trigger_registry, &mut missing);
 
@@ -92,6 +99,9 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
 
         // Check static abilities
         check_statics(&face.static_abilities, &static_registry, &mut missing);
+
+        // Check replacements
+        check_replacements(&face.replacements, &mut missing);
 
         let supported = missing.is_empty();
 
@@ -127,14 +137,22 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
     }
 }
 
+pub fn card_face_has_unimplemented_parts(face: &CardFace) -> bool {
+    ability_definitions_have_unimplemented_parts(&face.abilities)
+        || face
+            .additional_cost
+            .as_ref()
+            .is_some_and(additional_cost_has_unimplemented_parts)
+        || face.triggers.iter().any(trigger_has_unimplemented_parts)
+        || face
+            .replacements
+            .iter()
+            .any(replacement_has_unimplemented_parts)
+}
+
 fn check_abilities(abilities: &[AbilityDefinition], missing: &mut Vec<String>) {
     for def in abilities {
-        if let Effect::Unimplemented { name, .. } = &def.effect {
-            let label = format!("Effect:{name}");
-            if !missing.contains(&label) {
-                missing.push(label);
-            }
-        }
+        collect_ability_missing_parts(def, missing);
     }
 }
 
@@ -144,6 +162,9 @@ fn check_triggers(
     missing: &mut Vec<String>,
 ) {
     for def in triggers {
+        if let Some(execute) = &def.execute {
+            collect_ability_missing_parts(execute, missing);
+        }
         if matches!(&def.mode, TriggerMode::Unknown(_)) || !trigger_registry.contains_key(&def.mode)
         {
             let label = format!("Trigger:{}", def.mode);
@@ -165,6 +186,12 @@ fn check_keywords(keywords: &[Keyword], missing: &mut Vec<String>) {
     }
 }
 
+fn check_additional_cost(additional_cost: &Option<AdditionalCost>, missing: &mut Vec<String>) {
+    if let Some(additional_cost) = additional_cost {
+        collect_additional_cost_missing_parts(additional_cost, missing);
+    }
+}
+
 fn check_statics(
     statics: &[StaticDefinition],
     static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
@@ -180,6 +207,132 @@ fn check_statics(
     }
 }
 
+fn check_replacements(replacements: &[ReplacementDefinition], missing: &mut Vec<String>) {
+    for def in replacements {
+        if let Some(execute) = &def.execute {
+            collect_ability_missing_parts(execute, missing);
+        }
+
+        if let ReplacementMode::Optional {
+            decline: Some(decline),
+        } = &def.mode
+        {
+            collect_ability_missing_parts(decline, missing);
+        }
+    }
+}
+
+fn ability_definitions_have_unimplemented_parts(abilities: &[AbilityDefinition]) -> bool {
+    abilities
+        .iter()
+        .any(ability_definition_has_unimplemented_parts)
+}
+
+fn trigger_has_unimplemented_parts(trigger: &TriggerDefinition) -> bool {
+    trigger
+        .execute
+        .as_ref()
+        .is_some_and(|execute| ability_definition_has_unimplemented_parts(execute))
+}
+
+fn replacement_has_unimplemented_parts(replacement: &ReplacementDefinition) -> bool {
+    replacement
+        .execute
+        .as_ref()
+        .is_some_and(|execute| ability_definition_has_unimplemented_parts(execute))
+        || matches!(
+            &replacement.mode,
+            ReplacementMode::Optional {
+                decline: Some(decline),
+            } if ability_definition_has_unimplemented_parts(decline)
+        )
+}
+
+fn ability_definition_has_unimplemented_parts(def: &AbilityDefinition) -> bool {
+    matches!(def.effect, Effect::Unimplemented { .. })
+        || def
+            .cost
+            .as_ref()
+            .is_some_and(ability_cost_has_unimplemented_parts)
+        || def
+            .sub_ability
+            .as_ref()
+            .is_some_and(|sub| ability_definition_has_unimplemented_parts(sub))
+        || def
+            .mode_abilities
+            .iter()
+            .any(ability_definition_has_unimplemented_parts)
+}
+
+fn additional_cost_has_unimplemented_parts(additional_cost: &AdditionalCost) -> bool {
+    match additional_cost {
+        AdditionalCost::Optional(cost) => ability_cost_has_unimplemented_parts(cost),
+        AdditionalCost::Choice(first, second) => {
+            ability_cost_has_unimplemented_parts(first)
+                || ability_cost_has_unimplemented_parts(second)
+        }
+    }
+}
+
+fn ability_cost_has_unimplemented_parts(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Composite { costs } => costs.iter().any(ability_cost_has_unimplemented_parts),
+        AbilityCost::Unimplemented { .. } => true,
+        _ => false,
+    }
+}
+
+fn collect_ability_missing_parts(def: &AbilityDefinition, missing: &mut Vec<String>) {
+    if let Effect::Unimplemented { name, .. } = &def.effect {
+        let label = format!("Effect:{name}");
+        if !missing.contains(&label) {
+            missing.push(label);
+        }
+    }
+
+    if let Some(cost) = &def.cost {
+        collect_ability_cost_missing_parts(cost, missing);
+    }
+
+    if let Some(sub_ability) = &def.sub_ability {
+        collect_ability_missing_parts(sub_ability, missing);
+    }
+
+    for mode_ability in &def.mode_abilities {
+        collect_ability_missing_parts(mode_ability, missing);
+    }
+}
+
+fn collect_additional_cost_missing_parts(
+    additional_cost: &AdditionalCost,
+    missing: &mut Vec<String>,
+) {
+    match additional_cost {
+        AdditionalCost::Optional(cost) => collect_ability_cost_missing_parts(cost, missing),
+        AdditionalCost::Choice(first, second) => {
+            collect_ability_cost_missing_parts(first, missing);
+            collect_ability_cost_missing_parts(second, missing);
+        }
+    }
+}
+
+fn collect_ability_cost_missing_parts(cost: &AbilityCost, missing: &mut Vec<String>) {
+    match cost {
+        AbilityCost::Composite { costs } => {
+            for nested_cost in costs {
+                collect_ability_cost_missing_parts(nested_cost, missing);
+            }
+        }
+        AbilityCost::Unimplemented { description } => {
+            let label = format!("Cost:{description}");
+            if !missing.contains(&label) {
+                missing.push(label);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Returns `true` if the coverage summary shows 100% support (CI pass).
 /// Returns `false` if there are any unsupported cards (CI fail).
 pub fn is_fully_covered(summary: &CoverageSummary) -> bool {
@@ -190,8 +343,10 @@ pub fn is_fully_covered(summary: &CoverageSummary) -> bool {
 mod tests {
     use super::*;
     use crate::types::ability::{AbilityKind, DamageAmount, Effect, TargetFilter};
+    use crate::types::card_type::CardType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::Zone;
 
     fn make_obj() -> GameObject {
@@ -260,5 +415,89 @@ mod tests {
         assert!(!obj.has_unimplemented_mechanics());
         obj.keywords.push(Keyword::Unknown("Bogus".to_string()));
         assert!(obj.has_unimplemented_mechanics());
+    }
+
+    fn make_face() -> CardFace {
+        CardFace {
+            name: "Test Card".to_string(),
+            mana_cost: Default::default(),
+            card_type: CardType::default(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            oracle_text: None,
+            non_ability_text: None,
+            flavor_name: None,
+            keywords: vec![],
+            abilities: vec![],
+            triggers: vec![],
+            static_abilities: vec![],
+            replacements: vec![],
+            color_override: None,
+            scryfall_oracle_id: None,
+            modal: None,
+            additional_cost: None,
+        }
+    }
+
+    #[test]
+    fn card_face_with_nested_mode_unimplemented_is_detected() {
+        let mut face = make_face();
+        face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "modal".to_string(),
+                    description: None,
+                },
+            )
+            .with_modal(
+                crate::types::ability::ModalChoice {
+                    min_choices: 1,
+                    max_choices: 1,
+                    mode_count: 1,
+                    mode_descriptions: vec!["Mode".to_string()],
+                },
+                vec![AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Unimplemented {
+                        name: "nested".to_string(),
+                        description: None,
+                    },
+                )],
+            ),
+        );
+
+        assert!(card_face_has_unimplemented_parts(&face));
+    }
+
+    #[test]
+    fn card_face_with_unimplemented_additional_cost_is_detected() {
+        let mut face = make_face();
+        face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Unimplemented {
+            description: "mystery cost".to_string(),
+        }));
+
+        assert!(card_face_has_unimplemented_parts(&face));
+    }
+
+    #[test]
+    fn card_face_with_replacement_decline_unimplemented_is_detected() {
+        let mut face = make_face();
+        face.replacements
+            .push(ReplacementDefinition::new(ReplacementEvent::Draw).mode(
+                ReplacementMode::Optional {
+                    decline: Some(Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Unimplemented {
+                            name: "decline".to_string(),
+                            description: None,
+                        },
+                    ))),
+                },
+            ));
+
+        assert!(card_face_has_unimplemented_parts(&face));
     }
 }
