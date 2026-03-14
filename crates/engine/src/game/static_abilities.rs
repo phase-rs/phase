@@ -133,6 +133,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
         "CantExistWithout",
         "LeavesPlay",
         "ChangesZoneAll",
+        "NoMaximumHandSize",
+        "MayPlayAdditionalLand",
+        "MayChooseNotToUntap",
     ];
     for mode in &stubs {
         registry.insert(StaticMode::Other((*mode).into()), handle_stub);

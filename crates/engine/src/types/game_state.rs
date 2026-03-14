@@ -667,6 +667,8 @@ mod tests {
                     max_choices: 1,
                     mode_count: 3,
                     mode_descriptions: vec![],
+                    allow_repeat_modes: false,
+                    constraints: vec![],
                 },
                 pending_cast: Box::new(PendingCast {
                     object_id: ObjectId(1),
@@ -715,6 +717,8 @@ mod tests {
                     max_choices: 1,
                     mode_count: 2,
                     mode_descriptions: vec![],
+                    allow_repeat_modes: false,
+                    constraints: vec![],
                 },
                 source_id: ObjectId(1),
                 mode_abilities: vec![],

@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
-    AbilityDefinition, AdditionalCost, BasicLandType, ChosenAttribute, ChosenSubtypeKind,
-    ModalChoice, ReplacementDefinition, StaticDefinition, TriggerDefinition,
+    AbilityDefinition, AdditionalCost, BasicLandType, CastingRestriction, ChosenAttribute,
+    ChosenSubtypeKind, ModalChoice, ReplacementDefinition, SpellCastingOption, StaticDefinition,
+    TriggerDefinition,
 };
 use crate::types::card_type::CardType;
 use crate::types::identifiers::{CardId, ObjectId};
@@ -125,6 +126,14 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_cost: Option<AdditionalCost>,
 
+    /// Spell-casting restrictions. Copied from CardFace at load time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub casting_restrictions: Vec<CastingRestriction>,
+
+    /// Spell-casting options. Copied from CardFace at load time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub casting_options: Vec<SpellCastingOption>,
+
     /// Choices made as this permanent entered (e.g., "choose a color").
     /// Persists for the object's lifetime on the battlefield.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -175,6 +184,8 @@ impl GameObject {
             is_commander: false,
             modal: None,
             additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
             chosen_attributes: Vec::new(),
         }
     }

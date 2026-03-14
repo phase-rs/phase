@@ -130,11 +130,13 @@ pub fn parse_mana_symbols(text: &str) -> Option<(ManaCost, &str)> {
     let mut generic: u32 = 0;
     let mut shards = Vec::new();
     let mut pos = 0;
+    let mut parsed_any = false;
 
     while pos < text.len() && text[pos..].starts_with('{') {
         let end = text[pos..].find('}')? + pos;
         let symbol = &text[pos + 1..end];
         pos = end + 1;
+        parsed_any = true;
 
         match symbol {
             "W" => shards.push(ManaCostShard::White),
@@ -177,7 +179,7 @@ pub fn parse_mana_symbols(text: &str) -> Option<(ManaCost, &str)> {
         }
     }
 
-    if shards.is_empty() && generic == 0 {
+    if !parsed_any {
         return None;
     }
 
@@ -363,6 +365,19 @@ mod tests {
                 shards: vec![ManaCostShard::GreenWhite]
             }
         );
+    }
+
+    #[test]
+    fn parse_mana_symbols_zero() {
+        let (cost, rest) = parse_mana_symbols("{0}").unwrap();
+        assert_eq!(
+            cost,
+            ManaCost::Cost {
+                generic: 0,
+                shards: vec![],
+            }
+        );
+        assert_eq!(rest, "");
     }
 
     #[test]

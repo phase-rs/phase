@@ -710,6 +710,61 @@ pub enum AdditionalCost {
     Choice(AbilityCost, AbilityCost),
 }
 
+/// Structured spell-casting options parsed from Oracle text.
+/// These describe alternate ways a spell may be cast; runtime enforcement can
+/// be added independently of parsing/export support.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SpellCastingOption {
+    pub kind: SpellCastingOptionKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<AbilityCost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+}
+
+impl SpellCastingOption {
+    pub fn alternative_cost(cost: AbilityCost) -> Self {
+        Self {
+            kind: SpellCastingOptionKind::AlternativeCost,
+            cost: Some(cost),
+            condition: None,
+        }
+    }
+
+    pub fn free_cast() -> Self {
+        Self {
+            kind: SpellCastingOptionKind::CastWithoutManaCost,
+            cost: None,
+            condition: None,
+        }
+    }
+
+    pub fn as_though_had_flash() -> Self {
+        Self {
+            kind: SpellCastingOptionKind::AsThoughHadFlash,
+            cost: None,
+            condition: None,
+        }
+    }
+
+    pub fn cost(mut self, cost: AbilityCost) -> Self {
+        self.cost = Some(cost);
+        self
+    }
+
+    pub fn condition(mut self, condition: impl Into<String>) -> Self {
+        self.condition = Some(condition.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum SpellCastingOptionKind {
+    AlternativeCost,
+    CastWithoutManaCost,
+    AsThoughHadFlash,
+}
+
 // ---------------------------------------------------------------------------
 // Effect enum -- typed variants, zero HashMap
 // ---------------------------------------------------------------------------
@@ -1241,6 +1296,60 @@ pub struct ModalChoice {
     /// Short description of each mode (bullet text from Oracle).
     #[serde(default)]
     pub mode_descriptions: Vec<String>,
+    /// Whether the same mode may be chosen multiple times.
+    #[serde(default)]
+    pub allow_repeat_modes: bool,
+    /// Additional selection constraints parsed from modal reminder text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constraints: Vec<ModalSelectionConstraint>,
+}
+
+/// Selection constraints attached to a modal choice header.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum ModalSelectionConstraint {
+    DifferentTargetPlayers,
+}
+
+/// Structured activation-time restrictions parsed from Oracle text.
+/// These describe when an activated ability may be activated; runtime
+/// enforcement can be added independently of parsing/export support.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", content = "data")]
+pub enum ActivationRestriction {
+    AsSorcery,
+    AsInstant,
+    DuringYourTurn,
+    DuringYourUpkeep,
+    DuringCombat,
+    BeforeAttackersDeclared,
+    BeforeCombatDamage,
+    OnlyOnceEachTurn,
+    OnlyOnce,
+    MaxTimesEachTurn { count: u8 },
+    RequiresCondition { text: String },
+}
+
+/// Structured spell-casting restrictions parsed from Oracle text.
+/// These describe when a spell may be cast. Runtime enforcement can
+/// be added independently of parsing/export support.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", content = "data")]
+pub enum CastingRestriction {
+    DuringCombat,
+    DuringOpponentsTurn,
+    DuringYourTurn,
+    DuringYourUpkeep,
+    DuringOpponentsUpkeep,
+    DuringYourEndStep,
+    DuringOpponentsEndStep,
+    DeclareAttackersStep,
+    DeclareBlockersStep,
+    BeforeAttackersDeclared,
+    BeforeBlockersDeclared,
+    BeforeCombatDamage,
+    AfterCombat,
+    RequiresCondition { text: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -1264,6 +1373,8 @@ pub struct AbilityDefinition {
     pub target_prompt: Option<String>,
     #[serde(default)]
     pub sorcery_speed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub activation_restrictions: Vec<ActivationRestriction>,
     /// Condition that must be met for this ability to execute during resolution.
     #[serde(default)]
     pub condition: Option<AbilityCondition>,
@@ -1293,6 +1404,7 @@ impl AbilityDefinition {
             description: None,
             target_prompt: None,
             sorcery_speed: false,
+            activation_restrictions: Vec::new(),
             condition: None,
             optional_targeting: false,
             modal: None,
@@ -1327,6 +1439,11 @@ impl AbilityDefinition {
 
     pub fn sorcery_speed(mut self) -> Self {
         self.sorcery_speed = true;
+        self
+    }
+
+    pub fn activation_restrictions(mut self, restrictions: Vec<ActivationRestriction>) -> Self {
+        self.activation_restrictions = restrictions;
         self
     }
 
@@ -2410,6 +2527,8 @@ mod modal_ability_tests {
             max_choices: 1,
             mode_count: 2,
             mode_descriptions: vec!["Draw a card.".to_string(), "Gain 3 life.".to_string()],
+            allow_repeat_modes: false,
+            constraints: vec![],
         };
         let def = AbilityDefinition::new(
             AbilityKind::Activated,

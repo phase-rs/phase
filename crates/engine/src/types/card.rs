@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    AbilityDefinition, AdditionalCost, ModalChoice, PtValue, ReplacementDefinition,
-    StaticDefinition, TriggerDefinition,
+    AbilityDefinition, AdditionalCost, CastingRestriction, ModalChoice, PtValue,
+    ReplacementDefinition, StaticDefinition, TriggerDefinition,
+    SpellCastingOption,
 };
 use super::card_type::CardType;
 use super::keywords::Keyword;
@@ -36,6 +37,12 @@ pub struct CardFace {
     /// When present, the casting flow prompts the player for a decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_cost: Option<AdditionalCost>,
+    /// Spell-casting restrictions ("Cast this spell only during combat", etc.).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub casting_restrictions: Vec<CastingRestriction>,
+    /// Spell-casting options ("you may pay ... rather than pay this spell's mana cost", etc.).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub casting_options: Vec<SpellCastingOption>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

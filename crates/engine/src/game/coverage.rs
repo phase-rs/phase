@@ -438,6 +438,8 @@ mod tests {
             scryfall_oracle_id: None,
             modal: None,
             additional_cost: None,
+            casting_restrictions: vec![],
+            casting_options: vec![],
         }
     }
 
@@ -458,6 +460,8 @@ mod tests {
                     max_choices: 1,
                     mode_count: 1,
                     mode_descriptions: vec!["Mode".to_string()],
+                    allow_repeat_modes: false,
+                    constraints: vec![],
                 },
                 vec![AbilityDefinition::new(
                     AbilityKind::Spell,

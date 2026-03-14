@@ -273,7 +273,9 @@ pub fn parse_effect(text: &str) -> Effect {
 }
 
 fn parse_effect_clause(text: &str) -> ParsedEffectClause {
-    let text = text.trim().trim_end_matches('.');
+    let text = strip_leading_sequence_connector(text)
+        .trim()
+        .trim_end_matches('.');
     if text.is_empty() {
         return parsed_clause(Effect::Unimplemented {
             name: "empty".to_string(),
@@ -944,7 +946,12 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     let mut defs: Vec<AbilityDefinition> = Vec::new();
 
     for chunk in &chunks {
-        let (condition, text) = strip_additional_cost_conditional(&chunk.text);
+        let normalized_text = strip_leading_sequence_connector(&chunk.text).trim();
+        if normalized_text.is_empty() {
+            continue;
+        }
+
+        let (condition, text) = strip_additional_cost_conditional(normalized_text);
         let clause = parse_effect_clause(&text);
         let mut def = AbilityDefinition::new(kind, clause.effect);
         if let Some(duration) = clause.duration {
@@ -961,7 +968,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
 
         let followup_continuation = defs
             .last()
-            .and_then(|previous| parse_followup_continuation_ast(&chunk.text, &previous.effect))
+            .and_then(|previous| parse_followup_continuation_ast(normalized_text, &previous.effect))
             .and_then(lower_continuation_ast);
         let absorb_followup = followup_continuation.as_ref().is_some_and(|continuation| {
             current_defs
@@ -976,7 +983,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
         }
 
         let intrinsic_continuation =
-            parse_intrinsic_continuation_ast(&chunk.text, &current_defs[0].effect)
+            parse_intrinsic_continuation_ast(normalized_text, &current_defs[0].effect)
                 .and_then(lower_continuation_ast);
         defs.extend(current_defs);
 
@@ -2435,6 +2442,10 @@ fn try_parse_subject_restriction_clause(text: &str) -> Option<ParsedEffectClause
 }
 
 fn parse_subject_application(subject: &str) -> Option<SubjectApplication> {
+    if subject.trim().is_empty() {
+        return None;
+    }
+
     let lower = subject.to_lowercase();
 
     if lower.starts_with("target ") {
@@ -2534,6 +2545,11 @@ fn try_split_pump_compound(
     let and_pos = lower.find(" and ")?;
     let pump_part = &normalized[..and_pos];
     let remainder = normalized[and_pos + " and ".len()..].trim();
+    let (remainder_without_duration, _) = strip_trailing_duration(remainder);
+
+    if !parse_continuous_modifications(remainder_without_duration).is_empty() {
+        return None;
+    }
 
     let (power, toughness, duration) = parse_pump_clause(pump_part)?;
     let effect = build_pump_effect(application, power, toughness);
@@ -2845,6 +2861,21 @@ fn strip_trailing_where_x(text: &str) -> (&str, Option<String>) {
         }
     }
     (text, None)
+}
+
+fn strip_leading_sequence_connector(text: &str) -> &str {
+    let trimmed = text.trim_start();
+
+    if trimmed.eq_ignore_ascii_case("then") {
+        return "";
+    }
+
+    trimmed
+        .strip_prefix("Then, ")
+        .or_else(|| trimmed.strip_prefix("Then "))
+        .or_else(|| trimmed.strip_prefix("then, "))
+        .or_else(|| trimmed.strip_prefix("then "))
+        .unwrap_or(trimmed)
 }
 
 fn apply_where_x_expression(value: PtValue, where_x_expression: Option<&str>) -> PtValue {
@@ -4832,6 +4863,38 @@ mod tests {
     fn effect_all_creatures_gain_keywords_uses_continuous_effect() {
         let e = parse_effect("All creatures gain trample and haste until end of turn");
         assert!(matches!(e, Effect::GenericEffect { target: None, .. }));
+    }
+
+    #[test]
+    fn effect_target_creature_gets_and_gains_keyword_uses_continuous_effect() {
+        let e = parse_effect("Target creature gets +1/+1 and gains trample until end of turn");
+        assert!(matches!(
+            e,
+            Effect::GenericEffect {
+                target: Some(TargetFilter::Typed(TypedFilter {
+                    card_type: Some(TypeFilter::Creature),
+                    ..
+                })),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn effect_chain_ignores_leading_then_clause_connector() {
+        let ability = parse_effect_chain(
+            "Return up to one target creature card from your graveyard to your hand. Then, draw a card.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            ability.effect,
+            Effect::Bounce {
+                destination: None,
+                ..
+            }
+        ));
+        let sub = ability.sub_ability.expect("expected follow-up draw");
+        assert!(matches!(sub.effect, Effect::Draw { count: 1 }));
     }
 
     #[test]

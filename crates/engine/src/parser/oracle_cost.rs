@@ -1,6 +1,8 @@
-use super::oracle_target::parse_target;
+use super::oracle_target::{parse_target, parse_type_phrase};
+use super::oracle_util::parse_number;
 use super::oracle_util::parse_mana_symbols;
-use crate::types::ability::{AbilityCost, TargetFilter};
+use crate::types::ability::{AbilityCost, FilterProp, TargetFilter, TypedFilter};
+use crate::types::zones::Zone;
 
 /// Parse the cost portion before `:` in an Oracle activated ability.
 /// Input: the raw text before the colon, e.g., "{T}", "{2}{W}, Sacrifice a creature", "Pay 3 life".
@@ -22,8 +24,11 @@ fn split_cost_parts(text: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut brace_depth = 0u32;
+    let bytes = text.as_bytes();
+    let mut i = 0;
 
-    for (i, ch) in text.char_indices() {
+    while i < text.len() {
+        let ch = text[i..].chars().next().expect("valid UTF-8");
         match ch {
             '{' => brace_depth += 1,
             '}' => brace_depth = brace_depth.saturating_sub(1),
@@ -34,8 +39,17 @@ fn split_cost_parts(text: &str) -> Vec<&str> {
                 }
                 start = i + 1;
             }
+            ' ' if brace_depth == 0 && bytes[i..].starts_with(b" and ") => {
+                let part = text[start..i].trim();
+                if !part.is_empty() {
+                    parts.push(part);
+                }
+                start = i + " and ".len();
+                i += " and ".len() - 1;
+            }
             _ => {}
         }
+        i += ch.len_utf8();
     }
     let last = text[start..].trim();
     if !last.is_empty() {
@@ -102,9 +116,9 @@ fn parse_single_cost(text: &str) -> AbilityCost {
         return AbilityCost::Sacrifice { target: filter };
     }
 
-    // "Pay N life"
-    if lower.starts_with("pay ") && lower.contains("life") {
-        let rest = &lower[4..];
+    // "Pay N life" / "N life"
+    if (lower.starts_with("pay ") || lower.ends_with(" life")) && lower.contains("life") {
+        let rest = lower.strip_prefix("pay ").unwrap_or(&lower);
         if let Some(n) = rest
             .split_whitespace()
             .next()
@@ -137,25 +151,21 @@ fn parse_single_cost(text: &str) -> AbilityCost {
         };
     }
 
-    // "Exile {filter} from your graveyard"
-    if lower.starts_with("exile ") && lower.contains("from your graveyard") {
-        let rest = &text[6..];
-        let gy_pos = rest
-            .to_lowercase()
-            .find("from your graveyard")
-            .unwrap_or(rest.len());
-        let filter_text = rest[..gy_pos].trim();
-        // Simple: count if starts with number
-        let count = filter_text
-            .split_whitespace()
-            .next()
-            .and_then(|w| w.parse::<u32>().ok())
-            .unwrap_or(1);
-        return AbilityCost::Exile {
-            count,
-            zone: Some(crate::types::zones::Zone::Graveyard),
-            filter: None,
-        };
+    if let Some(rest) = lower.strip_prefix("exile ") {
+        let count = parse_number(rest).map(|(n, _)| n).unwrap_or(1);
+        let filter_start = parse_number(&text[6..])
+            .map(|(_, remaining)| remaining)
+            .unwrap_or(&text[6..]);
+        let filter_text = strip_count_article_prefix(filter_start);
+        let (filter, remainder) = parse_type_phrase(filter_text);
+        if remainder.trim().is_empty() {
+            let zone = extract_filter_zone(&filter);
+            return AbilityCost::Exile {
+                count,
+                zone,
+                filter: Some(filter),
+            };
+        }
     }
 
     // "Blight N"
@@ -182,6 +192,31 @@ fn parse_single_cost(text: &str) -> AbilityCost {
         }
     }
 
+    // "Tap an untapped creature you control" / "Tap two untapped creatures you control"
+    if let Some(rest) = lower.strip_prefix("tap ") {
+        let (count, filter_text) = if let Some(rest) = rest.strip_prefix("an untapped ") {
+            (1, rest)
+        } else if let Some(rest) = rest.strip_prefix("an ") {
+            (1, rest)
+        } else if let Some((n, rest)) = super::oracle_util::parse_number(rest) {
+            let rest = rest
+                .trim_start()
+                .strip_prefix("untapped ")
+                .unwrap_or(rest.trim_start());
+            (n, rest)
+        } else {
+            (0, "")
+        };
+
+        if count > 0 {
+            let target_text = format!("target {filter_text}");
+            let (filter, remainder) = parse_target(&target_text);
+            if remainder.trim().is_empty() {
+                return AbilityCost::TapCreatures { count, filter };
+            }
+        }
+    }
+
     // Mana cost: {N}{W}{U} etc.
     if text.starts_with('{') {
         if let Some((cost, rest)) = parse_mana_symbols(text) {
@@ -193,6 +228,31 @@ fn parse_single_cost(text: &str) -> AbilityCost {
 
     AbilityCost::Unimplemented {
         description: text.to_string(),
+    }
+}
+
+fn strip_count_article_prefix(text: &str) -> &str {
+    let trimmed = text.trim();
+    if let Some(rest) = trimmed.strip_prefix("a ") {
+        return rest;
+    }
+    if let Some(rest) = trimmed.strip_prefix("an ") {
+        return rest;
+    }
+
+    trimmed
+}
+
+fn extract_filter_zone(filter: &TargetFilter) -> Option<Zone> {
+    match filter {
+        TargetFilter::Typed(TypedFilter { properties, .. }) => properties.iter().find_map(|prop| {
+            if let FilterProp::InZone { zone } = prop {
+                Some(*zone)
+            } else {
+                None
+            }
+        }),
+        _ => None,
     }
 }
 
@@ -237,6 +297,19 @@ mod tests {
     }
 
     #[test]
+    fn cost_zero_mana() {
+        assert_eq!(
+            parse_oracle_cost("{0}"),
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![],
+                }
+            }
+        );
+    }
+
+    #[test]
     fn cost_sacrifice_self() {
         assert_eq!(
             parse_oracle_cost("Sacrifice ~"),
@@ -260,6 +333,19 @@ mod tests {
             }
             other => panic!("Expected Sacrifice, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn cost_tap_untapped_creature_you_control() {
+        assert_eq!(
+            parse_oracle_cost("Tap an untapped creature you control"),
+            AbilityCost::TapCreatures {
+                count: 1,
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().controller(crate::types::ability::ControllerRef::You)
+                ),
+            }
+        );
     }
 
     #[test]
@@ -312,6 +398,40 @@ mod tests {
                 assert!(matches!(costs[2], AbilityCost::Sacrifice { .. }));
             }
             other => panic!("Expected Composite, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cost_composite_pay_life_and_exile_card() {
+        match parse_oracle_cost("Pay 1 life and exile a blue card from your hand") {
+            AbilityCost::Composite { costs } => {
+                assert_eq!(costs.len(), 2);
+                assert_eq!(costs[0], AbilityCost::PayLife { amount: 1 });
+                assert!(matches!(costs[1], AbilityCost::Exile { .. }));
+            }
+            other => panic!("Expected Composite, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cost_exile_colored_card_from_hand() {
+        match parse_oracle_cost("Exile a blue card from your hand") {
+            AbilityCost::Exile {
+                count,
+                zone,
+                filter,
+            } => {
+                assert_eq!(count, 1);
+                assert_eq!(zone, Some(crate::types::zones::Zone::Hand));
+                assert!(matches!(
+                    filter,
+                    Some(TargetFilter::Typed(TypedFilter {
+                        controller: Some(crate::types::ability::ControllerRef::You),
+                        ..
+                    }))
+                ));
+            }
+            other => panic!("Expected Exile, got {:?}", other),
         }
     }
 

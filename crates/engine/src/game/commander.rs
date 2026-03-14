@@ -553,6 +553,8 @@ mod tests {
             scryfall_oracle_id: None,
             modal: None,
             additional_cost: None,
+            casting_restrictions: vec![],
+            casting_options: vec![],
         };
 
         let obj_id = create_commander_from_card_face(&mut state, &face, PlayerId(0));

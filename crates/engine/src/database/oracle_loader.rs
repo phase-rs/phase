@@ -244,6 +244,8 @@ fn build_oracle_face(mtgjson: &AtomicCard, oracle_id: Option<String>) -> CardFac
         scryfall_oracle_id: oracle_id,
         modal: parsed.modal,
         additional_cost: parsed.additional_cost,
+        casting_restrictions: parsed.casting_restrictions,
+        casting_options: parsed.casting_options,
     };
 
     synthesize_basic_land_mana(&mut face);

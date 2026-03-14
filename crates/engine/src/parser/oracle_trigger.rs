@@ -3,7 +3,7 @@ use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{parse_number, parse_ordinal, strip_reminder_text};
 use crate::types::ability::{
     AbilityKind, ControllerRef, FilterProp, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, TypedFilter,
+    TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::phase::Phase;
 use crate::types::triggers::TriggerMode;
@@ -277,6 +277,14 @@ fn make_base() -> TriggerDefinition {
 fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerDefinition) {
     let lower = condition.to_lowercase();
 
+    if let Some(result) = try_parse_named_trigger_mode(&lower) {
+        return result;
+    }
+
+    if let Some(result) = try_parse_special_trigger_pattern(&lower) {
+        return result;
+    }
+
     // --- Phase triggers: "At the beginning of..." ---
     if let Some(result) = try_parse_phase_trigger(&lower) {
         return result;
@@ -344,6 +352,13 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
         return (TargetFilter::SelfRef, "");
     }
 
+    if let Some(rest) = text.strip_prefix("this ") {
+        let noun_end = rest.find(' ').unwrap_or(rest.len());
+        if noun_end > 0 {
+            return (TargetFilter::SelfRef, rest[noun_end..].trim_start());
+        }
+    }
+
     // "equipped creature" / "enchanted creature" — the permanent this card is attached to
     if let Some(rest) = text.strip_prefix("equipped creature ") {
         return (TargetFilter::AttachedTo, rest);
@@ -372,10 +387,22 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
         return (with_another, rest);
     }
 
+    if let Some(after_quantifier) = text.strip_prefix("one or more ") {
+        let (filter, rest) = parse_type_phrase(after_quantifier);
+        if rest.len() < after_quantifier.len() {
+            return (filter, rest);
+        }
+    }
+
     // "a "/"an " + type phrase (general subject)
     let after_article = text.strip_prefix("a ").or_else(|| text.strip_prefix("an "));
     if let Some(after) = after_article {
         let (filter, rest) = parse_type_phrase(after);
+        return (filter, rest);
+    }
+
+    let (filter, rest) = parse_type_phrase(text);
+    if rest.len() < text.len() {
         return (filter, rest);
     }
 
@@ -530,12 +557,181 @@ fn try_parse_event(
         return Some((TriggerMode::Taps, def));
     }
 
+    if rest.starts_with("becomes untapped") || rest.starts_with("untaps") {
+        let mut def = make_base();
+        def.mode = TriggerMode::Untaps;
+        def.valid_card = Some(subject.clone());
+        return Some((TriggerMode::Untaps, def));
+    }
+
+    if rest.starts_with("is turned face up") {
+        let mut def = make_base();
+        def.mode = TriggerMode::TurnFaceUp;
+        def.valid_card = Some(subject.clone());
+        return Some((TriggerMode::TurnFaceUp, def));
+    }
+
+    if rest.starts_with("mutates") {
+        let mut def = make_base();
+        def.mode = TriggerMode::Mutates;
+        def.valid_card = Some(subject.clone());
+        return Some((TriggerMode::Mutates, def));
+    }
+
     // Counter-related events: "a +1/+1 counter is put on ~" / "one or more counters are put on ~"
     if let Some(result) = try_parse_counter_trigger(full_lower) {
         return Some(result);
     }
 
     None
+}
+
+fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    let mut def = make_base();
+
+    if matches!(lower, "whenever chaos ensues" | "when chaos ensues") {
+        def.mode = TriggerMode::ChaosEnsues;
+        return Some((TriggerMode::ChaosEnsues, def));
+    }
+
+    if matches!(
+        lower,
+        "when you set this scheme in motion" | "whenever you set this scheme in motion"
+    ) {
+        def.mode = TriggerMode::SetInMotion;
+        return Some((TriggerMode::SetInMotion, def));
+    }
+
+    if matches!(
+        lower,
+        "whenever you crank this contraption"
+            | "when you crank this contraption"
+            | "whenever you crank this ~"
+            | "when you crank this ~"
+    ) {
+        def.mode = TriggerMode::CrankContraption;
+        return Some((TriggerMode::CrankContraption, def));
+    }
+
+    None
+}
+
+fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    if let Some(result) = try_parse_self_or_another_controlled_subtype_enters(lower) {
+        return Some(result);
+    }
+
+    if matches!(
+        lower,
+        "when you unlock this door" | "whenever you unlock this door"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::UnlockDoor;
+        return Some((TriggerMode::UnlockDoor, def));
+    }
+
+    for prefix in ["whenever you cast or copy ", "when you cast or copy "] {
+        if let Some(rest) = lower.strip_prefix(prefix) {
+            if matches!(
+                rest,
+                "an instant or sorcery spell" | "a instant or sorcery spell"
+            ) {
+                let mut def = make_base();
+                def.mode = TriggerMode::SpellCastOrCopy;
+                def.valid_card = Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                    ],
+                });
+                def.valid_target = Some(TargetFilter::Controller);
+                return Some((TriggerMode::SpellCastOrCopy, def));
+            }
+        }
+    }
+
+    None
+}
+
+fn try_parse_self_or_another_controlled_subtype_enters(
+    lower: &str,
+) -> Option<(TriggerMode, TriggerDefinition)> {
+    for prefix in ["whenever ~ or another ", "when ~ or another "] {
+        let Some(rest) = lower.strip_prefix(prefix) else {
+            continue;
+        };
+        let Some(subject_text) = rest
+            .strip_suffix(" enters")
+            .or_else(|| rest.strip_suffix(" enters the battlefield"))
+        else {
+            continue;
+        };
+        let Some(subtype_text) = subject_text.trim().strip_suffix(" you control") else {
+            continue;
+        };
+        if subtype_text.split(" or ").any(is_core_type_name) {
+            continue;
+        }
+
+        let mut subtype_filters = Vec::new();
+        for subtype in subtype_text
+            .split(" or ")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            subtype_filters.push(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .subtype(canonicalize_subtype_name(subtype))
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another]),
+            ));
+        }
+        if subtype_filters.is_empty() {
+            continue;
+        }
+
+        let mut filters = vec![TargetFilter::SelfRef];
+        filters.extend(subtype_filters);
+
+        let mut def = make_base();
+        def.mode = TriggerMode::ChangesZone;
+        def.destination = Some(Zone::Battlefield);
+        def.valid_card = Some(TargetFilter::Or { filters });
+        return Some((TriggerMode::ChangesZone, def));
+    }
+
+    None
+}
+
+fn is_core_type_name(text: &str) -> bool {
+    matches!(
+        text,
+        "creature"
+            | "artifact"
+            | "enchantment"
+            | "land"
+            | "planeswalker"
+            | "spell"
+            | "card"
+            | "permanent"
+    )
+}
+
+fn canonicalize_subtype_name(text: &str) -> String {
+    text.split_whitespace()
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut capitalized = first.to_uppercase().collect::<String>();
+                    capitalized.push_str(chars.as_str());
+                    capitalized
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ---------------------------------------------------------------------------
@@ -1524,5 +1720,88 @@ mod tests {
             "Some Card",
         );
         assert_eq!(def.mode, TriggerMode::Blocks);
+    }
+
+    #[test]
+    fn trigger_chaos_ensues_mode() {
+        let def = parse_trigger_line("Whenever chaos ensues, draw a card.", "Plane");
+        assert_eq!(def.mode, TriggerMode::ChaosEnsues);
+    }
+
+    #[test]
+    fn trigger_set_in_motion_mode() {
+        let def = parse_trigger_line("When you set this scheme in motion, draw a card.", "Scheme");
+        assert_eq!(def.mode, TriggerMode::SetInMotion);
+    }
+
+    #[test]
+    fn trigger_crank_contraption_mode() {
+        let def = parse_trigger_line(
+            "Whenever you crank this Contraption, create a token.",
+            "Contraption",
+        );
+        assert_eq!(def.mode, TriggerMode::CrankContraption);
+    }
+
+    #[test]
+    fn trigger_turn_face_up_mode() {
+        let def = parse_trigger_line(
+            "When this creature is turned face up, draw a card.",
+            "Morphling",
+        );
+        assert_eq!(def.mode, TriggerMode::TurnFaceUp);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_spell_cast_or_copy_mode() {
+        let def = parse_trigger_line(
+            "Whenever you cast or copy an instant or sorcery spell, create a Treasure token.",
+            "Storm-Kiln Artist",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCastOrCopy);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_unlock_door_mode() {
+        let def = parse_trigger_line("When you unlock this door, draw a card.", "Door");
+        assert_eq!(def.mode, TriggerMode::UnlockDoor);
+    }
+
+    #[test]
+    fn trigger_mutates_mode() {
+        let def = parse_trigger_line("Whenever this creature mutates, draw a card.", "Gemrazer");
+        assert_eq!(def.mode, TriggerMode::Mutates);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_becomes_untapped_mode() {
+        let def = parse_trigger_line(
+            "Whenever this creature becomes untapped, draw a card.",
+            "Arbiter of the Ideal",
+        );
+        assert_eq!(def.mode, TriggerMode::Untaps);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_self_or_another_ally_enters() {
+        let def = parse_trigger_line(
+            "Whenever this creature or another Ally you control enters, you gain 1 life.",
+            "Hada Freeblade",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert!(matches!(def.valid_card, Some(TargetFilter::Or { .. })));
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+    }
+
+    #[test]
+    fn trigger_this_siege_enters_is_self_etb() {
+        let def = parse_trigger_line("When this Siege enters, draw a card.", "Invasion");
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     }
 }

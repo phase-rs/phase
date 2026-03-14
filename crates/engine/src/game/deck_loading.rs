@@ -216,6 +216,8 @@ pub fn create_object_from_card_face(
     obj.base_color = color;
     obj.modal = card_face.modal.clone();
     obj.additional_cost = card_face.additional_cost.clone();
+    obj.casting_restrictions = card_face.casting_restrictions.clone();
+    obj.casting_options = card_face.casting_options.clone();
 
     obj_id
 }
@@ -260,6 +262,8 @@ pub fn create_commander_from_card_face(
     obj.is_commander = true;
     obj.modal = card_face.modal.clone();
     obj.additional_cost = card_face.additional_cost.clone();
+    obj.casting_restrictions = card_face.casting_restrictions.clone();
+    obj.casting_options = card_face.casting_options.clone();
 
     obj_id
 }
@@ -403,6 +407,8 @@ mod tests {
             scryfall_oracle_id: None,
             modal: None,
             additional_cost: None,
+            casting_restrictions: vec![],
+            casting_options: vec![],
         }
     }
 
@@ -440,6 +446,8 @@ mod tests {
             scryfall_oracle_id: None,
             modal: None,
             additional_cost: None,
+            casting_restrictions: vec![],
+            casting_options: vec![],
         }
     }
 

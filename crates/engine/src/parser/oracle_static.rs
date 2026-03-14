@@ -13,9 +13,12 @@ use crate::types::statics::StaticMode;
 enum RuleStaticPredicate {
     CantUntap,
     MustAttack,
+    BlockOnlyCreaturesWithFlying,
     Shroud,
     MayLookAtTopOfLibrary,
     LoseAllAbilities,
+    NoMaximumHandSize,
+    MayPlayAdditionalLand,
 }
 
 /// Parse a static/continuous ability line into a StaticDefinition.
@@ -24,6 +27,16 @@ enum RuleStaticPredicate {
 pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
+
+    if lower.starts_with("you may choose not to untap ")
+        && lower.contains(" during your untap step")
+    {
+        return Some(
+            StaticDefinition::new(StaticMode::Other("MayChooseNotToUntap".to_string()))
+                .affected(TargetFilter::SelfRef)
+                .description(text.to_string()),
+        );
+    }
 
     // --- "Enchanted creature gets +N/+M" or "has {keyword}" ---
     if lower.starts_with("enchanted creature ") {
@@ -40,6 +53,15 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         if let Some(def) = parse_continuous_gets_has(
             &text[20..],
             TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy])),
+        ) {
+            return Some(def);
+        }
+    }
+
+    if lower.starts_with("enchanted land ") {
+        if let Some(def) = parse_continuous_gets_has(
+            &text[15..],
+            TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::EnchantedBy])),
         ) {
             return Some(def);
         }
@@ -548,8 +570,13 @@ fn strip_rule_static_subject<'a>(text: &'a str, lower: &str) -> Option<(TargetFi
         " don't untap during ",
         " don’t untap during ",
         " attacks each combat if able",
+        " can block only creatures with flying",
         " has shroud",
         " have shroud",
+        " has no maximum hand size",
+        " have no maximum hand size",
+        " may play an additional land",
+        " may play up to ",
         " may look at the top card of your library",
         " loses all abilities",
         " lose all abilities",
@@ -586,6 +613,10 @@ fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFilter> {
         return Some(TargetFilter::Typed(
             TypedFilter::default().controller(ControllerRef::You),
         ));
+    }
+
+    if matches!(lower.as_str(), "players" | "each player") {
+        return Some(TargetFilter::Player);
     }
 
     if lower == "enchanted creature" {
@@ -634,6 +665,13 @@ fn parse_rule_static_predicate(text: &str) -> Option<RuleStaticPredicate> {
 
     if matches!(
         lower.as_str(),
+        "can block only creatures with flying" | "can block only creatures with flying."
+    ) {
+        return Some(RuleStaticPredicate::BlockOnlyCreaturesWithFlying);
+    }
+
+    if matches!(
+        lower.as_str(),
         "has shroud" | "has shroud." | "have shroud" | "have shroud."
     ) {
         return Some(RuleStaticPredicate::Shroud);
@@ -653,6 +691,22 @@ fn parse_rule_static_predicate(text: &str) -> Option<RuleStaticPredicate> {
         return Some(RuleStaticPredicate::LoseAllAbilities);
     }
 
+    if matches!(
+        lower.as_str(),
+        "has no maximum hand size"
+            | "has no maximum hand size."
+            | "have no maximum hand size"
+            | "have no maximum hand size."
+    ) {
+        return Some(RuleStaticPredicate::NoMaximumHandSize);
+    }
+
+    if lower.starts_with("may play an additional land")
+        || (lower.starts_with("may play up to ") && lower.contains("additional land"))
+    {
+        return Some(RuleStaticPredicate::MayPlayAdditionalLand);
+    }
+
     None
 }
 
@@ -670,6 +724,11 @@ fn lower_rule_static(
         RuleStaticPredicate::MustAttack => StaticDefinition::new(StaticMode::MustAttack)
             .affected(affected)
             .description(description.to_string()),
+        RuleStaticPredicate::BlockOnlyCreaturesWithFlying => {
+            StaticDefinition::new(StaticMode::Other("BlockRestriction".to_string()))
+                .affected(affected)
+                .description(description.to_string())
+        }
         RuleStaticPredicate::Shroud => {
             StaticDefinition::new(StaticMode::Other("Shroud".to_string()))
                 .affected(affected)
@@ -684,6 +743,16 @@ fn lower_rule_static(
             .affected(affected)
             .modifications(vec![ContinuousModification::RemoveAllAbilities])
             .description(description.to_string()),
+        RuleStaticPredicate::NoMaximumHandSize => {
+            StaticDefinition::new(StaticMode::Other("NoMaximumHandSize".to_string()))
+                .affected(affected)
+                .description(description.to_string())
+        }
+        RuleStaticPredicate::MayPlayAdditionalLand => {
+            StaticDefinition::new(StaticMode::Other("MayPlayAdditionalLand".to_string()))
+                .affected(affected)
+                .description(description.to_string())
+        }
     }
 }
 
@@ -743,6 +812,16 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         modifications.push(ContinuousModification::SetPower { value: power });
         modifications.push(ContinuousModification::SetToughness { value: toughness });
     }
+    if let Some(power) = parse_base_power_mod(text) {
+        modifications.push(ContinuousModification::SetPower { value: power });
+    }
+    if let Some(toughness) = parse_base_toughness_mod(text) {
+        modifications.push(ContinuousModification::SetToughness { value: toughness });
+    }
+
+    for ability in extract_quoted_abilities(text) {
+        modifications.push(ContinuousModification::AddAbility { ability });
+    }
 
     if let Some(keyword_text) = extract_keyword_clause(text) {
         for part in split_keyword_list(keyword_text.trim().trim_end_matches('.')) {
@@ -760,6 +839,53 @@ fn parse_base_pt_mod(text: &str) -> Option<(i32, i32)> {
     let pos = lower.find("base power and toughness ")?;
     let pt_text = text[pos + "base power and toughness ".len()..].trim();
     parse_pt_mod(pt_text)
+}
+
+fn parse_base_power_mod(text: &str) -> Option<i32> {
+    let lower = text.to_lowercase();
+    if lower.contains("base power and toughness ") {
+        return None;
+    }
+    let pos = lower.find("base power ")?;
+    let power_text = text[pos + "base power ".len()..].trim();
+    parse_single_pt_value(power_text)
+}
+
+fn parse_base_toughness_mod(text: &str) -> Option<i32> {
+    let lower = text.to_lowercase();
+    if lower.contains("base power and toughness ") {
+        return None;
+    }
+    let pos = lower.find("base toughness ")?;
+    let toughness_text = text[pos + "base toughness ".len()..].trim();
+    parse_single_pt_value(toughness_text)
+}
+
+fn parse_single_pt_value(text: &str) -> Option<i32> {
+    let value = text
+        .split(|c: char| c.is_whitespace() || matches!(c, '.' | ','))
+        .next()?;
+    value.replace('+', "").parse::<i32>().ok()
+}
+
+fn extract_quoted_abilities(text: &str) -> Vec<String> {
+    let mut abilities = Vec::new();
+    let mut start = None;
+
+    for (idx, ch) in text.char_indices() {
+        if ch == '"' {
+            if let Some(open) = start.take() {
+                let ability = text[open + 1..idx].trim();
+                if !ability.is_empty() {
+                    abilities.push(ability.to_string());
+                }
+            } else {
+                start = Some(idx);
+            }
+        }
+    }
+
+    abilities
 }
 
 /// Split a keyword list like "flying and trample" or "flying, trample, and haste".
@@ -1311,6 +1437,13 @@ mod tests {
     }
 
     #[test]
+    fn static_this_creature_can_block_only_creatures_with_flying() {
+        let def = parse_static_line("This creature can block only creatures with flying.").unwrap();
+        assert_eq!(def.mode, StaticMode::Other("BlockRestriction".to_string()));
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
     fn static_you_have_shroud() {
         let def = parse_static_line("You have shroud.").unwrap();
         assert_eq!(def.mode, StaticMode::Other("Shroud".to_string()));
@@ -1320,6 +1453,42 @@ mod tests {
                 TypedFilter::default().controller(ControllerRef::You),
             ))
         );
+    }
+
+    #[test]
+    fn static_you_have_no_maximum_hand_size() {
+        let def = parse_static_line("You have no maximum hand size.").unwrap();
+        assert_eq!(def.mode, StaticMode::Other("NoMaximumHandSize".to_string()));
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ))
+        );
+    }
+
+    #[test]
+    fn static_each_player_may_play_an_additional_land() {
+        let def =
+            parse_static_line("Each player may play an additional land on each of their turns.")
+                .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::Other("MayPlayAdditionalLand".to_string())
+        );
+        assert_eq!(def.affected, Some(TargetFilter::Player));
+    }
+
+    #[test]
+    fn static_you_may_choose_not_to_untap_self() {
+        let def =
+            parse_static_line("You may choose not to untap this creature during your untap step.")
+                .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::Other("MayChooseNotToUntap".to_string())
+        );
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     }
 
     #[test]
@@ -1440,5 +1609,25 @@ mod tests {
         assert!(def
             .modifications
             .contains(&ContinuousModification::SetToughness { value: 3 }));
+    }
+
+    #[test]
+    fn static_target_subject_can_set_base_power_without_toughness() {
+        let modifications = parse_continuous_modifications("has base power 3 until end of turn");
+        assert_eq!(
+            modifications,
+            vec![ContinuousModification::SetPower { value: 3 }]
+        );
+    }
+
+    #[test]
+    fn static_enchanted_land_has_quoted_ability() {
+        let def = parse_static_line("Enchanted land has \"{T}: Add two mana of any one color.\"")
+            .unwrap();
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddAbility {
+                ability: "{T}: Add two mana of any one color.".to_string(),
+            }));
     }
 }

@@ -1832,6 +1832,8 @@ mod tests {
                     "Draw a card".to_string(),
                     "Gain 3 life".to_string(),
                 ],
+                allow_repeat_modes: false,
+                constraints: vec![],
             });
         }
         obj_id

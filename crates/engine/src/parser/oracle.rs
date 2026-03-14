@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, Effect, ModalChoice,
-    ReplacementDefinition, StaticDefinition, TriggerDefinition, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AdditionalCost,
+    CastingRestriction, Effect, ModalChoice, ModalSelectionConstraint, ReplacementDefinition,
+    SpellCastingOption, StaticDefinition, TriggerDefinition, TypedFilter,
 };
 use crate::types::keywords::Keyword;
 
@@ -30,6 +31,12 @@ pub struct ParsedAbilities {
     /// Additional casting cost parsed from "As an additional cost..." text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_cost: Option<AdditionalCost>,
+    /// Spell-casting restrictions parsed from Oracle text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub casting_restrictions: Vec<CastingRestriction>,
+    /// Spell-casting options parsed from Oracle text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub casting_options: Vec<SpellCastingOption>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +69,20 @@ struct ModalHeaderAst {
     raw: String,
     min_choices: usize,
     max_choices: usize,
+    allow_repeat_modes: bool,
+    constraints: Vec<ModalSelectionConstraint>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ActivatedConstraintAst {
+    restrictions: Vec<ActivationRestriction>,
+}
+
+impl ActivatedConstraintAst {
+    fn sorcery_speed(&self) -> bool {
+        self.restrictions
+            .contains(&ActivationRestriction::AsSorcery)
+    }
 }
 
 /// Parse Oracle text into structured ability definitions.
@@ -92,6 +113,8 @@ pub fn parse_oracle_text(
         extracted_keywords: Vec::new(),
         modal: None,
         additional_cost: None,
+        casting_restrictions: Vec::new(),
+        casting_options: Vec::new(),
     };
 
     let lines: Vec<&str> = oracle_text.split('\n').collect();
@@ -147,14 +170,29 @@ pub fn parse_oracle_text(
             continue;
         }
 
+        if is_granted_static_line(&lower) {
+            if let Some(static_def) = parse_static_line(&line) {
+                result.statics.push(static_def);
+                i += 1;
+                continue;
+            }
+        }
+
         // Priority 4: Activated ability — contains ":" with cost-like prefix
         if let Some(colon_pos) = find_activated_colon(&line) {
             let cost_text = line[..colon_pos].trim();
             let effect_text = line[colon_pos + 1..].trim();
+            let (effect_text, constraints) = strip_activated_constraints(effect_text);
             let cost = parse_oracle_cost(cost_text);
 
-            let mut def = parse_effect_chain(effect_text, AbilityKind::Activated);
+            let mut def = parse_effect_chain(&effect_text, AbilityKind::Activated);
             def.cost = Some(cost);
+            if constraints.sorcery_speed() {
+                def.sorcery_speed = true;
+            }
+            if !constraints.restrictions.is_empty() {
+                def.activation_restrictions = constraints.restrictions;
+            }
             result.abilities.push(def);
             i += 1;
             continue;
@@ -192,6 +230,19 @@ pub fn parse_oracle_text(
             result.additional_cost = parse_additional_cost_line(&lower, &line);
             i += 1;
             continue;
+        }
+
+        if is_spell {
+            if let Some(option) = parse_spell_casting_option_line(&line, card_name) {
+                result.casting_options.push(option);
+                i += 1;
+                continue;
+            }
+            if let Some(restrictions) = parse_casting_restriction_line(&line) {
+                result.casting_restrictions.extend(restrictions);
+                i += 1;
+                continue;
+            }
         }
 
         // Priority 9: Imperative verb for instants/sorceries
@@ -614,7 +665,7 @@ fn parse_loyalty_number(s: &str) -> Option<i32> {
 /// The left side must look like a cost (contains "{", or starts with cost-like words,
 /// or is a loyalty marker).
 fn find_activated_colon(line: &str) -> Option<usize> {
-    let colon_pos = line.find(':')?;
+    let colon_pos = find_top_level_colon(line)?;
     let prefix = &line[..colon_pos];
     let lower_prefix = prefix.to_lowercase().trim().to_string();
 
@@ -640,6 +691,278 @@ fn find_activated_colon(line: &str) -> Option<usize> {
     None
 }
 
+fn find_top_level_colon(line: &str) -> Option<usize> {
+    let mut paren_depth = 0u32;
+    let mut in_quotes = false;
+
+    for (idx, ch) in line.char_indices() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            '(' if !in_quotes => paren_depth += 1,
+            ')' if !in_quotes => paren_depth = paren_depth.saturating_sub(1),
+            ':' if !in_quotes && paren_depth == 0 => return Some(idx),
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn strip_activated_constraints(text: &str) -> (String, ActivatedConstraintAst) {
+    let mut remaining = text.trim().trim_end_matches('.').trim().to_string();
+    let mut constraints = ActivatedConstraintAst::default();
+
+    loop {
+        let lower = remaining.to_lowercase();
+
+        if let Some(prefix) = lower.strip_suffix("activate only as a sorcery") {
+            let end = remaining.len() - "activate only as a sorcery".len();
+            remaining = remaining[..end]
+                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                .to_string();
+            constraints
+                .restrictions
+                .push(ActivationRestriction::AsSorcery);
+            if prefix.trim().is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        if let Some(prefix) = lower.strip_suffix("activate only as an instant") {
+            let end = remaining.len() - "activate only as an instant".len();
+            remaining = remaining[..end]
+                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                .to_string();
+            constraints
+                .restrictions
+                .push(ActivationRestriction::AsInstant);
+            if prefix.trim().is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        if let Some(prefix) = lower.strip_suffix("activate only during your turn") {
+            let end = remaining.len() - "activate only during your turn".len();
+            remaining = remaining[..end]
+                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                .to_string();
+            constraints
+                .restrictions
+                .push(ActivationRestriction::DuringYourTurn);
+            if prefix.trim().is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        if let Some(prefix) = lower.strip_suffix("activate only during your upkeep") {
+            let end = remaining.len() - "activate only during your upkeep".len();
+            remaining = remaining[..end]
+                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                .to_string();
+            constraints
+                .restrictions
+                .push(ActivationRestriction::DuringYourUpkeep);
+            if prefix.trim().is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        if let Some(prefix) = lower.strip_suffix("activate only during combat") {
+            let end = remaining.len() - "activate only during combat".len();
+            remaining = remaining[..end]
+                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                .to_string();
+            constraints
+                .restrictions
+                .push(ActivationRestriction::DuringCombat);
+            if prefix.trim().is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        if let Some(prefix) =
+            lower.strip_suffix("activate only during your turn, before attackers are declared")
+        {
+            let end = remaining.len()
+                - "activate only during your turn, before attackers are declared".len();
+            remaining = remaining[..end]
+                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                .to_string();
+            constraints
+                .restrictions
+                .push(ActivationRestriction::DuringYourTurn);
+            constraints
+                .restrictions
+                .push(ActivationRestriction::BeforeAttackersDeclared);
+            if prefix.trim().is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        if let Some(prefix) =
+            lower.strip_suffix("activate only during combat before combat damage has been dealt")
+        {
+            let end = remaining.len()
+                - "activate only during combat before combat damage has been dealt".len();
+            remaining = remaining[..end]
+                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                .to_string();
+            constraints
+                .restrictions
+                .push(ActivationRestriction::DuringCombat);
+            constraints
+                .restrictions
+                .push(ActivationRestriction::BeforeCombatDamage);
+            if prefix.trim().is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        if let Some(prefix) = lower.strip_suffix("activate only once each turn") {
+            let end = remaining.len() - "activate only once each turn".len();
+            remaining = remaining[..end]
+                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                .to_string();
+            constraints
+                .restrictions
+                .push(ActivationRestriction::OnlyOnceEachTurn);
+            if prefix.trim().is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        if let Some(prefix) = lower.strip_suffix("activate only once") {
+            let end = remaining.len() - "activate only once".len();
+            remaining = remaining[..end]
+                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                .to_string();
+            constraints
+                .restrictions
+                .push(ActivationRestriction::OnlyOnce);
+            if prefix.trim().is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        if let Some(prefix) = lower.strip_suffix("activate no more than twice each turn") {
+            let end = remaining.len() - "activate no more than twice each turn".len();
+            remaining = remaining[..end]
+                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                .to_string();
+            constraints
+                .restrictions
+                .push(ActivationRestriction::MaxTimesEachTurn { count: 2 });
+            if prefix.trim().is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        if let Some(prefix) = lower.strip_suffix("activate no more than three times each turn") {
+            let end = remaining.len() - "activate no more than three times each turn".len();
+            remaining = remaining[..end]
+                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                .to_string();
+            constraints
+                .restrictions
+                .push(ActivationRestriction::MaxTimesEachTurn { count: 3 });
+            if prefix.trim().is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        if let Some(idx) = lower.rfind("activate only if ") {
+            if idx == 0 {
+                let condition_text = remaining["activate only if ".len()..].trim().to_string();
+                remaining.clear();
+                constraints
+                    .restrictions
+                    .push(ActivationRestriction::RequiresCondition {
+                        text: condition_text,
+                    });
+                break;
+            }
+            if lower[..idx].ends_with(". ") {
+                let condition_text = remaining[idx + "activate only if ".len()..]
+                    .trim()
+                    .to_string();
+                remaining = remaining[..idx]
+                    .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                    .to_string();
+                constraints
+                    .restrictions
+                    .push(ActivationRestriction::RequiresCondition {
+                        text: condition_text,
+                    });
+                continue;
+            }
+        }
+
+        if let Some(idx) = lower.rfind("activate only from ") {
+            if idx == 0 || lower[..idx].ends_with(". ") {
+                let restriction_text = remaining[idx + "activate only from ".len()..]
+                    .trim()
+                    .to_string();
+                remaining = remaining[..idx]
+                    .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                    .to_string();
+                constraints
+                    .restrictions
+                    .push(ActivationRestriction::RequiresCondition {
+                        text: format!("from {restriction_text}"),
+                    });
+                continue;
+            }
+        }
+
+        if let Some(idx) = lower.rfind("activate only ") {
+            if idx == 0 || lower[..idx].ends_with(". ") {
+                let restriction_text = remaining[idx + "activate only ".len()..].trim().to_string();
+                remaining = remaining[..idx]
+                    .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                    .to_string();
+                constraints
+                    .restrictions
+                    .push(ActivationRestriction::RequiresCondition {
+                        text: restriction_text,
+                    });
+                continue;
+            }
+        }
+
+        if let Some(idx) = lower.rfind("activate no more than ") {
+            if idx == 0 || lower[..idx].ends_with(". ") {
+                let restriction_text = remaining[idx + "activate no more than ".len()..]
+                    .trim()
+                    .to_string();
+                remaining = remaining[..idx]
+                    .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                    .to_string();
+                constraints
+                    .restrictions
+                    .push(ActivationRestriction::RequiresCondition {
+                        text: format!("no more than {restriction_text}"),
+                    });
+                continue;
+            }
+        }
+
+        break;
+    }
+
+    (remaining, constraints)
+}
+
 /// Check if a line looks like a static/continuous ability.
 fn is_static_pattern(lower: &str) -> bool {
     lower.contains("gets +")
@@ -657,6 +980,9 @@ fn is_static_pattern(lower: &str) -> bool {
         || lower.contains("doesn't untap")
         || lower.contains("don't untap")
         || lower.contains("attacks each combat if able")
+        || lower.contains("can block only creatures with flying")
+        || lower.contains("no maximum hand size")
+        || lower.contains("may choose not to untap")
         || lower.starts_with("as long as ")
         || lower.starts_with("enchanted ")
         || lower.starts_with("equipped ")
@@ -667,6 +993,7 @@ fn is_static_pattern(lower: &str) -> bool {
         || lower.starts_with("cards in ")
         || lower.starts_with("creatures you control ")
         || lower.starts_with("creatures your opponents control ")
+        || lower.starts_with("each player ")
         || lower.starts_with("spells you cast ")
         || lower.starts_with("spells your opponents cast ")
         || lower.starts_with("you may look at the top card of your library")
@@ -681,6 +1008,22 @@ fn is_static_pattern(lower: &str) -> bool {
         || lower.contains("lose all abilities")
         || lower.contains("power is equal to")
         || lower.contains("power and toughness are each equal to")
+}
+
+fn is_granted_static_line(lower: &str) -> bool {
+    (lower.starts_with("enchanted ")
+        || lower.starts_with("equipped ")
+        || lower.starts_with("all ")
+        || lower.starts_with("creatures ")
+        || lower.starts_with("lands ")
+        || lower.starts_with("other ")
+        || lower.starts_with("you ")
+        || lower.starts_with("players ")
+        || lower.starts_with("each player "))
+        && (lower.contains(" has \"")
+            || lower.contains(" have \"")
+            || lower.contains(" gains \"")
+            || lower.contains(" gain \""))
 }
 
 /// Check if a line looks like a replacement effect.
@@ -893,20 +1236,43 @@ fn split_short_label_prefix<'a>(text: &'a str, max_words: usize) -> Option<(&'a 
 
 fn is_modal_header_text(lower: &str) -> bool {
     let lower = lower.trim();
-    lower.starts_with("choose ") || (lower.starts_with("if ") && lower.contains("choose "))
+    lower.starts_with("choose ")
+        || lower.starts_with("you may choose ")
+        || (lower.starts_with("if ") && lower.contains("choose "))
 }
 
 fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
-    let lower = text.to_lowercase();
-    if !is_modal_header_text(&lower) {
+    let sentences: Vec<&str> = text
+        .split('.')
+        .map(str::trim)
+        .filter(|sentence| !sentence.is_empty())
+        .collect();
+    let header_text = sentences.first().copied().unwrap_or(text).trim();
+    let header_lower = header_text.to_lowercase();
+    if !is_modal_header_text(&header_lower) {
         return None;
     }
 
-    let (min_choices, max_choices) = parse_modal_choose_count(&lower);
+    let (min_choices, max_choices) = parse_modal_choose_count(&text.to_lowercase());
+    let mut allow_repeat_modes = false;
+    let mut constraints = Vec::new();
+    for sentence in sentences.iter().skip(1) {
+        let lower = sentence.to_lowercase();
+        if lower == "you may choose the same mode more than once" {
+            allow_repeat_modes = true;
+            continue;
+        }
+        if lower == "each mode must target a different player" {
+            constraints.push(ModalSelectionConstraint::DifferentTargetPlayers);
+        }
+    }
+
     Some(ModalHeaderAst {
         raw: text.to_string(),
         min_choices,
         max_choices,
+        allow_repeat_modes,
+        constraints,
     })
 }
 
@@ -980,6 +1346,8 @@ fn build_modal_choice(header: &ModalHeaderAst, modes: &[ModeAst]) -> ModalChoice
         max_choices: header.max_choices.min(modes.len()),
         mode_count: modes.len(),
         mode_descriptions: modes.iter().map(|mode| mode.raw.clone()).collect(),
+        allow_repeat_modes: header.allow_repeat_modes,
+        constraints: header.constraints.clone(),
     }
 }
 
@@ -1057,6 +1425,12 @@ fn is_effect_sentence_candidate(lower: &str) -> bool {
 /// - "choose one or more —" → (1, usize::MAX) (capped to mode_count at construction)
 /// - "choose any number of —" → (1, usize::MAX)
 fn parse_modal_choose_count(lower: &str) -> (usize, usize) {
+    let lower = lower.trim();
+    let lower = lower
+        .strip_prefix("you may ")
+        .unwrap_or(lower)
+        .trim_start();
+
     if lower.contains("choose any number instead") {
         return (1, usize::MAX);
     }
@@ -1128,6 +1502,242 @@ fn parse_additional_cost_line(lower: &str, _raw: &str) -> Option<AdditionalCost>
     }
 
     None
+}
+
+fn parse_spell_casting_option_line(text: &str, card_name: &str) -> Option<SpellCastingOption> {
+    let trimmed = text.trim().trim_end_matches('.');
+    let (condition, body) = split_leading_if_clause(trimmed);
+    let primary_body = body.split_once(". ").map_or(body, |(head, _)| head).trim();
+    let body_lower = primary_body.to_lowercase();
+
+    parse_self_flash_option(primary_body, &body_lower, card_name)
+        .or_else(|| parse_self_alternative_cost_option(primary_body, &body_lower, card_name))
+        .map(|mut option| {
+            if option.condition.is_none() {
+                if let Some(condition) = condition {
+                    option.condition = Some(condition.to_string());
+                }
+            }
+            option
+        })
+}
+
+fn split_leading_if_clause(text: &str) -> (Option<&str>, &str) {
+    let trimmed = text.trim();
+    let lower = trimmed.to_lowercase();
+    if !lower.starts_with("if ") {
+        return (None, trimmed);
+    }
+
+    if let Some((condition, rest)) = trimmed.split_once(", ") {
+        return (Some(condition.trim_start_matches("If ").trim()), rest.trim());
+    }
+
+    (None, trimmed)
+}
+
+fn parse_self_flash_option(
+    body: &str,
+    body_lower: &str,
+    card_name: &str,
+) -> Option<SpellCastingOption> {
+    let self_ref = self_spell_phrase(body_lower, card_name)?;
+    let prefix = format!("you may cast {self_ref} as though it had flash");
+    if !body_lower.starts_with(&prefix) {
+        return None;
+    }
+
+    let rest = body[prefix.len()..].trim();
+    let mut option = SpellCastingOption::as_though_had_flash();
+
+    if rest.is_empty() {
+        return Some(option);
+    }
+
+    if let Some(cost_text) = rest
+        .strip_prefix("if you pay ")
+        .and_then(|rest| rest.strip_suffix(" more to cast it"))
+    {
+        option = option.cost(parse_oracle_cost(cost_text));
+        return Some(option);
+    }
+
+    if let Some(cost_text) = rest
+        .strip_prefix("by ")
+        .and_then(|rest| rest.strip_suffix(" in addition to paying its other costs"))
+    {
+        option = option.cost(parse_oracle_cost(cost_text));
+        return Some(option);
+    }
+
+    if let Some(condition) = rest.strip_prefix("if ") {
+        option = option.condition(condition.trim());
+        return Some(option);
+    }
+
+    Some(option)
+}
+
+fn parse_self_alternative_cost_option(
+    body: &str,
+    body_lower: &str,
+    card_name: &str,
+) -> Option<SpellCastingOption> {
+    if let Some(cost_text) =
+        extract_alternative_cost(body, body_lower, "you may pay ", " rather than pay this spell's mana cost")
+    {
+        return Some(SpellCastingOption::alternative_cost(parse_oracle_cost(cost_text)));
+    }
+
+    if let Some((cost_text, condition)) = extract_alternative_cost_with_trailing_condition(
+        body,
+        body_lower,
+        "you may pay ",
+        " rather than pay this spell's mana cost if ",
+    ) {
+        return Some(
+            SpellCastingOption::alternative_cost(parse_oracle_cost(cost_text)).condition(condition),
+        );
+    }
+
+    if let Some(self_ref) = self_spell_phrase(body_lower, card_name) {
+        let without_cost = format!("you may cast {self_ref} without paying its mana cost");
+        if body_lower == without_cost {
+            return Some(SpellCastingOption::free_cast());
+        }
+
+        let for_cost = format!("you may cast {self_ref} for ");
+        if body_lower.starts_with(&for_cost) {
+            let cost_text = body[for_cost.len()..].trim();
+            return Some(SpellCastingOption::alternative_cost(parse_oracle_cost(cost_text)));
+        }
+    }
+
+    None
+}
+
+fn extract_alternative_cost<'a>(
+    raw: &'a str,
+    lower: &str,
+    prefix: &str,
+    suffix: &str,
+) -> Option<&'a str> {
+    if lower.starts_with(prefix) && lower.ends_with(suffix) {
+        let cost_end = raw.len() - suffix.len();
+        return Some(raw[prefix.len()..cost_end].trim());
+    }
+
+    None
+}
+
+fn extract_alternative_cost_with_trailing_condition<'a>(
+    raw: &'a str,
+    lower: &str,
+    prefix: &str,
+    marker: &str,
+) -> Option<(&'a str, &'a str)> {
+    if !lower.starts_with(prefix) {
+        return None;
+    }
+
+    let marker_pos = lower.find(marker)?;
+    let cost_text = raw[prefix.len()..marker_pos].trim();
+    let condition = raw[marker_pos + marker.len()..].trim();
+    Some((cost_text, condition))
+}
+
+fn self_spell_phrase(lower: &str, card_name: &str) -> Option<String> {
+    let card_name_lower = card_name.to_lowercase();
+    if lower.starts_with("you may cast this spell ")
+        || lower == "you may cast this spell without paying its mana cost"
+    {
+        return Some("this spell".to_string());
+    }
+    if lower.starts_with("you may cast it ")
+        || lower == "you may cast it without paying its mana cost"
+    {
+        return Some("it".to_string());
+    }
+    if lower.starts_with(&format!("you may cast {card_name_lower} ")) {
+        return Some(card_name_lower);
+    }
+
+    None
+}
+
+fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRestriction>> {
+    let lower = text.trim().trim_end_matches('.').to_lowercase();
+    let rest = lower.strip_prefix("cast this spell only ")?;
+    let mut restrictions = Vec::new();
+
+    if rest.contains("during combat") {
+        restrictions.push(CastingRestriction::DuringCombat);
+    }
+    if rest.contains("during an opponent's turn")
+        || rest.contains("during an opponents turn")
+        || rest.contains("on an opponent's turn")
+        || rest.contains("on an opponents turn")
+    {
+        restrictions.push(CastingRestriction::DuringOpponentsTurn);
+    }
+    if rest.contains("during your turn") {
+        restrictions.push(CastingRestriction::DuringYourTurn);
+    }
+    if rest.contains("during your upkeep") {
+        restrictions.push(CastingRestriction::DuringYourUpkeep);
+    }
+    if rest.contains("during an opponent's upkeep") || rest.contains("during an opponents upkeep") {
+        restrictions.push(CastingRestriction::DuringOpponentsUpkeep);
+    }
+    if rest.contains("during your end step") {
+        restrictions.push(CastingRestriction::DuringYourEndStep);
+    }
+    if rest.contains("during an opponent's end step") || rest.contains("during an opponents end step")
+    {
+        restrictions.push(CastingRestriction::DuringOpponentsEndStep);
+    }
+    if rest.contains("during the declare attackers step")
+        || rest.contains("during your declare attackers step")
+        || rest.contains("during declare attackers step")
+    {
+        restrictions.push(CastingRestriction::DeclareAttackersStep);
+    }
+    if rest.contains("during the declare blockers step")
+        || rest.contains("during your declare blockers step")
+        || rest.contains("during declare blockers step")
+    {
+        restrictions.push(CastingRestriction::DeclareBlockersStep);
+    }
+    if rest.contains("before attackers are declared") {
+        restrictions.push(CastingRestriction::BeforeAttackersDeclared);
+    }
+    if rest.contains("before blockers are declared") {
+        restrictions.push(CastingRestriction::BeforeBlockersDeclared);
+    }
+    if rest.contains("before the combat damage step") || rest.contains("before combat damage") {
+        restrictions.push(CastingRestriction::BeforeCombatDamage);
+    }
+    if rest.contains("after combat") {
+        restrictions.push(CastingRestriction::AfterCombat);
+    }
+
+    if let Some(condition) = rest.strip_prefix("if ") {
+        restrictions.push(CastingRestriction::RequiresCondition {
+            text: condition.trim().to_string(),
+        });
+    }
+    if let Some(condition) = rest.strip_prefix("only if ") {
+        restrictions.push(CastingRestriction::RequiresCondition {
+            text: condition.trim().to_string(),
+        });
+    }
+    if let Some(condition) = rest.split(" and only if ").nth(1) {
+        restrictions.push(CastingRestriction::RequiresCondition {
+            text: condition.trim().to_string(),
+        });
+    }
+
+    (!restrictions.is_empty()).then_some(restrictions)
 }
 
 /// Extract the blight count (N) from text starting after "blight ".
@@ -1370,6 +1980,278 @@ mod tests {
     }
 
     #[test]
+    fn no_maximum_hand_size_routes_to_static_parser() {
+        let r = parse(
+            "You have no maximum hand size.",
+            "Spellbook",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+        assert!(r.abilities.is_empty());
+        assert_eq!(r.statics.len(), 1);
+        assert_eq!(
+            r.statics[0].mode,
+            crate::types::statics::StaticMode::Other("NoMaximumHandSize".to_string())
+        );
+    }
+
+    #[test]
+    fn block_restriction_routes_to_static_parser() {
+        let r = parse(
+            "This creature can block only creatures with flying.",
+            "Cloud Pirates",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert!(r.abilities.is_empty());
+        assert_eq!(r.statics.len(), 1);
+        assert_eq!(
+            r.statics[0].mode,
+            crate::types::statics::StaticMode::Other("BlockRestriction".to_string())
+        );
+    }
+
+    #[test]
+    fn granted_activated_static_routes_before_colon_parse() {
+        let r = parse(
+            "Enchanted land has \"{T}: Add two mana of any one color.\"",
+            "Gift of Paradise",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        assert!(r.abilities.is_empty());
+        assert_eq!(r.statics.len(), 1);
+        assert!(r.statics[0].modifications.contains(
+            &crate::types::ability::ContinuousModification::AddAbility {
+                ability: "{T}: Add two mana of any one color.".to_string(),
+            }
+        ));
+    }
+
+    #[test]
+    fn quoted_granted_ability_is_not_misclassified_as_activated() {
+        let r = parse(
+            "White creatures you control have \"{T}: You gain 1 life.\"",
+            "Resplendent Mentor",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert!(r.abilities.is_empty());
+        assert_eq!(r.statics.len(), 1);
+    }
+
+    #[test]
+    fn activated_as_sorcery_constraint_sets_sorcery_speed() {
+        let r = parse(
+            "{2}{W}, Sacrifice this artifact: Target creature you control gets +2/+2 and gains flying until end of turn. Draw a card. Activate only as a sorcery.",
+            "Basilica Skullbomb",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+
+        assert_eq!(r.abilities.len(), 1);
+        assert!(r.abilities[0].sorcery_speed);
+        assert!(r.abilities[0]
+            .activation_restrictions
+            .contains(&crate::types::ability::ActivationRestriction::AsSorcery));
+        let draw = r.abilities[0]
+            .sub_ability
+            .as_ref()
+            .expect("expected draw follow-up");
+        assert!(matches!(draw.effect, Effect::Draw { count: 1 }));
+        let no_activate_tail = draw
+            .sub_ability
+            .as_ref()
+            .is_none_or(|tail| !matches!(tail.effect, Effect::Unimplemented { ref name, .. } if name == "activate"));
+        assert!(no_activate_tail);
+    }
+
+    #[test]
+    fn spell_cast_restrictions_parse_into_top_level_metadata() {
+        let r = parse(
+            "Cast this spell only during combat on an opponent's turn.\nReturn X target creature cards from your graveyard to the battlefield. Sacrifice those creatures at the beginning of the next end step.",
+            "Wake the Dead",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(
+            r.casting_restrictions,
+            vec![
+                CastingRestriction::DuringCombat,
+                CastingRestriction::DuringOpponentsTurn,
+            ]
+        );
+        assert!(!matches!(
+            r.abilities[0].effect,
+            Effect::Unimplemented { ref name, .. } if name == "cast"
+        ));
+    }
+
+    #[test]
+    fn spell_cast_restriction_condition_is_preserved() {
+        let restrictions = parse_casting_restriction_line(
+            "Cast this spell only during the declare attackers step and only if you've been attacked this step.",
+        )
+        .expect("restrictions should parse");
+        assert_eq!(
+            restrictions,
+            vec![
+                CastingRestriction::DeclareAttackersStep,
+                CastingRestriction::RequiresCondition {
+                    text: "you've been attacked this step".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn spell_cast_restriction_parses_end_step_window() {
+        let restrictions = parse_casting_restriction_line("Cast this spell only during your end step.")
+            .expect("restrictions should parse");
+        assert_eq!(restrictions, vec![CastingRestriction::DuringYourEndStep]);
+    }
+
+    #[test]
+    fn spell_cast_restriction_parses_opponent_upkeep_window() {
+        let restrictions =
+            parse_casting_restriction_line("Cast this spell only during an opponent's upkeep.")
+                .expect("restrictions should parse");
+        assert_eq!(restrictions, vec![CastingRestriction::DuringOpponentsUpkeep]);
+    }
+
+    #[test]
+    fn spell_cast_restriction_parses_plain_only_if_condition() {
+        let restrictions =
+            parse_casting_restriction_line("Cast this spell only if you control two or more Vampires.")
+                .expect("restrictions should parse");
+        assert_eq!(
+            restrictions,
+            vec![CastingRestriction::RequiresCondition {
+                text: "you control two or more vampires".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn spell_cast_restriction_parses_your_declare_attackers_step_variant() {
+        let restrictions = parse_casting_restriction_line(
+            "Cast this spell only during your declare attackers step.",
+        )
+        .expect("restrictions should parse");
+        assert_eq!(restrictions, vec![CastingRestriction::DeclareAttackersStep]);
+    }
+
+    #[test]
+    fn spell_casting_option_parses_trap_alternative_cost() {
+        let r = parse(
+            "If an opponent searched their library this turn, you may pay {0} rather than pay this spell's mana cost.\nTarget opponent mills thirteen cards.",
+            "Archive Trap",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(r.casting_options.len(), 1);
+        assert_eq!(
+            r.casting_options[0],
+            SpellCastingOption::alternative_cost(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![],
+                },
+            })
+            .condition("an opponent searched their library this turn")
+        );
+        assert_eq!(r.abilities.len(), 1);
+        assert!(!matches!(
+            r.abilities[0].effect,
+            Effect::Unimplemented { ref name, .. } if name == "pay"
+        ));
+    }
+
+    #[test]
+    fn spell_casting_option_parses_composite_alternative_cost() {
+        let r = parse(
+            "You may pay 1 life and exile a blue card from your hand rather than pay this spell's mana cost.\nCounter target spell.",
+            "Force of Will",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(r.casting_options.len(), 1);
+        assert!(matches!(
+            r.casting_options[0].cost,
+            Some(AbilityCost::Composite { .. })
+        ));
+    }
+
+    #[test]
+    fn spell_casting_option_parses_flash_permission_with_extra_cost() {
+        let r = parse(
+            "You may cast this spell as though it had flash if you pay {2} more to cast it.\nDestroy all creatures. They can't be regenerated.",
+            "Rout",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(r.casting_options.len(), 1);
+        assert_eq!(
+            r.casting_options[0],
+            SpellCastingOption::as_though_had_flash().cost(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    generic: 2,
+                    shards: vec![],
+                },
+            })
+        );
+        assert_eq!(r.abilities.len(), 1);
+    }
+
+    #[test]
+    fn spell_casting_option_parses_free_cast_condition() {
+        let r = parse(
+            "If this spell is the first spell you've cast this game, you may cast it without paying its mana cost.\nLook at the top five cards of your library.",
+            "Once Upon a Time",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(
+            r.casting_options,
+            vec![SpellCastingOption::free_cast()
+                .condition("this spell is the first spell you've cast this game")]
+        );
+    }
+
+    #[test]
+    fn spell_casting_option_ignores_followup_if_you_do_sentence() {
+        let r = parse(
+            "Return up to two target creature cards from your graveyard to your hand.\nYou may cast this spell for {2}{B/G}{B/G}. If you do, ignore the bracketed text.",
+            "Graveyard Dig",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(
+            r.casting_options,
+            vec![SpellCastingOption::alternative_cost(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    generic: 2,
+                    shards: vec![
+                        crate::types::mana::ManaCostShard::BlackGreen,
+                        crate::types::mana::ManaCostShard::BlackGreen,
+                    ],
+                },
+            })]
+        );
+    }
+
+    #[test]
     fn goblin_chainwhirler_etb_trigger() {
         let r = parse(
             "First strike\nWhen Goblin Chainwhirler enters the battlefield, it deals 1 damage to each opponent and each creature and planeswalker they control.",
@@ -1442,7 +2324,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_activate_only_land_condition_into_canonical_sub_ability_marker() {
+    fn parses_activate_only_land_condition_into_activation_restriction() {
         let r = parse(
             "{T}: Add {U}.\n{T}: Add {B}. Activate only if you control an Island or a Swamp.",
             "Gloomlake Verge",
@@ -1452,15 +2334,10 @@ mod tests {
         );
         assert_eq!(r.abilities.len(), 2);
         let second = &r.abilities[1];
-        let Some(sub) = second.sub_ability.as_ref() else {
-            panic!("expected activation-condition marker sub_ability");
-        };
         assert!(matches!(
-            &sub.effect,
-            Effect::Unimplemented {
-                name,
-                description: Some(description),
-            } if name == "activate_only_if_controls_land_subtype_any" && description == "Island|Swamp"
+            second.activation_restrictions.as_slice(),
+            [ActivationRestriction::RequiresCondition { text }]
+                if text == "you control an Island or a Swamp"
         ));
     }
 
@@ -1668,7 +2545,7 @@ mod tests {
         assert_eq!(r.triggers.len(), 1);
 
         let trigger = &r.triggers[0];
-        assert!(matches!(trigger.mode, TriggerMode::Unknown(_)));
+        assert_eq!(trigger.mode, TriggerMode::SetInMotion);
 
         let execute = trigger
             .execute
@@ -1757,6 +2634,39 @@ mod tests {
     }
 
     #[test]
+    fn triggered_modal_header_supports_you_may_choose_and_constraints() {
+        let r = parse(
+            "At the beginning of combat on your turn, you may choose two. Each mode must target a different player.\n• Target player creates a 2/1 white and black Inkling creature token with flying.\n• Target player draws a card and loses 1 life.\n• Target player puts a +1/+1 counter on each creature they control.",
+            "Shadrix Silverquill",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert_eq!(r.triggers.len(), 1);
+        let execute = r.triggers[0]
+            .execute
+            .as_ref()
+            .expect("trigger should have execute");
+        let modal = execute.modal.as_ref().expect("execute should be modal");
+        assert_eq!(modal.min_choices, 2);
+        assert_eq!(modal.max_choices, 2);
+        assert_eq!(modal.mode_count, 3);
+        assert_eq!(
+            modal.constraints,
+            vec![ModalSelectionConstraint::DifferentTargetPlayers]
+        );
+    }
+
+    #[test]
+    fn modal_header_tracks_repeatable_modes() {
+        let header = parse_modal_header_ast(
+            "Choose up to five {P} worth of modes. You may choose the same mode more than once.",
+        )
+        .expect("header should parse");
+        assert!(header.allow_repeat_modes);
+    }
+
+    #[test]
     fn non_modal_spell_has_no_modal_metadata() {
         let r = parse(
             "Deal 3 damage to any target.",
@@ -1772,6 +2682,7 @@ mod tests {
     fn parse_modal_choose_count_variants() {
         assert_eq!(parse_modal_choose_count("choose one —"), (1, 1));
         assert_eq!(parse_modal_choose_count("choose two —"), (2, 2));
+        assert_eq!(parse_modal_choose_count("you may choose two."), (2, 2));
         assert_eq!(parse_modal_choose_count("choose three —"), (3, 3));
         assert_eq!(parse_modal_choose_count("choose one or both —"), (1, 2));
         assert_eq!(
