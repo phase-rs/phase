@@ -117,7 +117,7 @@ describe("MyDecks", () => {
     expect(screen.queryByRole("button", { name: "Show all decks" })).not.toBeInTheDocument();
   });
 
-  it("renders compatibility badges from engine evaluation", async () => {
+  it("renders only compatible format badges from engine evaluation", async () => {
     saveDeck("Badge Deck", { main: [{ name: "Island", count: 60 }], sideboard: [] });
 
     vi.mocked(evaluateDeckCompatibilityBatch).mockResolvedValue({
@@ -142,7 +142,7 @@ describe("MyDecks", () => {
 
     expect(await screen.findByText("Badge Deck")).toBeInTheDocument();
     expect(screen.getByText("STD")).toBeInTheDocument();
-    expect(screen.getByText("CMD")).toBeInTheDocument();
+    expect(screen.queryByText("CMD")).not.toBeInTheDocument();
     expect(screen.getByText("BO3", { selector: "span" })).toBeInTheDocument();
     expect(screen.getByText("Unknown 1")).toBeInTheDocument();
   });

@@ -80,11 +80,25 @@ describe("partitionByType", () => {
 });
 
 describe("groupByName", () => {
-  it("produces one group per permanent (no stacking)", () => {
+  it("stacks matching permanents by name and tapped state", () => {
     const objects = [
       makeGameObject({ id: 1, name: "Forest" }),
       makeGameObject({ id: 2, name: "Forest" }),
       makeGameObject({ id: 3, name: "Mountain" }),
+    ];
+
+    const groups = groupByName(objects);
+
+    expect(groups).toHaveLength(2);
+    expect(groups[0]).toMatchObject({ name: "Forest", ids: [1, 2], count: 2 });
+    expect(groups[1]).toMatchObject({ name: "Mountain", ids: [3], count: 1 });
+  });
+
+  it("keeps permanents with counters or attachments in separate groups", () => {
+    const objects = [
+      makeGameObject({ id: 1, name: "Forest" }),
+      makeGameObject({ id: 2, name: "Forest", counters: { Plus1Plus1: 1 } }),
+      makeGameObject({ id: 3, name: "Forest", attachments: [99] }),
     ];
 
     const groups = groupByName(objects);

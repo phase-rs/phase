@@ -284,22 +284,6 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
         }
     }
 
-    // Mana abilities: untapped lands the player controls with activatable mana options.
-    // These are separate from ActivateAbility because mana abilities resolve without
-    // the stack (MTG CR 605). Including them during priority lets the player choose
-    // between mana and non-mana abilities on the same permanent (e.g. Soulstone Sanctuary).
-    for &obj_id in &state.battlefield {
-        if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player
-                && !obj.tapped
-                && obj.card_types.core_types.contains(&CoreType::Land)
-                && !mana_sources::activatable_land_mana_options(state, obj_id, player).is_empty()
-            {
-                actions.push(GameAction::TapLandForMana { object_id: obj_id });
-            }
-        }
-    }
-
     actions
 }
 
