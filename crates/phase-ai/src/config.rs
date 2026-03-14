@@ -24,6 +24,8 @@ pub struct SearchConfig {
     pub max_depth: u32,
     pub max_nodes: u32,
     pub max_branching: u32,
+    pub rollout_depth: u32,
+    pub rollout_samples: u32,
 }
 
 impl Default for SearchConfig {
@@ -33,6 +35,8 @@ impl Default for SearchConfig {
             max_depth: 0,
             max_nodes: 0,
             max_branching: 5,
+            rollout_depth: 0,
+            rollout_samples: 0,
         }
     }
 }
@@ -71,6 +75,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 max_depth: 0,
                 max_nodes: 0,
                 max_branching: 5,
+                rollout_depth: 0,
+                rollout_samples: 0,
             },
         ),
         AiDifficulty::Easy => (
@@ -82,6 +88,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 max_depth: 0,
                 max_nodes: 0,
                 max_branching: 5,
+                rollout_depth: 0,
+                rollout_samples: 0,
             },
         ),
         AiDifficulty::Medium => (
@@ -93,6 +101,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 max_depth: 2,
                 max_nodes: 24,
                 max_branching: 5,
+                rollout_depth: 1,
+                rollout_samples: 1,
             },
         ),
         AiDifficulty::Hard => (
@@ -104,6 +114,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 max_depth: 3,
                 max_nodes: 48,
                 max_branching: 5,
+                rollout_depth: 2,
+                rollout_samples: 1,
             },
         ),
         AiDifficulty::VeryHard => (
@@ -115,6 +127,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 max_depth: 3,
                 max_nodes: 64,
                 max_branching: 6,
+                rollout_depth: 2,
+                rollout_samples: 2,
             },
         ),
     };
@@ -133,6 +147,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
     if platform == Platform::Wasm {
         config.search.max_depth = config.search.max_depth.min(2);
         config.search.max_nodes = config.search.max_nodes * 2 / 3;
+        config.search.rollout_depth = config.search.rollout_depth.min(1);
     }
 
     config
@@ -158,6 +173,7 @@ pub fn create_config_for_players(
             config.search.max_depth = config.search.max_depth.min(2);
             config.search.max_nodes = config.search.max_nodes * 2 / 3;
             config.search.max_branching = config.search.max_branching.min(4);
+            config.search.rollout_depth = config.search.rollout_depth.min(1);
         }
         _ => {
             // 5-6+ players: heuristic-only or minimal search
@@ -167,6 +183,7 @@ pub fn create_config_for_players(
                 config.search.max_depth = 1;
                 config.search.max_nodes /= 3;
                 config.search.max_branching = config.search.max_branching.min(3);
+                config.search.rollout_depth = config.search.rollout_depth.min(1);
             }
         }
     }
@@ -201,6 +218,7 @@ mod tests {
         assert!(config.search.enabled);
         assert_eq!(config.search.max_depth, 2);
         assert_eq!(config.search.max_nodes, 24);
+        assert_eq!(config.search.rollout_depth, 1);
     }
 
     #[test]
@@ -209,6 +227,7 @@ mod tests {
         assert_eq!(config.temperature, 0.5);
         assert_eq!(config.search.max_depth, 3);
         assert_eq!(config.search.max_nodes, 48);
+        assert_eq!(config.search.rollout_depth, 2);
     }
 
     #[test]
@@ -218,6 +237,7 @@ mod tests {
         assert_eq!(config.search.max_depth, 3);
         assert_eq!(config.search.max_nodes, 64);
         assert_eq!(config.search.max_branching, 6);
+        assert_eq!(config.search.rollout_samples, 2);
     }
 
     #[test]
@@ -227,6 +247,7 @@ mod tests {
 
         assert!(wasm.search.max_depth <= 2);
         assert!(wasm.search.max_nodes < native.search.max_nodes);
+        assert!(wasm.search.rollout_depth <= native.search.rollout_depth);
     }
 
     #[test]

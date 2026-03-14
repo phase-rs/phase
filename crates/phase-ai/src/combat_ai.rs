@@ -9,6 +9,14 @@ use engine::types::zones::Zone;
 
 use crate::eval::{evaluate_creature, threat_level};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CombatObjective {
+    PushLethal,
+    Stabilize,
+    PreserveAdvantage,
+    Race,
+}
+
 /// Choose which creatures to attack with and assign each to an opponent.
 /// Returns `(ObjectId, AttackTarget)` pairs for per-creature targeting.
 /// Strategy: evaluate threat per opponent, check for lethal on weakest,
@@ -22,14 +30,6 @@ pub fn choose_attackers_with_targets(
         return Vec::new();
     }
 
-    let p_life = state.players[player.0 as usize].life;
-    let min_opp_life = opponents
-        .iter()
-        .map(|&opp| state.players[opp.0 as usize].life)
-        .min()
-        .unwrap_or(20);
-    let ahead_on_life = p_life > min_opp_life;
-
     let candidates: Vec<ObjectId> = state
         .battlefield
         .iter()
@@ -42,6 +42,7 @@ pub fn choose_attackers_with_targets(
             }
         })
         .collect();
+    let objective = determine_attack_objective(state, player, &opponents, &candidates);
 
     // Collect blockers per opponent
     let opponent_blockers: Vec<ObjectId> = state
@@ -112,7 +113,7 @@ pub fn choose_attackers_with_targets(
                 let free_damage = kills_blocker && attacker_survives;
                 // Favorable trade: attacker kills blocker and is worth less (trading up)
                 let favorable_trade = kills_blocker && my_value <= blocker_value;
-                if free_damage || favorable_trade || ahead_on_life {
+                if should_attack_given_objective(objective, free_damage, favorable_trade) {
                     attacking_ids.push(id);
                 }
             }
@@ -218,6 +219,7 @@ pub fn choose_blockers(
 ) -> Vec<(ObjectId, ObjectId)> {
     let mut assignments = Vec::new();
     let mut used_blockers = Vec::new();
+    let objective = determine_block_objective(state, player, attacker_ids);
 
     // Collect available blockers
     let available_blockers: Vec<ObjectId> = state
@@ -309,7 +311,10 @@ pub fn choose_blockers(
             let p_life = state.players[player.0 as usize].life;
             // Chump block: sacrifice the blocker to prevent significant damage
             // when life total is threatened (attacker power >= 3 and life <= 3x that)
-            let should_chump = priority == 0 && attacker_power >= 3 && p_life <= attacker_power * 3;
+            let should_chump = priority == 0
+                && attacker_power >= 3
+                && matches!(objective, CombatObjective::Stabilize)
+                && p_life <= attacker_power * 3;
             if priority > 0 || should_chump {
                 assignments.push((blocker_id, attacker_id));
                 used_blockers.push(blocker_id);
@@ -318,6 +323,84 @@ pub fn choose_blockers(
     }
 
     assignments
+}
+
+fn determine_attack_objective(
+    state: &GameState,
+    player: PlayerId,
+    opponents: &[PlayerId],
+    candidate_attackers: &[ObjectId],
+) -> CombatObjective {
+    let my_life = state.players[player.0 as usize].life;
+    let min_opp_life = opponents
+        .iter()
+        .map(|&opp| state.players[opp.0 as usize].life)
+        .min()
+        .unwrap_or(20);
+    let total_attack_power = sum_power(state, candidate_attackers);
+    if min_opp_life > 0 && total_attack_power >= min_opp_life {
+        return CombatObjective::PushLethal;
+    }
+
+    let my_board_power = battlefield_power(state, player);
+    let opp_board_power: i32 = opponents.iter().map(|&opp| battlefield_power(state, opp)).sum();
+
+    if my_life <= opp_board_power.max(0) {
+        CombatObjective::Stabilize
+    } else if my_board_power >= opp_board_power && my_life >= min_opp_life {
+        CombatObjective::PreserveAdvantage
+    } else {
+        CombatObjective::Race
+    }
+}
+
+fn determine_block_objective(
+    state: &GameState,
+    player: PlayerId,
+    attacker_ids: &[ObjectId],
+) -> CombatObjective {
+    let life = state.players[player.0 as usize].life;
+    let incoming_power = sum_power(state, attacker_ids);
+    if life <= incoming_power {
+        CombatObjective::Stabilize
+    } else {
+        CombatObjective::PreserveAdvantage
+    }
+}
+
+fn should_attack_given_objective(
+    objective: CombatObjective,
+    free_damage: bool,
+    favorable_trade: bool,
+) -> bool {
+    match objective {
+        CombatObjective::PushLethal => true,
+        CombatObjective::Stabilize => free_damage,
+        CombatObjective::PreserveAdvantage => free_damage || favorable_trade,
+        CombatObjective::Race => free_damage || favorable_trade,
+    }
+}
+
+fn battlefield_power(state: &GameState, player: PlayerId) -> i32 {
+    state
+        .battlefield
+        .iter()
+        .filter_map(|&id| {
+            let object = state.objects.get(&id)?;
+            if object.controller == player && object.card_types.core_types.contains(&CoreType::Creature)
+            {
+                Some(object.power.unwrap_or(0))
+            } else {
+                None
+            }
+        })
+        .sum()
+}
+
+fn sum_power(state: &GameState, ids: &[ObjectId]) -> i32 {
+    ids.iter()
+        .filter_map(|&id| state.objects.get(&id).map(|object| object.power.unwrap_or(0)))
+        .sum()
 }
 
 /// Check if a creature can attack (not tapped, no defender, no summoning sickness).
@@ -504,6 +587,36 @@ mod tests {
         assert!(
             blocker_ids.contains(&wall),
             "Wall should block since it survives"
+        );
+    }
+
+    #[test]
+    fn low_life_prefers_stabilizing_chump_block() {
+        let mut state = setup();
+        let attacker = add_creature(&mut state, PlayerId(0), "Giant", 5, 5, vec![]);
+        let chump = add_creature(&mut state, PlayerId(1), "Token", 1, 1, vec![]);
+        state.players[1].life = 4;
+
+        let blockers = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        assert!(
+            blockers.contains(&(chump, attacker)),
+            "Low-life defender should chump to stabilize"
+        );
+    }
+
+    #[test]
+    fn stable_life_avoids_pointless_chump_block() {
+        let mut state = setup();
+        let attacker = add_creature(&mut state, PlayerId(0), "Giant", 5, 5, vec![]);
+        let chump = add_creature(&mut state, PlayerId(1), "Token", 1, 1, vec![]);
+        state.players[1].life = 20;
+
+        let blockers = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        assert!(
+            !blockers.contains(&(chump, attacker)),
+            "Healthy defender should keep the chump blocker"
         );
     }
 

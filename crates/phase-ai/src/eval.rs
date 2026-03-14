@@ -32,6 +32,27 @@ impl Default for EvalWeights {
 const WIN_SCORE: f64 = 10000.0;
 const LOSS_SCORE: f64 = -10000.0;
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EvaluationBreakdown {
+    pub life: f64,
+    pub board_presence: f64,
+    pub board_power: f64,
+    pub board_toughness: f64,
+    pub hand_size: f64,
+    pub aggression: f64,
+}
+
+impl EvaluationBreakdown {
+    pub fn total(&self) -> f64 {
+        self.life
+            + self.board_presence
+            + self.board_power
+            + self.board_toughness
+            + self.hand_size
+            + self.aggression
+    }
+}
+
 /// Compute threat level of `target` from `evaluator`'s perspective.
 /// Returns 0.0-1.0 where higher means more threatening.
 /// Factors: board presence (creature count/total power), life ratio, hand size,
@@ -78,13 +99,23 @@ pub fn threat_level(state: &GameState, evaluator: PlayerId, target: PlayerId) ->
 /// Returns a score where higher is better for `player`.
 /// In multiplayer, weights opponent scores by threat level (focus fire on highest threat).
 pub fn evaluate_state(state: &GameState, player: PlayerId, weights: &EvalWeights) -> f64 {
+    evaluate_state_breakdown(state, player, weights)
+        .map(|breakdown| breakdown.total())
+        .unwrap_or_else(|terminal| terminal)
+}
+
+pub fn evaluate_state_breakdown(
+    state: &GameState,
+    player: PlayerId,
+    weights: &EvalWeights,
+) -> Result<EvaluationBreakdown, f64> {
     // Check for game over
     if let WaitingFor::GameOver { winner } = &state.waiting_for {
-        return match winner {
+        return Err(match winner {
             Some(w) if *w == player => WIN_SCORE,
             Some(_) => LOSS_SCORE,
             None => 0.0, // draw
-        };
+        });
     }
 
     let opponents = players::opponents(state, player);
@@ -92,7 +123,7 @@ pub fn evaluate_state(state: &GameState, player: PlayerId, weights: &EvalWeights
 
     // Check for lethal life totals
     if p.life <= 0 {
-        return LOSS_SCORE;
+        return Err(LOSS_SCORE);
     }
     // If any opponent is dead, that's good (but not an outright win unless all are)
     let all_opponents_dead = !opponents.is_empty()
@@ -100,10 +131,10 @@ pub fn evaluate_state(state: &GameState, player: PlayerId, weights: &EvalWeights
             .iter()
             .all(|&opp| state.players[opp.0 as usize].life <= 0);
     if all_opponents_dead {
-        return WIN_SCORE;
+        return Err(WIN_SCORE);
     }
 
-    let mut score = 0.0;
+    let mut breakdown = EvaluationBreakdown::default();
     let opp_count = opponents.len().max(1) as f64;
 
     // For multiplayer (3+), use threat-weighted opponent scoring
@@ -133,16 +164,18 @@ pub fn evaluate_state(state: &GameState, player: PlayerId, weights: &EvalWeights
         }
 
         // Life differential (against threat-weighted opponent)
-        score += (p.life as f64 - weighted_opp_life) * weights.life;
+        breakdown.life = (p.life as f64 - weighted_opp_life) * weights.life;
 
         let (my_creatures, my_power, my_toughness) = board_stats(state, player);
-        score += (my_creatures as f64 - weighted_opp_creatures) * weights.board_presence;
-        score += (my_power as f64 - weighted_opp_power) * weights.board_power;
-        score += (my_toughness as f64 - weighted_opp_toughness) * weights.board_toughness;
-        score += (p.hand.len() as f64 - weighted_opp_hand) * weights.hand_size;
+        breakdown.board_presence =
+            (my_creatures as f64 - weighted_opp_creatures) * weights.board_presence;
+        breakdown.board_power = (my_power as f64 - weighted_opp_power) * weights.board_power;
+        breakdown.board_toughness =
+            (my_toughness as f64 - weighted_opp_toughness) * weights.board_toughness;
+        breakdown.hand_size = (p.hand.len() as f64 - weighted_opp_hand) * weights.hand_size;
 
         if p.life as f64 > weighted_opp_life && my_power > 0 {
-            score += my_power as f64 * weights.aggression;
+            breakdown.aggression = my_power as f64 * weights.aggression;
         }
     } else {
         // 2-player path: original logic (no threat weighting overhead)
@@ -162,22 +195,24 @@ pub fn evaluate_state(state: &GameState, player: PlayerId, weights: &EvalWeights
         }
 
         let avg_opp_life = total_opp_life as f64 / opp_count;
-        score += (p.life as f64 - avg_opp_life) * weights.life;
+        breakdown.life = (p.life as f64 - avg_opp_life) * weights.life;
 
         let (my_creatures, my_power, my_toughness) = board_stats(state, player);
-        score += (my_creatures - total_opp_creatures) as f64 * weights.board_presence;
-        score += (my_power - total_opp_power) as f64 * weights.board_power;
-        score += (my_toughness - total_opp_toughness) as f64 * weights.board_toughness;
+        breakdown.board_presence =
+            (my_creatures - total_opp_creatures) as f64 * weights.board_presence;
+        breakdown.board_power = (my_power - total_opp_power) as f64 * weights.board_power;
+        breakdown.board_toughness =
+            (my_toughness - total_opp_toughness) as f64 * weights.board_toughness;
 
         let avg_opp_hand = total_opp_hand_size as f64 / opp_count;
-        score += (p.hand.len() as f64 - avg_opp_hand) * weights.hand_size;
+        breakdown.hand_size = (p.hand.len() as f64 - avg_opp_hand) * weights.hand_size;
 
         if p.life as f64 > avg_opp_life && my_power > 0 {
-            score += my_power as f64 * weights.aggression;
+            breakdown.aggression = my_power as f64 * weights.aggression;
         }
     }
 
-    score
+    Ok(breakdown)
 }
 
 fn board_stats(state: &GameState, player: PlayerId) -> (i32, i32, i32) {

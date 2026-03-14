@@ -3,16 +3,16 @@ use rand::Rng;
 use engine::ai_support::{build_decision_context, AiDecisionContext, CandidateAction, TacticalClass};
 use engine::game::engine::apply;
 use engine::types::actions::GameAction;
-use engine::types::ability::TargetRef;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
-use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
 use crate::card_hints::should_play_now;
 use crate::combat_ai::{choose_attackers_with_targets, choose_blockers};
 use crate::config::AiConfig;
-use crate::eval::{evaluate_creature, evaluate_state, threat_level};
+use crate::eval::evaluate_state;
+use crate::policies::PolicyRegistry;
+use crate::policies::context::PolicyContext;
 
 struct SearchBudget {
     max_nodes: u32,
@@ -62,6 +62,7 @@ pub fn choose_action(
     rng: &mut impl Rng,
 ) -> Option<GameAction> {
     let ctx = build_decision_context(state);
+    let policies = PolicyRegistry::default();
     let candidates = validate_candidates(state, ctx.candidates.clone());
     let actions: Vec<GameAction> = candidates.iter().map(|candidate| candidate.action.clone()).collect();
 
@@ -217,7 +218,7 @@ pub fn choose_action(
         let mut heuristic_scored: Vec<ScoredCandidate> = candidates
             .into_iter()
             .map(|candidate| {
-                let h = score_candidate(state, &ctx, &candidate, ai_player);
+                let h = score_candidate(state, &ctx, &candidate, ai_player, &policies);
                 ScoredCandidate {
                     candidate,
                     score: h,
@@ -260,7 +261,7 @@ pub fn choose_action(
         candidates
             .into_iter()
             .map(|candidate| {
-                let score = score_candidate(state, &ctx, &candidate, ai_player);
+                let score = score_candidate(state, &ctx, &candidate, ai_player, &policies);
                 ScoredCandidate { candidate, score }
             })
             .collect()
@@ -307,9 +308,19 @@ fn search_value(
     budget: &mut SearchBudget,
 ) -> f64 {
     budget.tick();
+    let policies = PolicyRegistry::default();
 
     // Base cases
-    if depth == 0 || budget.exhausted() {
+    if depth == 0 {
+        return rollout_value(
+            state,
+            ai_player,
+            config.search.rollout_depth,
+            config,
+            &policies,
+        );
+    }
+    if budget.exhausted() {
         return evaluate_state(state, ai_player, &config.weights);
     }
     if let WaitingFor::GameOver { .. } = &state.waiting_for {
@@ -323,14 +334,16 @@ fn search_value(
     }
 
     // Determine if this is a maximizing or minimizing node
-    let is_maximizing = acting_player(state).is_none_or(|player| player == ai_player);
+    let node_player = acting_player(state);
+    let is_maximizing = node_player.is_none_or(|player| player == ai_player);
+    let scoring_player = node_player.unwrap_or(ai_player);
 
     // Limit branching factor
     let max_branch = config.search.max_branching as usize;
     let mut scored_candidates: Vec<_> = candidates
         .into_iter()
         .map(|candidate| {
-            let score = score_candidate(state, &ctx, &candidate, ai_player);
+            let score = score_candidate(state, &ctx, &candidate, scoring_player, &policies);
             (candidate, score)
         })
         .collect();
@@ -375,6 +388,44 @@ fn search_value(
     }
 }
 
+fn rollout_value(
+    state: &GameState,
+    ai_player: PlayerId,
+    depth: u32,
+    config: &AiConfig,
+    policies: &PolicyRegistry,
+) -> f64 {
+    if depth == 0 || matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+        return evaluate_state(state, ai_player, &config.weights);
+    }
+
+    let ctx = build_decision_context(state);
+    let candidates = validate_candidates(state, ctx.candidates.clone());
+    if candidates.is_empty() {
+        return evaluate_state(state, ai_player, &config.weights);
+    }
+
+    let rollout_player = acting_player(state).unwrap_or(ai_player);
+    let best_candidate = candidates
+        .into_iter()
+        .map(|candidate| {
+            let score = score_candidate(state, &ctx, &candidate, rollout_player, policies);
+            (candidate, score)
+        })
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let Some((candidate, _)) = best_candidate else {
+        return evaluate_state(state, ai_player, &config.weights);
+    };
+
+    let mut sim = state.clone();
+    if apply(&mut sim, candidate.action).is_err() {
+        return evaluate_state(state, ai_player, &config.weights);
+    }
+
+    rollout_value(&sim, ai_player, depth - 1, config, policies)
+}
+
 fn acting_player(state: &GameState) -> Option<PlayerId> {
     match &state.waiting_for {
         WaitingFor::Priority { player }
@@ -408,69 +459,21 @@ fn score_candidate(
     ctx: &AiDecisionContext,
     candidate: &CandidateAction,
     ai_player: PlayerId,
+    policies: &PolicyRegistry,
 ) -> f64 {
     let mut score = should_play_now(state, &candidate.action, ai_player);
-    let is_targeting_context = matches!(
-        ctx.waiting_for,
-        WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. }
-    );
+    let policy_ctx = PolicyContext {
+        state,
+        decision: ctx,
+        candidate,
+        ai_player,
+    };
+    score += policies.score(&policy_ctx);
 
     match candidate.metadata.tactical_class {
-        TacticalClass::Target if !is_targeting_context => {
-            score += score_targeting_candidate(state, candidate, ai_player)
-        }
         TacticalClass::Pass => score -= 0.1,
         TacticalClass::Mana => score -= 0.05,
         _ => {}
-    }
-
-    if is_targeting_context {
-        score += score_targeting_candidate(state, candidate, ai_player);
-    }
-
-    score
-}
-
-fn score_targeting_candidate(
-    state: &GameState,
-    candidate: &CandidateAction,
-    ai_player: PlayerId,
-) -> f64 {
-    match &candidate.action {
-        GameAction::ChooseTarget { target } => target
-            .as_ref()
-            .map_or(-0.25, |target| score_target_ref(state, target, ai_player)),
-        GameAction::SelectTargets { targets } => targets
-            .iter()
-            .map(|target| score_target_ref(state, target, ai_player))
-            .sum(),
-        _ => 0.0,
-    }
-}
-
-fn score_target_ref(state: &GameState, target: &TargetRef, ai_player: PlayerId) -> f64 {
-    match target {
-        TargetRef::Player(player_id) => {
-            if *player_id == ai_player {
-                -100.0
-            } else {
-                4.0 + threat_level(state, ai_player, *player_id) * 8.0
-            }
-        }
-        TargetRef::Object(object_id) => score_target_object(state, *object_id, ai_player),
-    }
-}
-
-fn score_target_object(state: &GameState, object_id: ObjectId, ai_player: PlayerId) -> f64 {
-    let Some(object) = state.objects.get(&object_id) else {
-        return -10.0;
-    };
-
-    let controller_delta = if object.controller == ai_player { -1.0 } else { 1.0 };
-    let mut score = controller_delta * 2.0;
-
-    if object.card_types.core_types.contains(&CoreType::Creature) {
-        score += controller_delta * evaluate_creature(state, object_id);
     }
 
     score
@@ -593,7 +596,9 @@ fn softmax_select(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::ai_support::{ActionMetadata, CandidateAction};
     use engine::game::zones::create_object;
+    use engine::types::ability::TargetRef;
     use engine::types::card_type::CoreType;
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::{ManaType, ManaUnit};
@@ -819,8 +824,47 @@ mod tests {
     #[test]
     fn self_targeting_is_penalized() {
         let state = make_state();
-        let self_score = score_target_ref(&state, &TargetRef::Player(PlayerId(0)), PlayerId(0));
-        let opp_score = score_target_ref(&state, &TargetRef::Player(PlayerId(1)), PlayerId(0));
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TriggerTargetSelection {
+                player: PlayerId(0),
+                target_slots: Vec::new(),
+                target_constraints: Vec::new(),
+                selection: Default::default(),
+            },
+            candidates: Vec::new(),
+        };
+        let policies = PolicyRegistry::default();
+        let self_candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(0))),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Target,
+            },
+        };
+        let opp_candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(1))),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Target,
+            },
+        };
+
+        let self_score = policies.score(&PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &self_candidate,
+            ai_player: PlayerId(0),
+        });
+        let opp_score = policies.score(&PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &opp_candidate,
+            ai_player: PlayerId(0),
+        });
         assert!(self_score < opp_score);
         assert!(self_score < -50.0);
     }
