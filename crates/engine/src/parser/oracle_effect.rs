@@ -110,6 +110,34 @@ enum ClauseContinuation {
     CounterSourceStatic { source_static: StaticDefinition },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ImperativeAst {
+    Numeric(NumericImperativeAst),
+    Targeted(TargetedImperativeAst),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NumericImperativeAst {
+    Draw { count: u32 },
+    GainLife { amount: i32 },
+    LoseLife { amount: i32 },
+    Pump { effect: Effect },
+    Scry { count: u32 },
+    Surveil { count: u32 },
+    Mill { count: u32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TargetedImperativeAst {
+    Tap { target: TargetFilter },
+    Untap { target: TargetFilter },
+    Sacrifice { target: TargetFilter },
+    Discard { count: u32 },
+    Return { target: TargetFilter },
+    Fight { target: TargetFilter },
+    GainControl { target: TargetFilter },
+}
+
 /// Parse an effect clause from Oracle text into an Effect enum.
 /// This handles the verb-based matching for spell effects, activated ability effects,
 /// and the effect portion of triggered abilities.
@@ -1031,9 +1059,14 @@ fn parse_zone_and_counter_effect(text: &str, lower: &str) -> Option<Effect> {
 }
 
 fn parse_numeric_imperative_effect(text: &str, lower: &str) -> Option<Effect> {
+    let ast = ImperativeAst::Numeric(parse_numeric_imperative_ast(text, lower)?);
+    Some(lower_imperative_ast(ast))
+}
+
+fn parse_numeric_imperative_ast(text: &str, lower: &str) -> Option<NumericImperativeAst> {
     if lower.starts_with("draw ") {
         let count = parse_number(&text[5..]).map(|(n, _)| n).unwrap_or(1);
-        return Some(Effect::Draw { count });
+        return Some(NumericImperativeAst::Draw { count });
     }
 
     if lower.contains("gain") && lower.contains("life") {
@@ -1046,16 +1079,13 @@ fn parse_numeric_imperative_effect(text: &str, lower: &str) -> Option<Effect> {
         };
         if !after_gain.is_empty() {
             let amount = parse_number(after_gain).map(|(n, _)| n as i32).unwrap_or(1);
-            return Some(Effect::GainLife {
-                amount: LifeAmount::Fixed(amount),
-                player: GainLifePlayer::Controller,
-            });
+            return Some(NumericImperativeAst::GainLife { amount });
         }
     }
 
     if lower.contains("lose") && lower.contains("life") {
         let amount = extract_number_before(lower, "life").unwrap_or(1) as i32;
-        return Some(Effect::LoseLife { amount });
+        return Some(NumericImperativeAst::LoseLife { amount });
     }
 
     if lower.contains("gets +")
@@ -1064,65 +1094,104 @@ fn parse_numeric_imperative_effect(text: &str, lower: &str) -> Option<Effect> {
         || lower.contains("get -")
     {
         if let Some(effect) = try_parse_pump(lower, text) {
-            return Some(effect);
+            return Some(NumericImperativeAst::Pump { effect });
         }
     }
 
     if lower.starts_with("scry ") {
         let count = parse_number(&text[5..]).map(|(n, _)| n).unwrap_or(1);
-        return Some(Effect::Scry { count });
+        return Some(NumericImperativeAst::Scry { count });
     }
     if lower.starts_with("surveil ") {
         let count = parse_number(&text[8..]).map(|(n, _)| n).unwrap_or(1);
-        return Some(Effect::Surveil { count });
+        return Some(NumericImperativeAst::Surveil { count });
     }
     if lower.starts_with("mill ") {
         let count = parse_number(&text[5..]).map(|(n, _)| n).unwrap_or(1);
-        return Some(Effect::Mill {
-            count,
-            target: TargetFilter::Any,
-        });
+        return Some(NumericImperativeAst::Mill { count });
     }
 
     None
 }
 
 fn parse_targeted_action_effect(text: &str, lower: &str) -> Option<Effect> {
+    let ast = ImperativeAst::Targeted(parse_targeted_action_ast(text, lower)?);
+    Some(lower_imperative_ast(ast))
+}
+
+fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<TargetedImperativeAst> {
     if lower.starts_with("tap ") {
         let (target, _) = parse_target(&text[4..]);
-        return Some(Effect::Tap { target });
+        return Some(TargetedImperativeAst::Tap { target });
     }
     if lower.starts_with("untap ") {
         let (target, _) = parse_target(&text[6..]);
-        return Some(Effect::Untap { target });
+        return Some(TargetedImperativeAst::Untap { target });
     }
     if lower.starts_with("sacrifice ") {
         let (target, _) = parse_target(&text[10..]);
-        return Some(Effect::Sacrifice { target });
+        return Some(TargetedImperativeAst::Sacrifice { target });
     }
     if lower.starts_with("discard ") {
         let count = parse_number(&text[8..]).map(|(n, _)| n).unwrap_or(1);
-        return Some(Effect::Discard {
-            count,
-            target: TargetFilter::Any,
-        });
+        return Some(TargetedImperativeAst::Discard { count });
     }
     if lower.starts_with("return ") {
         let (target, _) = parse_target(&text[7..]);
-        return Some(Effect::Bounce {
-            target,
-            destination: None,
-        });
+        return Some(TargetedImperativeAst::Return { target });
     }
     if lower.starts_with("fight ") {
         let (target, _) = parse_target(&text[6..]);
-        return Some(Effect::Fight { target });
+        return Some(TargetedImperativeAst::Fight { target });
     }
     if lower.starts_with("gain control of ") {
         let (target, _) = parse_target(&text[16..]);
-        return Some(Effect::GainControl { target });
+        return Some(TargetedImperativeAst::GainControl { target });
     }
     None
+}
+
+fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect {
+    match ast {
+        NumericImperativeAst::Draw { count } => Effect::Draw { count },
+        NumericImperativeAst::GainLife { amount } => Effect::GainLife {
+            amount: LifeAmount::Fixed(amount),
+            player: GainLifePlayer::Controller,
+        },
+        NumericImperativeAst::LoseLife { amount } => Effect::LoseLife { amount },
+        NumericImperativeAst::Pump { effect } => effect,
+        NumericImperativeAst::Scry { count } => Effect::Scry { count },
+        NumericImperativeAst::Surveil { count } => Effect::Surveil { count },
+        NumericImperativeAst::Mill { count } => Effect::Mill {
+            count,
+            target: TargetFilter::Any,
+        },
+    }
+}
+
+fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
+    match ast {
+        TargetedImperativeAst::Tap { target } => Effect::Tap { target },
+        TargetedImperativeAst::Untap { target } => Effect::Untap { target },
+        TargetedImperativeAst::Sacrifice { target } => Effect::Sacrifice { target },
+        TargetedImperativeAst::Discard { count } => Effect::Discard {
+            count,
+            target: TargetFilter::Any,
+        },
+        TargetedImperativeAst::Return { target } => Effect::Bounce {
+            target,
+            destination: None,
+        },
+        TargetedImperativeAst::Fight { target } => Effect::Fight { target },
+        TargetedImperativeAst::GainControl { target } => Effect::GainControl { target },
+    }
+}
+
+fn lower_imperative_ast(ast: ImperativeAst) -> Effect {
+    match ast {
+        ImperativeAst::Numeric(ast) => lower_numeric_imperative_ast(ast),
+        ImperativeAst::Targeted(ast) => lower_targeted_action_ast(ast),
+    }
 }
 
 fn parse_search_and_creation_effect(text: &str, lower: &str) -> Option<Effect> {
