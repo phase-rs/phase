@@ -164,7 +164,7 @@ fn main() {
 
     println!(
         "{}",
-        serde_json::to_string_pretty(&face_index).expect("Failed to serialize card data")
+        serde_json::to_string(&face_index).expect("Failed to serialize card data")
     );
 
     if let Some(names_path) = names_out {
