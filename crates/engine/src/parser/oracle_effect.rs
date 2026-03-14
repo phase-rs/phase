@@ -1045,42 +1045,42 @@ fn parse_followup_continuation_ast(
     }
 }
 
-fn parse_destroy_effect(text: &str, lower: &str) -> Option<Effect> {
+fn parse_destroy_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
     if lower.starts_with("destroy all ") || lower.starts_with("destroy each ") {
         let (target, _) = parse_target(&text[8..]);
-        return Some(Effect::DestroyAll { target });
+        return Some(ZoneCounterImperativeAst::Destroy { target, all: true });
     }
     if lower.starts_with("destroy ") {
         let (target, _) = parse_target(&text[8..]);
-        return Some(Effect::Destroy { target });
+        return Some(ZoneCounterImperativeAst::Destroy { target, all: false });
     }
     None
 }
 
-fn parse_exile_effect(text: &str, lower: &str) -> Option<Effect> {
+fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
     if lower.starts_with("exile all ") || lower.starts_with("exile each ") {
         let (target, _) = parse_target(&text[6..]);
-        return Some(Effect::ChangeZoneAll {
+        return Some(ZoneCounterImperativeAst::Exile {
             origin: None,
-            destination: Zone::Exile,
             target,
+            all: true,
         });
     }
 
     let rest_lower = lower.strip_prefix("exile ")?;
     let (target, _) = parse_target(&text[6..]);
     let origin = infer_origin_zone(rest_lower);
-    Some(Effect::ChangeZone {
+    Some(ZoneCounterImperativeAst::Exile {
         origin,
-        destination: Zone::Exile,
         target,
+        all: false,
     })
 }
 
-fn parse_counter_effect(text: &str, lower: &str) -> Option<Effect> {
+fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
     let rest = lower.strip_prefix("counter ")?;
     if rest.contains("activated or triggered ability") {
-        return Some(Effect::Counter {
+        return Some(ZoneCounterImperativeAst::Counter {
             target: TargetFilter::StackAbility,
             source_static: None,
         });
@@ -1092,7 +1092,7 @@ fn parse_counter_effect(text: &str, lower: &str) -> Option<Effect> {
     } else {
         target
     };
-    Some(Effect::Counter {
+    Some(ZoneCounterImperativeAst::Counter {
         target,
         source_static: None,
     })
@@ -1236,51 +1236,14 @@ fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> Effect {
 }
 
 fn parse_zone_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
-    if let Some(effect) = parse_destroy_effect(text, lower) {
-        return match effect {
-            Effect::DestroyAll { target } => {
-                Some(ZoneCounterImperativeAst::Destroy { target, all: true })
-            }
-            Effect::Destroy { target } => {
-                Some(ZoneCounterImperativeAst::Destroy { target, all: false })
-            }
-            _ => None,
-        };
+    if let Some(ast) = parse_destroy_ast(text, lower) {
+        return Some(ast);
     }
-    if let Some(effect) = parse_exile_effect(text, lower) {
-        return match effect {
-            Effect::ChangeZoneAll {
-                origin,
-                destination: Zone::Exile,
-                target,
-            } => Some(ZoneCounterImperativeAst::Exile {
-                origin,
-                target,
-                all: true,
-            }),
-            Effect::ChangeZone {
-                origin,
-                destination: Zone::Exile,
-                target,
-            } => Some(ZoneCounterImperativeAst::Exile {
-                origin,
-                target,
-                all: false,
-            }),
-            _ => None,
-        };
+    if let Some(ast) = parse_exile_ast(text, lower) {
+        return Some(ast);
     }
-    if let Some(effect) = parse_counter_effect(text, lower) {
-        return match effect {
-            Effect::Counter {
-                target,
-                source_static,
-            } => Some(ZoneCounterImperativeAst::Counter {
-                target,
-                source_static,
-            }),
-            _ => None,
-        };
+    if let Some(ast) = parse_counter_ast(text, lower) {
+        return Some(ast);
     }
     if lower.starts_with("put ") && lower.contains("counter") {
         return match try_parse_put_counter(lower, text) {
