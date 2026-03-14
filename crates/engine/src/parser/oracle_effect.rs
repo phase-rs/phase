@@ -114,6 +114,8 @@ enum ClauseContinuation {
 enum ImperativeAst {
     Numeric(NumericImperativeAst),
     Targeted(TargetedImperativeAst),
+    SearchCreation(SearchCreationImperativeAst),
+    Utility(UtilityImperativeAst),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +138,22 @@ enum TargetedImperativeAst {
     Return { target: TargetFilter },
     Fight { target: TargetFilter },
     GainControl { target: TargetFilter },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SearchCreationImperativeAst {
+    SearchLibrary { effect: Effect },
+    Dig { count: u32 },
+    Token { effect: Effect },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UtilityImperativeAst {
+    Prevent { text: String },
+    Regenerate { text: String },
+    Copy { target: TargetFilter },
+    Transform { text: String },
+    Attach { target: TargetFilter },
 }
 
 /// Parse an effect clause from Oracle text into an Effect enum.
@@ -1187,28 +1205,93 @@ fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
     }
 }
 
+fn parse_search_and_creation_ast(text: &str, lower: &str) -> Option<SearchCreationImperativeAst> {
+    if starts_with_possessive(lower, "search", "library") {
+        return Some(SearchCreationImperativeAst::SearchLibrary {
+            effect: parse_search_library(text, lower),
+        });
+    }
+    if lower.starts_with("look at the top ") {
+        let count = parse_number(&text[16..]).map(|(n, _)| n).unwrap_or(1);
+        return Some(SearchCreationImperativeAst::Dig { count });
+    }
+    if lower.starts_with("create ") {
+        return try_parse_token(lower, text)
+            .map(|effect| SearchCreationImperativeAst::Token { effect });
+    }
+    None
+}
+
+fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) -> Effect {
+    match ast {
+        SearchCreationImperativeAst::SearchLibrary { effect } => effect,
+        SearchCreationImperativeAst::Dig { count } => Effect::Dig {
+            count,
+            destination: None,
+        },
+        SearchCreationImperativeAst::Token { effect } => effect,
+    }
+}
+
+fn parse_utility_imperative_ast(text: &str, lower: &str) -> Option<UtilityImperativeAst> {
+    if lower.starts_with("prevent ") {
+        return Some(UtilityImperativeAst::Prevent {
+            text: text.to_string(),
+        });
+    }
+    if lower.starts_with("regenerate ") {
+        return Some(UtilityImperativeAst::Regenerate {
+            text: text.to_string(),
+        });
+    }
+    if lower.starts_with("copy ") {
+        let (target, _) = parse_target(&text[5..]);
+        return Some(UtilityImperativeAst::Copy { target });
+    }
+    if lower.starts_with("transform ") || lower == "transform" {
+        return Some(UtilityImperativeAst::Transform {
+            text: text.to_string(),
+        });
+    }
+    if lower.starts_with("attach ") {
+        let to_pos = lower.find(" to ").map(|p| p + 4).unwrap_or(7);
+        let (target, _) = parse_target(&text[to_pos..]);
+        return Some(UtilityImperativeAst::Attach { target });
+    }
+    None
+}
+
+fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect {
+    match ast {
+        UtilityImperativeAst::Prevent { text } => Effect::Unimplemented {
+            name: "prevent".to_string(),
+            description: Some(text),
+        },
+        UtilityImperativeAst::Regenerate { text } => Effect::Unimplemented {
+            name: "regenerate".to_string(),
+            description: Some(text),
+        },
+        UtilityImperativeAst::Copy { target } => Effect::CopySpell { target },
+        UtilityImperativeAst::Transform { text } => Effect::Unimplemented {
+            name: "transform".to_string(),
+            description: Some(text),
+        },
+        UtilityImperativeAst::Attach { target } => Effect::Attach { target },
+    }
+}
+
 fn lower_imperative_ast(ast: ImperativeAst) -> Effect {
     match ast {
         ImperativeAst::Numeric(ast) => lower_numeric_imperative_ast(ast),
         ImperativeAst::Targeted(ast) => lower_targeted_action_ast(ast),
+        ImperativeAst::SearchCreation(ast) => lower_search_and_creation_ast(ast),
+        ImperativeAst::Utility(ast) => lower_utility_imperative_ast(ast),
     }
 }
 
 fn parse_search_and_creation_effect(text: &str, lower: &str) -> Option<Effect> {
-    if starts_with_possessive(lower, "search", "library") {
-        return Some(parse_search_library(text, lower));
-    }
-    if lower.starts_with("look at the top ") {
-        let count = parse_number(&text[16..]).map(|(n, _)| n).unwrap_or(1);
-        return Some(Effect::Dig {
-            count,
-            destination: None,
-        });
-    }
-    if lower.starts_with("create ") {
-        return try_parse_token(lower, text);
-    }
-    None
+    let ast = ImperativeAst::SearchCreation(parse_search_and_creation_ast(text, lower)?);
+    Some(lower_imperative_ast(ast))
 }
 
 fn parse_hand_reveal_effect(text: &str, lower: &str) -> Option<Effect> {
@@ -1283,6 +1366,10 @@ fn parse_choose_effect(text: &str, lower: &str) -> Option<Effect> {
 }
 
 fn parse_put_effect(text: &str, lower: &str) -> Option<Effect> {
+    if !lower.starts_with("put ") {
+        return None;
+    }
+
     if lower.starts_with("put the top ") && lower.contains("graveyard") {
         let after = &lower[12..];
         let count = parse_number(after).map(|(n, _)| n).unwrap_or(1);
@@ -1353,39 +1440,8 @@ fn parse_shuffle_effect(text: &str, lower: &str) -> Option<Effect> {
 }
 
 fn parse_utility_imperative_effect(text: &str, lower: &str) -> Option<Effect> {
-    if lower.starts_with("prevent ") {
-        return Some(Effect::Unimplemented {
-            name: "prevent".to_string(),
-            description: Some(text.to_string()),
-        });
-    }
-
-    if lower.starts_with("regenerate ") {
-        return Some(Effect::Unimplemented {
-            name: "regenerate".to_string(),
-            description: Some(text.to_string()),
-        });
-    }
-
-    if lower.starts_with("copy ") {
-        let (target, _) = parse_target(&text[5..]);
-        return Some(Effect::CopySpell { target });
-    }
-
-    if lower.starts_with("transform ") || lower == "transform" {
-        return Some(Effect::Unimplemented {
-            name: "transform".to_string(),
-            description: Some(text.to_string()),
-        });
-    }
-
-    if lower.starts_with("attach ") {
-        let to_pos = lower.find(" to ").map(|p| p + 4).unwrap_or(7);
-        let (target, _) = parse_target(&text[to_pos..]);
-        return Some(Effect::Attach { target });
-    }
-
-    None
+    let ast = ImperativeAst::Utility(parse_utility_imperative_ast(text, lower)?);
+    Some(lower_imperative_ast(ast))
 }
 
 fn lower_continuation_ast(ast: ContinuationAst) -> Option<ClauseContinuation> {
