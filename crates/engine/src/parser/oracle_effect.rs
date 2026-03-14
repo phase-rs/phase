@@ -123,7 +123,8 @@ enum ImperativeAst {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ImperativeFamilyAst {
     Structured(ImperativeAst),
-    RawEffect { effect: Effect },
+    CostResource(CostResourceImperativeAst),
+    ZoneCounter(ZoneCounterImperativeAst),
     Explore,
     Proliferate,
     Shuffle(ShuffleImperativeAst),
@@ -197,6 +198,21 @@ enum ShuffleImperativeAst {
     ChangeZoneToLibrary,
     ChangeZoneAllToLibrary { origin: Zone },
     Unimplemented { text: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CostResourceImperativeAst {
+    ActivateOnly { effect: Effect },
+    Mana { effect: Effect },
+    Damage { effect: Effect },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ZoneCounterImperativeAst {
+    Destroy { effect: Effect },
+    Exile { effect: Effect },
+    Counter { effect: Effect },
+    PutCounter { effect: Effect },
 }
 
 /// Parse an effect clause from Oracle text into an Effect enum.
@@ -1035,25 +1051,34 @@ fn parse_counter_effect(text: &str, lower: &str) -> Option<Effect> {
     })
 }
 
-fn parse_cost_and_resource_effect(text: &str, lower: &str) -> Option<Effect> {
+fn parse_cost_resource_ast(text: &str, lower: &str) -> Option<CostResourceImperativeAst> {
     if let Some(effect) = try_parse_activate_only_condition(text) {
-        return Some(effect);
+        return Some(CostResourceImperativeAst::ActivateOnly { effect });
     }
     if lower.starts_with("add ") {
-        return try_parse_add_mana_effect(text);
+        return try_parse_add_mana_effect(text)
+            .map(|effect| CostResourceImperativeAst::Mana { effect });
     }
     if let Some(effect) = try_parse_damage(lower, text) {
-        return Some(effect);
+        return Some(CostResourceImperativeAst::Damage { effect });
     }
     None
 }
 
-fn parse_imperative_family_ast(text: &str, lower: &str) -> Option<ImperativeFamilyAst> {
-    if let Some(effect) = parse_cost_and_resource_effect(text, lower) {
-        return Some(ImperativeFamilyAst::RawEffect { effect });
+fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect {
+    match ast {
+        CostResourceImperativeAst::ActivateOnly { effect }
+        | CostResourceImperativeAst::Mana { effect }
+        | CostResourceImperativeAst::Damage { effect } => effect,
     }
-    if let Some(effect) = parse_zone_and_counter_effect(text, lower) {
-        return Some(ImperativeFamilyAst::RawEffect { effect });
+}
+
+fn parse_imperative_family_ast(text: &str, lower: &str) -> Option<ImperativeFamilyAst> {
+    if let Some(ast) = parse_cost_resource_ast(text, lower) {
+        return Some(ImperativeFamilyAst::CostResource(ast));
+    }
+    if let Some(ast) = parse_zone_counter_ast(text, lower) {
+        return Some(ImperativeFamilyAst::ZoneCounter(ast));
     }
     if let Some(ast) = parse_numeric_imperative_ast(text, lower) {
         return Some(ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)));
@@ -1102,7 +1127,8 @@ fn parse_imperative_family_ast(text: &str, lower: &str) -> Option<ImperativeFami
 fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> Effect {
     match ast {
         ImperativeFamilyAst::Structured(ast) => lower_imperative_ast(ast),
-        ImperativeFamilyAst::RawEffect { effect } => effect,
+        ImperativeFamilyAst::CostResource(ast) => lower_cost_resource_ast(ast),
+        ImperativeFamilyAst::ZoneCounter(ast) => lower_zone_counter_ast(ast),
         ImperativeFamilyAst::Explore => Effect::Explore,
         ImperativeFamilyAst::Proliferate => Effect::Proliferate,
         ImperativeFamilyAst::Shuffle(ast) => lower_shuffle_ast(ast),
@@ -1111,20 +1137,30 @@ fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> Effect {
     }
 }
 
-fn parse_zone_and_counter_effect(text: &str, lower: &str) -> Option<Effect> {
+fn parse_zone_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
     if let Some(effect) = parse_destroy_effect(text, lower) {
-        return Some(effect);
+        return Some(ZoneCounterImperativeAst::Destroy { effect });
     }
     if let Some(effect) = parse_exile_effect(text, lower) {
-        return Some(effect);
+        return Some(ZoneCounterImperativeAst::Exile { effect });
     }
     if let Some(effect) = parse_counter_effect(text, lower) {
-        return Some(effect);
+        return Some(ZoneCounterImperativeAst::Counter { effect });
     }
     if lower.starts_with("put ") && lower.contains("counter") {
-        return try_parse_put_counter(lower, text);
+        return try_parse_put_counter(lower, text)
+            .map(|effect| ZoneCounterImperativeAst::PutCounter { effect });
     }
     None
+}
+
+fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
+    match ast {
+        ZoneCounterImperativeAst::Destroy { effect }
+        | ZoneCounterImperativeAst::Exile { effect }
+        | ZoneCounterImperativeAst::Counter { effect }
+        | ZoneCounterImperativeAst::PutCounter { effect } => effect,
+    }
 }
 
 fn parse_numeric_imperative_ast(text: &str, lower: &str) -> Option<NumericImperativeAst> {
