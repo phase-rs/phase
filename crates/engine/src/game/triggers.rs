@@ -324,6 +324,12 @@ pub(crate) fn check_trigger_condition(
             .find(|p| p.id == controller)
             .map(|p| p.life_gained_this_turn >= *minimum)
             .unwrap_or(false),
+        TriggerCondition::DescendedThisTurn => state
+            .players
+            .iter()
+            .find(|p| p.id == controller)
+            .map(|p| p.descended_this_turn)
+            .unwrap_or(false),
         TriggerCondition::ControlCreatureCount { minimum } => {
             let count = state
                 .battlefield

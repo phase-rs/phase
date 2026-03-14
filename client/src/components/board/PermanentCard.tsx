@@ -181,7 +181,7 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
     <motion.div
       data-object-id={objectId}
       layoutId={`permanent-${objectId}`}
-      className={`relative cursor-pointer rounded-lg ${glowClass}`}
+      className="relative inline-flex w-fit cursor-pointer rounded-lg self-start"
       style={{
         filter: sicknessFilter,
         boxShadow: sicknessGlow,
@@ -231,11 +231,13 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
 
       {/* Main card — art crop or full card based on preference */}
       {useArtCrop ? (
-        <ArtCropCard objectId={objectId} />
+        <div className={`relative z-10 rounded-lg ${glowClass}`}>
+          <ArtCropCard objectId={objectId} />
+        </div>
       ) : (
         <>
-          <div className="relative z-10">
-            <CardImage cardName={obj.name} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.card_id === 0} />
+          <div className="relative z-10 rounded-lg">
+            <CardImage cardName={obj.name} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.card_id === 0} className={glowClass} />
           </div>
 
           {/* P/T box for creatures */}

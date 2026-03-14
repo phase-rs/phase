@@ -59,6 +59,7 @@ import {
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { usePlayerId } from "../hooks/usePlayerId.ts";
 import { abilityChoiceLabel, additionalCostChoices } from "../viewmodel/costLabel.ts";
+import { gameButtonClass } from "../components/ui/buttonStyles.ts";
 
 type ZoneRailStyle = CSSProperties & {
   "--card-w": string;
@@ -1158,10 +1159,6 @@ function GameOverScreen({
       ? "radial-gradient(ellipse at center, rgba(60,50,10,0.6) 0%, rgba(0,0,0,0.95) 70%)"
       : "radial-gradient(ellipse at center, rgba(60,10,10,0.5) 0%, rgba(0,0,0,0.95) 70%)";
 
-  const menuBtnClass = isVictory
-    ? "bg-amber-600 text-white hover:bg-amber-500"
-    : "bg-gray-700 text-white hover:bg-gray-600";
-
   const handleRematch = () => {
     const newId = crypto.randomUUID();
     const params = new URLSearchParams();
@@ -1232,7 +1229,7 @@ function GameOverScreen({
       <AnimatePresence>
         {buttonsVisible && (
           <motion.div
-            className="relative z-10 mt-8 flex w-full max-w-sm flex-col gap-3 sm:max-w-none sm:flex-row"
+            className="relative z-10 mt-8 flex w-full max-w-[min(28rem,calc(100vw-2rem))] flex-col gap-3 rounded-[22px] border border-white/10 bg-[#0b1020]/82 p-2 shadow-[0_20px_48px_rgba(0,0,0,0.38)] backdrop-blur-md sm:max-w-none sm:flex-row sm:items-center sm:justify-center"
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.15, duration: 0.3 }}
@@ -1240,21 +1237,33 @@ function GameOverScreen({
             {isOnlineMode ? (
               <button
                 onClick={() => navigate("/?view=lobby")}
-                className={`min-h-11 rounded-lg px-8 py-3 text-base font-bold shadow-lg transition sm:px-10 sm:py-4 sm:text-lg ${menuBtnClass}`}
+                className={gameButtonClass({
+                  tone: isVictory ? "amber" : "slate",
+                  size: "lg",
+                  className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
+                })}
               >
                 Back to Lobby
               </button>
             ) : (
               <button
                 onClick={() => navigate("/")}
-                className={`min-h-11 rounded-lg px-8 py-3 text-base font-bold shadow-lg transition sm:px-10 sm:py-4 sm:text-lg ${menuBtnClass}`}
+                className={gameButtonClass({
+                  tone: isVictory ? "amber" : "slate",
+                  size: "lg",
+                  className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
+                })}
               >
                 Return to Menu
               </button>
             )}
             <button
               onClick={handleRematch}
-              className="min-h-11 rounded-lg border border-gray-500 bg-transparent px-8 py-3 text-base font-semibold text-gray-200 transition hover:border-gray-300 hover:text-white sm:px-10 sm:py-4 sm:text-lg"
+              className={gameButtonClass({
+                tone: isVictory ? "emerald" : "neutral",
+                size: "lg",
+                className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
+              })}
             >
               Rematch
             </button>

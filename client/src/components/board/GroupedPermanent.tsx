@@ -37,8 +37,7 @@ export function GroupedPermanentDisplay({ group }: GroupedPermanentProps) {
 
   return (
     <div
-      className="relative cursor-pointer"
-      onClick={() => setExpanded(true)}
+      className="relative"
       style={{
         // Reserve width for staggered cards beyond the first
         paddingRight: `${(group.count - 1) * STAGGER_PX}px`,
@@ -70,9 +69,14 @@ export function GroupedPermanentDisplay({ group }: GroupedPermanentProps) {
       />
 
       {/* Count badge */}
-      <div className="absolute left-1 top-1 z-30 flex h-5 w-5 items-center justify-center rounded-full bg-black/80 text-[10px] font-bold text-white ring-1 ring-gray-500">
+      <button
+        type="button"
+        onClick={() => setExpanded(true)}
+        className="absolute left-1 top-1 z-30 flex h-5 w-5 items-center justify-center rounded-full bg-black/80 text-[10px] font-bold text-white ring-1 ring-gray-500 transition-colors hover:bg-black"
+        aria-label={`Expand ${group.name} group`}
+      >
         {group.count}
-      </div>
+      </button>
     </div>
   );
 }

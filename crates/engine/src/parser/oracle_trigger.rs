@@ -148,6 +148,25 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         }
     }
 
+    // Pattern: "if you descended this turn"
+    if let Some(pos) = lower.find("if you descended this turn") {
+        let pattern_len = "if you descended this turn".len();
+        let before = text[..pos].trim_end().trim_end_matches(',');
+        let after = text[pos + pattern_len..]
+            .trim_start_matches(',')
+            .trim_start()
+            .trim_end_matches('.')
+            .trim();
+        let cleaned = if before.is_empty() {
+            after.to_string()
+        } else if after.is_empty() {
+            before.to_string()
+        } else {
+            format!("{before} {after}")
+        };
+        return (cleaned, Some(TriggerCondition::DescendedThisTurn));
+    }
+
     // Pattern: "if you control N or more creatures, {effect}"
     if let Some((condition, end_pos)) = parse_control_count_condition(&lower) {
         // Strip the "if you control N or more creatures" clause and keep the rest.
@@ -869,6 +888,18 @@ mod tests {
             def.condition,
             Some(TriggerCondition::LifeGainedThisTurn { minimum: 1 })
         );
+    }
+
+    #[test]
+    fn trigger_if_descended_this_turn() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if you descended this turn, scry 1.",
+            "Ruin-Lurker Bat",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::End));
+        assert_eq!(def.condition, Some(TriggerCondition::DescendedThisTurn));
+        assert!(def.execute.is_some());
     }
 
     #[test]

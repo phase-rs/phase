@@ -813,17 +813,8 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 casting::build_chained_resolved(mode_abilities, indices.as_slice(), sid, p)?;
 
             if *is_activated {
-                if matches!(ability_cost, Some(crate::types::ability::AbilityCost::Tap)) {
-                    let obj = state.objects.get_mut(&sid).ok_or_else(|| {
-                        EngineError::InvalidAction("Source object not found".to_string())
-                    })?;
-                    if obj.tapped {
-                        return Err(EngineError::ActionNotAllowed(
-                            "Cannot activate tap ability: permanent is tapped".to_string(),
-                        ));
-                    }
-                    obj.tapped = true;
-                    events.push(GameEvent::PermanentTapped { object_id: sid });
+                if let Some(cost) = ability_cost {
+                    casting::pay_ability_cost(state, p, sid, cost, &mut events)?;
                 }
 
                 if state.layers_dirty {

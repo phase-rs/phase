@@ -74,6 +74,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         player.has_drawn_this_turn = false;
         player.lands_played_this_turn = 0;
         player.life_gained_this_turn = 0;
+        player.descended_this_turn = false;
     }
 
     // Reset loyalty_activated_this_turn for all permanents controlled by the active player

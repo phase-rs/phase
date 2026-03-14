@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, AdditionalCost, Effect, ResolvedAbility, TargetFilter,
-    TargetRef,
+    AbilityDefinition, AbilityCost, AbilityKind, AdditionalCost, Effect, ResolvedAbility,
+    TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -557,6 +557,110 @@ pub fn handle_select_targets(
 }
 
 /// Activate an ability from a permanent on the battlefield.
+/// Check whether an ability cost includes a tap component (either directly or
+/// within a composite). Used for pre-validation before presenting modal choices.
+fn requires_untapped(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Tap => true,
+        AbilityCost::Composite { costs } => costs.iter().any(requires_untapped),
+        _ => false,
+    }
+}
+
+/// Pay a mana cost by auto-tapping lands and deducting from the player's mana pool.
+///
+/// Shared building block used by both spell casting (`pay_and_push`) and activated
+/// ability cost payment (`pay_ability_cost`).
+fn pay_mana_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let spell_meta = state.objects.get(&source_id).map(|obj| SpellMeta {
+        types: obj
+            .card_types
+            .core_types
+            .iter()
+            .map(|ct| format!("{ct:?}"))
+            .collect(),
+        subtypes: obj.card_types.subtypes.clone(),
+    });
+
+    auto_tap_lands(state, player, cost, events);
+
+    {
+        let player_data = state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .expect("player exists");
+        if !mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, spell_meta.as_ref()) {
+            return Err(EngineError::ActionNotAllowed(
+                "Cannot pay mana cost".to_string(),
+            ));
+        }
+    }
+
+    let hand_demand = mana_payment::compute_hand_color_demand(state, player, source_id);
+    let player_data = state
+        .players
+        .iter_mut()
+        .find(|p| p.id == player)
+        .expect("player exists");
+    mana_payment::pay_cost_with_demand(
+        &mut player_data.mana_pool,
+        cost,
+        Some(&hand_demand),
+        spell_meta.as_ref(),
+    )
+    .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
+
+    Ok(())
+}
+
+/// Pay an activated ability's cost. Handles `Tap`, `Mana`, `Composite` (recursive),
+/// and passes through other cost types that require interactive resolution.
+pub fn pay_ability_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    match cost {
+        AbilityCost::Tap => {
+            let obj = state
+                .objects
+                .get(&source_id)
+                .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
+            if obj.tapped {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot activate tap ability: permanent is tapped".to_string(),
+                ));
+            }
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.tapped = true;
+            events.push(GameEvent::PermanentTapped {
+                object_id: source_id,
+            });
+        }
+        AbilityCost::Mana { cost } => {
+            pay_mana_cost(state, player, source_id, cost, events)?;
+        }
+        AbilityCost::Composite { costs } => {
+            for sub_cost in costs {
+                pay_ability_cost(state, player, source_id, sub_cost, events)?;
+            }
+        }
+        // Other cost types (Sacrifice, PayLife, etc.) require interactive resolution
+        // and are not yet auto-payable. Pass through to allow the ability to resolve.
+        _ => {}
+    }
+    Ok(())
+}
+
 pub fn handle_activate_ability(
     state: &mut GameState,
     player: PlayerId,
@@ -588,10 +692,8 @@ pub fn handle_activate_ability(
     // Per MTG CR 602.2a: announce → choose modes → choose targets → pay costs.
     // Modal detection must happen BEFORE cost payment.
     if let Some(ref modal) = ability_def.modal {
-        if matches!(
-            ability_def.cost,
-            Some(crate::types::ability::AbilityCost::Tap)
-        ) {
+        // Pre-validate tap cost for modals — fail fast before presenting the choice
+        if ability_def.cost.as_ref().is_some_and(requires_untapped) {
             let obj = state.objects.get(&source_id).unwrap();
             if obj.tapped {
                 return Err(EngineError::ActionNotAllowed(
@@ -609,24 +711,9 @@ pub fn handle_activate_ability(
         });
     }
 
-    // Handle tap cost
-    let has_tap_cost = matches!(
-        ability_def.cost,
-        Some(crate::types::ability::AbilityCost::Tap)
-    );
-
-    if has_tap_cost {
-        let obj = state.objects.get(&source_id).unwrap();
-        if obj.tapped {
-            return Err(EngineError::ActionNotAllowed(
-                "Cannot activate tap ability: permanent is tapped".to_string(),
-            ));
-        }
-        let obj = state.objects.get_mut(&source_id).unwrap();
-        obj.tapped = true;
-        events.push(GameEvent::PermanentTapped {
-            object_id: source_id,
-        });
+    // Pay ability cost (tap, mana, composite, etc.)
+    if let Some(ref cost) = ability_def.cost {
+        pay_ability_cost(state, player, source_id, cost, events)?;
     }
 
     let resolved = {
@@ -832,48 +919,7 @@ fn pay_and_push(
         }
     }
 
-    // Build spell metadata for restriction-aware mana spending
-    let spell_meta = state.objects.get(&object_id).map(|obj| SpellMeta {
-        types: obj
-            .card_types
-            .core_types
-            .iter()
-            .map(|ct| format!("{ct:?}"))
-            .collect(),
-        subtypes: obj.card_types.subtypes.clone(),
-    });
-
-    // Auto-tap lands to fill mana pool before paying
-    auto_tap_lands(state, player, cost, events);
-
-    // Auto-pay mana cost
-    {
-        let player_data = state
-            .players
-            .iter()
-            .find(|p| p.id == player)
-            .expect("player exists");
-        if !mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, spell_meta.as_ref()) {
-            return Err(EngineError::ActionNotAllowed(
-                "Cannot pay mana cost".to_string(),
-            ));
-        }
-    }
-
-    // Compute hand color demand to guide hybrid mana spending
-    let hand_demand = mana_payment::compute_hand_color_demand(state, player, object_id);
-    let player_data = state
-        .players
-        .iter_mut()
-        .find(|p| p.id == player)
-        .expect("player exists");
-    let _ = mana_payment::pay_cost_with_demand(
-        &mut player_data.mana_pool,
-        cost,
-        Some(&hand_demand),
-        spell_meta.as_ref(),
-    )
-    .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
+    pay_mana_cost(state, player, object_id, cost, events)?;
 
     // Record commander cast before moving (need to check zone before move)
     let was_in_command_zone = state

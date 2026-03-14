@@ -29,10 +29,10 @@ export function partitionByType(objects: GameObject[]): BattlefieldPartition {
   const other: ObjectId[] = [];
 
   for (const obj of objects) {
-    if (obj.card_types.core_types.includes("Land")) {
-      lands.push(obj.id);
-    } else if (obj.card_types.core_types.includes("Creature")) {
+    if (obj.card_types.core_types.includes("Creature")) {
       creatures.push(obj.id);
+    } else if (obj.card_types.core_types.includes("Land")) {
+      lands.push(obj.id);
     } else {
       other.push(obj.id);
     }

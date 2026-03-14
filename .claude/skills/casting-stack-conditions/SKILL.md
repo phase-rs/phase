@@ -57,8 +57,7 @@ CastSpell action
   ▼
 8. pay_and_push()
    ├─ X in cost → WaitingFor::ManaPayment
-   ├─ Build `SpellMeta` from spell's types/subtypes (for restriction-aware mana spending)
-   ├─ auto_tap_lands() → can_pay_for_spell() → pay_cost_with_demand(pool, cost, demand, spell)
+   ├─ pay_mana_cost() — shared mana payment building block (see below)
    ├─ Move card to Zone::Stack
    ├─ Record commander cast if applicable
    └─ stack::push_to_stack() creates StackEntry
@@ -67,7 +66,58 @@ CastSpell action
 9. Return WaitingFor::Priority
 ```
 
-Key functions: `handle_cast_spell()`, `pay_and_push()`, `handle_select_targets()`, `handle_cancel_cast()`, `build_resolved_from_def()`
+Key functions: `handle_cast_spell()`, `pay_and_push()`, `pay_mana_cost()`, `pay_ability_cost()`, `handle_activate_ability()`, `handle_select_targets()`, `handle_cancel_cast()`, `build_resolved_from_def()`
+
+---
+
+## Activated Ability Cost Payment — Building Blocks
+
+Three composable helpers handle all ability cost payment:
+
+### `pay_mana_cost(state, player, source_id, cost, events)`
+Shared mana payment pipeline: `SpellMeta` → `auto_tap_lands()` → `can_pay_for_spell()` → `pay_cost_with_demand()`. Used by both `pay_and_push()` (spell casting) and `pay_ability_cost()` (activated abilities).
+
+### `pay_ability_cost(state, player, source_id, cost, events)`
+Dispatches over `AbilityCost` enum:
+- `Tap` → validates untapped, taps, emits `PermanentTapped`
+- `Mana { cost }` → delegates to `pay_mana_cost()`
+- `Composite { costs }` → recursively pays each sub-cost (handles `{T}, {2}: ...` patterns)
+- Other variants (Sacrifice, PayLife, etc.) → pass-through (interactive resolution not yet implemented)
+
+### `requires_untapped(cost) -> bool`
+Checks if a cost contains a `Tap` component (direct or within `Composite`). Used for pre-validation before presenting modal choices — fails fast before the player sees a mode selection dialog.
+
+### Activated Ability Flow — `handle_activate_ability()`
+
+```
+ActivateAbility action
+  │
+  ▼
+1. Validate: on battlefield, controller matches, ability_index valid
+  │
+  ▼
+2. Modal? → pre-validate via requires_untapped() → WaitingFor::AbilityModeChoice
+  │
+  ▼
+3. pay_ability_cost() — handles Tap, Mana, Composite
+  │
+  ▼
+4. Build ResolvedAbility
+  │
+  ▼
+5. Handle targeting (same as spell casting)
+  │
+  ▼
+6. Push StackEntry(ActivatedAbility) → WaitingFor::Priority
+```
+
+### Mana Abilities During Priority — `legal_actions.rs`
+
+`priority_actions()` generates both:
+- `ActivateAbility` — for non-mana activated abilities
+- `TapLandForMana` — for untapped lands with mana options (MTG CR 605)
+
+This enables the frontend choice modal when a permanent has both mana and non-mana abilities (e.g., Soulstone Sanctuary: `{T}: Add {C}` vs `{4}: animate`).
 
 ---
 
@@ -165,7 +215,7 @@ Casting-relevant states:
 
 | WaitingFor | Triggered by | Responded with |
 |------------|-------------|---------------|
-| `Priority { player }` | Normal priority | `CastSpell`, `ActivateAbility`, `PassPriority` |
+| `Priority { player }` | Normal priority | `CastSpell`, `ActivateAbility`, `TapLandForMana`, `PassPriority` |
 | `TargetSelection { player, pending_cast, legal_targets }` | Multiple legal targets during cast | `SelectTargets { targets }` |
 | `ModeChoice { player, modal, pending_cast }` | Modal spell ("Choose one —") detected via `obj.modal` | `SelectModes { indices }` |
 | `ManaPayment { player }` | X in mana cost | Mana declaration |
@@ -285,6 +335,9 @@ if lower.starts_with("you may ") {
 ```bash
 rg -q "fn handle_cast_spell" crates/engine/src/game/casting.rs && \
 rg -q "fn pay_and_push" crates/engine/src/game/casting.rs && \
+rg -q "fn pay_mana_cost" crates/engine/src/game/casting.rs && \
+rg -q "fn pay_ability_cost" crates/engine/src/game/casting.rs && \
+rg -q "fn requires_untapped" crates/engine/src/game/casting.rs && \
 rg -q "fn resolve_top" crates/engine/src/game/stack.rs && \
 rg -q "fn resolve_ability_chain" crates/engine/src/game/effects/mod.rs && \
 rg -q "struct PendingCast" crates/engine/src/types/game_state.rs && \

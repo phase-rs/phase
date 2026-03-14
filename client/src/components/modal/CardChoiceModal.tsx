@@ -17,8 +17,10 @@ type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
 type SearchChoice = Extract<WaitingFor, { type: "SearchChoice" }>;
 type DiscardToHandSize = Extract<WaitingFor, { type: "DiscardToHandSize" }>;
 const CHOICE_CARD_IMAGE_CLASS = "h-[clamp(136px,24vh,224px)] w-[clamp(97px,17vh,160px)]";
+const SCRY_CARD_IMAGE_CLASS =
+  "!h-[220px] !w-[157px] sm:!h-[280px] sm:!w-[200px] lg:!h-[340px] lg:!w-[243px]";
 const CHOICE_CARD_ROW_CLASS =
-  "mb-6 flex w-full max-w-5xl flex-wrap items-start justify-center gap-3 overflow-y-auto px-1 sm:mb-10";
+  "mx-auto mb-6 flex w-full max-w-5xl flex-wrap items-start justify-center gap-3 overflow-y-auto px-1 sm:mb-10";
 
 /**
  * Generic card choice modal for Scry, Dig, Surveil, Reveal, Search, and NamedChoice.
@@ -86,12 +88,20 @@ function ScryModal({ data }: { data: ScryChoice["data"] }) {
 
   if (!objects) return null;
 
+  const overlayWidthClassName =
+    data.cards.length <= 1
+      ? "max-w-[22rem] sm:max-w-[26rem] lg:max-w-[30rem]"
+      : data.cards.length === 2
+        ? "max-w-[30rem] sm:max-w-[38rem] lg:max-w-[46rem]"
+        : "max-w-[38rem] sm:max-w-[48rem] lg:max-w-[58rem]";
+
   return (
     <ChoiceOverlay
       title="Scry"
       subtitle={`Look at the top ${data.cards.length} card${data.cards.length > 1 ? "s" : ""} of your library`}
+      maxWidthClassName={overlayWidthClassName}
     >
-      <div className={CHOICE_CARD_ROW_CLASS}>
+      <div className="mx-auto mb-6 flex w-full max-w-fit flex-wrap items-start justify-center gap-3 px-1 sm:mb-10 sm:gap-4">
         {data.cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
@@ -118,7 +128,7 @@ function ScryModal({ data }: { data: ScryChoice["data"] }) {
                 <CardImage
                   cardName={obj.name}
                   size="normal"
-                  className={CHOICE_CARD_IMAGE_CLASS}
+                  className={SCRY_CARD_IMAGE_CLASS}
                 />
               </motion.div>
               <button

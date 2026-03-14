@@ -6,17 +6,19 @@ export function ChoiceOverlay({
   title,
   subtitle,
   children,
+  maxWidthClassName = "max-w-6xl",
 }: {
   title: string;
   subtitle: string;
   children: React.ReactNode;
+  maxWidthClassName?: string;
 }) {
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto px-3 py-4 sm:px-4 sm:py-6">
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
       <div className="relative flex min-h-full flex-col items-center justify-center pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
         <motion.div
-          className="w-full max-w-6xl overflow-hidden rounded-[28px] border border-white/10 bg-[#0b1020]/94 shadow-[0_32px_90px_rgba(0,0,0,0.48)] backdrop-blur-md"
+          className={`w-full overflow-hidden rounded-[28px] border border-white/10 bg-[#0b1020]/94 shadow-[0_32px_90px_rgba(0,0,0,0.48)] backdrop-blur-md ${maxWidthClassName}`}
           initial={{ opacity: 0, y: 18, scale: 0.98 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
           transition={{ duration: 0.24, ease: "easeOut" }}
@@ -53,7 +55,7 @@ export function ConfirmButton({
   return (
     <AnimatePresence>
       <motion.div
-        className="w-full max-w-xs px-4 sm:px-0"
+        className="mx-auto w-full max-w-xs px-4 sm:px-0"
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.5, duration: 0.3 }}

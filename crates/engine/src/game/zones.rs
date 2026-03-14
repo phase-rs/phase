@@ -85,6 +85,27 @@ pub fn move_to_zone(
         obj_mut.entered_battlefield_turn = Some(state.turn_number);
     }
 
+    // Track descended: a permanent card was put into its owner's graveyard
+    if to == Zone::Graveyard {
+        use crate::types::card_type::CoreType;
+        let is_permanent_card = obj_mut.card_types.core_types.iter().any(|ct| {
+            matches!(
+                ct,
+                CoreType::Creature
+                    | CoreType::Artifact
+                    | CoreType::Enchantment
+                    | CoreType::Planeswalker
+                    | CoreType::Land
+                    | CoreType::Battle
+            )
+        });
+        if is_permanent_card {
+            if let Some(player) = state.players.iter_mut().find(|p| p.id == owner) {
+                player.descended_this_turn = true;
+            }
+        }
+    }
+
     // Mark layers dirty when objects enter or leave the battlefield
     if from == Zone::Battlefield || to == Zone::Battlefield {
         state.layers_dirty = true;

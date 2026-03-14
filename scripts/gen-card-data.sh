@@ -2,8 +2,10 @@
 set -euo pipefail
 
 DATA_DIR="data"
-OUTPUT="client/public/card-data.json"
-NAMES_OUTPUT="client/public/card-names.json"
+OUTPUT_DIR="client/public"
+OUTPUT="${OUTPUT_DIR}/card-data.json"
+NAMES_OUTPUT="${OUTPUT_DIR}/card-names.json"
+COVERAGE_OUTPUT="${OUTPUT_DIR}/coverage-data.json"
 
 echo "=== Card Data Generation ==="
 
@@ -20,6 +22,8 @@ fi
 echo "Generating card data from MTGJSON via Oracle text parser..."
 mkdir -p "$(dirname "$OUTPUT")"
 cargo run --release --bin oracle-gen -- "$DATA_DIR" --stats --names-out "$NAMES_OUTPUT" > "$OUTPUT"
+echo "Generating card coverage data..."
+cargo run --release --bin coverage-report -- "$DATA_DIR" --all > "$COVERAGE_OUTPUT"
 
 # Summary
 FILE_SIZE=$(du -h "$OUTPUT" | cut -f1)

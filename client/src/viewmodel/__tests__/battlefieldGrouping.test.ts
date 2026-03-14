@@ -67,15 +67,15 @@ describe("partitionByType", () => {
     expect(result.other).toEqual([]);
   });
 
-  it("classifies land-creatures as lands", () => {
+  it("classifies land-creatures as creatures", () => {
     const objects = [
       makeGameObject({ id: 1, card_types: { supertypes: [], core_types: ["Creature", "Land"], subtypes: [] } }),
     ];
 
     const result = partitionByType(objects);
-    // Lands take priority since they check first
-    expect(result.lands).toEqual([1]);
-    expect(result.creatures).toEqual([]);
+    // Creatures take priority — animated lands should display in the creature zone
+    expect(result.creatures).toEqual([1]);
+    expect(result.lands).toEqual([]);
   });
 });
 
