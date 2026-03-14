@@ -380,6 +380,12 @@ pub fn declare_attackers(
             }
         })
         .collect();
+    state.players_attacked_this_step = combat
+        .attackers
+        .iter()
+        .map(|a| a.defending_player)
+        .collect();
+    let attacker_count = combat.attackers.len();
 
     // Use the first attacker's defending player for the event
     let defending_player = combat
@@ -392,6 +398,7 @@ pub fn declare_attackers(
         attacker_ids,
         defending_player,
     });
+    super::restrictions::record_attackers_declared(state, attacker_count);
 
     Ok(())
 }

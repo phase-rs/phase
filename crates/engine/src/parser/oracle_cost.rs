@@ -1,6 +1,6 @@
 use super::oracle_target::{parse_target, parse_type_phrase};
-use super::oracle_util::parse_number;
 use super::oracle_util::parse_mana_symbols;
+use super::oracle_util::parse_number;
 use crate::types::ability::{AbilityCost, FilterProp, TargetFilter, TypedFilter};
 use crate::types::zones::Zone;
 

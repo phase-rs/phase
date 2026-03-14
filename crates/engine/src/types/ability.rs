@@ -134,6 +134,35 @@ impl ChosenAttribute {
     /// Parse a player's string response into a typed ChosenAttribute.
     /// Returns None if the string doesn't match the expected choice type.
     pub fn from_choice(choice_type: ChoiceType, value: &str) -> Option<Self> {
+        match ChoiceValue::from_choice(&choice_type, value)? {
+            ChoiceValue::Color(color) => Some(Self::Color(color)),
+            ChoiceValue::CreatureType(creature_type) => Some(Self::CreatureType(creature_type)),
+            ChoiceValue::BasicLandType(land_type) => Some(Self::BasicLandType(land_type)),
+            ChoiceValue::CardType(card_type) => Some(Self::CardType(card_type)),
+            ChoiceValue::OddOrEven(parity) => Some(Self::OddOrEven(parity)),
+            ChoiceValue::CardName(card_name) => Some(Self::CardName(card_name)),
+            ChoiceValue::Number(_) | ChoiceValue::Label(_) | ChoiceValue::LandType(_) => None,
+        }
+    }
+}
+
+/// A typed value chosen at resolution time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", content = "value")]
+pub enum ChoiceValue {
+    Color(ManaColor),
+    CreatureType(String),
+    BasicLandType(BasicLandType),
+    CardType(CoreType),
+    OddOrEven(Parity),
+    CardName(String),
+    Number(u8),
+    Label(String),
+    LandType(String),
+}
+
+impl ChoiceValue {
+    pub fn from_choice(choice_type: &ChoiceType, value: &str) -> Option<Self> {
         match choice_type {
             ChoiceType::Color => value.parse::<ManaColor>().ok().map(Self::Color),
             ChoiceType::CreatureType => Some(Self::CreatureType(value.to_string())),
@@ -143,12 +172,9 @@ impl ChosenAttribute {
             ChoiceType::CardType => value.parse::<CoreType>().ok().map(Self::CardType),
             ChoiceType::OddOrEven => value.parse::<Parity>().ok().map(Self::OddOrEven),
             ChoiceType::CardName => Some(Self::CardName(value.to_string())),
-            // These choice types represent ephemeral selections (numbers, binary labels, land types)
-            // that don't map to a typed ChosenAttribute. If persist=true is used with these variants,
-            // the choice is not stored on the object — extend ChosenAttribute if persistence is needed.
-            ChoiceType::NumberRange { .. } | ChoiceType::Labeled { .. } | ChoiceType::LandType => {
-                None
-            }
+            ChoiceType::NumberRange { .. } => value.parse::<u8>().ok().map(Self::Number),
+            ChoiceType::Labeled { .. } => Some(Self::Label(value.to_string())),
+            ChoiceType::LandType => Some(Self::LandType(value.to_string())),
         }
     }
 }
@@ -1336,11 +1362,13 @@ pub enum ActivationRestriction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", content = "data")]
 pub enum CastingRestriction {
+    AsSorcery,
     DuringCombat,
     DuringOpponentsTurn,
     DuringYourTurn,
     DuringYourUpkeep,
     DuringOpponentsUpkeep,
+    DuringAnyUpkeep,
     DuringYourEndStep,
     DuringOpponentsEndStep,
     DeclareAttackersStep,

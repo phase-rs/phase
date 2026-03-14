@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::process;
@@ -119,10 +119,10 @@ fn main() {
 
 /// Load the Standard card manifest file.
 /// Returns a set of lowercase card names, filtering out blank lines and comments.
-fn load_manifest(path: &PathBuf) -> Result<HashSet<String>, std::io::Error> {
+fn load_manifest(path: &PathBuf) -> Result<BTreeSet<String>, std::io::Error> {
     let file = std::fs::File::open(path)?;
     let reader = std::io::BufReader::new(file);
-    let mut names = HashSet::new();
+    let mut names = BTreeSet::new();
     for line in reader.lines() {
         let line = line?;
         let trimmed = line.trim();
@@ -137,7 +137,7 @@ fn load_manifest(path: &PathBuf) -> Result<HashSet<String>, std::io::Error> {
 /// Filter a CoverageSummary to only include cards whose names are in the manifest.
 /// Also strips benign MTGJSON keyword mismatches (bare parameterized keywords and
 /// action keywords like Scry/Mill that MTGJSON tracks but Forge doesn't).
-fn filter_to_manifest(summary: CoverageSummary, manifest: &HashSet<String>) -> CoverageSummary {
+fn filter_to_manifest(summary: CoverageSummary, manifest: &BTreeSet<String>) -> CoverageSummary {
     let cards: Vec<_> = summary
         .cards
         .into_iter()

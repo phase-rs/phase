@@ -377,6 +377,8 @@ pub fn resolve(
                     }
 
                     state.layers_dirty = true;
+                    crate::game::restrictions::record_battlefield_entry(state, obj_id);
+                    crate::game::restrictions::record_token_created(state, obj_id);
 
                     events.push(GameEvent::TokenCreated {
                         object_id: obj_id,
@@ -610,6 +612,18 @@ mod tests {
         assert!(obj.card_types.core_types.contains(&CoreType::Creature));
         assert_eq!(obj.color, vec![ManaColor::White]);
         assert_eq!(obj.card_id, CardId(0));
+    }
+
+    #[test]
+    fn token_creation_records_creature_etb_after_attributes_are_applied() {
+        let (state, _) = resolve_token("w_4_4_angel_flying");
+
+        assert!(state
+            .players_who_had_creature_etb_this_turn
+            .contains(&PlayerId(0)));
+        assert!(state
+            .players_who_had_angel_or_berserker_etb_this_turn
+            .contains(&PlayerId(0)));
     }
 
     #[test]

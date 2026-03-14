@@ -5,8 +5,8 @@ use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    AbilityCost, AbilityDefinition, AdditionalCost, ChoiceType, ModalChoice, ResolvedAbility,
-    TargetFilter, TargetRef, TriggerCondition,
+    AbilityCost, AbilityDefinition, AdditionalCost, ChoiceType, ChoiceValue, ModalChoice,
+    ResolvedAbility, TargetFilter, TargetRef, TriggerCondition,
 };
 use super::events::GameEvent;
 use super::format::FormatConfig;
@@ -57,6 +57,35 @@ pub struct PendingCast {
     pub card_id: CardId,
     pub ability: ResolvedAbility,
     pub cost: ManaCost,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_cost: Option<AbilityCost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_ability_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_constraints: Vec<TargetSelectionConstraint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetSelectionSlot {
+    pub legal_targets: Vec<TargetRef>,
+    #[serde(default)]
+    pub optional: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TargetSelectionProgress {
+    #[serde(default)]
+    pub current_slot: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_slots: Vec<Option<TargetRef>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub current_legal_targets: Vec<TargetRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum TargetSelectionConstraint {
+    DifferentTargetPlayers,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -88,7 +117,9 @@ pub enum WaitingFor {
     TargetSelection {
         player: PlayerId,
         pending_cast: Box<PendingCast>,
-        legal_targets: Vec<TargetRef>,
+        target_slots: Vec<TargetSelectionSlot>,
+        #[serde(default)]
+        selection: TargetSelectionProgress,
     },
     DeclareAttackers {
         player: PlayerId,
@@ -145,10 +176,11 @@ pub enum WaitingFor {
     },
     TriggerTargetSelection {
         player: PlayerId,
-        legal_targets: Vec<TargetRef>,
-        /// When true, the player may decline (choose zero targets). Used for "up to one" effects.
+        target_slots: Vec<TargetSelectionSlot>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        target_constraints: Vec<TargetSelectionConstraint>,
         #[serde(default)]
-        optional: bool,
+        selection: TargetSelectionProgress,
     },
     BetweenGamesSideboard {
         player: PlayerId,
@@ -203,6 +235,8 @@ pub enum WaitingFor {
         /// (already on stack, needs effect replacement).
         #[serde(default)]
         is_activated: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ability_index: Option<usize>,
         /// For activated abilities: the cost to pay after mode selection.
         /// Per MTG CR 602.2a: announce → choose modes → choose targets → pay costs.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -337,6 +371,40 @@ pub struct GameState {
     pub triggers_fired_this_turn: HashSet<(ObjectId, usize)>,
     #[serde(default)]
     pub triggers_fired_this_game: HashSet<(ObjectId, usize)>,
+    #[serde(default)]
+    pub activated_abilities_this_turn: HashMap<(ObjectId, usize), u32>,
+    #[serde(default)]
+    pub activated_abilities_this_game: HashMap<(ObjectId, usize), u32>,
+    #[serde(default)]
+    pub spells_cast_this_game: HashMap<PlayerId, u32>,
+    #[serde(default)]
+    pub spells_cast_this_turn_by_player: HashMap<PlayerId, u32>,
+    #[serde(default)]
+    pub players_who_cast_noncreature_spell_this_turn: HashSet<PlayerId>,
+    #[serde(default)]
+    pub players_who_searched_library_this_turn: HashSet<PlayerId>,
+    #[serde(default)]
+    pub players_attacked_this_step: HashSet<PlayerId>,
+    #[serde(default)]
+    pub players_attacked_this_turn: HashSet<PlayerId>,
+    #[serde(default)]
+    pub attacking_creatures_this_turn: HashMap<PlayerId, u32>,
+    #[serde(default)]
+    pub players_who_created_token_this_turn: HashSet<PlayerId>,
+    #[serde(default)]
+    pub players_who_discarded_card_this_turn: HashSet<PlayerId>,
+    #[serde(default)]
+    pub players_who_sacrificed_artifact_this_turn: HashSet<PlayerId>,
+    #[serde(default)]
+    pub players_who_had_creature_etb_this_turn: HashSet<PlayerId>,
+    #[serde(default)]
+    pub players_who_had_angel_or_berserker_etb_this_turn: HashSet<PlayerId>,
+    #[serde(default)]
+    pub players_who_had_artifact_etb_this_turn: HashSet<PlayerId>,
+    #[serde(default)]
+    pub cards_left_graveyard_this_turn: HashMap<PlayerId, u32>,
+    #[serde(default)]
+    pub creature_died_this_turn: bool,
 
     /// Cards currently revealed to all players (e.g. during a RevealHand effect).
     /// `filter_state_for_player` skips hiding these cards.
@@ -352,7 +420,7 @@ pub struct GameState {
     /// The most recently chosen named value (creature type, color, etc.).
     /// Set by the NamedChoice handler, consumed by continuation effects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_named_choice: Option<String>,
+    pub last_named_choice: Option<ChoiceValue>,
 
     /// All creature subtypes seen across loaded cards. Used by Changeling CDA
     /// to grant every creature type at runtime.
@@ -432,6 +500,23 @@ impl GameState {
             sideboard_submitted: Vec::new(),
             triggers_fired_this_turn: HashSet::new(),
             triggers_fired_this_game: HashSet::new(),
+            activated_abilities_this_turn: HashMap::new(),
+            activated_abilities_this_game: HashMap::new(),
+            spells_cast_this_game: HashMap::new(),
+            spells_cast_this_turn_by_player: HashMap::new(),
+            players_who_cast_noncreature_spell_this_turn: HashSet::new(),
+            players_who_searched_library_this_turn: HashSet::new(),
+            players_attacked_this_step: HashSet::new(),
+            players_attacked_this_turn: HashSet::new(),
+            attacking_creatures_this_turn: HashMap::new(),
+            players_who_created_token_this_turn: HashSet::new(),
+            players_who_discarded_card_this_turn: HashSet::new(),
+            players_who_sacrificed_artifact_this_turn: HashSet::new(),
+            players_who_had_creature_etb_this_turn: HashSet::new(),
+            players_who_had_angel_or_berserker_etb_this_turn: HashSet::new(),
+            players_who_had_artifact_etb_this_turn: HashSet::new(),
+            cards_left_graveyard_this_turn: HashMap::new(),
+            creature_died_this_turn: false,
             revealed_cards: HashSet::new(),
             pending_continuation: None,
             last_named_choice: None,
@@ -501,6 +586,30 @@ impl PartialEq for GameState {
             && self.sideboard_submitted == other.sideboard_submitted
             && self.triggers_fired_this_turn == other.triggers_fired_this_turn
             && self.triggers_fired_this_game == other.triggers_fired_this_game
+            && self.activated_abilities_this_turn == other.activated_abilities_this_turn
+            && self.activated_abilities_this_game == other.activated_abilities_this_game
+            && self.spells_cast_this_game == other.spells_cast_this_game
+            && self.spells_cast_this_turn_by_player == other.spells_cast_this_turn_by_player
+            && self.players_who_cast_noncreature_spell_this_turn
+                == other.players_who_cast_noncreature_spell_this_turn
+            && self.players_who_searched_library_this_turn
+                == other.players_who_searched_library_this_turn
+            && self.players_attacked_this_step == other.players_attacked_this_step
+            && self.players_attacked_this_turn == other.players_attacked_this_turn
+            && self.attacking_creatures_this_turn == other.attacking_creatures_this_turn
+            && self.players_who_created_token_this_turn == other.players_who_created_token_this_turn
+            && self.players_who_discarded_card_this_turn
+                == other.players_who_discarded_card_this_turn
+            && self.players_who_sacrificed_artifact_this_turn
+                == other.players_who_sacrificed_artifact_this_turn
+            && self.players_who_had_creature_etb_this_turn
+                == other.players_who_had_creature_etb_this_turn
+            && self.players_who_had_angel_or_berserker_etb_this_turn
+                == other.players_who_had_angel_or_berserker_etb_this_turn
+            && self.players_who_had_artifact_etb_this_turn
+                == other.players_who_had_artifact_etb_this_turn
+            && self.cards_left_graveyard_this_turn == other.cards_left_graveyard_this_turn
+            && self.creature_died_this_turn == other.creature_died_this_turn
             && self.pending_continuation == other.pending_continuation
             && self.last_named_choice == other.last_named_choice
     }
@@ -657,8 +766,12 @@ mod tests {
             },
             WaitingFor::TriggerTargetSelection {
                 player: PlayerId(0),
-                legal_targets: vec![TargetRef::Object(ObjectId(1))],
-                optional: false,
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: vec![TargetRef::Object(ObjectId(1))],
+                    optional: false,
+                }],
+                target_constraints: vec![],
+                selection: TargetSelectionProgress::default(),
             },
             WaitingFor::ModeChoice {
                 player: PlayerId(0),
@@ -683,6 +796,9 @@ mod tests {
                         PlayerId(0),
                     ),
                     cost: crate::types::mana::ManaCost::NoCost,
+                    activation_cost: None,
+                    activation_ability_index: None,
+                    target_constraints: vec![],
                 }),
             },
             WaitingFor::DiscardToHandSize {
@@ -708,6 +824,9 @@ mod tests {
                         PlayerId(0),
                     ),
                     cost: crate::types::mana::ManaCost::NoCost,
+                    activation_cost: None,
+                    activation_ability_index: None,
+                    target_constraints: vec![],
                 }),
             },
             WaitingFor::AbilityModeChoice {
@@ -723,6 +842,7 @@ mod tests {
                 source_id: ObjectId(1),
                 mode_abilities: vec![],
                 is_activated: true,
+                ability_index: Some(0),
                 ability_cost: None,
             },
         ];
@@ -817,11 +937,15 @@ mod tests {
         use crate::types::ability::TargetRef;
         let wf = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
-            legal_targets: vec![
-                TargetRef::Object(ObjectId(1)),
-                TargetRef::Object(ObjectId(2)),
-            ],
-            optional: false,
+            target_slots: vec![TargetSelectionSlot {
+                legal_targets: vec![
+                    TargetRef::Object(ObjectId(1)),
+                    TargetRef::Object(ObjectId(2)),
+                ],
+                optional: false,
+            }],
+            target_constraints: vec![],
+            selection: TargetSelectionProgress::default(),
         };
         let json = serde_json::to_string(&wf).unwrap();
         let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();
@@ -833,16 +957,12 @@ mod tests {
     #[test]
     fn pending_trigger_roundtrips() {
         use crate::game::triggers::PendingTrigger;
-        use crate::types::ability::{Effect, ResolvedAbility, TargetFilter};
-        use crate::types::triggers::TriggerMode;
+        use crate::types::ability::{Effect, ResolvedAbility};
 
         let trigger = PendingTrigger {
             source_id: ObjectId(5),
             controller: PlayerId(0),
-            trigger_def: crate::types::ability::TriggerDefinition::new(TriggerMode::ChangesZone)
-                .valid_card(TargetFilter::SelfRef)
-                .origin(crate::types::zones::Zone::Battlefield)
-                .destination(crate::types::zones::Zone::Graveyard),
+            condition: None,
             ability: ResolvedAbility::new(
                 Effect::Draw { count: 1 },
                 vec![],
@@ -850,6 +970,7 @@ mod tests {
                 PlayerId(0),
             ),
             timestamp: 42,
+            target_constraints: Vec::new(),
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: PendingTrigger = serde_json::from_str(&json).unwrap();
@@ -860,7 +981,6 @@ mod tests {
     fn game_state_with_pending_trigger_and_exile_links() {
         use crate::game::triggers::PendingTrigger;
         use crate::types::ability::{Effect, ResolvedAbility};
-        use crate::types::triggers::TriggerMode;
 
         let mut state = GameState::new_two_player(42);
         state.exile_links.push(ExileLink {
@@ -870,7 +990,7 @@ mod tests {
         state.pending_trigger = Some(PendingTrigger {
             source_id: ObjectId(5),
             controller: PlayerId(0),
-            trigger_def: crate::types::ability::TriggerDefinition::new(TriggerMode::ChangesZone),
+            condition: None,
             ability: ResolvedAbility::new(
                 Effect::Draw { count: 1 },
                 vec![],
@@ -878,6 +998,7 @@ mod tests {
                 PlayerId(0),
             ),
             timestamp: 1,
+            target_constraints: Vec::new(),
         });
 
         let json = serde_json::to_string(&state).unwrap();

@@ -712,8 +712,51 @@ fn strip_activated_constraints(text: &str) -> (String, ActivatedConstraintAst) {
     let mut remaining = text.trim().trim_end_matches('.').trim().to_string();
     let mut constraints = ActivatedConstraintAst::default();
 
-    loop {
+    'parse_constraints: loop {
         let lower = remaining.to_lowercase();
+
+        for (suffix, parsed) in [
+            (
+                "activate only as a sorcery and only once each turn",
+                vec![
+                    ActivationRestriction::AsSorcery,
+                    ActivationRestriction::OnlyOnceEachTurn,
+                ],
+            ),
+            (
+                "activate only as a sorcery and only once",
+                vec![
+                    ActivationRestriction::AsSorcery,
+                    ActivationRestriction::OnlyOnce,
+                ],
+            ),
+            (
+                "activate only during your turn and only once each turn",
+                vec![
+                    ActivationRestriction::DuringYourTurn,
+                    ActivationRestriction::OnlyOnceEachTurn,
+                ],
+            ),
+            (
+                "activate only during your upkeep and only once each turn",
+                vec![
+                    ActivationRestriction::DuringYourUpkeep,
+                    ActivationRestriction::OnlyOnceEachTurn,
+                ],
+            ),
+        ] {
+            if lower.ends_with(suffix) {
+                let end = remaining.len() - suffix.len();
+                remaining = remaining[..end]
+                    .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                    .to_string();
+                constraints.restrictions.extend(parsed);
+                if remaining.is_empty() {
+                    break 'parse_constraints;
+                }
+                continue 'parse_constraints;
+            }
+        }
 
         if let Some(prefix) = lower.strip_suffix("activate only as a sorcery") {
             let end = remaining.len() - "activate only as a sorcery".len();
@@ -1426,10 +1469,7 @@ fn is_effect_sentence_candidate(lower: &str) -> bool {
 /// - "choose any number of —" → (1, usize::MAX)
 fn parse_modal_choose_count(lower: &str) -> (usize, usize) {
     let lower = lower.trim();
-    let lower = lower
-        .strip_prefix("you may ")
-        .unwrap_or(lower)
-        .trim_start();
+    let lower = lower.strip_prefix("you may ").unwrap_or(lower).trim_start();
 
     if lower.contains("choose any number instead") {
         return (1, usize::MAX);
@@ -1530,7 +1570,10 @@ fn split_leading_if_clause(text: &str) -> (Option<&str>, &str) {
     }
 
     if let Some((condition, rest)) = trimmed.split_once(", ") {
-        return (Some(condition.trim_start_matches("If ").trim()), rest.trim());
+        return (
+            Some(condition.trim_start_matches("If ").trim()),
+            rest.trim(),
+        );
     }
 
     (None, trimmed)
@@ -1583,10 +1626,15 @@ fn parse_self_alternative_cost_option(
     body_lower: &str,
     card_name: &str,
 ) -> Option<SpellCastingOption> {
-    if let Some(cost_text) =
-        extract_alternative_cost(body, body_lower, "you may pay ", " rather than pay this spell's mana cost")
-    {
-        return Some(SpellCastingOption::alternative_cost(parse_oracle_cost(cost_text)));
+    if let Some(cost_text) = extract_alternative_cost(
+        body,
+        body_lower,
+        "you may pay ",
+        " rather than pay this spell's mana cost",
+    ) {
+        return Some(SpellCastingOption::alternative_cost(parse_oracle_cost(
+            cost_text,
+        )));
     }
 
     if let Some((cost_text, condition)) = extract_alternative_cost_with_trailing_condition(
@@ -1609,7 +1657,9 @@ fn parse_self_alternative_cost_option(
         let for_cost = format!("you may cast {self_ref} for ");
         if body_lower.starts_with(&for_cost) {
             let cost_text = body[for_cost.len()..].trim();
-            return Some(SpellCastingOption::alternative_cost(parse_oracle_cost(cost_text)));
+            return Some(SpellCastingOption::alternative_cost(parse_oracle_cost(
+                cost_text,
+            )));
         }
     }
 
@@ -1670,6 +1720,9 @@ fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRestriction>>
     let rest = lower.strip_prefix("cast this spell only ")?;
     let mut restrictions = Vec::new();
 
+    if rest.contains("as a sorcery") {
+        restrictions.push(CastingRestriction::AsSorcery);
+    }
     if rest.contains("during combat") {
         restrictions.push(CastingRestriction::DuringCombat);
     }
@@ -1686,13 +1739,17 @@ fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRestriction>>
     if rest.contains("during your upkeep") {
         restrictions.push(CastingRestriction::DuringYourUpkeep);
     }
+    if rest.contains("during any upkeep step") || rest.contains("during any upkeep") {
+        restrictions.push(CastingRestriction::DuringAnyUpkeep);
+    }
     if rest.contains("during an opponent's upkeep") || rest.contains("during an opponents upkeep") {
         restrictions.push(CastingRestriction::DuringOpponentsUpkeep);
     }
     if rest.contains("during your end step") {
         restrictions.push(CastingRestriction::DuringYourEndStep);
     }
-    if rest.contains("during an opponent's end step") || rest.contains("during an opponents end step")
+    if rest.contains("during an opponent's end step")
+        || rest.contains("during an opponents end step")
     {
         restrictions.push(CastingRestriction::DuringOpponentsEndStep);
     }
@@ -1723,21 +1780,29 @@ fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRestriction>>
 
     if let Some(condition) = rest.strip_prefix("if ") {
         restrictions.push(CastingRestriction::RequiresCondition {
-            text: condition.trim().to_string(),
+            text: strip_casting_condition_suffixes(condition).to_string(),
         });
     }
     if let Some(condition) = rest.strip_prefix("only if ") {
         restrictions.push(CastingRestriction::RequiresCondition {
-            text: condition.trim().to_string(),
+            text: strip_casting_condition_suffixes(condition).to_string(),
         });
     }
     if let Some(condition) = rest.split(" and only if ").nth(1) {
         restrictions.push(CastingRestriction::RequiresCondition {
-            text: condition.trim().to_string(),
+            text: strip_casting_condition_suffixes(condition).to_string(),
         });
     }
 
     (!restrictions.is_empty()).then_some(restrictions)
+}
+
+fn strip_casting_condition_suffixes(text: &str) -> &str {
+    text.trim()
+        .trim_end_matches(" and only as a sorcery")
+        .trim_end_matches(" and only during any upkeep step")
+        .trim_end_matches(" and only during any upkeep")
+        .trim()
 }
 
 /// Extract the blight count (N) from text starting after "blight ".
@@ -1963,6 +2028,31 @@ mod tests {
     }
 
     #[test]
+    fn favorable_winds_routes_to_static_parser() {
+        let r = parse(
+            "Creatures you control with flying get +1/+1.",
+            "Favorable Winds",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        assert!(r.abilities.is_empty());
+        assert_eq!(r.statics.len(), 1);
+        assert!(matches!(
+            r.statics[0].affected,
+            Some(crate::types::ability::TargetFilter::Typed(
+                crate::types::ability::TypedFilter {
+                    controller: Some(crate::types::ability::ControllerRef::You),
+                    ref properties,
+                    ..
+                }
+            )) if properties == &vec![crate::types::ability::FilterProp::WithKeyword {
+                value: "flying".to_string(),
+            }]
+        ));
+    }
+
+    #[test]
     fn must_attack_routes_to_static_parser() {
         let r = parse(
             "This creature attacks each combat if able.",
@@ -2112,8 +2202,9 @@ mod tests {
 
     #[test]
     fn spell_cast_restriction_parses_end_step_window() {
-        let restrictions = parse_casting_restriction_line("Cast this spell only during your end step.")
-            .expect("restrictions should parse");
+        let restrictions =
+            parse_casting_restriction_line("Cast this spell only during your end step.")
+                .expect("restrictions should parse");
         assert_eq!(restrictions, vec![CastingRestriction::DuringYourEndStep]);
     }
 
@@ -2122,19 +2213,49 @@ mod tests {
         let restrictions =
             parse_casting_restriction_line("Cast this spell only during an opponent's upkeep.")
                 .expect("restrictions should parse");
-        assert_eq!(restrictions, vec![CastingRestriction::DuringOpponentsUpkeep]);
+        assert_eq!(
+            restrictions,
+            vec![CastingRestriction::DuringOpponentsUpkeep]
+        );
+    }
+
+    #[test]
+    fn spell_cast_restriction_parses_any_upkeep_window() {
+        let restrictions =
+            parse_casting_restriction_line("Cast this spell only during any upkeep step.")
+                .expect("restrictions should parse");
+        assert_eq!(restrictions, vec![CastingRestriction::DuringAnyUpkeep]);
     }
 
     #[test]
     fn spell_cast_restriction_parses_plain_only_if_condition() {
-        let restrictions =
-            parse_casting_restriction_line("Cast this spell only if you control two or more Vampires.")
-                .expect("restrictions should parse");
+        let restrictions = parse_casting_restriction_line(
+            "Cast this spell only if you control two or more Vampires.",
+        )
+        .expect("restrictions should parse");
         assert_eq!(
             restrictions,
             vec![CastingRestriction::RequiresCondition {
                 text: "you control two or more vampires".to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn spell_cast_restriction_splits_as_sorcery_from_condition() {
+        let restrictions = parse_casting_restriction_line(
+            "Cast this spell only if there are four or more card types among cards in your graveyard and only as a sorcery.",
+        )
+        .expect("restrictions should parse");
+        assert_eq!(
+            restrictions,
+            vec![
+                CastingRestriction::AsSorcery,
+                CastingRestriction::RequiresCondition {
+                    text: "there are four or more card types among cards in your graveyard"
+                        .to_string(),
+                },
+            ]
         );
     }
 
@@ -2339,6 +2460,24 @@ mod tests {
             [ActivationRestriction::RequiresCondition { text }]
                 if text == "you control an Island or a Swamp"
         ));
+    }
+
+    #[test]
+    fn parses_compound_activate_only_constraints() {
+        let r = parse(
+            "{T}: Add {R}. Activate only as a sorcery and only once each turn.",
+            "Careful Forge",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+        assert_eq!(
+            r.abilities[0].activation_restrictions,
+            vec![
+                ActivationRestriction::AsSorcery,
+                ActivationRestriction::OnlyOnceEachTurn,
+            ]
+        );
     }
 
     #[test]

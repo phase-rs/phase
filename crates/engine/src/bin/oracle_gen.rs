@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process;
 use std::str::FromStr;
@@ -23,7 +23,7 @@ struct CardExportEntry {
     #[serde(flatten)]
     face: CardFace,
     #[serde(default)]
-    legalities: HashMap<String, String>,
+    legalities: BTreeMap<String, String>,
 }
 
 fn main() {
@@ -94,7 +94,7 @@ fn main() {
         }
     };
 
-    let mut face_index: HashMap<String, CardExportEntry> = HashMap::new();
+    let mut face_index: BTreeMap<String, CardExportEntry> = BTreeMap::new();
     let mut total_cards = 0u32;
     let mut cards_with_unimplemented = 0u32;
 
@@ -110,7 +110,7 @@ fn main() {
         if faces.len() >= 2 {
             let face_a = build_oracle_face(&faces[0], oracle_id.clone());
             let face_b = build_oracle_face(&faces[1], oracle_id);
-            let mut legalities_by_face = HashMap::new();
+            let mut legalities_by_face = BTreeMap::new();
             legalities_by_face.insert(
                 face_a.name.to_lowercase(),
                 legalities_to_export_map(&normalize_legalities(&faces[0].legalities)),
@@ -164,7 +164,7 @@ fn main() {
 
     println!(
         "{}",
-        serde_json::to_string(&face_index).expect("Failed to serialize card data")
+        serde_json::to_string_pretty(&face_index).expect("Failed to serialize card data")
     );
 
     if let Some(names_path) = names_out {

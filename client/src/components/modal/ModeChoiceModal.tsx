@@ -9,7 +9,7 @@ export function ModeChoiceModal() {
   const playerId = usePlayerId();
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
-  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [selected, setSelected] = useState<number[]>([]);
 
   const isModeChoice = waitingFor?.type === "ModeChoice" || waitingFor?.type === "AbilityModeChoice";
   const isAbilityMode = waitingFor?.type === "AbilityModeChoice";
@@ -19,13 +19,22 @@ export function ModeChoiceModal() {
   const toggleMode = useCallback(
     (index: number) => {
       setSelected((prev) => {
-        const next = new Set(prev);
-        if (next.has(index)) {
-          next.delete(index);
-        } else if (modal && next.size < modal.max_choices) {
-          next.add(index);
+        if (!modal) return prev;
+
+        if (modal.allow_repeat_modes) {
+          if (prev.length >= modal.max_choices) {
+            return prev;
+          }
+          return [...prev, index].sort((a, b) => a - b);
         }
-        return next;
+
+        if (prev.includes(index)) {
+          return prev.filter((value) => value !== index);
+        }
+        if (prev.length >= modal.max_choices) {
+          return prev;
+        }
+        return [...prev, index].sort((a, b) => a - b);
       });
     },
     [modal],
@@ -33,20 +42,20 @@ export function ModeChoiceModal() {
 
   const handleConfirm = useCallback(() => {
     if (!modal) return;
-    const indices = Array.from(selected).sort((a, b) => a - b);
+    const indices = [...selected].sort((a, b) => a - b);
     if (indices.length < modal.min_choices || indices.length > modal.max_choices) return;
     dispatch({ type: "SelectModes", data: { indices } });
-    setSelected(new Set());
+    setSelected([]);
   }, [modal, selected, dispatch]);
 
   const handleCancel = useCallback(() => {
     dispatch({ type: "CancelCast" });
-    setSelected(new Set());
+    setSelected([]);
   }, [dispatch]);
 
   if (!isModeChoice || !isMyChoice || !modal) return null;
 
-  const canConfirm = selected.size >= modal.min_choices && selected.size <= modal.max_choices;
+  const canConfirm = selected.length >= modal.min_choices && selected.length <= modal.max_choices;
   const isSingleChoice = modal.min_choices === 1 && modal.max_choices === 1;
 
   const chooseLabel =
@@ -84,14 +93,15 @@ export function ModeChoiceModal() {
           <div className="px-4 py-4 sm:px-5 sm:py-5">
             <div className="flex flex-col gap-2">
               {modal.mode_descriptions.map((desc, index) => {
-                const isSelected = selected.has(index);
+                const count = selected.filter((value) => value === index).length;
+                const isSelected = count > 0;
                 return (
                   <button
                     key={index}
                     onClick={() => {
                       if (isSingleChoice) {
                         dispatch({ type: "SelectModes", data: { indices: [index] } });
-                        setSelected(new Set());
+                        setSelected([]);
                       } else {
                         toggleMode(index);
                       }
@@ -103,6 +113,11 @@ export function ModeChoiceModal() {
                     }`}
                   >
                     <span className="font-semibold text-white">{desc}</span>
+                    {count > 0 && (
+                      <span className="ml-2 inline-flex min-w-6 items-center justify-center rounded-full bg-cyan-300/20 px-2 py-0.5 text-xs font-semibold text-cyan-100">
+                        {count}
+                      </span>
+                    )}
                   </button>
                 );
               })}
@@ -119,7 +134,15 @@ export function ModeChoiceModal() {
                       : "cursor-not-allowed border border-white/8 bg-white/5 text-slate-500"
                   }`}
                 >
-                  Confirm ({selected.size}/{modal.max_choices})
+                  Confirm ({selected.length}/{modal.max_choices})
+                </button>
+              )}
+              {!isSingleChoice && selected.length > 0 && (
+                <button
+                  onClick={() => setSelected([])}
+                  className="min-h-11 rounded-[16px] border border-white/8 bg-white/5 px-6 py-2 font-semibold text-slate-200 transition hover:bg-white/8"
+                >
+                  Clear
                 </button>
               )}
               {!isAbilityMode && (

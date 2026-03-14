@@ -10,10 +10,7 @@ describe("uiStore", () => {
         selectedObjectId: null,
         hoveredObjectId: null,
         inspectedObjectId: null,
-        targetingMode: false,
-        validTargetIds: [],
-        sourceObjectId: null,
-        selectedTargets: [],
+        selectedCardIds: [],
         fullControl: false,
         autoPass: false,
       });
@@ -35,36 +32,21 @@ describe("uiStore", () => {
     expect(useUiStore.getState().inspectedObjectId).toBe(99);
   });
 
-  it("startTargeting enters targeting mode", () => {
-    act(() => useUiStore.getState().startTargeting([1, 2, 3], 10));
-
-    const state = useUiStore.getState();
-    expect(state.targetingMode).toBe(true);
-    expect(state.validTargetIds).toEqual([1, 2, 3]);
-    expect(state.sourceObjectId).toBe(10);
-    expect(state.selectedTargets).toEqual([]);
+  it("addSelectedCard appends to selectedCardIds", () => {
+    act(() => {
+      useUiStore.getState().addSelectedCard(5);
+      useUiStore.getState().addSelectedCard(10);
+    });
+    expect(useUiStore.getState().selectedCardIds).toEqual([5, 10]);
   });
 
-  it("addTarget appends to selectedTargets", () => {
+  it("clearSelectedCards resets selectedCardIds", () => {
     act(() => {
-      useUiStore.getState().addTarget(5);
-      useUiStore.getState().addTarget(10);
-    });
-    expect(useUiStore.getState().selectedTargets).toEqual([5, 10]);
-  });
-
-  it("clearTargets resets targeting state", () => {
-    act(() => {
-      useUiStore.getState().startTargeting([1, 2], 5);
-      useUiStore.getState().addTarget(1);
-      useUiStore.getState().clearTargets();
+      useUiStore.getState().addSelectedCard(1);
+      useUiStore.getState().clearSelectedCards();
     });
 
-    const state = useUiStore.getState();
-    expect(state.targetingMode).toBe(false);
-    expect(state.validTargetIds).toEqual([]);
-    expect(state.sourceObjectId).toBeNull();
-    expect(state.selectedTargets).toEqual([]);
+    expect(useUiStore.getState().selectedCardIds).toEqual([]);
   });
 
   it("toggleFullControl flips fullControl boolean", () => {

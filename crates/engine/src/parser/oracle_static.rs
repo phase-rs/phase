@@ -1567,6 +1567,28 @@ mod tests {
     }
 
     #[test]
+    fn static_creatures_you_control_with_flying_filter() {
+        let def = parse_static_line("Creatures you control with flying get +1/+1.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::WithKeyword {
+                        value: "flying".to_string(),
+                    }]),
+            ))
+        );
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 1 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 1 }));
+    }
+
+    #[test]
     fn static_other_zombie_creatures_have_swampwalk() {
         let def = parse_static_line("Other Zombie creatures have swampwalk.").unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);

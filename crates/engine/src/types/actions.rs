@@ -38,6 +38,9 @@ pub enum GameAction {
     SelectTargets {
         targets: Vec<TargetRef>,
     },
+    ChooseTarget {
+        target: Option<TargetRef>,
+    },
     ChooseReplacement {
         index: usize,
     },

@@ -254,7 +254,24 @@ export interface PendingCast {
   card_id: CardId;
   ability: unknown;
   cost: ManaCost;
+  activation_cost?: SerializedAbilityCost;
+  activation_ability_index?: number;
+  target_constraints?: Array<{ type: string }>;
 }
+
+export interface TargetSelectionSlot {
+  legal_targets: TargetRef[];
+  optional?: boolean;
+}
+
+export interface TargetSelectionProgress {
+  current_slot: number;
+  selected_slots?: Array<TargetRef | null>;
+  current_legal_targets: TargetRef[];
+}
+
+export type TargetSelectionConstraint =
+  | { type: "DifferentTargetPlayers" };
 
 // ── Additional Costs (kicker, blight, "or pay") ─────────────────────────
 
@@ -272,6 +289,8 @@ export interface ModalChoice {
   max_choices: number;
   mode_count: number;
   mode_descriptions: string[];
+  allow_repeat_modes: boolean;
+  constraints?: Array<{ type: string }>;
 }
 
 // ── WaitingFor (discriminated union with tag="type", content="data") ─────
@@ -281,7 +300,7 @@ export type WaitingFor =
   | { type: "MulliganDecision"; data: { player: PlayerId; mulligan_count: number } }
   | { type: "MulliganBottomCards"; data: { player: PlayerId; count: number } }
   | { type: "ManaPayment"; data: { player: PlayerId } }
-  | { type: "TargetSelection"; data: { player: PlayerId; pending_cast: PendingCast; legal_targets: TargetRef[] } }
+  | { type: "TargetSelection"; data: { player: PlayerId; pending_cast: PendingCast; target_slots: TargetSelectionSlot[]; selection: TargetSelectionProgress } }
   | { type: "DeclareAttackers"; data: { player: PlayerId; valid_attacker_ids: ObjectId[]; valid_attack_targets?: AttackTarget[] } }
   | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]> } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
@@ -292,12 +311,12 @@ export type WaitingFor =
   | { type: "SurveilChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown } }
   | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number } }
-  | { type: "TriggerTargetSelection"; data: { player: PlayerId; legal_targets: TargetRef[]; optional?: boolean } }
+  | { type: "TriggerTargetSelection"; data: { player: PlayerId; target_slots: TargetSelectionSlot[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress } }
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
-  | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[] } }
+  | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source_id?: ObjectId } }
   | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast } }
-  | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_cost?: unknown } }
+  | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown } }
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
   | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; pending_cast: PendingCast } };
 
@@ -321,6 +340,7 @@ export type GameAction =
   | { type: "TapLandForMana"; data: { object_id: ObjectId } }
   | { type: "SelectCards"; data: { cards: ObjectId[] } }
   | { type: "SelectTargets"; data: { targets: TargetRef[] } }
+  | { type: "ChooseTarget"; data: { target: TargetRef | null } }
   | { type: "ChooseReplacement"; data: { index: number } }
   | { type: "CancelCast" }
   | { type: "Equip"; data: { equipment_id: ObjectId; target_id: ObjectId } }

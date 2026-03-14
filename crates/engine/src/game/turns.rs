@@ -51,6 +51,7 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.priority_player = state.active_player;
     state.priority_passes.clear();
     state.priority_pass_count = 0;
+    state.players_attacked_this_step.clear();
 
     events.push(GameEvent::PhaseChanged { phase: next });
 }
@@ -70,6 +71,23 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.lands_played_this_turn = 0;
     state.spells_cast_this_turn = 0;
     state.triggers_fired_this_turn.clear();
+    state.activated_abilities_this_turn.clear();
+    state.spells_cast_this_turn_by_player.clear();
+    state.players_who_cast_noncreature_spell_this_turn.clear();
+    state.players_who_searched_library_this_turn.clear();
+    state.players_attacked_this_step.clear();
+    state.players_attacked_this_turn.clear();
+    state.attacking_creatures_this_turn.clear();
+    state.players_who_created_token_this_turn.clear();
+    state.players_who_discarded_card_this_turn.clear();
+    state.players_who_sacrificed_artifact_this_turn.clear();
+    state.players_who_had_creature_etb_this_turn.clear();
+    state
+        .players_who_had_angel_or_berserker_etb_this_turn
+        .clear();
+    state.players_who_had_artifact_etb_this_turn.clear();
+    state.cards_left_graveyard_this_turn.clear();
+    state.creature_died_this_turn = false;
     for player in &mut state.players {
         player.has_drawn_this_turn = false;
         player.lands_played_this_turn = 0;

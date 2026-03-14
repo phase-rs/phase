@@ -3,6 +3,7 @@ use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
+use super::ability_utils::{flatten_targets_in_chain, validate_targets_in_chain};
 use super::effects;
 use super::targeting;
 use super::zones;
@@ -44,34 +45,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // Capture targets for Aura attachment after resolution
     let spell_targets = ability.targets.clone();
 
-    // Run fizzle check if the ability has targets
-    if !ability.targets.is_empty() {
-        let filter = super::triggers::extract_target_filter_from_effect(&ability.effect);
-        let legal = match filter {
-            Some(f) => targeting::validate_targets(
-                state,
-                &ability.targets,
-                f,
-                ability.controller,
-                ability.source_id,
-            ),
-            None => {
-                // No typed filter (e.g. Aura with Unimplemented effect):
-                // verify object targets are still on battlefield
-                ability
-                    .targets
-                    .iter()
-                    .filter(|t| match t {
-                        crate::types::ability::TargetRef::Object(id) => {
-                            state.battlefield.contains(id)
-                        }
-                        crate::types::ability::TargetRef::Player(_) => true,
-                    })
-                    .cloned()
-                    .collect()
-            }
-        };
-        if targeting::check_fizzle(&ability.targets, &legal) {
+    let original_targets = flatten_targets_in_chain(&ability);
+    if !original_targets.is_empty() {
+        let validated = validate_targets_in_chain(state, &ability);
+        let legal_targets = flatten_targets_in_chain(&validated);
+        if targeting::check_fizzle(&original_targets, &legal_targets) {
             // Fizzle: all targets illegal -- move card to graveyard without executing
             if is_spell {
                 zones::move_to_zone(state, entry.id, Zone::Graveyard, events);
@@ -81,10 +59,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             });
             return;
         }
-        // Update ability with only still-legal targets
-        let mut ability = ability;
-        ability.targets = legal;
-        execute_effect(state, &ability, events);
+        execute_effect(state, &validated, events);
     } else {
         execute_effect(state, &ability, events);
     }
@@ -169,7 +144,7 @@ fn is_permanent_type(state: &GameState, object_id: ObjectId) -> bool {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, ResolvedAbility, TargetRef, TypedFilter};
+    use crate::types::ability::{DamageAmount, Effect, ResolvedAbility, TargetRef, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
@@ -344,5 +319,103 @@ mod tests {
         // Should be on battlefield, not attached to anything
         assert!(state.battlefield.contains(&ench_id));
         assert_eq!(state.objects.get(&ench_id).unwrap().attached_to, None);
+    }
+
+    #[test]
+    fn multi_target_chain_resolves_remaining_legal_target() {
+        let mut state = setup();
+
+        let first_target = create_object(
+            &mut state,
+            CardId(70),
+            PlayerId(1),
+            "First Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&first_target).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+        }
+
+        let second_target = create_object(
+            &mut state,
+            CardId(71),
+            PlayerId(1),
+            "Second Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&second_target).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+        }
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(72),
+            PlayerId(0),
+            "Twin Bolt".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&spell_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: DamageAmount::Fixed(2),
+                target: crate::types::ability::TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![TargetRef::Object(first_target)],
+            spell_id,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: DamageAmount::Fixed(2),
+                target: crate::types::ability::TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![TargetRef::Object(second_target)],
+            spell_id,
+            PlayerId(0),
+        ));
+
+        state.stack.push(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(72),
+                ability,
+            },
+        });
+
+        state.battlefield.retain(|&id| id != first_target);
+        state.objects.get_mut(&first_target).unwrap().zone = Zone::Graveyard;
+        state.players[1].graveyard.push(first_target);
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        assert!(state.players[0].graveyard.contains(&spell_id));
+        assert_eq!(state.objects[&second_target].damage_marked, 2);
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::DamageDealt {
+                    target: TargetRef::Object(target),
+                    amount: 2,
+                    ..
+                } if *target == second_target
+            )),
+            "expected the remaining legal target to be damaged"
+        );
     }
 }

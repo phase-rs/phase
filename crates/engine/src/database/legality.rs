@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -101,8 +101,8 @@ pub fn normalize_legalities(raw: &HashMap<String, String>) -> CardLegalities {
     legalities
 }
 
-pub fn legalities_to_export_map(legalities: &CardLegalities) -> HashMap<String, String> {
-    let mut out = HashMap::new();
+pub fn legalities_to_export_map(legalities: &CardLegalities) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
     for format in LegalityFormat::ALL {
         let Some(status) = legalities.get(&format).copied() else {
             continue;

@@ -1,22 +1,26 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, Effect, ResolvedAbility,
-    TargetFilter, TargetRef,
+    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, Effect, ResolvedAbility, TargetRef,
 };
-use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::{ManaCostShard, ManaType, SpellMeta};
-use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+use super::ability_utils::{
+    assign_selected_slots_in_chain, assign_targets_in_chain, auto_select_targets,
+    begin_target_selection, build_chained_resolved, build_resolved_from_def, build_target_slots,
+    choose_target, flatten_targets_in_chain, target_constraints_from_modal, validate_modal_indices,
+    validate_selected_targets, TargetSelectionAdvance,
+};
 use super::engine::EngineError;
 use super::mana_abilities;
 use super::mana_payment;
 use super::mana_sources::{self, ManaSourceOption};
+use super::restrictions;
 use super::stack;
 use super::targeting;
 use super::zones;
@@ -122,31 +126,19 @@ pub fn handle_cast_spell(
         obj.abilities[0].clone()
     };
 
-    // 3. Validate timing
-    let is_instant_speed = obj.card_types.core_types.contains(&CoreType::Instant)
-        || obj.has_keyword(&crate::types::keywords::Keyword::Flash);
-
-    if !is_instant_speed && ability_def.kind == AbilityKind::Spell {
-        // Sorcery-speed: main phase + empty stack + active player
-        match state.phase {
-            Phase::PreCombatMain | Phase::PostCombatMain => {}
-            _ => {
-                return Err(EngineError::ActionNotAllowed(
-                    "Sorcery-speed spells can only be cast during main phases".to_string(),
-                ));
-            }
+    // 3. Validate timing, including any parsed "as though it had flash" permission.
+    let flash_cost = restrictions::flash_timing_cost(state, player, obj);
+    let mut used_flash_timing = false;
+    if let Err(base_timing_error) =
+        restrictions::check_spell_timing(state, player, obj, &ability_def, false)
+    {
+        if flash_cost.is_none() {
+            return Err(base_timing_error);
         }
-        if !state.stack.is_empty() {
-            return Err(EngineError::ActionNotAllowed(
-                "Sorcery-speed spells can only be cast when the stack is empty".to_string(),
-            ));
-        }
-        if state.active_player != player {
-            return Err(EngineError::ActionNotAllowed(
-                "Sorcery-speed spells can only be cast by the active player".to_string(),
-            ));
-        }
+        restrictions::check_spell_timing(state, player, obj, &ability_def, true)?;
+        used_flash_timing = true;
     }
+    restrictions::check_casting_restrictions(state, player, object_id, &obj.casting_restrictions)?;
 
     // 3b. Color identity check (Commander format only)
     if state.format_config.command_zone {
@@ -181,12 +173,17 @@ pub fn handle_cast_spell(
             }
         }
     }
+    if used_flash_timing {
+        let extra_cost = flash_cost.expect("flash timing cost checked above");
+        mana_cost = restrictions::add_mana_cost(&mana_cost, &extra_cost);
+    }
 
     // 4b. Modal spells: require mode choice before targets/payment
     if let Some(ref modal_choice) = modal {
         // Cap max_choices to actual mode count
         let mut capped = modal_choice.clone();
         capped.max_choices = capped.max_choices.min(capped.mode_count);
+        let target_constraints = target_constraints_from_modal(&capped);
 
         // Build a placeholder resolved ability -- will be replaced after mode selection
         let placeholder =
@@ -199,6 +196,9 @@ pub fn handle_cast_spell(
                 card_id,
                 ability: placeholder,
                 cost: mana_cost,
+                activation_cost: None,
+                activation_ability_index: None,
+                target_constraints,
             }),
         });
     }
@@ -238,13 +238,18 @@ pub fn handle_cast_spell(
                     "No legal targets for Aura".to_string(),
                 ));
             }
-            if legal.len() == 1 {
+            let target_slots = vec![crate::types::game_state::TargetSelectionSlot {
+                legal_targets: legal,
+                optional: false,
+            }];
+            if let Some(targets) = auto_select_targets(&target_slots, &[])? {
                 let mut resolved = resolved;
-                resolved.targets = legal;
+                assign_targets_in_chain(&mut resolved, &targets)?;
                 return check_additional_cost_or_pay(
                     state, player, object_id, card_id, resolved, &mana_cost, events,
                 );
             } else {
+                let selection = begin_target_selection(&target_slots, &[])?;
                 return Ok(WaitingFor::TargetSelection {
                     player,
                     pending_cast: Box::new(PendingCast {
@@ -252,41 +257,42 @@ pub fn handle_cast_spell(
                         card_id,
                         ability: resolved,
                         cost: mana_cost,
+                        activation_cost: None,
+                        activation_ability_index: None,
+                        target_constraints: Vec::new(),
                     }),
-                    legal_targets: legal,
+                    target_slots,
+                    selection,
                 });
             }
         }
     }
 
-    // Targeting: use typed TargetFilter extracted from the effect
-    if let Some(filter) = super::triggers::extract_target_filter_from_effect(&ability_def.effect) {
-        let legal = targeting::find_legal_targets(state, filter, player, object_id);
-        if legal.is_empty() {
-            return Err(EngineError::ActionNotAllowed(
-                "No legal targets available".to_string(),
-            ));
-        }
-        if legal.len() == 1 {
-            // Auto-target
+    let target_slots = build_target_slots(state, &resolved)?;
+    if !target_slots.is_empty() {
+        if let Some(targets) = auto_select_targets(&target_slots, &[])? {
             let mut resolved = resolved;
-            resolved.targets = legal;
+            assign_targets_in_chain(&mut resolved, &targets)?;
             return check_additional_cost_or_pay(
                 state, player, object_id, card_id, resolved, &mana_cost, events,
             );
-        } else {
-            // Need target selection from player
-            return Ok(WaitingFor::TargetSelection {
-                player,
-                pending_cast: Box::new(PendingCast {
-                    object_id,
-                    card_id,
-                    ability: resolved,
-                    cost: mana_cost,
-                }),
-                legal_targets: legal,
-            });
         }
+
+        let selection = begin_target_selection(&target_slots, &[])?;
+        return Ok(WaitingFor::TargetSelection {
+            player,
+            pending_cast: Box::new(PendingCast {
+                object_id,
+                card_id,
+                ability: resolved,
+                cost: mana_cost,
+                activation_cost: None,
+                activation_ability_index: None,
+                target_constraints: Vec::new(),
+            }),
+            target_slots,
+            selection,
+        });
     }
 
     // 6. Check additional cost, then pay mana cost
@@ -327,29 +333,17 @@ pub fn spell_has_legal_targets(
         None => return true, // Vanilla permanent needs no targets
     };
 
-    match super::triggers::extract_target_filter_from_effect(&ability_def.effect) {
-        Some(filter) => !targeting::find_legal_targets(state, filter, player, obj.id).is_empty(),
-        None => true,
+    let resolved = build_resolved_from_def(ability_def, obj.id, player);
+    match build_target_slots(state, &resolved) {
+        Ok(target_slots) => {
+            if target_slots.is_empty() {
+                true
+            } else {
+                auto_select_targets(&target_slots, &[]).is_ok()
+            }
+        }
+        Err(_) => false,
     }
-}
-
-/// Build a ResolvedAbility from an AbilityDefinition recursively.
-fn build_resolved_from_def(
-    def: &AbilityDefinition,
-    source_id: ObjectId,
-    controller: PlayerId,
-) -> ResolvedAbility {
-    let mut resolved = ResolvedAbility::new(def.effect.clone(), Vec::new(), source_id, controller);
-    if let Some(sub) = &def.sub_ability {
-        resolved = resolved.sub_ability(build_resolved_from_def(sub, source_id, controller));
-    }
-    if let Some(d) = def.duration.clone() {
-        resolved = resolved.duration(d);
-    }
-    if let Some(c) = def.condition.clone() {
-        resolved = resolved.condition(c);
-    }
-    resolved
 }
 
 /// Handle mode selection for a modal spell.
@@ -375,32 +369,7 @@ pub fn handle_select_modes(
         }
     };
 
-    // Validate selection count
-    if indices.len() < modal.min_choices || indices.len() > modal.max_choices {
-        return Err(EngineError::InvalidAction(format!(
-            "Must choose between {} and {} modes, got {}",
-            modal.min_choices,
-            modal.max_choices,
-            indices.len()
-        )));
-    }
-
-    // Validate all indices are in range and unique
-    let mut seen = std::collections::HashSet::new();
-    for &idx in &indices {
-        if idx >= modal.mode_count {
-            return Err(EngineError::InvalidAction(format!(
-                "Mode index {} out of range ({})",
-                idx, modal.mode_count
-            )));
-        }
-        if !seen.insert(idx) {
-            return Err(EngineError::InvalidAction(format!(
-                "Duplicate mode index {}",
-                idx
-            )));
-        }
-    }
+    validate_modal_indices(&modal, &indices)?;
 
     // Get the card's abilities to build combined resolved ability from chosen modes
     let obj = state
@@ -417,20 +386,11 @@ pub fn handle_select_modes(
         super::layers::evaluate_layers(state);
     }
 
-    // Walk the sub_ability chain to find the first mode with a target filter.
-    // This handles modal spells where mode 1 has no targets but mode 2 does
-    // (e.g., "Draw a card" + "Destroy target creature").
-    let first_filter = find_first_target_filter_in_chain(&resolved);
-    if let Some(filter) = first_filter {
-        let legal = targeting::find_legal_targets(state, filter, player, pending.object_id);
-        if legal.is_empty() {
-            return Err(EngineError::ActionNotAllowed(
-                "No legal targets available".to_string(),
-            ));
-        }
-        if legal.len() == 1 {
+    let target_slots = build_target_slots(state, &resolved)?;
+    if !target_slots.is_empty() {
+        if let Some(targets) = auto_select_targets(&target_slots, &pending.target_constraints)? {
             let mut resolved = resolved;
-            resolved.targets = legal;
+            assign_targets_in_chain(&mut resolved, &targets)?;
             return check_additional_cost_or_pay(
                 state,
                 player,
@@ -440,18 +400,23 @@ pub fn handle_select_modes(
                 &pending.cost,
                 events,
             );
-        } else {
-            return Ok(WaitingFor::TargetSelection {
-                player,
-                pending_cast: Box::new(PendingCast {
-                    object_id: pending.object_id,
-                    card_id: pending.card_id,
-                    ability: resolved,
-                    cost: pending.cost,
-                }),
-                legal_targets: legal,
-            });
         }
+
+        let selection = begin_target_selection(&target_slots, &pending.target_constraints)?;
+        return Ok(WaitingFor::TargetSelection {
+            player,
+            pending_cast: Box::new(PendingCast {
+                object_id: pending.object_id,
+                card_id: pending.card_id,
+                ability: resolved,
+                cost: pending.cost,
+                activation_cost: None,
+                activation_ability_index: None,
+                target_constraints: pending.target_constraints,
+            }),
+            target_slots,
+            selection,
+        });
     }
 
     // No targets needed -- check additional cost, then pay
@@ -466,51 +431,6 @@ pub fn handle_select_modes(
     )
 }
 
-/// Build a chained ResolvedAbility from selected mode indices.
-///
-/// The first mode becomes the primary effect; subsequent modes are chained
-/// as sub_abilities in order. This lets resolve_ability_chain execute them
-/// sequentially during resolution.
-pub(crate) fn build_chained_resolved(
-    abilities: &[AbilityDefinition],
-    indices: &[usize],
-    source_id: ObjectId,
-    controller: PlayerId,
-) -> Result<ResolvedAbility, EngineError> {
-    if indices.is_empty() {
-        return Err(EngineError::InvalidAction("No modes selected".to_string()));
-    }
-
-    // Build from last to first so we can nest sub_abilities
-    let mut result: Option<ResolvedAbility> = None;
-    for &idx in indices.iter().rev() {
-        let def = abilities.get(idx).ok_or_else(|| {
-            EngineError::InvalidAction(format!("Mode index {} out of range", idx))
-        })?;
-        let mut resolved = build_resolved_from_def(def, source_id, controller);
-        resolved.sub_ability = result.map(Box::new);
-        result = Some(resolved);
-    }
-
-    result.ok_or_else(|| EngineError::InvalidAction("No modes selected".to_string()))
-}
-
-/// Walk a ResolvedAbility chain (via sub_ability links) to find the first
-/// effect that requires targeting. Returns the TargetFilter if found.
-pub(crate) fn find_first_target_filter_in_chain(
-    ability: &ResolvedAbility,
-) -> Option<&TargetFilter> {
-    // Check this level
-    if let Some(filter) = super::triggers::extract_target_filter_from_effect(&ability.effect) {
-        return Some(filter);
-    }
-    // Walk the sub_ability chain
-    if let Some(ref sub) = ability.sub_ability {
-        return find_first_target_filter_in_chain(sub);
-    }
-    None
-}
-
 /// Handle target selection for a pending cast.
 pub fn handle_select_targets(
     state: &mut GameState,
@@ -522,17 +442,10 @@ pub fn handle_select_targets(
     let pending = match &state.waiting_for {
         WaitingFor::TargetSelection {
             pending_cast,
-            legal_targets,
+            target_slots,
             ..
         } => {
-            // Validate targets are legal
-            for t in &targets {
-                if !legal_targets.contains(t) {
-                    return Err(EngineError::InvalidAction(
-                        "Illegal target selected".to_string(),
-                    ));
-                }
-            }
+            validate_selected_targets(target_slots, &targets, &pending_cast.target_constraints)?;
             *pending_cast.clone()
         }
         _ => {
@@ -543,7 +456,40 @@ pub fn handle_select_targets(
     };
 
     let mut ability = pending.ability;
-    ability.targets = targets;
+    assign_targets_in_chain(&mut ability, &targets)?;
+
+    if let Some(ability_index) = pending.activation_ability_index {
+        if let Some(ref activation_cost) = pending.activation_cost {
+            pay_ability_cost(state, player, pending.object_id, activation_cost, events)?;
+        }
+
+        let assigned_targets = flatten_targets_in_chain(&ability);
+        emit_targeting_events(state, &assigned_targets, pending.object_id, player, events);
+
+        let entry_id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        stack::push_to_stack(
+            state,
+            StackEntry {
+                id: entry_id,
+                source_id: pending.object_id,
+                controller: player,
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: pending.object_id,
+                    ability,
+                },
+            },
+            events,
+        );
+
+        restrictions::record_ability_activation(state, pending.object_id, ability_index);
+        events.push(GameEvent::AbilityActivated {
+            source_id: pending.object_id,
+        });
+        state.priority_passes.clear();
+        state.priority_pass_count = 0;
+        return Ok(WaitingFor::Priority { player });
+    }
 
     check_additional_cost_or_pay(
         state,
@@ -554,6 +500,92 @@ pub fn handle_select_targets(
         &pending.cost,
         events,
     )
+}
+
+pub fn handle_choose_target(
+    state: &mut GameState,
+    player: PlayerId,
+    target: Option<TargetRef>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let (pending, target_slots, selection) = match &state.waiting_for {
+        WaitingFor::TargetSelection {
+            pending_cast,
+            target_slots,
+            selection,
+            ..
+        } => (
+            *pending_cast.clone(),
+            target_slots.clone(),
+            selection.clone(),
+        ),
+        _ => {
+            return Err(EngineError::InvalidAction(
+                "Not waiting for target selection".to_string(),
+            ));
+        }
+    };
+
+    match choose_target(
+        &target_slots,
+        &pending.target_constraints,
+        &selection,
+        target,
+    )? {
+        TargetSelectionAdvance::InProgress(selection) => Ok(WaitingFor::TargetSelection {
+            player,
+            pending_cast: Box::new(pending),
+            target_slots,
+            selection,
+        }),
+        TargetSelectionAdvance::Complete(selected_slots) => {
+            let mut ability = pending.ability;
+            assign_selected_slots_in_chain(&mut ability, &selected_slots)?;
+
+            if let Some(ability_index) = pending.activation_ability_index {
+                if let Some(ref activation_cost) = pending.activation_cost {
+                    pay_ability_cost(state, player, pending.object_id, activation_cost, events)?;
+                }
+
+                let assigned_targets = flatten_targets_in_chain(&ability);
+                emit_targeting_events(state, &assigned_targets, pending.object_id, player, events);
+
+                let entry_id = ObjectId(state.next_object_id);
+                state.next_object_id += 1;
+                stack::push_to_stack(
+                    state,
+                    StackEntry {
+                        id: entry_id,
+                        source_id: pending.object_id,
+                        controller: player,
+                        kind: StackEntryKind::ActivatedAbility {
+                            source_id: pending.object_id,
+                            ability,
+                        },
+                    },
+                    events,
+                );
+
+                restrictions::record_ability_activation(state, pending.object_id, ability_index);
+                events.push(GameEvent::AbilityActivated {
+                    source_id: pending.object_id,
+                });
+                state.priority_passes.clear();
+                state.priority_pass_count = 0;
+                return Ok(WaitingFor::Priority { player });
+            }
+
+            check_additional_cost_or_pay(
+                state,
+                player,
+                pending.object_id,
+                pending.card_id,
+                ability,
+                &pending.cost,
+                events,
+            )
+        }
+    }
 }
 
 /// Activate an ability from a permanent on the battlefield.
@@ -635,6 +667,11 @@ pub fn pay_ability_cost(
                 .objects
                 .get(&source_id)
                 .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
+            if obj.zone != Zone::Battlefield {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot activate tap ability: source is not on the battlefield".to_string(),
+                ));
+            }
             if obj.tapped {
                 return Err(EngineError::ActionNotAllowed(
                     "Cannot activate tap ability: permanent is tapped".to_string(),
@@ -689,6 +726,14 @@ pub fn handle_activate_ability(
 
     let ability_def = obj.abilities[ability_index].clone();
 
+    restrictions::check_activation_restrictions(
+        state,
+        player,
+        source_id,
+        ability_index,
+        &ability_def.activation_restrictions,
+    )?;
+
     // Per MTG CR 602.2a: announce → choose modes → choose targets → pay costs.
     // Modal detection must happen BEFORE cost payment.
     if let Some(ref modal) = ability_def.modal {
@@ -707,13 +752,9 @@ pub fn handle_activate_ability(
             source_id,
             mode_abilities: ability_def.mode_abilities.clone(),
             is_activated: true,
+            ability_index: Some(ability_index),
             ability_cost: ability_def.cost.clone(),
         });
-    }
-
-    // Pay ability cost (tap, mana, composite, etc.)
-    if let Some(ref cost) = ability_def.cost {
-        pay_ability_cost(state, player, source_id, cost, events)?;
     }
 
     let resolved = {
@@ -727,21 +768,19 @@ pub fn handle_activate_ability(
         r
     };
 
-    // Handle targeting
-    if let Some(filter) = super::triggers::extract_target_filter_from_effect(&ability_def.effect) {
-        let legal = targeting::find_legal_targets(state, filter, player, source_id);
-        if legal.is_empty() {
-            return Err(EngineError::ActionNotAllowed(
-                "No legal targets available".to_string(),
-            ));
-        }
-        if legal.len() == 1 {
+    let target_slots = build_target_slots(state, &resolved)?;
+    if !target_slots.is_empty() {
+        if let Some(targets) = auto_select_targets(&target_slots, &[])? {
             let mut resolved = resolved;
-            resolved.targets = legal;
+            assign_targets_in_chain(&mut resolved, &targets)?;
 
-            emit_targeting_events(state, &resolved.targets, source_id, player, events);
+            if let Some(ref cost) = ability_def.cost {
+                pay_ability_cost(state, player, source_id, cost, events)?;
+            }
 
-            // Fall through to push to stack
+            let assigned_targets = flatten_targets_in_chain(&resolved);
+            emit_targeting_events(state, &assigned_targets, source_id, player, events);
+
             let entry_id = ObjectId(state.next_object_id);
             state.next_object_id += 1;
 
@@ -759,24 +798,32 @@ pub fn handle_activate_ability(
                 events,
             );
 
+            restrictions::record_ability_activation(state, source_id, ability_index);
             events.push(GameEvent::AbilityActivated { source_id });
             state.priority_passes.clear();
             state.priority_pass_count = 0;
             return Ok(WaitingFor::Priority { player });
-        } else {
-            // For activated abilities, we need target selection too
-            // Use a PendingCast with a dummy card_id
-            return Ok(WaitingFor::TargetSelection {
-                player,
-                pending_cast: Box::new(PendingCast {
-                    object_id: source_id,
-                    card_id: CardId(0),
-                    ability: resolved,
-                    cost: crate::types::mana::ManaCost::NoCost,
-                }),
-                legal_targets: legal,
-            });
         }
+
+        let selection = begin_target_selection(&target_slots, &[])?;
+        return Ok(WaitingFor::TargetSelection {
+            player,
+            pending_cast: Box::new(PendingCast {
+                object_id: source_id,
+                card_id: CardId(0),
+                ability: resolved,
+                cost: crate::types::mana::ManaCost::NoCost,
+                activation_cost: ability_def.cost.clone(),
+                activation_ability_index: Some(ability_index),
+                target_constraints: Vec::new(),
+            }),
+            target_slots,
+            selection,
+        });
+    }
+
+    if let Some(ref cost) = ability_def.cost {
+        pay_ability_cost(state, player, source_id, cost, events)?;
     }
 
     // Push to stack
@@ -797,6 +844,7 @@ pub fn handle_activate_ability(
         events,
     );
 
+    restrictions::record_ability_activation(state, source_id, ability_index);
     events.push(GameEvent::AbilityActivated { source_id });
 
     state.priority_passes.clear();
@@ -807,22 +855,12 @@ pub fn handle_activate_ability(
 
 /// Cancel a pending cast, reverting any side effects (e.g. untapping a source tapped for cost).
 pub fn handle_cancel_cast(
-    state: &mut GameState,
-    pending: &PendingCast,
-    events: &mut Vec<GameEvent>,
+    _state: &mut GameState,
+    _pending: &PendingCast,
+    _events: &mut Vec<GameEvent>,
 ) {
-    // For activated abilities (card_id == CardId(0)), the source may have been
-    // tapped as part of the activation cost. Untap it on cancel.
-    if pending.card_id == CardId(0) {
-        if let Some(obj) = state.objects.get_mut(&pending.object_id) {
-            if obj.tapped {
-                obj.tapped = false;
-                events.push(GameEvent::PermanentUntapped {
-                    object_id: pending.object_id,
-                });
-            }
-        }
-    }
+    // Costs are not paid before cancelable target/mode selection states, so cancel has no
+    // side effects to unwind.
 }
 
 /// Handle the player's decision on an additional cost (kicker, blight, "or pay").
@@ -896,6 +934,9 @@ fn check_additional_cost_or_pay(
                 card_id,
                 ability,
                 cost: cost.clone(),
+                activation_cost: None,
+                activation_ability_index: None,
+                target_constraints: Vec::new(),
             }),
         });
     }
@@ -929,7 +970,13 @@ fn pay_and_push(
         .unwrap_or(false);
 
     // Emit targeting events before the spell moves to the stack
-    emit_targeting_events(state, &ability.targets, object_id, player, events);
+    emit_targeting_events(
+        state,
+        &flatten_targets_in_chain(&ability),
+        object_id,
+        player,
+        events,
+    );
 
     // Move card from hand/command zone to stack zone
     zones::move_to_zone(state, object_id, Zone::Stack, events);
@@ -959,7 +1006,12 @@ fn pay_and_push(
         controller: player,
     });
 
-    state.spells_cast_this_turn = state.spells_cast_this_turn.saturating_add(1);
+    let obj = state
+        .objects
+        .get(&object_id)
+        .expect("spell object still exists after stack push")
+        .clone();
+    restrictions::record_spell_cast(state, player, &obj);
 
     Ok(WaitingFor::Priority { player })
 }
@@ -1114,8 +1166,10 @@ fn auto_tap_lands(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::DamageAmount;
     use crate::types::card_type::CoreType;
     use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
+    use crate::types::phase::Phase;
 
     fn setup_game_at_main_phase() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -1234,6 +1288,29 @@ mod tests {
         obj_id
     }
 
+    fn create_targeted_activated_permanent(state: &mut GameState, player: PlayerId) -> ObjectId {
+        let obj_id = create_object(
+            state,
+            CardId(51),
+            player,
+            "Pinger".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::DealDamage {
+                    amount: crate::types::ability::DamageAmount::Fixed(1),
+                    target: crate::types::ability::TargetFilter::Any,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+        obj_id
+    }
+
     #[test]
     fn spell_cast_from_hand_moves_to_stack() {
         let mut state = setup_game_at_main_phase();
@@ -1318,6 +1395,207 @@ mod tests {
         let result = handle_cast_spell(&mut state, PlayerId(0), CardId(10), &mut events);
         // Should succeed -- instants can be cast at any priority
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn flash_permission_option_allows_sorcery_outside_normal_window() {
+        let mut state = setup_game_at_main_phase();
+        state.phase = Phase::End;
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(0);
+
+        let obj_id = create_sorcery_in_hand(&mut state, PlayerId(0));
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.name = "Rout".to_string();
+        obj.casting_options.push(
+            crate::types::ability::SpellCastingOption::as_though_had_flash().cost(
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![],
+                        generic: 2,
+                    },
+                },
+            ),
+        );
+
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 4);
+
+        let mut events = Vec::new();
+        let result = handle_cast_spell(&mut state, PlayerId(0), CardId(20), &mut events)
+            .expect("flash permission should allow cast");
+
+        assert!(matches!(result, WaitingFor::Priority { .. }));
+        assert_eq!(state.stack.len(), 1);
+    }
+
+    #[test]
+    fn flash_permission_cost_is_not_added_in_normal_timing_window() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_sorcery_in_hand(&mut state, PlayerId(0));
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.casting_options.push(
+            crate::types::ability::SpellCastingOption::as_though_had_flash().cost(
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![],
+                        generic: 2,
+                    },
+                },
+            ),
+        );
+
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        handle_cast_spell(&mut state, PlayerId(0), CardId(20), &mut Vec::new())
+            .expect("normal-timing cast should not require flash surcharge");
+        assert_eq!(state.stack.len(), 1);
+    }
+
+    #[test]
+    fn activated_ability_with_target_defers_cost_until_target_selection() {
+        let mut state = setup_game_at_main_phase();
+        let source = create_targeted_activated_permanent(&mut state, PlayerId(0));
+        let target = create_object(
+            &mut state,
+            CardId(52),
+            PlayerId(1),
+            "Target".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let waiting =
+            handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new()).unwrap();
+
+        assert!(matches!(waiting, WaitingFor::TargetSelection { .. }));
+        state.waiting_for = waiting;
+        assert!(!state.objects[&source].tapped);
+
+        let mut events = Vec::new();
+        let waiting = handle_select_targets(
+            &mut state,
+            PlayerId(0),
+            vec![TargetRef::Object(target)],
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(matches!(waiting, WaitingFor::Priority { .. }));
+        assert!(state.objects[&source].tapped);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::AbilityActivated { source_id } if *source_id == source
+        )));
+    }
+
+    #[test]
+    fn deferred_tap_cost_fails_if_source_left_battlefield_before_target_lock() {
+        let mut state = setup_game_at_main_phase();
+        let source = create_targeted_activated_permanent(&mut state, PlayerId(0));
+        let target = create_object(
+            &mut state,
+            CardId(52),
+            PlayerId(1),
+            "Target".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let waiting =
+            handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new()).unwrap();
+        state.waiting_for = waiting;
+
+        let mut zone_events = Vec::new();
+        zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut zone_events);
+
+        let result = handle_select_targets(
+            &mut state,
+            PlayerId(0),
+            vec![TargetRef::Object(target)],
+            &mut Vec::new(),
+        );
+
+        assert!(result.is_err());
+        assert!(!state.objects[&source].tapped);
+    }
+
+    #[test]
+    fn activation_restriction_only_once_each_turn_is_enforced() {
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(70),
+            PlayerId(0),
+            "Relic".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.abilities.push(
+            AbilityDefinition::new(AbilityKind::Activated, Effect::Draw { count: 1 })
+                .activation_restrictions(vec![
+                    crate::types::ability::ActivationRestriction::OnlyOnceEachTurn,
+                ]),
+        );
+
+        let mut events = Vec::new();
+        handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events).unwrap();
+        let second = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events);
+
+        assert!(second.is_err());
+    }
+
+    #[test]
+    fn cancel_targeted_activated_ability_does_not_untap_source() {
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(71),
+            PlayerId(0),
+            "Weird Relic".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.tapped = true;
+        obj.abilities.push(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::DealDamage {
+                amount: crate::types::ability::DamageAmount::Fixed(1),
+                target: crate::types::ability::TargetFilter::Any,
+            },
+        ));
+
+        let waiting =
+            handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new()).unwrap();
+        assert!(matches!(waiting, WaitingFor::TargetSelection { .. }));
+
+        let mut events = Vec::new();
+        handle_cancel_cast(
+            &mut state,
+            &match waiting {
+                WaitingFor::TargetSelection { pending_cast, .. } => *pending_cast,
+                other => panic!("expected target selection, got {other:?}"),
+            },
+            &mut events,
+        );
+
+        assert!(state.objects[&source].tapped);
+        assert!(events.is_empty());
     }
 
     #[test]
@@ -1534,8 +1812,9 @@ mod tests {
         let result = handle_cast_spell(&mut state, PlayerId(0), CardId(30), &mut events).unwrap();
 
         match result {
-            WaitingFor::TargetSelection { legal_targets, .. } => {
-                assert_eq!(legal_targets.len(), 2);
+            WaitingFor::TargetSelection { target_slots, .. } => {
+                assert_eq!(target_slots.len(), 1);
+                assert_eq!(target_slots[0].legal_targets.len(), 2);
             }
             other => panic!("Expected TargetSelection, got {:?}", other),
         }
@@ -1783,6 +2062,80 @@ mod tests {
         assert!(events.iter().any(
             |e| matches!(e, GameEvent::CrimeCommitted { player_id } if *player_id == PlayerId(0))
         ));
+    }
+
+    #[test]
+    fn pay_and_push_emits_targeting_events_for_chained_spell_targets() {
+        let mut state = setup_game_at_main_phase();
+        let object_id = create_object(
+            &mut state,
+            CardId(77),
+            PlayerId(0),
+            "Split Bolt".to_string(),
+            Zone::Hand,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(88),
+            PlayerId(1),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: DamageAmount::Fixed(1),
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            object_id,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![TargetRef::Object(creature)],
+            object_id,
+            PlayerId(0),
+        ));
+
+        let mut events = Vec::new();
+        let waiting_for = pay_and_push(
+            &mut state,
+            PlayerId(0),
+            object_id,
+            CardId(77),
+            ability,
+            &ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            },
+            &mut events,
+        )
+        .expect("spell with chained targets should cast");
+
+        assert!(matches!(waiting_for, WaitingFor::Priority { .. }));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::BecomesTarget { object_id, .. } if *object_id == creature
+            )
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::CrimeCommitted { player_id } if *player_id == PlayerId(0)
+            )
+        }));
     }
 
     // ── Modal spell tests ────────────────────────────────────────────────

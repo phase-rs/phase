@@ -141,6 +141,7 @@ pub fn resolve_ability_chain(
                 | WaitingFor::SurveilChoice { .. }
                 | WaitingFor::RevealChoice { .. }
                 | WaitingFor::SearchChoice { .. }
+                | WaitingFor::TriggerTargetSelection { .. }
                 | WaitingFor::NamedChoice { .. }
         ) {
             let mut sub_clone = sub.as_ref().clone();

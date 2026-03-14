@@ -788,6 +788,72 @@ mod tests {
     }
 
     #[test]
+    fn test_keyword_filtered_lord_uses_source_controller() {
+        let mut state = setup();
+        let winds = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(1),
+            "Favorable Winds".to_string(),
+            Zone::Battlefield,
+        );
+        let winds_ts = state.next_timestamp();
+        {
+            let obj = state.objects.get_mut(&winds).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.timestamp = winds_ts;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::WithKeyword {
+                                value: "flying".to_string(),
+                            }]),
+                    ))
+                    .modifications(vec![
+                        ContinuousModification::AddPower { value: 1 },
+                        ContinuousModification::AddToughness { value: 1 },
+                    ]),
+            );
+        }
+
+        let opponent_flyer = make_creature(&mut state, "Opponent Flyer", 2, 2, PlayerId(1));
+        state
+            .objects
+            .get_mut(&opponent_flyer)
+            .unwrap()
+            .base_keywords
+            .push(Keyword::Flying);
+        state.objects.get_mut(&opponent_flyer).unwrap().keywords = vec![Keyword::Flying];
+
+        let my_flyer = make_creature(&mut state, "My Flyer", 2, 2, PlayerId(0));
+        state
+            .objects
+            .get_mut(&my_flyer)
+            .unwrap()
+            .base_keywords
+            .push(Keyword::Flying);
+        state.objects.get_mut(&my_flyer).unwrap().keywords = vec![Keyword::Flying];
+
+        let opponent_ground = make_creature(&mut state, "Opponent Ground", 2, 2, PlayerId(1));
+
+        evaluate_layers(&mut state);
+
+        let opponent_flyer_obj = state.objects.get(&opponent_flyer).unwrap();
+        assert_eq!(opponent_flyer_obj.power, Some(3));
+        assert_eq!(opponent_flyer_obj.toughness, Some(3));
+
+        let my_flyer_obj = state.objects.get(&my_flyer).unwrap();
+        assert_eq!(my_flyer_obj.power, Some(2));
+        assert_eq!(my_flyer_obj.toughness, Some(2));
+
+        let opponent_ground_obj = state.objects.get(&opponent_ground).unwrap();
+        assert_eq!(opponent_ground_obj.power, Some(2));
+        assert_eq!(opponent_ground_obj.toughness, Some(2));
+    }
+
+    #[test]
     fn test_multi_layer_effect_does_not_double_apply() {
         // Regression: an effect with AddPower + AddKeyword spans two layers
         // (ModifyPT and Ability). AddPower must only be applied once.

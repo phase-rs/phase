@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::game::game_object::CounterType;
+use crate::game::game_object::{parse_counter_type, CounterType};
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
@@ -8,17 +8,6 @@ use crate::types::ability::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::proposed_event::ProposedEvent;
-
-/// Map counter type string to CounterType enum.
-/// Accepts both canonical names ("P1P1") and oracle text forms ("+1/+1").
-fn parse_counter_type(s: &str) -> CounterType {
-    match s {
-        "P1P1" | "+1/+1" => CounterType::Plus1Plus1,
-        "M1M1" | "-1/-1" => CounterType::Minus1Minus1,
-        "LOYALTY" => CounterType::Loyalty,
-        other => CounterType::Generic(other.to_string()),
-    }
-}
 
 /// Add counters to target objects.
 pub fn resolve_add(

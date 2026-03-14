@@ -111,6 +111,8 @@ pub fn move_to_zone(
         state.layers_dirty = true;
     }
 
+    super::restrictions::record_zone_change(state, object_id, from, to);
+
     events.push(GameEvent::ZoneChanged {
         object_id,
         from,

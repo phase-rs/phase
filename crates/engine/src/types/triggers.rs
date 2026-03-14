@@ -486,8 +486,7 @@ mod tests {
 
     #[test]
     fn trigger_mode_count_at_least_141() {
-        // Count all known variants by parsing Forge's trigger mode names
-        let forge_modes = [
+        let modes = [
             "Abandoned",
             "AbilityCast",
             "AbilityResolves",
@@ -641,7 +640,7 @@ mod tests {
         ];
 
         let mut known_count = 0;
-        for mode in &forge_modes {
+        for mode in &modes {
             let parsed = TriggerMode::from_str(mode).unwrap();
             if !matches!(parsed, TriggerMode::Unknown(_)) {
                 known_count += 1;

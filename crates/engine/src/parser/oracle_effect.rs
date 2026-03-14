@@ -69,14 +69,12 @@ enum ClauseAst {
         predicate: PredicateAst,
     },
     Conditional {
-        condition_text: String,
         clause: Box<ClauseAst>,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SubjectPhraseAst {
-    text: String,
     affected: TargetFilter,
     target: Option<TargetFilter>,
 }
@@ -103,14 +101,6 @@ enum PredicateAst {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ContinuationAst {
-    SearchDestination { text: String },
-    RevealHandFilter { text: String },
-    ManaRestriction { text: String },
-    CounterSourceStatic { text: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ClauseContinuation {
     SearchDestination { destination: Zone },
     RevealHandFilter { card_filter: TargetFilter },
     ManaRestriction { restriction: ManaSpendRestriction },
@@ -297,8 +287,8 @@ fn parse_clause_ast(text: &str) -> ClauseAst {
     // Mirror the CubeArtisan grammar's high-level sentence shapes:
     // 1) conditionals ("if X, Y"), 2) subject + verb phrase, 3) bare imperative.
     if let Some((condition_text, remainder)) = split_leading_conditional(text) {
+        let _ = condition_text;
         return ClauseAst::Conditional {
-            condition_text,
             clause: Box::new(parse_clause_ast(&remainder)),
         };
     }
@@ -318,10 +308,7 @@ fn lower_clause_ast(ast: ClauseAst) -> ParsedEffectClause {
         ClauseAst::SubjectPredicate { subject, predicate } => {
             lower_subject_predicate_ast(subject, predicate)
         }
-        ClauseAst::Conditional {
-            condition_text: _condition_text,
-            clause,
-        } => {
+        ClauseAst::Conditional { clause } => {
             // Phase 2 preserves current semantics for generic leading conditionals:
             // recognize the structure explicitly, but lower only the body.
             lower_clause_ast(*clause)
@@ -966,10 +953,9 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
             current_defs.push(*sub);
         }
 
-        let followup_continuation = defs
-            .last()
-            .and_then(|previous| parse_followup_continuation_ast(normalized_text, &previous.effect))
-            .and_then(lower_continuation_ast);
+        let followup_continuation = defs.last().and_then(|previous| {
+            parse_followup_continuation_ast(normalized_text, &previous.effect)
+        });
         let absorb_followup = followup_continuation.as_ref().is_some_and(|continuation| {
             current_defs
                 .first()
@@ -983,8 +969,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
         }
 
         let intrinsic_continuation =
-            parse_intrinsic_continuation_ast(normalized_text, &current_defs[0].effect)
-                .and_then(lower_continuation_ast);
+            parse_intrinsic_continuation_ast(normalized_text, &current_defs[0].effect);
         defs.extend(current_defs);
 
         if let Some(continuation) = intrinsic_continuation {
@@ -1017,7 +1002,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
 fn parse_intrinsic_continuation_ast(text: &str, effect: &Effect) -> Option<ContinuationAst> {
     match effect {
         Effect::SearchLibrary { .. } => Some(ContinuationAst::SearchDestination {
-            text: text.to_string(),
+            destination: parse_search_destination(&text.to_lowercase()),
         }),
         _ => None,
     }
@@ -1033,20 +1018,22 @@ fn parse_followup_continuation_ast(
         Effect::RevealHand { .. }
             if lower.contains("card from it") || lower.contains("card from among") =>
         {
-            Some(ContinuationAst::RevealHandFilter {
-                text: text.to_string(),
-            })
+            let card_filter = if lower.starts_with("you choose ") || lower.starts_with("choose ") {
+                parse_choose_filter(&lower)
+            } else {
+                parse_choose_filter_from_sentence(&lower)
+            };
+            Some(ContinuationAst::RevealHandFilter { card_filter })
         }
-        Effect::Mana { .. } if parse_mana_spend_restriction(&lower).is_some() => {
-            Some(ContinuationAst::ManaRestriction {
-                text: text.to_string(),
-            })
-        }
+        Effect::Mana { .. } => parse_mana_spend_restriction(&lower)
+            .map(|restriction| ContinuationAst::ManaRestriction { restriction }),
         Effect::Counter { .. }
             if lower.contains("countered this way") && lower.contains("loses all abilities") =>
         {
             Some(ContinuationAst::CounterSourceStatic {
-                text: text.to_string(),
+                source_static: StaticDefinition::continuous().modifications(vec![
+                    crate::types::ability::ContinuousModification::RemoveAllAbilities,
+                ]),
             })
         }
         _ => None,
@@ -1775,43 +1762,13 @@ fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> Effect {
     }
 }
 
-fn lower_continuation_ast(ast: ContinuationAst) -> Option<ClauseContinuation> {
-    match ast {
-        ContinuationAst::SearchDestination { text } => {
-            Some(ClauseContinuation::SearchDestination {
-                destination: parse_search_destination(&text.to_lowercase()),
-            })
-        }
-        ContinuationAst::RevealHandFilter { text } => {
-            let lower = text.to_lowercase();
-            let card_filter = if lower.starts_with("you choose ") || lower.starts_with("choose ") {
-                parse_choose_filter(&lower)
-            } else {
-                parse_choose_filter_from_sentence(&lower)
-            };
-            Some(ClauseContinuation::RevealHandFilter { card_filter })
-        }
-        ContinuationAst::ManaRestriction { text } => {
-            parse_mana_spend_restriction(&text.to_lowercase())
-                .map(|restriction| ClauseContinuation::ManaRestriction { restriction })
-        }
-        ContinuationAst::CounterSourceStatic { text: _text } => {
-            Some(ClauseContinuation::CounterSourceStatic {
-                source_static: StaticDefinition::continuous().modifications(vec![
-                    crate::types::ability::ContinuousModification::RemoveAllAbilities,
-                ]),
-            })
-        }
-    }
-}
-
 fn apply_clause_continuation(
     defs: &mut Vec<AbilityDefinition>,
-    continuation: ClauseContinuation,
+    continuation: ContinuationAst,
     kind: AbilityKind,
 ) {
     match continuation {
-        ClauseContinuation::SearchDestination { destination } => {
+        ContinuationAst::SearchDestination { destination } => {
             defs.push(AbilityDefinition::new(
                 kind,
                 Effect::ChangeZone {
@@ -1821,7 +1778,7 @@ fn apply_clause_continuation(
                 },
             ));
         }
-        ClauseContinuation::RevealHandFilter { card_filter } => {
+        ContinuationAst::RevealHandFilter { card_filter } => {
             let Some(previous) = defs.last_mut() else {
                 return;
             };
@@ -1833,7 +1790,7 @@ fn apply_clause_continuation(
                 *existing = card_filter;
             }
         }
-        ClauseContinuation::ManaRestriction { restriction } => {
+        ContinuationAst::ManaRestriction { restriction } => {
             let Some(previous) = defs.last_mut() else {
                 return;
             };
@@ -1841,7 +1798,7 @@ fn apply_clause_continuation(
                 restrictions.push(restriction);
             }
         }
-        ClauseContinuation::CounterSourceStatic { source_static } => {
+        ContinuationAst::CounterSourceStatic { source_static } => {
             let Some(previous) = defs.last_mut() else {
                 return;
             };
@@ -1856,17 +1813,15 @@ fn apply_clause_continuation(
     }
 }
 
-fn continuation_absorbs_current(
-    continuation: &ClauseContinuation,
-    current_effect: &Effect,
-) -> bool {
+fn continuation_absorbs_current(continuation: &ContinuationAst, current_effect: &Effect) -> bool {
     match continuation {
-        ClauseContinuation::RevealHandFilter { .. } => {
+        ContinuationAst::RevealHandFilter { .. } => {
             matches!(current_effect, Effect::RevealHand { .. })
         }
-        ClauseContinuation::ManaRestriction { .. }
-        | ClauseContinuation::CounterSourceStatic { .. } => true,
-        ClauseContinuation::SearchDestination { .. } => false,
+        ContinuationAst::ManaRestriction { .. } | ContinuationAst::CounterSourceStatic { .. } => {
+            true
+        }
+        ContinuationAst::SearchDestination { .. } => false,
     }
 }
 
@@ -2283,7 +2238,6 @@ fn try_parse_subject_predicate_ast(text: &str) -> Option<ClauseAst> {
         });
         return Some(ClauseAst::SubjectPredicate {
             subject: SubjectPhraseAst {
-                text: subject_text,
                 affected: application.affected,
                 target: application.target,
             },
@@ -2310,7 +2264,6 @@ where
 
     ClauseAst::SubjectPredicate {
         subject: SubjectPhraseAst {
-            text: subject_text,
             affected: application.affected,
             target: application.target,
         },

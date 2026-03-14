@@ -33,9 +33,7 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   const tapRotation = usePreferencesStore((s) => s.tapRotation);
 
   const selectedObjectId = useUiStore((s) => s.selectedObjectId);
-  const targetingMode = useUiStore((s) => s.targetingMode);
   const selectObject = useUiStore((s) => s.selectObject);
-  const clearTargets = useUiStore((s) => s.clearTargets);
   const hoverObject = useUiStore((s) => s.hoverObject);
   const inspectObject = useUiStore((s) => s.inspectObject);
   const combatMode = useUiStore((s) => s.combatMode);
@@ -43,7 +41,6 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   const toggleAttacker = useUiStore((s) => s.toggleAttacker);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const combatClickHandler = useUiStore((s) => s.combatClickHandler);
-  const validTargetIds = useUiStore((s) => s.validTargetIds);
   const combatAttackers = useGameStore(
     (s) => s.gameState?.combat?.attackers,
   );
@@ -98,7 +95,16 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
 
   const ptDisplay = computePTDisplay(obj);
   const isSelected = selectedObjectId === objectId;
-  const isValidTarget = targetingMode && validTargetIds.includes(objectId);
+  const currentTargetRefs =
+    waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection"
+      ? waitingFor.data.selection.current_legal_targets
+      : [];
+  const isHumanTargetSelection =
+    (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
+    && waitingFor.data.player === playerId;
+  const isValidTarget = isHumanTargetSelection && currentTargetRefs.some(
+    (target) => "Object" in target && target.Object === objectId,
+  );
 
   // Combat state — check both UI selection and committed combat state
   const isSelectingAttacker =
@@ -155,9 +161,8 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
       if (validAttackerIds.includes(objectId)) toggleAttacker(objectId);
     } else if (combatMode === "blockers" && combatClickHandler) {
       combatClickHandler(objectId);
-    } else if (targetingMode && isValidTarget) {
-      dispatchAction({ type: "SelectTargets", data: { targets: [{ Object: objectId }] } });
-      clearTargets();
+    } else if (isValidTarget) {
+      dispatchAction({ type: "ChooseTarget", data: { target: { Object: objectId } } });
     } else if (isActivatable) {
       const actions = useGameStore.getState().legalActions.filter((a) =>
         (a.type === "ActivateAbility" && a.data.source_id === objectId) ||

@@ -81,8 +81,16 @@ export function useKeyboardShortcuts(): void {
           e.preventDefault();
           if (uiState.endTurnMode) {
             uiState.clearEndTurnMode();
+          } else if (waitingFor?.type === "TargetSelection") {
+            dispatch({ type: "CancelCast" });
+          } else if (waitingFor?.type === "TriggerTargetSelection") {
+            const activeSlot =
+              waitingFor.data.target_slots[waitingFor.data.selection.current_slot];
+            if (activeSlot?.optional) {
+              dispatch({ type: "ChooseTarget", data: { target: null } });
+            }
           } else {
-            uiState.clearTargets();
+            uiState.clearSelectedCards();
           }
           break;
 

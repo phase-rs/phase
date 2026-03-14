@@ -115,8 +115,7 @@ phase-server    — Axum WebSocket server for multiplayer
 - **`game/effects/`** — Effect handlers (~28 modules), including: `animate`, `attach`, `bounce`, `change_zone`, `choose_card`, `cleanup`, `copy_spell`, `counter`, `counters`, `deal_damage`, `destroy`, `dig`, `discard`, `draw`, `explore`, `fight`, `gain_control`, `life`, `mana`, `mill`, `proliferate`, `pump`, `sacrifice`, `scry`, `surveil`, `tap_untap`, `token`. New effects are added as modules here following the existing handler pattern.
 - **`parser/`** — Oracle text parser: converts MTGJSON Oracle text into typed `AbilityDefinition` structs. See `docs/parser-instructions.md` for architecture and contribution guide.
 - **`database/`** — Card database with three loading paths:
-  - `CardDatabase::load_json(mtgjson_path, abilities_dir)` — MTGJSON + typed ability JSON
-  - `CardDatabase::load(root)` — Forge `.txt` files (requires `forge-compat`)
+  - `CardDatabase::load_json(mtgjson_path)` — MTGJSON
   - `CardDatabase::from_export(path)` — Pre-built `card-data.json` (used at runtime by WASM and server)
 
 ### Card Data Format (`data/`)

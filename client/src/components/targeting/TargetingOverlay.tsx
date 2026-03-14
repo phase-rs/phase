@@ -1,53 +1,40 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { useCallback, useEffect } from "react";
+import { useCallback } from "react";
 
-import type { ObjectId } from "../../adapter/types.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { useUiStore } from "../../stores/uiStore.ts";
 
 export function TargetingOverlay() {
   const playerId = usePlayerId();
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const gameState = useGameStore((s) => s.gameState);
   const dispatch = useGameStore((s) => s.dispatch);
-  const targetingMode = useUiStore((s) => s.targetingMode);
-  const startTargeting = useUiStore((s) => s.startTargeting);
-  const clearTargets = useUiStore((s) => s.clearTargets);
 
   const isTargetSelection = waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection";
-  const pendingCast = waitingFor?.type === "TargetSelection" ? waitingFor.data.pending_cast : null;
-  const legalTargets = isTargetSelection ? waitingFor!.data.legal_targets : null;
-  const isTriggerTargeting = waitingFor?.type === "TriggerTargetSelection";
-  const isOptionalTrigger = isTriggerTargeting && waitingFor?.data?.optional === true;
-
-  // Activate targeting mode when engine requests target selection
-  useEffect(() => {
-    if (!isTargetSelection || !gameState || !legalTargets) return;
-
-    const validIds = legalTargets
-      .filter((t): t is { Object: ObjectId } => "Object" in t)
-      .map((t) => t.Object);
-    const sourceId = pendingCast?.object_id ?? null;
-
-    startTargeting(validIds, sourceId);
-
-    return () => {
-      clearTargets();
-    };
-  }, [isTargetSelection, gameState, legalTargets, pendingCast, startTargeting, clearTargets]);
+  const targetSlots = isTargetSelection ? waitingFor.data.target_slots : [];
+  const selection = isTargetSelection ? waitingFor.data.selection : null;
+  const currentTargetSlot = selection?.current_slot ?? 0;
+  const activeSlot = targetSlots[currentTargetSlot];
+  const isOptionalCurrentSlot = activeSlot?.optional === true;
+  const validPlayerTargets = selection?.current_legal_targets
+    .filter((target): target is { Player: number } => "Player" in target)
+    .map((target) => target.Player) ?? [];
 
   const handleCancel = useCallback(() => {
-    clearTargets();
     dispatch({ type: "CancelCast" });
-  }, [clearTargets, dispatch]);
+  }, [dispatch]);
 
-  const handleDecline = useCallback(() => {
-    clearTargets();
-    dispatch({ type: "SelectTargets", targets: [] });
-  }, [clearTargets, dispatch]);
+  const handleSkip = useCallback(() => {
+    dispatch({ type: "ChooseTarget", data: { target: null } });
+  }, [dispatch]);
 
-  if (!targetingMode || !isTargetSelection) return null;
+  const handlePlayerTarget = useCallback(
+    (player: number) => {
+      dispatch({ type: "ChooseTarget", data: { target: { Player: player } } });
+    },
+    [dispatch],
+  );
+
+  if (!isTargetSelection) return null;
 
   // Only show targeting UI for the human player
   if (waitingFor.data.player !== playerId) return null;
@@ -67,31 +54,44 @@ export function TargetingOverlay() {
         {/* Instruction text */}
         <div className="absolute left-0 right-0 top-4 flex justify-center">
           <div className="rounded-lg bg-gray-900/90 px-6 py-2 text-lg font-semibold text-cyan-400 shadow-lg">
-            {isTriggerTargeting ? "Choose a target for triggered ability" : "Choose a target"}
+            {targetSlots.length > 1
+              ? `Choose target ${Math.min(currentTargetSlot + 1, targetSlots.length)} of ${targetSlots.length}`
+              : "Choose a target"}
           </div>
         </div>
 
-        {/* Cancel button (voluntary casts) or Decline button (optional triggers) */}
-        {!isTriggerTargeting && (
-          <div className="pointer-events-auto absolute bottom-6 left-0 right-0 flex justify-center gap-4">
+        {validPlayerTargets.length > 0 && (
+          <div className="pointer-events-auto absolute left-0 right-0 top-20 flex justify-center gap-3">
+            {validPlayerTargets.map((targetPlayer) => (
+              <button
+                key={targetPlayer}
+                onClick={() => handlePlayerTarget(targetPlayer)}
+                className="rounded-lg bg-cyan-700 px-4 py-2 font-semibold text-white shadow-lg transition hover:bg-cyan-600"
+              >
+                Target Player {targetPlayer + 1}
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="pointer-events-auto absolute bottom-6 left-0 right-0 flex justify-center gap-4">
+          {waitingFor.type === "TargetSelection" && (
             <button
               onClick={handleCancel}
               className="rounded-lg bg-gray-700 px-6 py-2 font-semibold text-gray-200 shadow-lg transition hover:bg-gray-600"
             >
               Cancel
             </button>
-          </div>
-        )}
-        {isOptionalTrigger && (
-          <div className="pointer-events-auto absolute bottom-6 left-0 right-0 flex justify-center gap-4">
+          )}
+          {isOptionalCurrentSlot && (
             <button
-              onClick={handleDecline}
+              onClick={handleSkip}
               className="rounded-lg bg-amber-700 px-6 py-2 font-semibold text-gray-100 shadow-lg transition hover:bg-amber-600"
             >
-              Decline
+              Skip
             </button>
-          </div>
-        )}
+          )}
+        </div>
       </motion.div>
     </AnimatePresence>
   );

@@ -45,6 +45,7 @@ pub fn resolve(
                         } => {
                             zones::move_to_zone(state, object_id, Zone::Graveyard, events);
                             state.layers_dirty = true;
+                            crate::game::restrictions::record_sacrifice(state, object_id, pid);
                             events.push(GameEvent::PermanentSacrificed {
                                 object_id,
                                 player_id: pid,

@@ -37,6 +37,15 @@ pub enum CounterType {
     Generic(String),
 }
 
+pub fn parse_counter_type(text: &str) -> CounterType {
+    match text.trim().trim_end_matches(" counter").trim() {
+        "P1P1" | "+1/+1" | "plus1plus1" => CounterType::Plus1Plus1,
+        "M1M1" | "-1/-1" | "minus1minus1" => CounterType::Minus1Minus1,
+        "LOYALTY" | "loyalty" => CounterType::Loyalty,
+        other => CounterType::Generic(other.to_string()),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameObject {
     pub id: ObjectId,

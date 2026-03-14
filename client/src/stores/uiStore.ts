@@ -1,15 +1,15 @@
 import { create } from "zustand";
-import type { GameAction, ObjectId } from "../adapter/types";
+import type {
+  GameAction,
+  ObjectId,
+} from "../adapter/types";
 
 interface UiStoreState {
   selectedObjectId: ObjectId | null;
   hoveredObjectId: ObjectId | null;
   inspectedObjectId: ObjectId | null;
   inspectedFaceIndex: number;
-  targetingMode: boolean;
-  validTargetIds: ObjectId[];
-  sourceObjectId: ObjectId | null;
-  selectedTargets: ObjectId[];
+  selectedCardIds: ObjectId[];
   fullControl: boolean;
   autoPass: boolean;
   combatMode: "attackers" | "blockers" | null;
@@ -29,9 +29,8 @@ interface UiStoreActions {
   selectObject: (id: ObjectId | null) => void;
   hoverObject: (id: ObjectId | null) => void;
   inspectObject: (id: ObjectId | null, faceIndex?: number) => void;
-  startTargeting: (validIds: ObjectId[], sourceId: ObjectId | null) => void;
-  addTarget: (id: ObjectId) => void;
-  clearTargets: () => void;
+  addSelectedCard: (cardId: ObjectId) => void;
+  clearSelectedCards: () => void;
   toggleFullControl: () => void;
   toggleAutoPass: () => void;
   setCombatMode: (mode: "attackers" | "blockers" | null) => void;
@@ -56,10 +55,7 @@ export const useUiStore = create<UiStore>()((set) => ({
   hoveredObjectId: null,
   inspectedObjectId: null,
   inspectedFaceIndex: 0,
-  targetingMode: false,
-  validTargetIds: [],
-  sourceObjectId: null,
-  selectedTargets: [],
+  selectedCardIds: [],
   fullControl: false,
   autoPass: false,
   combatMode: null,
@@ -78,16 +74,15 @@ export const useUiStore = create<UiStore>()((set) => ({
   hoverObject: (id) => set({ hoveredObjectId: id }),
   inspectObject: (id, faceIndex) => set({ inspectedObjectId: id, inspectedFaceIndex: faceIndex ?? 0 }),
 
-  startTargeting: (validIds, sourceId) =>
-    set({ targetingMode: true, validTargetIds: validIds, sourceObjectId: sourceId, selectedTargets: [] }),
-
-  addTarget: (id) =>
+  addSelectedCard: (cardId) =>
     set((state) => ({
-      selectedTargets: [...state.selectedTargets, id],
+      selectedCardIds: [...state.selectedCardIds, cardId],
     })),
 
-  clearTargets: () =>
-    set({ targetingMode: false, validTargetIds: [], sourceObjectId: null, selectedTargets: [] }),
+  clearSelectedCards: () =>
+    set({
+      selectedCardIds: [],
+    }),
 
   toggleFullControl: () =>
     set((state) => ({ fullControl: !state.fullControl })),

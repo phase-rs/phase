@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
 
+use engine::game::ability_utils::generate_modal_index_sequences;
 use engine::game::casting::spell_has_legal_targets;
 use engine::game::combat::AttackTarget;
 use engine::game::deck_loading::DeckEntry;
 use engine::game::game_object::GameObject;
 use engine::game::mana_sources;
+use engine::game::restrictions;
 use engine::types::ability::ChoiceType;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -111,22 +113,14 @@ pub fn get_legal_actions(state: &GameState) -> Vec<GameAction> {
                 .collect()
         }
         WaitingFor::TriggerTargetSelection {
-            legal_targets,
-            optional,
+            target_slots,
+            selection,
             ..
-        } => {
-            let mut actions: Vec<GameAction> = legal_targets
-                .iter()
-                .map(|t| GameAction::SelectTargets {
-                    targets: vec![t.clone()],
-                })
-                .collect();
-            if *optional {
-                // "Up to one" — AI can also decline targeting
-                actions.push(GameAction::SelectTargets { targets: vec![] });
-            }
-            actions
-        }
+        } => target_choice_actions(
+            target_slots,
+            selection.current_slot,
+            &selection.current_legal_targets,
+        ),
         WaitingFor::ModeChoice { modal, .. } => mode_choice_actions(modal),
         WaitingFor::BetweenGamesSideboard { player, .. } => sideboard_actions(state, *player),
         WaitingFor::BetweenGamesChoosePlayDraw { .. } => {
@@ -196,35 +190,10 @@ fn deck_entries_to_counts(entries: &[DeckEntry]) -> Vec<DeckCardCount> {
 
 /// Generate all valid mode combinations for a modal spell.
 fn mode_choice_actions(modal: &engine::types::ability::ModalChoice) -> Vec<GameAction> {
-    let indices: Vec<usize> = (0..modal.mode_count).collect();
-    let mut actions = Vec::new();
-    for k in modal.min_choices..=modal.max_choices {
-        for combo in index_combinations(&indices, k) {
-            actions.push(GameAction::SelectModes { indices: combo });
-        }
-    }
-    actions
-}
-
-/// Compute combinations of `k` elements from a slice of indices.
-fn index_combinations(items: &[usize], k: usize) -> Vec<Vec<usize>> {
-    if k == 0 {
-        return vec![Vec::new()];
-    }
-    if items.len() < k {
-        return Vec::new();
-    }
-    if items.len() == k {
-        return vec![items.to_vec()];
-    }
-
-    let mut result = Vec::new();
-    for mut combo in index_combinations(&items[1..], k - 1) {
-        combo.insert(0, items[0]);
-        result.push(combo);
-    }
-    result.extend(index_combinations(&items[1..], k));
-    result
+    generate_modal_index_sequences(modal)
+        .into_iter()
+        .map(|indices| GameAction::SelectModes { indices })
+        .collect()
 }
 
 fn priority_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
@@ -232,11 +201,9 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
 
     let p = &state.players[player.0 as usize];
     let is_main_phase = matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain);
-    let stack_empty = state.stack.is_empty();
-    let is_active = state.active_player == player;
 
     // Playable lands: main phase, stack empty, active player, land drop available
-    if is_main_phase && stack_empty && is_active {
+    if is_main_phase && state.stack.is_empty() && state.active_player == player {
         let lands_available = state.lands_played_this_turn < state.max_lands_per_turn;
         if lands_available {
             for &obj_id in &p.hand {
@@ -254,9 +221,7 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
     // Castable spells from hand
     for &obj_id in &p.hand {
         if let Some(obj) = state.objects.get(&obj_id) {
-            if can_cast(state, obj, player, is_main_phase, stack_empty, is_active)
-                && spell_has_legal_targets(state, obj, player)
-            {
+            if can_cast(state, obj, player) && spell_has_legal_targets(state, obj, player) {
                 actions.push(GameAction::CastSpell {
                     card_id: obj.card_id,
                     targets: Vec::new(),
@@ -273,6 +238,14 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
                 for (i, ability_def) in obj.abilities.iter().enumerate() {
                     if ability_def.kind == engine::types::ability::AbilityKind::Activated
                         && !engine::game::mana_abilities::is_mana_ability(ability_def)
+                        && restrictions::check_activation_restrictions(
+                            state,
+                            player,
+                            obj_id,
+                            i,
+                            &ability_def.activation_restrictions,
+                        )
+                        .is_ok()
                     {
                         actions.push(GameAction::ActivateAbility {
                             source_id: obj_id,
@@ -287,30 +260,42 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
     actions
 }
 
-fn can_cast(
-    state: &GameState,
-    obj: &GameObject,
-    player: PlayerId,
-    is_main_phase: bool,
-    stack_empty: bool,
-    is_active: bool,
-) -> bool {
+fn can_cast(state: &GameState, obj: &GameObject, player: PlayerId) -> bool {
     // Lands are played, not cast
     if obj.card_types.core_types.contains(&CoreType::Land) {
         return false;
     }
 
-    // Sorcery-speed: must be main phase, stack empty, active player
-    let is_instant =
-        obj.card_types.core_types.contains(&CoreType::Instant) || obj.has_keyword(&Keyword::Flash);
+    let ability_def = obj.abilities.first().cloned().unwrap_or_else(|| {
+        engine::types::ability::AbilityDefinition::new(
+            engine::types::ability::AbilityKind::Spell,
+            engine::types::ability::Effect::Unimplemented {
+                name: "PermanentNoncreature".to_string(),
+                description: None,
+            },
+        )
+    });
 
-    if !(is_instant || is_main_phase && stack_empty && is_active) {
+    let flash_cost = restrictions::flash_timing_cost(state, player, obj);
+    let mut effective_cost = obj.mana_cost.clone();
+    if restrictions::check_spell_timing(state, player, obj, &ability_def, false).is_err() {
+        let Some(flash_cost) = flash_cost else {
+            return false;
+        };
+        if restrictions::check_spell_timing(state, player, obj, &ability_def, true).is_err() {
+            return false;
+        }
+        effective_cost = restrictions::add_mana_cost(&effective_cost, &flash_cost);
+    }
+    if restrictions::check_casting_restrictions(state, player, obj.id, &obj.casting_restrictions)
+        .is_err()
+    {
         return false;
     }
 
     // Check if player could afford the cost using pool + untapped lands.
-    let available = compute_available_mana_for_cost(state, player, &obj.mana_cost);
-    can_afford_with(&available, &obj.mana_cost)
+    let available = compute_available_mana_for_cost(state, player, &effective_cost);
+    can_afford_with(&available, &effective_cost)
 }
 
 /// Mana available from the current pool plus untapped lands on the battlefield.
@@ -714,43 +699,42 @@ fn combinations(
 }
 
 fn target_selection_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
-    use engine::types::ability::TargetRef;
+    let WaitingFor::TargetSelection {
+        target_slots,
+        selection,
+        ..
+    } = &state.waiting_for
+    else {
+        return Vec::new();
+    };
 
-    let mut actions = Vec::new();
+    let _ = player;
 
-    // Enumerate legal targets: creatures and players
-    for &obj_id in &state.battlefield {
-        if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.card_types.core_types.contains(&CoreType::Creature) {
-                // Don't target hexproof/shroud creatures controlled by opponents
-                let is_opponent = obj.controller != player;
-                if is_opponent
-                    && (obj.has_keyword(&Keyword::Hexproof) || obj.has_keyword(&Keyword::Shroud))
-                {
-                    continue;
-                }
-                if !is_opponent && obj.has_keyword(&Keyword::Shroud) {
-                    continue;
-                }
-                actions.push(GameAction::SelectTargets {
-                    targets: vec![TargetRef::Object(obj_id)],
-                });
-            }
-        }
-    }
+    target_choice_actions(
+        target_slots,
+        selection.current_slot,
+        &selection.current_legal_targets,
+    )
+}
 
-    // Players as targets
-    for p in &state.players {
-        actions.push(GameAction::SelectTargets {
-            targets: vec![TargetRef::Player(p.id)],
-        });
-    }
+fn target_choice_actions(
+    target_slots: &[engine::types::game_state::TargetSelectionSlot],
+    current_slot: usize,
+    current_legal_targets: &[engine::types::ability::TargetRef],
+) -> Vec<GameAction> {
+    let mut actions = current_legal_targets
+        .iter()
+        .cloned()
+        .map(|target| GameAction::ChooseTarget {
+            target: Some(target),
+        })
+        .collect::<Vec<_>>();
 
-    // Stack spells as targets (for counterspells)
-    for entry in &state.stack {
-        actions.push(GameAction::SelectTargets {
-            targets: vec![TargetRef::Object(entry.id)],
-        });
+    if target_slots
+        .get(current_slot)
+        .is_some_and(|slot| slot.optional)
+    {
+        actions.push(GameAction::ChooseTarget { target: None });
     }
 
     actions
@@ -869,6 +853,7 @@ fn can_block_attacker(blocker: &GameObject, attacker: &GameObject) -> bool {
 mod tests {
     use super::*;
     use engine::game::zones::create_object;
+    use engine::types::ability::{AbilityDefinition, AbilityKind, ActivationRestriction, Effect};
     use engine::types::card_type::CoreType;
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -1019,6 +1004,96 @@ mod tests {
         assert!(!actions
             .iter()
             .any(|a| matches!(a, GameAction::CastSpell { .. })));
+    }
+
+    #[test]
+    fn priority_excludes_spell_with_unmet_casting_restriction() {
+        let mut state = make_state();
+        let card_id = add_card_to_hand(
+            &mut state,
+            PlayerId(0),
+            "Combat Trick",
+            CoreType::Instant,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            },
+        );
+        let obj = state.objects.get_mut(&card_id).unwrap();
+        obj.casting_restrictions = vec![engine::types::ability::CastingRestriction::DuringCombat];
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        let actions = get_legal_actions(&state);
+
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, GameAction::CastSpell { .. })));
+    }
+
+    #[test]
+    fn priority_includes_flash_permission_spell_when_extra_cost_is_payable() {
+        let mut state = make_state();
+        state.phase = Phase::End;
+        state.active_player = PlayerId(1);
+
+        let card_id = add_card_to_hand(
+            &mut state,
+            PlayerId(0),
+            "Rout",
+            CoreType::Sorcery,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 4,
+            },
+        );
+        let obj = state.objects.get_mut(&card_id).unwrap();
+        obj.casting_options.push(
+            engine::types::ability::SpellCastingOption::as_though_had_flash().cost(
+                engine::types::ability::AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![],
+                        generic: 2,
+                    },
+                },
+            ),
+        );
+        add_mana(&mut state, PlayerId(0), ManaType::White, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 6);
+
+        let actions = get_legal_actions(&state);
+
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, GameAction::CastSpell { .. })));
+    }
+
+    #[test]
+    fn priority_excludes_activated_ability_with_unmet_once_each_turn_restriction() {
+        let mut state = make_state();
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Relic".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.abilities.push(
+            AbilityDefinition::new(AbilityKind::Activated, Effect::Draw { count: 1 })
+                .activation_restrictions(vec![ActivationRestriction::OnlyOnceEachTurn]),
+        );
+        state.activated_abilities_this_turn.insert((source, 0), 1);
+
+        let actions = get_legal_actions(&state);
+
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index: 0,
+            } if *source_id == source
+        )));
     }
 
     #[test]
@@ -1377,16 +1452,84 @@ mod tests {
                 PlayerId(0),
             ),
             cost: ManaCost::zero(),
+            activation_cost: None,
+            activation_ability_index: None,
+            target_constraints: vec![],
         };
+        let bear = add_creature_to_battlefield(&mut state, PlayerId(1), "Bear", 2, 2);
         state.waiting_for = WaitingFor::TargetSelection {
             player: PlayerId(0),
             pending_cast: Box::new(pending),
-            legal_targets: vec![],
+            target_slots: vec![engine::types::game_state::TargetSelectionSlot {
+                legal_targets: vec![
+                    engine::types::ability::TargetRef::Object(bear),
+                    engine::types::ability::TargetRef::Player(PlayerId(0)),
+                    engine::types::ability::TargetRef::Player(PlayerId(1)),
+                ],
+                optional: false,
+            }],
+            selection: engine::types::game_state::TargetSelectionProgress {
+                current_slot: 0,
+                selected_slots: vec![],
+                current_legal_targets: vec![
+                    engine::types::ability::TargetRef::Object(bear),
+                    engine::types::ability::TargetRef::Player(PlayerId(0)),
+                    engine::types::ability::TargetRef::Player(PlayerId(1)),
+                ],
+            },
         };
-        add_creature_to_battlefield(&mut state, PlayerId(1), "Bear", 2, 2);
         let actions = get_legal_actions(&state);
         // Should have creature targets + 2 player targets
         assert!(actions.len() >= 3);
+    }
+
+    #[test]
+    fn trigger_target_selection_respects_different_player_constraint() {
+        let mut state = make_state();
+        state.waiting_for = WaitingFor::TriggerTargetSelection {
+            player: PlayerId(0),
+            target_slots: vec![
+                engine::types::game_state::TargetSelectionSlot {
+                    legal_targets: vec![
+                        engine::types::ability::TargetRef::Player(PlayerId(0)),
+                        engine::types::ability::TargetRef::Player(PlayerId(1)),
+                    ],
+                    optional: false,
+                },
+                engine::types::game_state::TargetSelectionSlot {
+                    legal_targets: vec![
+                        engine::types::ability::TargetRef::Player(PlayerId(0)),
+                        engine::types::ability::TargetRef::Player(PlayerId(1)),
+                    ],
+                    optional: false,
+                },
+            ],
+            target_constraints: vec![
+                engine::types::game_state::TargetSelectionConstraint::DifferentTargetPlayers,
+            ],
+            selection: engine::types::game_state::TargetSelectionProgress {
+                current_slot: 0,
+                selected_slots: vec![],
+                current_legal_targets: vec![
+                    engine::types::ability::TargetRef::Player(PlayerId(0)),
+                    engine::types::ability::TargetRef::Player(PlayerId(1)),
+                ],
+            },
+        };
+
+        let actions = get_legal_actions(&state);
+
+        assert_eq!(
+            actions,
+            vec![
+                GameAction::ChooseTarget {
+                    target: Some(engine::types::ability::TargetRef::Player(PlayerId(0))),
+                },
+                GameAction::ChooseTarget {
+                    target: Some(engine::types::ability::TargetRef::Player(PlayerId(1))),
+                },
+            ]
+        );
     }
 
     #[test]

@@ -23,6 +23,9 @@ pub fn resolve(
         .iter()
         .find(|p| p.id == ability.controller)
         .ok_or(EffectError::PlayerNotFound)?;
+    state
+        .players_who_searched_library_this_turn
+        .insert(ability.controller);
 
     // Collect library objects that match the filter
     let matching: Vec<_> = player

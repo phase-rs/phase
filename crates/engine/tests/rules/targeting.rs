@@ -181,7 +181,8 @@ fn hexproof_prevents_opponent_targeting() {
         .expect("cast should succeed (there are still legal targets: players)");
 
     // If target selection is needed, verify the troll is NOT in legal targets
-    if let WaitingFor::TargetSelection { legal_targets, .. } = &result.waiting_for {
+    if let WaitingFor::TargetSelection { target_slots, .. } = &result.waiting_for {
+        let legal_targets = &target_slots[0].legal_targets;
         assert!(
             !legal_targets.contains(&TargetRef::Object(troll_id)),
             "Hexproof creature should not be in legal targets for opponent"
@@ -234,7 +235,8 @@ fn shroud_prevents_all_targeting() {
         .expect("cast should succeed (players are still valid targets)");
 
     // If target selection is needed, verify the stalker is NOT in legal targets
-    if let WaitingFor::TargetSelection { legal_targets, .. } = &result.waiting_for {
+    if let WaitingFor::TargetSelection { target_slots, .. } = &result.waiting_for {
+        let legal_targets = &target_slots[0].legal_targets;
         assert!(
             !legal_targets.contains(&TargetRef::Object(stalker_id)),
             "Shroud creature should not be in legal targets for any player"

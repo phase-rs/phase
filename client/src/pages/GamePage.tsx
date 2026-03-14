@@ -970,17 +970,17 @@ function MulliganBottomCardsPrompt({
 }: MulliganBottomCardsPromptProps) {
   const player = useGameStore((s) => s.gameState?.players[playerId]);
   const objects = useGameStore((s) => s.gameState?.objects);
-  const selectedTargets = useUiStore((s) => s.selectedTargets);
-  const addTarget = useUiStore((s) => s.addTarget);
+  const selectedCardIds = useUiStore((s) => s.selectedCardIds);
+  const addSelectedCard = useUiStore((s) => s.addSelectedCard);
   const inspectObject = useUiStore((s) => s.inspectObject);
 
   if (!player || !objects) return null;
 
   const handObjects = player.hand.map((id) => objects[id]).filter(Boolean);
-  const isReady = selectedTargets.length === count;
+  const isReady = selectedCardIds.length === count;
 
   const handleConfirm = () => {
-    onChoose(selectedTargets.join(","));
+    onChoose(selectedCardIds.join(","));
   };
 
   return (
@@ -996,7 +996,7 @@ function MulliganBottomCardsPrompt({
           transition={{ delay: 0.12, duration: 0.22 }}
         >
           <div className="text-sm text-slate-400">
-            Selected {selectedTargets.length} of {count}
+            Selected {selectedCardIds.length} of {count}
           </div>
           <button
             onClick={handleConfirm}
@@ -1024,13 +1024,13 @@ function MulliganBottomCardsPrompt({
         <div className="overflow-x-auto pb-3">
           <div className="mx-auto flex w-max min-w-full items-center justify-center px-2 sm:px-4">
             {handObjects.map((obj, index) => {
-              const isSelected = selectedTargets.includes(obj.id);
+              const isSelected = selectedCardIds.includes(obj.id);
               return (
                 <motion.button
                   key={obj.id}
                   onClick={() => {
-                    if (!isSelected && selectedTargets.length < count) {
-                      addTarget(obj.id);
+                    if (!isSelected && selectedCardIds.length < count) {
+                      addSelectedCard(obj.id);
                     }
                   }}
                   className={`flex-shrink-0 rounded-[18px] p-1 transition hover:z-50 ${

@@ -3,7 +3,7 @@
 //! Replaces the Forge-style string filter parsing with typed enum matching.
 //! All filter logic works against the TargetFilter enum hierarchy from types/ability.rs.
 
-use crate::game::game_object::GameObject;
+use crate::game::game_object::{parse_counter_type, GameObject};
 use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter};
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
@@ -276,15 +276,6 @@ fn matches_filter_prop(
             None => false,
         },
         FilterProp::Other { .. } => true, // Permissive fallback for unrecognized properties
-    }
-}
-
-fn parse_counter_type(s: &str) -> crate::game::game_object::CounterType {
-    match s {
-        "+1/+1" => crate::game::game_object::CounterType::Plus1Plus1,
-        "-1/-1" => crate::game::game_object::CounterType::Minus1Minus1,
-        "loyalty" => crate::game::game_object::CounterType::Loyalty,
-        other => crate::game::game_object::CounterType::Generic(other.to_string()),
     }
 }
 

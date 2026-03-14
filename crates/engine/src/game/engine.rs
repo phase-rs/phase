@@ -2,7 +2,8 @@ use rand::Rng;
 use thiserror::Error;
 
 use crate::types::ability::{
-    AbilityDefinition, ChoiceType, ChosenAttribute, EffectKind, ResolvedAbility, TargetRef,
+    AbilityDefinition, ChoiceType, ChoiceValue, ChosenAttribute, EffectKind, ResolvedAbility,
+    TargetRef,
 };
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
@@ -13,6 +14,12 @@ use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+use super::ability_utils::{
+    assign_selected_slots_in_chain, assign_targets_in_chain, auto_select_targets,
+    begin_target_selection, build_chained_resolved, build_target_slots, choose_target,
+    flatten_targets_in_chain, validate_modal_indices, validate_selected_targets,
+    TargetSelectionAdvance,
+};
 use super::casting;
 use super::derived::derive_display_state;
 use super::effects;
@@ -23,6 +30,7 @@ use super::match_flow;
 use super::mulligan;
 use super::planeswalker;
 use super::priority;
+use super::restrictions;
 use super::sba;
 use super::triggers;
 use super::turns;
@@ -143,6 +151,9 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
         }
         (WaitingFor::TargetSelection { player, .. }, GameAction::SelectTargets { targets }) => {
             casting::handle_select_targets(state, *player, targets, &mut events)?
+        }
+        (WaitingFor::TargetSelection { player, .. }, GameAction::ChooseTarget { target }) => {
+            casting::handle_choose_target(state, *player, target, &mut events)?
         }
         (
             WaitingFor::TargetSelection {
@@ -671,7 +682,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             }
 
             // Store the chosen value for continuations to read
-            state.last_named_choice = Some(choice);
+            state.last_named_choice = ChoiceValue::from_choice(choice_type, &choice);
 
             // Resume pending continuation if present
             state.waiting_for = WaitingFor::Priority { player: p };
@@ -709,36 +720,24 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
         (
             WaitingFor::TriggerTargetSelection {
                 player,
-                legal_targets,
-                optional,
+                target_slots,
+                target_constraints,
+                ..
             },
             GameAction::SelectTargets { targets },
         ) => {
-            // Empty targets is only valid for optional targeting ("up to one")
-            if targets.is_empty() && !optional {
-                return Err(EngineError::InvalidAction(
-                    "Must select at least one target".to_string(),
-                ));
-            }
-            // Validate targets are legal
-            for t in &targets {
-                if !legal_targets.contains(t) {
-                    return Err(EngineError::InvalidAction(
-                        "Illegal target selected".to_string(),
-                    ));
-                }
-            }
+            validate_selected_targets(target_slots, &targets, target_constraints)?;
             // Take the pending trigger, set targets, push to stack
             let trigger = state
                 .pending_trigger
                 .take()
                 .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
             let mut ability = trigger.ability;
-            ability.targets = targets;
+            assign_targets_in_chain(&mut ability, &targets)?;
 
             casting::emit_targeting_events(
                 state,
-                &ability.targets,
+                &flatten_targets_in_chain(&ability),
                 trigger.source_id,
                 trigger.controller,
                 &mut events,
@@ -753,13 +752,69 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 kind: crate::types::game_state::StackEntryKind::TriggeredAbility {
                     source_id: trigger.source_id,
                     ability,
-                    condition: trigger.trigger_def.condition.clone(),
+                    condition: trigger.condition.clone(),
                 },
             };
             super::stack::push_to_stack(state, entry, &mut events);
             state.priority_passes.clear();
             state.priority_pass_count = 0;
             WaitingFor::Priority { player: *player }
+        }
+        (
+            WaitingFor::TriggerTargetSelection {
+                player,
+                target_slots,
+                target_constraints,
+                selection,
+            },
+            GameAction::ChooseTarget { target },
+        ) => {
+            let Some(_pending_trigger) = state.pending_trigger.as_ref() else {
+                return Err(EngineError::InvalidAction("No pending trigger".to_string()));
+            };
+
+            match choose_target(target_slots, target_constraints, selection, target)? {
+                TargetSelectionAdvance::InProgress(selection) => {
+                    WaitingFor::TriggerTargetSelection {
+                        player: *player,
+                        target_slots: target_slots.clone(),
+                        target_constraints: target_constraints.clone(),
+                        selection,
+                    }
+                }
+                TargetSelectionAdvance::Complete(selected_slots) => {
+                    let trigger = state.pending_trigger.take().ok_or_else(|| {
+                        EngineError::InvalidAction("No pending trigger".to_string())
+                    })?;
+                    let mut ability = trigger.ability;
+                    assign_selected_slots_in_chain(&mut ability, &selected_slots)?;
+
+                    casting::emit_targeting_events(
+                        state,
+                        &flatten_targets_in_chain(&ability),
+                        trigger.source_id,
+                        trigger.controller,
+                        &mut events,
+                    );
+
+                    let entry_id = ObjectId(state.next_object_id);
+                    state.next_object_id += 1;
+                    let entry = crate::types::game_state::StackEntry {
+                        id: entry_id,
+                        source_id: trigger.source_id,
+                        controller: trigger.controller,
+                        kind: crate::types::game_state::StackEntryKind::TriggeredAbility {
+                            source_id: trigger.source_id,
+                            ability,
+                            condition: trigger.condition.clone(),
+                        },
+                    };
+                    super::stack::push_to_stack(state, entry, &mut events);
+                    state.priority_passes.clear();
+                    state.priority_pass_count = 0;
+                    WaitingFor::Priority { player: *player }
+                }
+            }
         }
         (
             WaitingFor::BetweenGamesSideboard { player, .. },
@@ -778,60 +833,40 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 source_id,
                 mode_abilities,
                 is_activated,
+                ability_index,
                 ability_cost,
             },
             GameAction::SelectModes { indices },
         ) => {
-            if indices.len() < modal.min_choices || indices.len() > modal.max_choices {
-                return Err(EngineError::InvalidAction(format!(
-                    "Must choose between {} and {} modes, got {}",
-                    modal.min_choices,
-                    modal.max_choices,
-                    indices.len()
-                )));
-            }
-
-            let mut seen = std::collections::HashSet::new();
-            for &idx in indices.iter() {
-                if idx >= modal.mode_count {
-                    return Err(EngineError::InvalidAction(format!(
-                        "Mode index {} out of range ({})",
-                        idx, modal.mode_count
-                    )));
-                }
-                if !seen.insert(idx) {
-                    return Err(EngineError::InvalidAction(format!(
-                        "Duplicate mode index {}",
-                        idx
-                    )));
-                }
-            }
+            validate_modal_indices(modal, &indices)?;
 
             let p = *player;
             let sid = *source_id;
-            let resolved =
-                casting::build_chained_resolved(mode_abilities, indices.as_slice(), sid, p)?;
+            let resolved = build_chained_resolved(mode_abilities, indices.as_slice(), sid, p)?;
 
             if *is_activated {
-                if let Some(cost) = ability_cost {
-                    casting::pay_ability_cost(state, p, sid, cost, &mut events)?;
-                }
-
                 if state.layers_dirty {
                     super::layers::evaluate_layers(state);
                 }
 
-                let first_filter = casting::find_first_target_filter_in_chain(&resolved);
-                if let Some(filter) = first_filter {
-                    let legal = super::targeting::find_legal_targets(state, filter, p, sid);
-                    if legal.is_empty() {
-                        return Err(EngineError::ActionNotAllowed(
-                            "No legal targets available".to_string(),
-                        ));
-                    }
-                    if legal.len() == 1 {
+                let target_slots = build_target_slots(state, &resolved)?;
+                let target_constraints = super::ability_utils::target_constraints_from_modal(modal);
+                if !target_slots.is_empty() {
+                    if let Some(targets) = auto_select_targets(&target_slots, &target_constraints)?
+                    {
                         let mut resolved = resolved;
-                        resolved.targets = legal;
+                        assign_targets_in_chain(&mut resolved, &targets)?;
+
+                        if let Some(cost) = ability_cost {
+                            casting::pay_ability_cost(state, p, sid, cost, &mut events)?;
+                        }
+                        casting::emit_targeting_events(
+                            state,
+                            &flatten_targets_in_chain(&resolved),
+                            sid,
+                            p,
+                            &mut events,
+                        );
 
                         let entry_id = ObjectId(state.next_object_id);
                         state.next_object_id += 1;
@@ -848,7 +883,11 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                             },
                             &mut events,
                         );
+                        if let Some(idx) = ability_index {
+                            restrictions::record_ability_activation(state, sid, *idx);
+                        }
                     } else {
+                        let selection = begin_target_selection(&target_slots, &target_constraints)?;
                         return Ok(ActionResult {
                             events,
                             waiting_for: WaitingFor::TargetSelection {
@@ -858,12 +897,19 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                                     card_id: CardId(0),
                                     ability: resolved,
                                     cost: crate::types::mana::ManaCost::NoCost,
+                                    activation_cost: ability_cost.clone(),
+                                    activation_ability_index: *ability_index,
+                                    target_constraints,
                                 }),
-                                legal_targets: legal,
+                                target_slots,
+                                selection,
                             },
                         });
                     }
                 } else {
+                    if let Some(cost) = ability_cost {
+                        casting::pay_ability_cost(state, p, sid, cost, &mut events)?;
+                    }
                     let entry_id = ObjectId(state.next_object_id);
                     state.next_object_id += 1;
                     super::stack::push_to_stack(
@@ -879,6 +925,9 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                         },
                         &mut events,
                     );
+                    if let Some(idx) = ability_index {
+                        restrictions::record_ability_activation(state, sid, *idx);
+                    }
                 }
 
                 events.push(GameEvent::AbilityActivated { source_id: sid });
@@ -886,22 +935,66 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 state.priority_pass_count = 0;
                 WaitingFor::Priority { player: p }
             } else {
-                // Triggered ability modal: push as triggered ability
-                let entry_id = ObjectId(state.next_object_id);
-                state.next_object_id += 1;
-                super::stack::push_to_stack(
-                    state,
-                    crate::types::game_state::StackEntry {
-                        id: entry_id,
-                        source_id: sid,
-                        controller: p,
-                        kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
+                let target_slots = build_target_slots(state, &resolved)?;
+                let target_constraints = super::ability_utils::target_constraints_from_modal(modal);
+                if !target_slots.is_empty() {
+                    if let Some(targets) = auto_select_targets(&target_slots, &target_constraints)?
+                    {
+                        let mut resolved = resolved;
+                        assign_targets_in_chain(&mut resolved, &targets)?;
+                        casting::emit_targeting_events(
+                            state,
+                            &flatten_targets_in_chain(&resolved),
+                            sid,
+                            p,
+                            &mut events,
+                        );
+                        super::triggers::push_pending_trigger_to_stack(
+                            state,
+                            crate::game::triggers::PendingTrigger {
+                                source_id: sid,
+                                controller: p,
+                                condition: None,
+                                ability: resolved,
+                                timestamp: state.turn_number,
+                                target_constraints,
+                            },
+                            &mut events,
+                        );
+                    } else {
+                        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
                             source_id: sid,
+                            controller: p,
+                            condition: None,
                             ability: resolved,
+                            timestamp: state.turn_number,
+                            target_constraints: target_constraints.clone(),
+                        });
+                        let selection = begin_target_selection(&target_slots, &target_constraints)?;
+                        return Ok(ActionResult {
+                            events,
+                            waiting_for: WaitingFor::TriggerTargetSelection {
+                                player: p,
+                                target_slots,
+                                target_constraints,
+                                selection,
+                            },
+                        });
+                    }
+                } else {
+                    super::triggers::push_pending_trigger_to_stack(
+                        state,
+                        crate::game::triggers::PendingTrigger {
+                            source_id: sid,
+                            controller: p,
+                            condition: None,
+                            ability: resolved,
+                            timestamp: state.turn_number,
+                            target_constraints,
                         },
-                    },
-                    &mut events,
-                );
+                        &mut events,
+                    );
+                }
                 state.priority_passes.clear();
                 state.priority_pass_count = 0;
                 WaitingFor::Priority { player: p }
@@ -954,21 +1047,16 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
 
         // Check if a trigger needs target selection from the player
         if let Some(trigger) = state.pending_trigger.as_ref() {
-            if let Some(filter) =
-                triggers::extract_target_filter_from_effect(&trigger.ability.effect)
-            {
-                let legal = super::targeting::find_legal_targets(
-                    state,
-                    filter,
-                    trigger.controller,
-                    trigger.source_id,
-                );
+            let target_slots = build_target_slots(state, &trigger.ability)?;
+            if !target_slots.is_empty() {
                 let player = trigger.controller;
-                let optional = trigger.ability.optional_targeting;
+                let target_constraints = trigger.target_constraints.clone();
+                let selection = begin_target_selection(&target_slots, &target_constraints)?;
                 let wf = WaitingFor::TriggerTargetSelection {
                     player,
-                    legal_targets: legal,
-                    optional,
+                    target_slots,
+                    target_constraints,
+                    selection,
                 };
                 state.waiting_for = wf.clone();
                 derive_display_state(state);
@@ -3243,9 +3331,11 @@ mod trigger_target_tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ControllerRef, Effect, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
+        AbilityDefinition, AbilityKind, ControllerRef, DamageAmount, Effect, ModalChoice,
+        ModalSelectionConstraint, TargetFilter, TargetRef, TypedFilter,
     };
     use crate::types::card_type::CoreType;
+    use crate::types::game_state::TargetSelectionConstraint;
     use crate::types::identifiers::CardId;
 
     #[test]
@@ -3321,18 +3411,29 @@ mod trigger_target_tests {
         state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
             source_id: trigger_creature,
             controller: PlayerId(0),
-            trigger_def: TriggerDefinition::new(crate::types::triggers::TriggerMode::ChangesZone)
-                .destination(Zone::Battlefield),
+            condition: None,
             ability,
             timestamp: 1,
+            target_constraints: Vec::new(),
         });
 
         let legal_targets = vec![TargetRef::Object(target1), TargetRef::Object(target2)];
 
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
-            legal_targets: legal_targets.clone(),
-            optional: false,
+            target_slots: vec![crate::types::game_state::TargetSelectionSlot {
+                legal_targets: legal_targets.clone(),
+                optional: false,
+            }],
+            target_constraints: Vec::new(),
+            selection: crate::game::ability_utils::begin_target_selection(
+                &[crate::types::game_state::TargetSelectionSlot {
+                    legal_targets: legal_targets.clone(),
+                    optional: false,
+                }],
+                &[],
+            )
+            .unwrap(),
         };
 
         // Player selects target1
@@ -3377,7 +3478,7 @@ mod trigger_target_tests {
         state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
             source_id: ObjectId(1),
             controller: PlayerId(0),
-            trigger_def: TriggerDefinition::new(crate::types::triggers::TriggerMode::ChangesZone),
+            condition: None,
             ability: crate::types::ability::ResolvedAbility::new(
                 Effect::ChangeZone {
                     origin: Some(Zone::Battlefield),
@@ -3389,12 +3490,17 @@ mod trigger_target_tests {
                 PlayerId(0),
             ),
             timestamp: 1,
+            target_constraints: Vec::new(),
         });
 
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
-            legal_targets: vec![TargetRef::Object(legal_target)],
-            optional: false,
+            target_slots: vec![crate::types::game_state::TargetSelectionSlot {
+                legal_targets: vec![TargetRef::Object(legal_target)],
+                optional: false,
+            }],
+            target_constraints: Vec::new(),
+            selection: crate::types::game_state::TargetSelectionProgress::default(),
         };
 
         // Try to select an illegal target
@@ -3406,6 +3512,284 @@ mod trigger_target_tests {
         );
 
         assert!(result.is_err(), "Should reject illegal target");
+    }
+
+    #[test]
+    fn triggered_modal_modes_with_targets_wait_for_target_selection() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::AbilityModeChoice {
+            player: PlayerId(0),
+            modal: ModalChoice {
+                min_choices: 2,
+                max_choices: 2,
+                mode_count: 1,
+                mode_descriptions: vec!["Deal 1 damage to target player.".to_string()],
+                allow_repeat_modes: true,
+                constraints: vec![ModalSelectionConstraint::DifferentTargetPlayers],
+            },
+            source_id: ObjectId(20),
+            mode_abilities: vec![AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::DealDamage {
+                    amount: DamageAmount::Fixed(1),
+                    target: TargetFilter::Player,
+                },
+            )],
+            is_activated: false,
+            ability_index: None,
+            ability_cost: None,
+        };
+
+        let result = apply(
+            &mut state,
+            GameAction::SelectModes {
+                indices: vec![0, 0],
+            },
+        )
+        .unwrap();
+
+        match result.waiting_for {
+            WaitingFor::TriggerTargetSelection {
+                target_slots,
+                target_constraints,
+                ..
+            } => {
+                assert_eq!(target_slots.len(), 2);
+                assert_eq!(
+                    target_constraints,
+                    vec![TargetSelectionConstraint::DifferentTargetPlayers]
+                );
+            }
+            other => panic!("Expected TriggerTargetSelection, got {other:?}"),
+        }
+        assert_eq!(state.stack.len(), 0);
+        assert!(state.pending_trigger.is_some());
+    }
+
+    #[test]
+    fn trigger_target_selection_enforces_different_player_constraint() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+            source_id: ObjectId(30),
+            controller: PlayerId(0),
+            condition: None,
+            ability: crate::types::ability::ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: DamageAmount::Fixed(1),
+                    target: TargetFilter::Player,
+                },
+                vec![],
+                ObjectId(30),
+                PlayerId(0),
+            )
+            .sub_ability(crate::types::ability::ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: DamageAmount::Fixed(1),
+                    target: TargetFilter::Player,
+                },
+                vec![],
+                ObjectId(30),
+                PlayerId(0),
+            )),
+            timestamp: 1,
+            target_constraints: vec![TargetSelectionConstraint::DifferentTargetPlayers],
+        });
+        state.waiting_for = WaitingFor::TriggerTargetSelection {
+            player: PlayerId(0),
+            target_slots: vec![
+                crate::types::game_state::TargetSelectionSlot {
+                    legal_targets: vec![
+                        TargetRef::Player(PlayerId(0)),
+                        TargetRef::Player(PlayerId(1)),
+                    ],
+                    optional: false,
+                },
+                crate::types::game_state::TargetSelectionSlot {
+                    legal_targets: vec![
+                        TargetRef::Player(PlayerId(0)),
+                        TargetRef::Player(PlayerId(1)),
+                    ],
+                    optional: false,
+                },
+            ],
+            target_constraints: vec![TargetSelectionConstraint::DifferentTargetPlayers],
+            selection: crate::types::game_state::TargetSelectionProgress::default(),
+        };
+
+        let invalid = apply(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![
+                    TargetRef::Player(PlayerId(1)),
+                    TargetRef::Player(PlayerId(1)),
+                ],
+            },
+        );
+        assert!(invalid.is_err(), "same player should be rejected");
+
+        let valid = apply(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![
+                    TargetRef::Player(PlayerId(0)),
+                    TargetRef::Player(PlayerId(1)),
+                ],
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(valid.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.stack.len(), 1);
+        match &state.stack[0].kind {
+            crate::types::game_state::StackEntryKind::TriggeredAbility { ability, .. } => {
+                assert_eq!(
+                    flatten_targets_in_chain(ability),
+                    vec![
+                        TargetRef::Player(PlayerId(0)),
+                        TargetRef::Player(PlayerId(1))
+                    ]
+                );
+            }
+            other => panic!("expected triggered ability on stack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn choose_target_action_advances_trigger_selection_from_engine_state() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let target_slots = vec![
+            crate::types::game_state::TargetSelectionSlot {
+                legal_targets: vec![
+                    TargetRef::Player(PlayerId(0)),
+                    TargetRef::Player(PlayerId(1)),
+                ],
+                optional: false,
+            },
+            crate::types::game_state::TargetSelectionSlot {
+                legal_targets: vec![
+                    TargetRef::Player(PlayerId(0)),
+                    TargetRef::Player(PlayerId(1)),
+                ],
+                optional: false,
+            },
+        ];
+        let target_constraints = vec![TargetSelectionConstraint::DifferentTargetPlayers];
+        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+            source_id: ObjectId(31),
+            controller: PlayerId(0),
+            condition: None,
+            ability: crate::types::ability::ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: DamageAmount::Fixed(1),
+                    target: TargetFilter::Player,
+                },
+                vec![],
+                ObjectId(31),
+                PlayerId(0),
+            )
+            .sub_ability(crate::types::ability::ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: DamageAmount::Fixed(1),
+                    target: TargetFilter::Player,
+                },
+                vec![],
+                ObjectId(31),
+                PlayerId(0),
+            )),
+            timestamp: 1,
+            target_constraints: target_constraints.clone(),
+        });
+        state.waiting_for = WaitingFor::TriggerTargetSelection {
+            player: PlayerId(0),
+            target_slots: target_slots.clone(),
+            target_constraints: target_constraints.clone(),
+            selection: crate::game::ability_utils::begin_target_selection(
+                &target_slots,
+                &target_constraints,
+            )
+            .unwrap(),
+        };
+
+        let intermediate = apply(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(0))),
+            },
+        )
+        .unwrap();
+
+        match intermediate.waiting_for {
+            WaitingFor::TriggerTargetSelection { selection, .. } => {
+                assert_eq!(selection.current_slot, 1);
+                assert_eq!(
+                    selection.current_legal_targets,
+                    vec![TargetRef::Player(PlayerId(1))]
+                );
+            }
+            other => panic!("expected trigger target selection, got {other:?}"),
+        }
+
+        let completed = apply(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(1))),
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.stack.len(), 1);
+    }
+
+    #[test]
+    fn triggered_modal_modes_reject_unsatisfiable_target_constraints() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::AbilityModeChoice {
+            player: PlayerId(0),
+            modal: ModalChoice {
+                min_choices: 2,
+                max_choices: 2,
+                mode_count: 1,
+                mode_descriptions: vec!["Target opponent reveals their hand.".to_string()],
+                allow_repeat_modes: true,
+                constraints: vec![ModalSelectionConstraint::DifferentTargetPlayers],
+            },
+            source_id: ObjectId(40),
+            mode_abilities: vec![AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::DealDamage {
+                    amount: DamageAmount::Fixed(1),
+                    target: TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::Opponent),
+                    ),
+                },
+            )],
+            is_activated: false,
+            ability_index: None,
+            ability_cost: None,
+        };
+
+        let result = apply(
+            &mut state,
+            GameAction::SelectModes {
+                indices: vec![0, 0],
+            },
+        );
+
+        assert!(
+            result.is_err(),
+            "unsatisfiable target constraints should be rejected"
+        );
     }
 }
 

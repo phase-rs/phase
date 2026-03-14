@@ -1,4 +1,7 @@
+use std::str::FromStr;
+
 use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter};
+use crate::types::keywords::Keyword;
 use crate::types::zones::Zone;
 
 use super::oracle_util::contains_possessive;
@@ -186,6 +189,11 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     // Check "with [counter] counter(s) on it/them" suffix
     if let Some((prop, consumed)) = parse_counter_suffix(&lower[pos..]) {
         properties.push(prop);
+        pos += consumed;
+    }
+
+    if let Some((keyword_props, consumed)) = parse_keyword_suffix(&lower[pos..]) {
+        properties.extend(keyword_props);
         pos += consumed;
     }
 
@@ -412,6 +420,84 @@ fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
     }
 
     None
+}
+
+fn parse_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
+    let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
+    let mut remaining = trimmed.strip_prefix("with ")?;
+    let mut consumed = leading_ws + "with ".len();
+    let mut properties = Vec::new();
+
+    loop {
+        let Some((keyword, keyword_len)) = parse_leading_keyword(remaining) else {
+            break;
+        };
+
+        properties.push(FilterProp::WithKeyword {
+            value: keyword.to_string(),
+        });
+        consumed += keyword_len;
+        remaining = &remaining[keyword_len..];
+
+        if let Some(rest) = remaining.strip_prefix(", and ") {
+            consumed += ", and ".len();
+            remaining = rest;
+            continue;
+        }
+        if let Some(rest) = remaining.strip_prefix(" and ") {
+            consumed += " and ".len();
+            remaining = rest;
+            continue;
+        }
+        if let Some(rest) = remaining.strip_prefix(", ") {
+            consumed += ", ".len();
+            remaining = rest;
+            continue;
+        }
+
+        break;
+    }
+
+    if properties.is_empty() {
+        None
+    } else {
+        Some((properties, consumed))
+    }
+}
+
+fn parse_leading_keyword(text: &str) -> Option<(&str, usize)> {
+    let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
+    let mut candidate_ends = vec![trimmed.len()];
+
+    for (idx, ch) in trimmed.char_indices() {
+        if matches!(ch, ' ' | ',' | '.') {
+            candidate_ends.push(idx);
+        }
+    }
+
+    candidate_ends.sort_unstable();
+    candidate_ends.dedup();
+
+    for end in candidate_ends.into_iter().rev() {
+        let candidate = trimmed[..end].trim();
+        if is_recognized_keyword(candidate) {
+            return Some((candidate, leading_ws + end));
+        }
+    }
+
+    None
+}
+
+fn is_recognized_keyword(text: &str) -> bool {
+    matches!(
+        Keyword::from_str(text),
+        Ok(keyword) if !matches!(keyword, Keyword::Unknown(_))
+    ) || matches!(
+        text,
+        "plainswalk" | "islandwalk" | "swampwalk" | "mountainwalk" | "forestwalk"
+    )
 }
 
 fn typed(
@@ -819,6 +905,37 @@ mod tests {
                     .controller(ControllerRef::You)
                     .properties(vec![FilterProp::IsChosenCreatureType])
             )
+        );
+    }
+
+    #[test]
+    fn creatures_you_control_with_flying() {
+        let (f, _) = parse_type_phrase("creatures you control with flying");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::WithKeyword {
+                        value: "flying".to_string(),
+                    }])
+            )
+        );
+    }
+
+    #[test]
+    fn creature_with_first_strike_and_vigilance() {
+        let (f, _) = parse_type_phrase("creature with first strike and vigilance");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::WithKeyword {
+                    value: "first strike".to_string(),
+                },
+                FilterProp::WithKeyword {
+                    value: "vigilance".to_string(),
+                },
+            ]))
         );
     }
 }

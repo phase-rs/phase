@@ -1,20 +1,20 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    AbilityDefinition, Effect, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
-    TriggerCondition, TriggerDefinition, TypedFilter,
+    Effect, EffectKind, ResolvedAbility, TargetFilter, TargetRef, TriggerCondition,
+    TriggerDefinition, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
+use crate::types::game_state::{GameState, StackEntry, StackEntryKind, TargetSelectionConstraint};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::player::{Player, PlayerId};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
+use super::ability_utils::build_resolved_from_def;
 use super::stack;
-use super::targeting;
 
 /// Function signature for trigger matchers: returns true if event matches the trigger.
 pub type TriggerMatcher = fn(
@@ -29,9 +29,11 @@ pub type TriggerMatcher = fn(
 pub struct PendingTrigger {
     pub source_id: ObjectId,
     pub controller: PlayerId,
-    pub trigger_def: TriggerDefinition,
+    pub condition: Option<TriggerCondition>,
     pub ability: ResolvedAbility,
     pub timestamp: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_constraints: Vec<TargetSelectionConstraint>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -72,9 +74,10 @@ fn collect_matching_triggers(
                 pending.push(PendingTrigger {
                     source_id: obj_id,
                     controller,
-                    trigger_def: trig_def.clone(),
+                    condition: trig_def.condition.clone(),
                     ability,
                     timestamp,
+                    target_constraints: Vec::new(),
                 });
                 record_trigger_fired(state, trig_def, obj_id, trig_idx);
             }
@@ -147,9 +150,10 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         pending.push(PendingTrigger {
                             source_id: obj_id,
                             controller,
-                            trigger_def: prowess_trig_def,
+                            condition: prowess_trig_def.condition,
                             ability: prowess_ability,
                             timestamp,
+                            target_constraints: Vec::new(),
                         });
                     }
                 }
@@ -206,84 +210,61 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
 
     let mut events_out = Vec::new();
     for trigger in pending {
-        // Check if this trigger's ability has targeting requirements
-        if let Some(target_filter) = extract_target_filter_from_effect(&trigger.ability.effect) {
-            let optional = trigger.ability.optional_targeting;
-            let legal = targeting::find_legal_targets(
-                state,
-                target_filter,
-                trigger.controller,
-                trigger.source_id,
-            );
-            if legal.is_empty() {
-                if optional {
-                    // "Up to one" with no legal targets — put on stack with 0 targets
-                    let entry_id = ObjectId(state.next_object_id);
-                    state.next_object_id += 1;
-                    let condition = trigger.trigger_def.condition.clone();
-                    let entry = StackEntry {
-                        id: entry_id,
-                        source_id: trigger.source_id,
-                        controller: trigger.controller,
-                        kind: StackEntryKind::TriggeredAbility {
-                            source_id: trigger.source_id,
-                            ability: trigger.ability,
-                            condition,
-                        },
-                    };
-                    stack::push_to_stack(state, entry, &mut events_out);
-                } else {
-                    // No legal targets -- skip this trigger entirely
+        let target_slots = match super::ability_utils::build_target_slots(state, &trigger.ability) {
+            Ok(target_slots) => target_slots,
+            Err(_) => continue,
+        };
+
+        if target_slots.is_empty() {
+            push_pending_trigger_to_stack(state, trigger, &mut events_out);
+            continue;
+        }
+
+        match super::ability_utils::auto_select_targets(&target_slots, &trigger.target_constraints)
+        {
+            Ok(Some(targets)) => {
+                let mut trigger = trigger;
+                if super::ability_utils::assign_targets_in_chain(&mut trigger.ability, &targets)
+                    .is_err()
+                {
                     continue;
                 }
-            } else if legal.len() == 1 && !optional {
-                // Auto-target: set the target and push to stack
-                let mut ability = trigger.ability;
-                ability.targets = legal;
                 super::casting::emit_targeting_events(
                     state,
-                    &ability.targets,
+                    &super::ability_utils::flatten_targets_in_chain(&trigger.ability),
                     trigger.source_id,
                     trigger.controller,
                     &mut events_out,
                 );
-                let entry_id = ObjectId(state.next_object_id);
-                state.next_object_id += 1;
-                let condition = trigger.trigger_def.condition.clone();
-                let entry = StackEntry {
-                    id: entry_id,
-                    source_id: trigger.source_id,
-                    controller: trigger.controller,
-                    kind: StackEntryKind::TriggeredAbility {
-                        source_id: trigger.source_id,
-                        ability,
-                        condition,
-                    },
-                };
-                stack::push_to_stack(state, entry, &mut events_out);
-            } else {
-                // Multiple targets or optional targeting -- prompt player for choice
+                push_pending_trigger_to_stack(state, trigger, &mut events_out);
+            }
+            Ok(None) => {
                 state.pending_trigger = Some(trigger);
                 return;
             }
-        } else {
-            // No targeting needed -- push to stack as normal
-            let entry_id = ObjectId(state.next_object_id);
-            state.next_object_id += 1;
-            let condition = trigger.trigger_def.condition.clone();
-            let entry = StackEntry {
-                id: entry_id,
-                source_id: trigger.source_id,
-                controller: trigger.controller,
-                kind: StackEntryKind::TriggeredAbility {
-                    source_id: trigger.source_id,
-                    ability: trigger.ability,
-                    condition,
-                },
-            };
-            stack::push_to_stack(state, entry, &mut events_out);
+            Err(_) => continue,
         }
     }
+}
+
+pub fn push_pending_trigger_to_stack(
+    state: &mut GameState,
+    trigger: PendingTrigger,
+    events: &mut Vec<GameEvent>,
+) {
+    let entry_id = ObjectId(state.next_object_id);
+    state.next_object_id += 1;
+    let entry = StackEntry {
+        id: entry_id,
+        source_id: trigger.source_id,
+        controller: trigger.controller,
+        kind: StackEntryKind::TriggeredAbility {
+            source_id: trigger.source_id,
+            ability: trigger.ability,
+            condition: trigger.condition,
+        },
+    };
+    stack::push_to_stack(state, entry, events);
 }
 
 /// Check whether a trigger's constraint allows it to fire.
@@ -418,26 +399,6 @@ fn build_triggered_ability(
             controller,
         )
     }
-}
-
-/// Recursively build a ResolvedAbility from an AbilityDefinition.
-fn build_resolved_from_def(
-    def: &AbilityDefinition,
-    source_id: ObjectId,
-    controller: PlayerId,
-) -> ResolvedAbility {
-    let mut resolved = ResolvedAbility::new(def.effect.clone(), Vec::new(), source_id, controller);
-    if let Some(sub) = &def.sub_ability {
-        resolved = resolved.sub_ability(build_resolved_from_def(sub, source_id, controller));
-    }
-    if let Some(d) = def.duration.clone() {
-        resolved = resolved.duration(d);
-    }
-    if let Some(c) = def.condition.clone() {
-        resolved = resolved.condition(c);
-    }
-    resolved.optional_targeting = def.optional_targeting;
-    resolved
 }
 
 /// Extract the TargetFilter from an effect, if it has targeting requirements.
@@ -1850,8 +1811,8 @@ pub mod tests {
     use crate::game::filter::matches_target_filter;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityKind, ControllerRef, FilterProp, GainLifePlayer, LifeAmount, TargetFilter,
-        TriggerDefinition,
+        AbilityDefinition, AbilityKind, ControllerRef, FilterProp, GainLifePlayer, LifeAmount,
+        TargetFilter, TriggerDefinition,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;

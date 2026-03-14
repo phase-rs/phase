@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ability::{
     AbilityDefinition, AdditionalCost, CastingRestriction, ModalChoice, PtValue,
-    ReplacementDefinition, StaticDefinition, TriggerDefinition,
-    SpellCastingOption,
+    ReplacementDefinition, SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
 use super::card_type::CardType;
 use super::keywords::Keyword;
