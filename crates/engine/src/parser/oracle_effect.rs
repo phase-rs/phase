@@ -171,6 +171,9 @@ enum SearchCreationImperativeAst {
     Dig {
         count: u32,
     },
+    CopyTokenOf {
+        target: TargetFilter,
+    },
     Token {
         token: TokenDescription,
     },
@@ -1486,6 +1489,9 @@ fn parse_search_and_creation_ast(text: &str, lower: &str) -> Option<SearchCreati
     }
     if lower.starts_with("create ") {
         return match try_parse_token(lower, text) {
+            Some(Effect::CopySpell { target }) => {
+                Some(SearchCreationImperativeAst::CopyTokenOf { target })
+            }
             Some(Effect::Token {
                 name,
                 power,
@@ -1528,6 +1534,7 @@ fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) -> Effect {
             count,
             destination: None,
         },
+        SearchCreationImperativeAst::CopyTokenOf { target } => Effect::CopySpell { target },
         SearchCreationImperativeAst::Token { token } => Effect::Token {
             name: token.name,
             power: token.power.unwrap_or(PtValue::Fixed(0)),
