@@ -1,6 +1,8 @@
 use indexmap::IndexMap;
 
-use crate::types::ability::{AbilityDefinition, Effect, ReplacementCondition, ReplacementMode};
+use crate::types::ability::{
+    AbilityDefinition, Effect, LifeAmount, ReplacementCondition, ReplacementMode,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingReplacement, WaitingFor};
 use crate::types::identifiers::ObjectId;
@@ -24,7 +26,7 @@ pub enum ApplyResult {
 
 pub type ReplacementMatcher = fn(&ProposedEvent, ObjectId, &GameState) -> bool;
 pub type ReplacementApplier =
-    fn(ProposedEvent, ObjectId, &mut GameState, &mut Vec<GameEvent>) -> ApplyResult;
+    fn(ProposedEvent, ReplacementId, &mut GameState, &mut Vec<GameEvent>) -> ApplyResult;
 
 pub struct ReplacementHandlerEntry {
     pub matcher: ReplacementMatcher,
@@ -79,7 +81,7 @@ fn stub_matcher(_event: &ProposedEvent, _source: ObjectId, _state: &GameState) -
 
 fn stub_applier(
     event: ProposedEvent,
-    _source: ObjectId,
+    _rid: ReplacementId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
@@ -94,7 +96,7 @@ fn moved_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -
 
 fn moved_applier(
     event: ProposedEvent,
-    _source: ObjectId,
+    _rid: ReplacementId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
@@ -109,7 +111,7 @@ fn damage_done_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameSt
 
 fn damage_done_applier(
     event: ProposedEvent,
-    _source: ObjectId,
+    _rid: ReplacementId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
@@ -124,7 +126,7 @@ fn destroy_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState)
 
 fn destroy_applier(
     event: ProposedEvent,
-    _source: ObjectId,
+    _rid: ReplacementId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
@@ -139,7 +141,7 @@ fn draw_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) ->
 
 fn draw_applier(
     event: ProposedEvent,
-    _source: ObjectId,
+    _rid: ReplacementId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
@@ -154,11 +156,46 @@ fn gain_life_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameStat
 
 fn gain_life_applier(
     event: ProposedEvent,
-    _source: ObjectId,
-    _state: &mut GameState,
+    rid: ReplacementId,
+    state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    ApplyResult::Modified(event)
+    let Some(delta) = gain_life_replacement_delta(state, rid) else {
+        return ApplyResult::Modified(event);
+    };
+
+    if let ProposedEvent::LifeGain {
+        player_id,
+        amount,
+        applied,
+    } = event
+    {
+        ApplyResult::Modified(ProposedEvent::LifeGain {
+            player_id,
+            amount: amount.saturating_add(delta),
+            applied,
+        })
+    } else {
+        ApplyResult::Modified(event)
+    }
+}
+
+fn gain_life_replacement_delta(state: &GameState, rid: ReplacementId) -> Option<u32> {
+    let execute = state
+        .objects
+        .get(&rid.source)?
+        .replacement_definitions
+        .get(rid.index)?
+        .execute
+        .as_deref()?;
+
+    match &execute.effect {
+        Effect::GainLife {
+            amount: LifeAmount::Fixed(delta),
+            ..
+        } if *delta > 0 && execute.sub_ability.is_none() => Some(*delta as u32),
+        _ => None,
+    }
 }
 
 // --- 6. LifeReduced ---
@@ -169,7 +206,7 @@ fn life_reduced_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameS
 
 fn life_reduced_applier(
     event: ProposedEvent,
-    _source: ObjectId,
+    _rid: ReplacementId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
@@ -193,7 +230,7 @@ fn lose_life_matcher(event: &ProposedEvent, source: ObjectId, state: &GameState)
 
 fn lose_life_applier(
     event: ProposedEvent,
-    _source: ObjectId,
+    _rid: ReplacementId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
@@ -221,7 +258,7 @@ fn add_counter_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameSt
 
 fn add_counter_applier(
     event: ProposedEvent,
-    _source: ObjectId,
+    _rid: ReplacementId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
@@ -236,7 +273,7 @@ fn remove_counter_matcher(event: &ProposedEvent, _source: ObjectId, _state: &Gam
 
 fn remove_counter_applier(
     event: ProposedEvent,
-    _source: ObjectId,
+    _rid: ReplacementId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
@@ -251,7 +288,7 @@ fn create_token_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameS
 
 fn create_token_applier(
     event: ProposedEvent,
-    _source: ObjectId,
+    _rid: ReplacementId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
@@ -266,7 +303,7 @@ fn tap_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> 
 
 fn tap_applier(
     event: ProposedEvent,
-    _source: ObjectId,
+    _rid: ReplacementId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
@@ -281,7 +318,7 @@ fn untap_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -
 
 fn untap_applier(
     event: ProposedEvent,
-    _source: ObjectId,
+    _rid: ReplacementId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
@@ -302,7 +339,7 @@ fn counter_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState)
 
 fn counter_applier(
     event: ProposedEvent,
-    _source: ObjectId,
+    _rid: ReplacementId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
@@ -334,7 +371,7 @@ fn attached_matcher(event: &ProposedEvent, _source: ObjectId, state: &GameState)
 
 fn attached_applier(
     event: ProposedEvent,
-    _source: ObjectId,
+    _rid: ReplacementId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
@@ -361,7 +398,7 @@ fn dealt_damage_matcher(event: &ProposedEvent, source: ObjectId, state: &GameSta
 
 fn dealt_damage_applier(
     event: ProposedEvent,
-    _source: ObjectId,
+    _rid: ReplacementId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
@@ -383,7 +420,7 @@ fn mill_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) ->
 
 fn mill_applier(
     event: ProposedEvent,
-    _source: ObjectId,
+    _rid: ReplacementId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
@@ -398,7 +435,7 @@ fn pay_life_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState
 
 fn pay_life_applier(
     event: ProposedEvent,
-    _source: ObjectId,
+    _rid: ReplacementId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
@@ -413,7 +450,7 @@ fn placeholder_matcher(_event: &ProposedEvent, _source: ObjectId, _state: &GameS
 
 fn placeholder_applier(
     event: ProposedEvent,
-    _source: ObjectId,
+    _rid: ReplacementId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
@@ -746,7 +783,7 @@ fn apply_single_replacement(
 
     if let Some(handler) = registry.get(&event_key) {
         let event_type = event_key.to_string();
-        match (handler.applier)(proposed, rid.source, state, events) {
+        match (handler.applier)(proposed, rid, state, events) {
             ApplyResult::Modified(mut new_event) => {
                 // If the replacement carries a Tap execute (ETB tapped), mark the zone change.
                 if enters_tapped {
@@ -934,7 +971,7 @@ pub fn continue_replacement(
 mod tests {
     use super::*;
     use crate::game::game_object::GameObject;
-    use crate::types::ability::{ReplacementDefinition, TargetRef};
+    use crate::types::ability::{GainLifePlayer, ReplacementDefinition, TargetRef};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
@@ -1063,6 +1100,34 @@ mod tests {
                 assert_eq!(player, PlayerId(0));
             }
             other => panic!("expected NeedsChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn gain_life_replacement_uses_execute_as_delta() {
+        let repl =
+            ReplacementDefinition::new(ReplacementEvent::GainLife).execute(AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: LifeAmount::Fixed(1),
+                    player: GainLifePlayer::Controller,
+                },
+            ));
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+        let mut events = Vec::new();
+
+        let proposed = ProposedEvent::LifeGain {
+            player_id: PlayerId(0),
+            amount: 3,
+            applied: HashSet::new(),
+        };
+
+        let result = replace_event(&mut state, proposed, &mut events);
+        match result {
+            ReplacementResult::Execute(ProposedEvent::LifeGain { amount, .. }) => {
+                assert_eq!(amount, 4);
+            }
+            other => panic!("expected Execute with LifeGain, got {:?}", other),
         }
     }
 

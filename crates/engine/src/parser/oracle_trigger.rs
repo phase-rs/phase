@@ -372,6 +372,12 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
     if text == "enchanted creature" {
         return (TargetFilter::AttachedTo, "");
     }
+    if let Some(rest) = text.strip_prefix("enchanted land ") {
+        return (TargetFilter::AttachedTo, rest);
+    }
+    if text == "enchanted land" {
+        return (TargetFilter::AttachedTo, "");
+    }
     // "enchanted permanent" (some aura triggers use this phrasing)
     if let Some(rest) = text.strip_prefix("enchanted permanent ") {
         return (TargetFilter::AttachedTo, rest);
@@ -445,6 +451,29 @@ fn add_another_prop(filter: TargetFilter) -> TargetFilter {
             filters: filters.into_iter().map(add_another_prop).collect(),
         },
         _ => TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Another])),
+    }
+}
+
+fn add_controller(filter: TargetFilter, controller: ControllerRef) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(TypedFilter {
+            card_type,
+            subtype,
+            controller: existing,
+            properties,
+        }) => TargetFilter::Typed(TypedFilter {
+            card_type,
+            subtype,
+            controller: Some(existing.unwrap_or(controller)),
+            properties,
+        }),
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| add_controller(filter, controller.clone()))
+                .collect(),
+        },
+        other => other,
     }
 }
 
@@ -572,6 +601,13 @@ fn try_parse_event(
         return Some((TriggerMode::Taps, def));
     }
 
+    if rest.starts_with("is tapped for mana") {
+        let mut def = make_base();
+        def.mode = TriggerMode::TapsForMana;
+        def.valid_card = Some(subject.clone());
+        return Some((TriggerMode::TapsForMana, def));
+    }
+
     if rest.starts_with("becomes untapped") || rest.starts_with("untaps") {
         let mut def = make_base();
         def.mode = TriggerMode::Untaps;
@@ -636,6 +672,10 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         return Some(result);
     }
 
+    if let Some(result) = try_parse_one_or_more_combat_damage_to_player(lower) {
+        return Some(result);
+    }
+
     if matches!(
         lower,
         "whenever you commit a crime" | "when you commit a crime"
@@ -682,6 +722,36 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
                 return Some((TriggerMode::SpellCastOrCopy, def));
             }
         }
+    }
+
+    None
+}
+
+fn try_parse_one_or_more_combat_damage_to_player(
+    lower: &str,
+) -> Option<(TriggerMode, TriggerDefinition)> {
+    for prefix in ["whenever one or more ", "when one or more "] {
+        let Some(rest) = lower.strip_prefix(prefix) else {
+            continue;
+        };
+        let Some(subject_text) = rest
+            .strip_suffix(" deal combat damage to a player")
+            .or_else(|| rest.strip_suffix(" deals combat damage to a player"))
+        else {
+            continue;
+        };
+
+        let (filter, remainder) = parse_type_phrase(subject_text);
+        if !remainder.trim().is_empty() {
+            continue;
+        }
+
+        let mut def = make_base();
+        def.mode = TriggerMode::DamageDoneOnceByController;
+        def.combat_damage = true;
+        def.valid_source = Some(filter);
+        def.valid_target = Some(TargetFilter::Player);
+        return Some((TriggerMode::DamageDoneOnceByController, def));
     }
 
     None
@@ -874,6 +944,95 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::Cycled, def));
     }
 
+    if matches!(lower, "whenever you cycle a card" | "when you cycle a card") {
+        let mut def = make_base();
+        def.mode = TriggerMode::Cycled;
+        def.valid_target = Some(TargetFilter::Controller);
+        return Some((TriggerMode::Cycled, def));
+    }
+
+    if matches!(
+        lower,
+        "whenever an opponent draws a card" | "when an opponent draws a card"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::Drawn;
+        def.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ));
+        return Some((TriggerMode::Drawn, def));
+    }
+
+    for prefix in ["whenever you tap ", "when you tap "] {
+        let Some(rest) = lower.strip_prefix(prefix) else {
+            continue;
+        };
+        let Some(subject_text) = rest.strip_suffix(" for mana") else {
+            continue;
+        };
+        let (filter, remainder) = parse_trigger_subject(subject_text);
+        if !remainder.trim().is_empty() {
+            continue;
+        }
+
+        let mut def = make_base();
+        def.mode = TriggerMode::TapsForMana;
+        def.valid_card = Some(filter);
+        def.valid_target = Some(TargetFilter::Controller);
+        return Some((TriggerMode::TapsForMana, def));
+    }
+
+    for prefix in ["whenever a player taps ", "when a player taps "] {
+        let Some(rest) = lower.strip_prefix(prefix) else {
+            continue;
+        };
+        let Some(subject_text) = rest.strip_suffix(" for mana") else {
+            continue;
+        };
+        let (filter, remainder) = parse_trigger_subject(subject_text);
+        if !remainder.trim().is_empty() {
+            continue;
+        }
+
+        let mut def = make_base();
+        def.mode = TriggerMode::TapsForMana;
+        def.valid_card = Some(filter);
+        return Some((TriggerMode::TapsForMana, def));
+    }
+
+    if matches!(lower, "whenever you lose life" | "when you lose life") {
+        let mut def = make_base();
+        def.mode = TriggerMode::LifeLost;
+        def.valid_target = Some(TargetFilter::Controller);
+        return Some((TriggerMode::LifeLost, def));
+    }
+
+    if matches!(
+        lower,
+        "whenever you lose life during your turn" | "when you lose life during your turn"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::LifeLost;
+        def.valid_target = Some(TargetFilter::Controller);
+        def.constraint = Some(TriggerConstraint::OnlyDuringYourTurn);
+        return Some((TriggerMode::LifeLost, def));
+    }
+
+    for prefix in ["whenever you sacrifice ", "when you sacrifice "] {
+        let Some(rest) = lower.strip_prefix(prefix) else {
+            continue;
+        };
+        let (filter, remainder) = parse_trigger_subject(rest);
+        if !remainder.trim().is_empty() {
+            continue;
+        }
+
+        let mut def = make_base();
+        def.mode = TriggerMode::Sacrificed;
+        def.valid_card = Some(add_controller(filter, ControllerRef::You));
+        return Some((TriggerMode::Sacrificed, def));
+    }
+
     if lower.contains("you cast a") || lower.contains("you cast an") {
         let mut def = make_base();
         def.mode = TriggerMode::SpellCast;
@@ -1061,6 +1220,23 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::DamageDone);
         assert!(def.combat_damage);
+    }
+
+    #[test]
+    fn trigger_one_or_more_creatures_you_control_deal_combat_damage_to_player() {
+        let def = parse_trigger_line(
+            "Whenever one or more creatures you control deal combat damage to a player, create a Treasure token.",
+            "Professional Face-Breaker",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
+        assert!(def.combat_damage);
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            ))
+        );
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
     }
 
     #[test]
@@ -1706,6 +1882,85 @@ mod tests {
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         assert!(def.trigger_zones.contains(&Zone::Graveyard));
         assert!(def.optional);
+    }
+
+    #[test]
+    fn trigger_opponent_draws_a_card() {
+        let def = parse_trigger_line(
+            "Whenever an opponent draws a card, you gain 1 life.",
+            "Underworld Dreams",
+        );
+        assert_eq!(def.mode, TriggerMode::Drawn);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_you_cycle_a_card() {
+        let def = parse_trigger_line("Whenever you cycle a card, draw a card.", "Drake Haven");
+        assert_eq!(def.mode, TriggerMode::Cycled);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_you_lose_life() {
+        let def = parse_trigger_line(
+            "Whenever you lose life, create a 1/1 token.",
+            "Unholy Annex",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeLost);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_you_lose_life_during_your_turn() {
+        let def = parse_trigger_line(
+            "Whenever you lose life during your turn, draw a card.",
+            "Bloodtracker",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeLost);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+    }
+
+    #[test]
+    fn trigger_you_sacrifice_a_creature() {
+        let def = parse_trigger_line(
+            "Whenever you sacrifice a creature, draw a card.",
+            "Morbid Opportunist",
+        );
+        assert_eq!(def.mode, TriggerMode::Sacrificed);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_you_tap_a_land_for_mana() {
+        let def = parse_trigger_line("Whenever you tap a land for mana, add {G}.", "Mana Flare");
+        assert_eq!(def.mode, TriggerMode::TapsForMana);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)))
+        );
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_enchanted_land_is_tapped_for_mana() {
+        let def = parse_trigger_line(
+            "Whenever enchanted land is tapped for mana, its controller adds an additional {G}.",
+            "Wild Growth",
+        );
+        assert_eq!(def.mode, TriggerMode::TapsForMana);
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
     }
 
     #[test]

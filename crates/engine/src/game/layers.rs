@@ -136,6 +136,16 @@ fn gather_active_continuous_effects(state: &GameState) -> Vec<ActiveContinuousEf
                             continue;
                         }
                     }
+                    StaticCondition::LifeMoreThanStartingBy { amount } => {
+                        let Some(player) = state.players.iter().find(|p| p.id == obj.controller)
+                        else {
+                            continue;
+                        };
+                        let threshold = state.format_config.starting_life + *amount;
+                        if player.life < threshold {
+                            continue;
+                        }
+                    }
                     StaticCondition::IsPresent { .. } => {
                         // TODO: evaluate presence check
                     }
@@ -525,6 +535,40 @@ mod tests {
             .unwrap()
             .static_definitions
             .push(def);
+    }
+
+    #[test]
+    fn conditional_life_more_than_starting_applies_only_above_threshold() {
+        let mut state = setup();
+        state.format_config.starting_life = 20;
+        state.players[0].life = 26;
+
+        let leyline = make_creature(&mut state, "Leyline Source", 0, 0, PlayerId(0));
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        let def = StaticDefinition::continuous()
+            .affected(creature_you_ctrl())
+            .modifications(vec![
+                ContinuousModification::AddPower { value: 2 },
+                ContinuousModification::AddToughness { value: 2 },
+            ])
+            .condition(StaticCondition::LifeMoreThanStartingBy { amount: 7 });
+        state
+            .objects
+            .get_mut(&leyline)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&bear].power, Some(2));
+        assert_eq!(state.objects[&bear].toughness, Some(2));
+
+        state.players[0].life = 27;
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&bear].power, Some(4));
+        assert_eq!(state.objects[&bear].toughness, Some(4));
     }
 
     #[test]

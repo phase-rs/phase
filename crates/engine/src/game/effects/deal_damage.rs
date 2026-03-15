@@ -83,6 +83,7 @@ pub fn resolve(
                         source_id: ability.source_id,
                         target: t.clone(),
                         amount,
+                        is_combat: false,
                     });
                 }
             }
@@ -147,6 +148,7 @@ pub fn resolve_all(
             source_id: ability.source_id,
             target: TargetRef::Object(obj_id),
             amount: num_dmg,
+            is_combat: false,
         });
     }
 

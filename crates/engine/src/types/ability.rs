@@ -631,6 +631,9 @@ pub enum StaticCondition {
         colors: Vec<ManaColor>,
         threshold: u32,
     },
+    LifeMoreThanStartingBy {
+        amount: i32,
+    },
     IsPresent {
         #[serde(default)]
         filter: Option<TargetFilter>,
@@ -2396,6 +2399,7 @@ mod tests {
                 colors: vec![ManaColor::White, ManaColor::Blue],
                 threshold: 7,
             },
+            StaticCondition::LifeMoreThanStartingBy { amount: 7 },
             StaticCondition::IsPresent {
                 filter: Some(
                     TypedFilter::creature()

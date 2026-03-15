@@ -464,7 +464,10 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::DamageDoneOnce, match_damage_done);
     r.insert(TriggerMode::DamageAll, match_damage_done);
     r.insert(TriggerMode::DamageDealtOnce, match_damage_done);
-    r.insert(TriggerMode::DamageDoneOnceByController, match_damage_done);
+    r.insert(
+        TriggerMode::DamageDoneOnceByController,
+        match_damage_done_once_by_controller,
+    );
     r.insert(TriggerMode::SpellCast, match_spell_cast);
     r.insert(TriggerMode::SpellCastOrCopy, match_spell_cast);
     r.insert(TriggerMode::Attacks, match_attacks);
@@ -675,6 +678,32 @@ fn valid_source_matches(
     match &trigger.valid_source {
         None => true,
         Some(filter) => target_filter_matches_object(state, object_id, filter, source_id),
+    }
+}
+
+fn valid_player_matches(
+    trigger: &TriggerDefinition,
+    state: &GameState,
+    player_id: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    let Some(filter) = &trigger.valid_target else {
+        return true;
+    };
+
+    let trigger_controller = state.objects.get(&source_id).map(|o| o.controller);
+    match filter {
+        TargetFilter::Player => true,
+        TargetFilter::Controller => trigger_controller == Some(player_id),
+        TargetFilter::Typed(TypedFilter {
+            controller: Some(crate::types::ability::ControllerRef::You),
+            ..
+        }) => trigger_controller == Some(player_id),
+        TargetFilter::Typed(TypedFilter {
+            controller: Some(crate::types::ability::ControllerRef::Opponent),
+            ..
+        }) => trigger_controller.is_some_and(|controller| controller != player_id),
+        _ => true,
     }
 }
 
@@ -943,6 +972,7 @@ fn match_damage_done(
         source_id: dmg_source,
         target: _,
         amount: _,
+        is_combat,
     } = event
     {
         // Check if trigger requires damage from a specific source
@@ -950,14 +980,65 @@ fn match_damage_done(
             return false;
         }
         // Check combat_damage flag
-        if trigger.combat_damage {
-            // For combat damage filtering, we'd need combat state.
-            // For now, allow all damage events when combat_damage is set.
+        if trigger.combat_damage && !is_combat {
+            return false;
         }
         true
     } else {
         false
     }
+}
+
+fn match_damage_done_once_by_controller(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::CombatDamageDealtToPlayer {
+        player_id,
+        source_ids,
+    } = event
+    else {
+        return false;
+    };
+
+    if let Some(ref vt) = trigger.valid_target {
+        let trigger_controller = state.objects.get(&source_id).map(|o| o.controller);
+        match vt {
+            TargetFilter::Controller => {
+                if trigger_controller != Some(*player_id) {
+                    return false;
+                }
+            }
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(crate::types::ability::ControllerRef::You),
+                ..
+            }) => {
+                if trigger_controller != Some(*player_id) {
+                    return false;
+                }
+            }
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(crate::types::ability::ControllerRef::Opponent),
+                ..
+            }) => {
+                if trigger_controller == Some(*player_id) {
+                    return false;
+                }
+            }
+            TargetFilter::Player => {}
+            _ => {}
+        }
+    }
+
+    if let Some(filter) = &trigger.valid_source {
+        return source_ids
+            .iter()
+            .any(|source| target_filter_matches_object(state, *source, filter, source_id));
+    }
+
+    source_ids.contains(&source_id)
 }
 
 fn match_spell_cast(
@@ -985,35 +1066,7 @@ fn match_spell_cast(
                 }
             }
         }
-        // Check valid_target as controller filter (ValidActivatingPlayer equivalent)
-        if let Some(ref vt) = trigger.valid_target {
-            let trigger_controller = state.objects.get(&source_id).map(|o| o.controller);
-            match vt {
-                TargetFilter::Controller => {
-                    if trigger_controller != Some(*controller) {
-                        return false;
-                    }
-                }
-                TargetFilter::Typed(TypedFilter {
-                    controller: Some(crate::types::ability::ControllerRef::You),
-                    ..
-                }) => {
-                    if trigger_controller != Some(*controller) {
-                        return false;
-                    }
-                }
-                TargetFilter::Typed(TypedFilter {
-                    controller: Some(crate::types::ability::ControllerRef::Opponent),
-                    ..
-                }) => {
-                    if trigger_controller == Some(*controller) {
-                        return false;
-                    }
-                }
-                _ => {}
-            }
-        }
-        true
+        valid_player_matches(trigger, state, *controller, source_id)
     } else {
         false
     }
@@ -1182,16 +1235,7 @@ fn match_life_gained(
         if *amount <= 0 {
             return false;
         }
-        // Check valid_target as player filter
-        if let Some(ref vt) = trigger.valid_target {
-            let trigger_controller = state.objects.get(&source_id).map(|o| o.controller);
-            match vt {
-                TargetFilter::Controller => trigger_controller == Some(*player_id),
-                _ => true,
-            }
-        } else {
-            true
-        }
+        valid_player_matches(trigger, state, *player_id, source_id)
     } else {
         false
     }
@@ -1207,15 +1251,7 @@ fn match_life_lost(
         if *amount >= 0 {
             return false;
         }
-        if let Some(ref vt) = trigger.valid_target {
-            let trigger_controller = state.objects.get(&source_id).map(|o| o.controller);
-            match vt {
-                TargetFilter::Controller => trigger_controller == Some(*player_id),
-                _ => true,
-            }
-        } else {
-            true
-        }
+        valid_player_matches(trigger, state, *player_id, source_id)
     } else {
         false
     }
@@ -1228,15 +1264,7 @@ fn match_drawn(
     state: &GameState,
 ) -> bool {
     if let GameEvent::CardDrawn { player_id, .. } = event {
-        if let Some(ref vt) = trigger.valid_target {
-            let trigger_controller = state.objects.get(&source_id).map(|o| o.controller);
-            match vt {
-                TargetFilter::Controller => trigger_controller == Some(*player_id),
-                _ => true,
-            }
-        } else {
-            true
-        }
+        valid_player_matches(trigger, state, *player_id, source_id)
     } else {
         false
     }
@@ -1566,16 +1594,25 @@ fn match_revealed(
 /// TapsForMana: fires when source taps and produces mana.
 fn match_taps_for_mana(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
+    trigger: &TriggerDefinition,
     source_id: ObjectId,
-    _state: &GameState,
+    state: &GameState,
 ) -> bool {
     if let GameEvent::ManaAdded {
+        player_id,
         source_id: mana_source,
         ..
     } = event
     {
-        *mana_source == source_id
+        if trigger.valid_card.is_some() {
+            if !valid_card_matches(trigger, state, *mana_source, source_id) {
+                return false;
+            }
+        } else if *mana_source != source_id {
+            return false;
+        }
+
+        valid_player_matches(trigger, state, *player_id, source_id)
     } else {
         false
     }
@@ -1743,7 +1780,13 @@ fn match_damage_received(
     source_id: ObjectId,
     _state: &GameState,
 ) -> bool {
-    if let GameEvent::DamageDealt { target, .. } = event {
+    if let GameEvent::DamageDealt {
+        target, is_combat, ..
+    } = event
+    {
+        if trigger.combat_damage && !is_combat {
+            return false;
+        }
         match target {
             TargetRef::Object(target_id) => {
                 if trigger.valid_card.is_some() {
@@ -1812,7 +1855,7 @@ pub mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ControllerRef, FilterProp, GainLifePlayer, LifeAmount,
-        TargetFilter, TriggerDefinition,
+        TargetFilter, TriggerDefinition, TypeFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
@@ -1883,8 +1926,56 @@ pub mod tests {
             source_id: ObjectId(1),
             target: crate::types::ability::TargetRef::Player(PlayerId(0)),
             amount: 3,
+            is_combat: false,
         };
         assert!(match_damage_done(&event, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn damage_done_once_by_controller_matches_aggregated_combat_damage_event() {
+        let mut state = setup();
+        let trigger_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Professional Face-Breaker".to_string(),
+            Zone::Battlefield,
+        );
+        let source_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Attacker A".to_string(),
+            Zone::Battlefield,
+        );
+        let source_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Attacker B".to_string(),
+            Zone::Battlefield,
+        );
+        for source in [source_a, source_b] {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+
+        let mut trigger = make_trigger(TriggerMode::DamageDoneOnceByController);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(crate::types::ability::ControllerRef::You),
+        ));
+        trigger.valid_target = Some(TargetFilter::Player);
+
+        let event = GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(1),
+            source_ids: vec![source_a, source_b],
+        };
+        assert!(match_damage_done_once_by_controller(
+            &event,
+            &trigger,
+            trigger_source,
+            &state
+        ));
     }
 
     #[test]
@@ -2652,6 +2743,102 @@ pub mod tests {
         };
         let trigger = make_trigger(TriggerMode::TapsForMana);
         assert!(match_taps_for_mana(&event, &trigger, source, &state));
+    }
+
+    #[test]
+    fn taps_for_mana_matches_valid_card_filter() {
+        let mut state = setup();
+        let aura = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Wild Growth".to_string(),
+            Zone::Battlefield,
+        );
+        let enchanted_land = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(enchanted_land);
+
+        let event = GameEvent::ManaAdded {
+            player_id: PlayerId(0),
+            mana_type: crate::types::mana::ManaType::Green,
+            source_id: enchanted_land,
+        };
+
+        let mut trigger = make_trigger(TriggerMode::TapsForMana);
+        trigger.valid_card = Some(TargetFilter::AttachedTo);
+        assert!(match_taps_for_mana(&event, &trigger, aura, &state));
+    }
+
+    #[test]
+    fn taps_for_mana_respects_player_filter() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Mana Flare".to_string(),
+            Zone::Battlefield,
+        );
+        let tapped_land = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(1),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&tapped_land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let event = GameEvent::ManaAdded {
+            player_id: PlayerId(1),
+            mana_type: crate::types::mana::ManaType::Green,
+            source_id: tapped_land,
+        };
+
+        let mut trigger = make_trigger(TriggerMode::TapsForMana);
+        trigger.valid_target = Some(TargetFilter::Controller);
+        trigger.valid_card = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)));
+        assert!(!match_taps_for_mana(&event, &trigger, source, &state));
+    }
+
+    #[test]
+    fn drawn_respects_opponent_filter() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Underworld Dreams".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut trigger = make_trigger(TriggerMode::Drawn);
+        trigger.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(crate::types::ability::ControllerRef::Opponent),
+        ));
+
+        let opponent_event = GameEvent::CardDrawn {
+            player_id: PlayerId(1),
+            object_id: ObjectId(20),
+        };
+        assert!(match_drawn(&opponent_event, &trigger, source, &state));
+
+        let controller_event = GameEvent::CardDrawn {
+            player_id: PlayerId(0),
+            object_id: ObjectId(21),
+        };
+        assert!(!match_drawn(&controller_event, &trigger, source, &state));
     }
 
     #[test]

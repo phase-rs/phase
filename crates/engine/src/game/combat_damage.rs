@@ -36,7 +36,8 @@ pub fn resolve_combat_damage(state: &mut GameState, events: &mut Vec<GameEvent>)
 
     if has_first_or_double {
         // First strike damage step
-        first_strike_damage_step(state, events);
+        let first_strike_events = first_strike_damage_step(state);
+        events.extend(first_strike_events.iter().cloned());
 
         // Mark first strike done
         if let Some(c) = &mut state.combat {
@@ -45,21 +46,27 @@ pub fn resolve_combat_damage(state: &mut GameState, events: &mut Vec<GameEvent>)
 
         // SBAs between damage steps
         sba::check_state_based_actions(state, events);
-        triggers::process_triggers(state, events);
+        triggers::process_triggers(state, &first_strike_events);
 
         // Regular damage step
-        regular_damage_step(state, events);
+        let regular_events = regular_damage_step(state);
+        events.extend(regular_events.iter().cloned());
+        sba::check_state_based_actions(state, events);
+        triggers::process_triggers(state, &regular_events);
     } else {
         // Single damage step
-        regular_damage_step(state, events);
+        let regular_events = regular_damage_step(state);
+        events.extend(regular_events.iter().cloned());
+        sba::check_state_based_actions(state, events);
+        triggers::process_triggers(state, &regular_events);
     }
 }
 
 /// First strike damage step: only FirstStrike and DoubleStrike creatures deal damage.
-fn first_strike_damage_step(state: &mut GameState, events: &mut Vec<GameEvent>) {
+fn first_strike_damage_step(state: &mut GameState) -> Vec<GameEvent> {
     let combat = match &state.combat {
         Some(c) => c.clone(),
-        None => return,
+        None => return Vec::new(),
     };
 
     let mut all_assignments: Vec<(ObjectId, DamageAssignment)> = Vec::new();
@@ -120,14 +127,14 @@ fn first_strike_damage_step(state: &mut GameState, events: &mut Vec<GameEvent>) 
         ));
     }
 
-    apply_combat_damage(state, &all_assignments, events);
+    apply_combat_damage(state, &all_assignments)
 }
 
 /// Regular damage step: creatures WITHOUT FirstStrike (already dealt) + DoubleStrike creatures deal damage.
-fn regular_damage_step(state: &mut GameState, events: &mut Vec<GameEvent>) {
+fn regular_damage_step(state: &mut GameState) -> Vec<GameEvent> {
     let combat = match &state.combat {
         Some(c) => c.clone(),
-        None => return,
+        None => return Vec::new(),
     };
     let first_strike_was_done = combat.first_strike_done;
 
@@ -197,7 +204,7 @@ fn regular_damage_step(state: &mut GameState, events: &mut Vec<GameEvent>) {
         ));
     }
 
-    apply_combat_damage(state, &all_assignments, events);
+    apply_combat_damage(state, &all_assignments)
 }
 
 /// Determine how an attacker assigns its damage.
@@ -329,8 +336,11 @@ fn lethal_damage_needed(
 fn apply_combat_damage(
     state: &mut GameState,
     assignments: &[(ObjectId, DamageAssignment)],
-    events: &mut Vec<GameEvent>,
-) {
+) -> Vec<GameEvent> {
+    let mut events = Vec::new();
+    let mut combat_damage_to_players: Vec<(crate::types::player::PlayerId, Vec<ObjectId>)> =
+        Vec::new();
+
     for (source_id, assignment) in assignments {
         let (
             source_has_deathtouch,
@@ -385,7 +395,7 @@ fn apply_combat_damage(
             applied: HashSet::new(),
         };
 
-        let actual_amount = match replacement::replace_event(state, proposed, events) {
+        let actual_amount = match replacement::replace_event(state, proposed, &mut events) {
             ReplacementResult::Execute(event) => {
                 if let ProposedEvent::Damage {
                     target: ref t,
@@ -427,6 +437,7 @@ fn apply_combat_damage(
                                 source_id: *source_id,
                                 target: TargetRef::Object(*target_id),
                                 amount,
+                                is_combat: true,
                             });
                         }
                         TargetRef::Player(player_id) => {
@@ -439,14 +450,30 @@ fn apply_combat_damage(
                                 }
                             } else {
                                 crate::game::effects::life::apply_damage_life_loss(
-                                    state, *player_id, amount, events,
+                                    state,
+                                    *player_id,
+                                    amount,
+                                    &mut events,
                                 );
                             }
                             events.push(GameEvent::DamageDealt {
                                 source_id: *source_id,
                                 target: TargetRef::Player(*player_id),
                                 amount,
+                                is_combat: true,
                             });
+
+                            let player_sources = combat_damage_to_players
+                                .iter_mut()
+                                .find(|(damaged_player, _)| *damaged_player == *player_id)
+                                .map(|(_, source_ids)| source_ids);
+                            if let Some(source_ids) = player_sources {
+                                if !source_ids.contains(source_id) {
+                                    source_ids.push(*source_id);
+                                }
+                            } else {
+                                combat_damage_to_players.push((*player_id, vec![*source_id]));
+                            }
 
                             // Commander damage tracking
                             if source_is_commander && amount > 0 {
@@ -491,6 +518,15 @@ fn apply_combat_damage(
             });
         }
     }
+
+    for (player_id, source_ids) in combat_damage_to_players {
+        events.push(GameEvent::CombatDamageDealtToPlayer {
+            player_id,
+            source_ids,
+        });
+    }
+
+    events
 }
 
 #[cfg(test)]
@@ -498,9 +534,13 @@ mod tests {
     use super::*;
     use crate::game::combat::{AttackerInfo, CombatState};
     use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AbilityDefinition, ControllerRef, Effect, TriggerDefinition, TypedFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
+    use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
     fn setup() -> GameState {
@@ -972,5 +1012,105 @@ mod tests {
             .unwrap();
         assert_eq!(entry_a.damage, 3);
         assert_eq!(entry_b.damage, 2);
+    }
+
+    #[test]
+    fn one_or_more_combat_damage_trigger_fires_once_per_damage_step() {
+        let mut state = setup();
+        let watcher = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Professional Face-Breaker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&watcher)
+            .unwrap()
+            .trigger_definitions
+            .push({
+                let mut trigger = TriggerDefinition::new(TriggerMode::DamageDoneOnceByController)
+                    .execute(AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Spell,
+                        Effect::Draw { count: 1 },
+                    ));
+                trigger.valid_source = Some(crate::types::ability::TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                ));
+                trigger.valid_target = Some(crate::types::ability::TargetFilter::Player);
+                trigger
+            });
+
+        let attacker_a = create_creature(&mut state, PlayerId(0), "Attacker A", 2, 2);
+        let attacker_b = create_creature(&mut state, PlayerId(0), "Attacker B", 3, 3);
+        setup_combat(&mut state, vec![attacker_a, attacker_b], vec![]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        assert_eq!(state.stack.len(), 1);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::CombatDamageDealtToPlayer {
+                    player_id,
+                    source_ids,
+                } if *player_id == PlayerId(1)
+                    && source_ids.len() == 2
+                    && source_ids.contains(&attacker_a)
+                    && source_ids.contains(&attacker_b)
+            )
+        }));
+    }
+
+    #[test]
+    fn one_or_more_combat_damage_trigger_fires_in_each_double_strike_step() {
+        let mut state = setup();
+        let watcher = create_object(
+            &mut state,
+            CardId(600),
+            PlayerId(0),
+            "Damage Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&watcher)
+            .unwrap()
+            .trigger_definitions
+            .push({
+                let mut trigger = TriggerDefinition::new(TriggerMode::DamageDoneOnceByController)
+                    .execute(AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Spell,
+                        Effect::Draw { count: 1 },
+                    ));
+                trigger.valid_source = Some(crate::types::ability::TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                ));
+                trigger.valid_target = Some(crate::types::ability::TargetFilter::Player);
+                trigger
+            });
+
+        let attacker = create_creature(&mut state, PlayerId(0), "Double Striker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::DoubleStrike);
+        setup_combat(&mut state, vec![attacker], vec![]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        assert_eq!(state.stack.len(), 2);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::CombatDamageDealtToPlayer { .. }))
+                .count(),
+            2
+        );
     }
 }

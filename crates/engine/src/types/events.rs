@@ -84,6 +84,7 @@ pub enum GameEvent {
         source_id: ObjectId,
         target: TargetRef,
         amount: u32,
+        is_combat: bool,
     },
     SpellCountered {
         object_id: ObjectId,
@@ -141,6 +142,10 @@ pub enum GameEvent {
     CardsRevealed {
         player: PlayerId,
         card_names: Vec<String>,
+    },
+    CombatDamageDealtToPlayer {
+        player_id: PlayerId,
+        source_ids: Vec<ObjectId>,
     },
     PlayerEliminated {
         player_id: PlayerId,
@@ -214,6 +219,7 @@ mod tests {
             source_id: ObjectId(1),
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
+            is_combat: false,
         };
         let serialized = serde_json::to_string(&event).unwrap();
         let deserialized: GameEvent = serde_json::from_str(&serialized).unwrap();
@@ -225,6 +231,17 @@ mod tests {
         let event = GameEvent::EffectResolved {
             kind: EffectKind::DealDamage,
             source_id: ObjectId(5),
+        };
+        let serialized = serde_json::to_string(&event).unwrap();
+        let deserialized: GameEvent = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(event, deserialized);
+    }
+
+    #[test]
+    fn combat_damage_dealt_to_player_roundtrips() {
+        let event = GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(1),
+            source_ids: vec![ObjectId(10), ObjectId(11)],
         };
         let serialized = serde_json::to_string(&event).unwrap();
         let deserialized: GameEvent = serde_json::from_str(&serialized).unwrap();

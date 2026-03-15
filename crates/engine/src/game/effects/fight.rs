@@ -54,6 +54,7 @@ pub fn resolve(
             source_id,
             target: TargetRef::Object(target_id),
             amount: source_power as u32,
+            is_combat: false,
         });
     }
 
@@ -69,6 +70,7 @@ pub fn resolve(
             source_id: target_id,
             target: TargetRef::Object(source_id),
             amount: target_power as u32,
+            is_combat: false,
         });
     }
 

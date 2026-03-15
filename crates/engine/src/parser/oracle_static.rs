@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use super::oracle_target::parse_type_phrase;
-use super::oracle_util::strip_reminder_text;
+use super::oracle_util::{parse_number, strip_reminder_text};
 use crate::types::ability::{
     ChosenSubtypeKind, ContinuousModification, ControllerRef, DynamicPTValue, FilterProp,
     StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
@@ -206,6 +206,10 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     // --- CDA: "~'s power is equal to the number of card types among cards in all graveyards
     //     and its toughness is equal to that number plus 1" (Tarmogoyf) ---
     if let Some(def) = parse_cda_pt_equality(&lower, &text) {
+        return Some(def);
+    }
+
+    if let Some(def) = parse_conditional_static(&text) {
         return Some(def);
     }
 
@@ -482,6 +486,33 @@ fn parse_subject_continuous_static(text: &str) -> Option<StaticDefinition> {
     None
 }
 
+fn parse_conditional_static(text: &str) -> Option<StaticDefinition> {
+    let conditional = text.strip_prefix("As long as ")?;
+    let (condition_text, remainder) = conditional.split_once(", ")?;
+    let condition = parse_static_condition(condition_text)?;
+    let mut def = parse_static_line(remainder.trim())?;
+    if def.condition.is_some() {
+        return None;
+    }
+    def.condition = Some(condition);
+    def.description = Some(text.to_string());
+    Some(def)
+}
+
+fn parse_static_condition(text: &str) -> Option<StaticCondition> {
+    let lower = text.to_lowercase();
+    let amount_text = lower
+        .strip_prefix("you have at least ")?
+        .strip_suffix(" life more than your starting life total")?;
+    let (amount, rest) = parse_number(amount_text)?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(StaticCondition::LifeMoreThanStartingBy {
+        amount: amount as i32,
+    })
+}
+
 fn find_continuous_predicate_start(lower: &str) -> Option<usize> {
     [
         " gets ", " get ", " gains ", " gain ", " has ", " have ", " loses ", " lose ",
@@ -511,10 +542,10 @@ fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
     let trimmed = subject.trim();
     let lower = trimmed.to_lowercase();
 
-    let (descriptor, plural_suffix) = if let Some(prefix) = trimmed.strip_suffix(" creatures") {
-        (prefix.trim(), false)
+    let descriptor = if let Some(prefix) = trimmed.strip_suffix(" creatures") {
+        prefix.trim()
     } else if !trimmed.contains(' ') && lower.ends_with('s') {
-        (trimmed.trim_end_matches('s').trim(), true)
+        trimmed.trim_end_matches('s').trim()
     } else {
         return None;
     };
@@ -532,11 +563,7 @@ fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
     }
 
     if is_capitalized_words(descriptor) {
-        let subtype = if plural_suffix {
-            descriptor.to_string()
-        } else {
-            descriptor.to_string()
-        };
+        let subtype = descriptor.to_string();
         return Some(TargetFilter::Typed(
             TypedFilter::creature().subtype(subtype),
         ));
@@ -1223,6 +1250,33 @@ mod tests {
             def.condition,
             Some(StaticCondition::CheckSVar { .. })
         ));
+    }
+
+    #[test]
+    fn static_life_more_than_starting_conditional() {
+        let def = parse_static_line(
+            "As long as you have at least 7 life more than your starting life total, creatures you control get +2/+2.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter {
+                card_type: Some(TypeFilter::Creature),
+                controller: Some(ControllerRef::You),
+                ..
+            }))
+        ));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 2 }));
+        assert_eq!(
+            def.condition,
+            Some(StaticCondition::LifeMoreThanStartingBy { amount: 7 })
+        );
     }
 
     #[test]
