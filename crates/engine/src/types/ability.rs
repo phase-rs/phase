@@ -1039,6 +1039,10 @@ pub enum Effect {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
     },
+    Transform {
+        #[serde(default = "default_target_filter_self_ref")]
+        target: TargetFilter,
+    },
     /// Search a player's library for card(s) matching a filter.
     /// The destination is handled by the sub_ability chain (ChangeZone + Shuffle).
     SearchLibrary {
@@ -1128,6 +1132,10 @@ fn default_target_filter_controller() -> TargetFilter {
     TargetFilter::Controller
 }
 
+fn default_target_filter_self_ref() -> TargetFilter {
+    TargetFilter::SelfRef
+}
+
 /// Returns the human-readable variant name for an Effect.
 /// Production API for GameEvent::EffectResolved api_type strings and logging.
 pub fn effect_variant_name(effect: &Effect) -> &str {
@@ -1171,6 +1179,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Mana { .. } => "Mana",
         Effect::Discard { .. } => "Discard",
         Effect::Shuffle { .. } => "Shuffle",
+        Effect::Transform { .. } => "Transform",
         Effect::SearchLibrary { .. } => "SearchLibrary",
         Effect::RevealHand { .. } => "RevealHand",
         Effect::TargetOnly { .. } => "TargetOnly",
@@ -1284,6 +1293,7 @@ impl From<&Effect> for EffectKind {
             Effect::Mana { .. } => EffectKind::Mana,
             Effect::Discard { .. } => EffectKind::Discard,
             Effect::Shuffle { .. } => EffectKind::Shuffle,
+            Effect::Transform { .. } => EffectKind::Transform,
             Effect::SearchLibrary { .. } => EffectKind::SearchLibrary,
             Effect::RevealHand { .. } => EffectKind::Reveal,
             Effect::TargetOnly { .. } => EffectKind::TargetOnly,

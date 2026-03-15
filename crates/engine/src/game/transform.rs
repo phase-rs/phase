@@ -1,6 +1,7 @@
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
+use crate::types::zones::Zone;
 
 use super::engine::EngineError;
 use super::game_object::BackFaceData;
@@ -20,6 +21,12 @@ pub fn transform_permanent(
         .objects
         .get(&object_id)
         .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
+
+    if obj.zone != Zone::Battlefield {
+        return Err(EngineError::InvalidAction(
+            "Only permanents on the battlefield can transform".to_string(),
+        ));
+    }
 
     let back_face = obj
         .back_face
@@ -243,5 +250,19 @@ mod tests {
         let result = transform_permanent(&mut state, id, &mut events);
         assert!(result.is_err());
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn off_battlefield_object_cannot_transform() {
+        let mut state = GameState::new_two_player(42);
+        let id = setup_dfc(&mut state);
+        state.objects.get_mut(&id).unwrap().zone = Zone::Graveyard;
+        let mut events = Vec::new();
+
+        let result = transform_permanent(&mut state, id, &mut events);
+
+        assert!(result.is_err());
+        assert!(events.is_empty());
+        assert!(!state.objects[&id].transformed);
     }
 }

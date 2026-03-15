@@ -50,8 +50,18 @@ pub enum EngineError {
 
 pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, EngineError> {
     let result = apply_action(state, action);
+    if let Ok(action_result) = &result {
+        sync_waiting_for(state, &action_result.waiting_for);
+    }
     derive_display_state(state);
     result
+}
+
+fn sync_waiting_for(state: &mut GameState, waiting_for: &WaitingFor) {
+    state.waiting_for = waiting_for.clone();
+    if let WaitingFor::Priority { player } = waiting_for {
+        state.priority_player = *player;
+    }
 }
 
 fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResult, EngineError> {
@@ -1716,12 +1726,17 @@ mod tests {
         assert_eq!(state.lands_played_this_turn, 1);
 
         // Player retains priority
-        assert!(matches!(
+        assert!(
+            matches!(
+                result.waiting_for,
+                WaitingFor::Priority {
+                    player: PlayerId(0)
+                }
+            ),
+            "result.waiting_for={:?}, stack={:?}",
             result.waiting_for,
-            WaitingFor::Priority {
-                player: PlayerId(0)
-            }
-        ));
+            state.stack
+        );
     }
 
     #[test]
@@ -4049,6 +4064,112 @@ mod phase_trigger_regression_tests {
             "No pending trigger should exist for a skipped phase"
         );
         assert!(matches!(result2.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    #[test]
+    fn spell_cast_trigger_syncs_priority_to_active_player() {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+
+        let creature_spell = create_object(
+            &mut state,
+            CardId(300),
+            PlayerId(0),
+            "Bear Cub".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&creature_spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.stack.push(crate::types::game_state::StackEntry {
+            id: creature_spell,
+            source_id: creature_spell,
+            controller: PlayerId(0),
+            kind: crate::types::game_state::StackEntryKind::Spell {
+                card_id: CardId(300),
+                ability: ResolvedAbility::new(
+                    Effect::Unimplemented {
+                        name: "Creature".to_string(),
+                        description: None,
+                    },
+                    Vec::new(),
+                    creature_spell,
+                    PlayerId(0),
+                ),
+            },
+        });
+
+        let spell_cast_trigger_creature = create_object(
+            &mut state,
+            CardId(301),
+            PlayerId(1),
+            "Spell Trigger Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_cast_trigger_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.trigger_definitions
+                .push(TriggerDefinition::new(TriggerMode::SpellCast).execute(
+                    AbilityDefinition::new(AbilityKind::Database, Effect::Draw { count: 1 }),
+                ));
+        }
+
+        let searing_spear = create_object(
+            &mut state,
+            CardId(302),
+            PlayerId(1),
+            "Searing Spear".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&searing_spear)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        let result = apply(
+            &mut state,
+            GameAction::CastSpell {
+                card_id: CardId(302),
+                targets: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        assert_eq!(state.priority_player, PlayerId(0));
+
+        let pass_result = apply(&mut state, GameAction::PassPriority).unwrap();
+        assert!(matches!(
+            pass_result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(1)
+            }
+        ));
     }
 
     #[test]

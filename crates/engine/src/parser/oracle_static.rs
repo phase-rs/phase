@@ -142,41 +142,23 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         );
     }
 
-    // --- "During your turn, ~ has [keyword]" ---
+    // --- "During your turn, [subject] has/gets ..." ---
     if let Some(rest) = lower.strip_prefix("during your turn, ") {
         let original_rest = &text["during your turn, ".len()..];
-        // Expect "~ has {keyword}" or "this creature has {keyword}"
-        if let Some(has_pos) = rest.find(" has ") {
-            let keyword_text = rest[has_pos + 5..].trim().trim_end_matches('.');
-            let mut modifications = Vec::new();
-            for kw_part in keyword_text.split(" and ") {
-                let kw_part = kw_part.trim().trim_end_matches('.');
-                if let Some(kw) = map_keyword(kw_part) {
-                    modifications.push(ContinuousModification::AddKeyword { keyword: kw });
+        if let Some(subject_end) = find_continuous_predicate_start(rest) {
+            let subject = original_rest[..subject_end].trim();
+            let predicate = original_rest[subject_end + 1..].trim();
+            if let Some(affected) = parse_continuous_subject_filter(subject) {
+                let modifications = parse_continuous_modifications(predicate);
+                if !modifications.is_empty() {
+                    return Some(
+                        StaticDefinition::continuous()
+                            .affected(affected)
+                            .modifications(modifications)
+                            .condition(StaticCondition::DuringYourTurn)
+                            .description(text.to_string()),
+                    );
                 }
-            }
-            if !modifications.is_empty() {
-                return Some(
-                    StaticDefinition::continuous()
-                        .affected(TargetFilter::SelfRef)
-                        .modifications(modifications)
-                        .condition(StaticCondition::DuringYourTurn)
-                        .description(text.to_string()),
-                );
-            }
-        }
-        // Fallback: "during your turn, ~ gets +N/+M"
-        if let Some(gets_pos) = rest.find(" gets ") {
-            let mods_text = &original_rest[gets_pos + 6..];
-            let modifications = parse_continuous_modifications(mods_text);
-            if !modifications.is_empty() {
-                return Some(
-                    StaticDefinition::continuous()
-                        .affected(TargetFilter::SelfRef)
-                        .modifications(modifications)
-                        .condition(StaticCondition::DuringYourTurn)
-                        .description(text.to_string()),
-                );
             }
         }
     }
@@ -398,28 +380,37 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
 /// `text` is the original-case text starting at the subtype word.
 /// `lower` is the lowercased version of `text`.
 /// `is_other` indicates whether this was preceded by "Other ".
-fn parse_typed_you_control(text: &str, lower: &str, _is_other: bool) -> Option<StaticDefinition> {
+fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<StaticDefinition> {
     // Try "X creatures you control get/have" first
     if let Some(creatures_pos) = lower.find(" creatures you control ") {
         let descriptor = text[..creatures_pos].trim();
         if !descriptor.is_empty() {
             let after_prefix = &text[creatures_pos + 23..];
-            let typed_filter = if let Some(color) = parse_named_color(descriptor) {
-                TargetFilter::Typed(
-                    TypedFilter::creature()
-                        .controller(ControllerRef::You)
-                        .properties(vec![FilterProp::HasColor {
-                            color: color.to_string(),
-                        }]),
-                )
-            } else if is_capitalized_words(descriptor) {
-                TargetFilter::Typed(
-                    TypedFilter::creature()
-                        .subtype(descriptor.to_string())
-                        .controller(ControllerRef::You),
-                )
+            let full_subject = text[..creatures_pos + " creatures you control".len()].trim();
+            let typed_filter =
+                if let Some(filter) = parse_modified_creature_subject_filter(full_subject) {
+                    filter
+                } else if let Some(color) = parse_named_color(descriptor) {
+                    TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::HasColor {
+                                color: color.to_string(),
+                            }]),
+                    )
+                } else if is_capitalized_words(descriptor) {
+                    TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .subtype(descriptor.to_string())
+                            .controller(ControllerRef::You),
+                    )
+                } else {
+                    return None;
+                };
+            let typed_filter = if is_other {
+                add_another_filter(typed_filter)
             } else {
-                return None;
+                typed_filter
             };
             return parse_continuous_gets_has(after_prefix, typed_filter);
         }
@@ -430,24 +421,33 @@ fn parse_typed_you_control(text: &str, lower: &str, _is_other: bool) -> Option<S
         let descriptor = text[..yc_pos].trim();
         if !descriptor.is_empty() {
             let after_prefix = &text[yc_pos + 13..];
-            let typed_filter = if let Some(color) = parse_named_color(descriptor) {
-                TargetFilter::Typed(
-                    TypedFilter::creature()
-                        .controller(ControllerRef::You)
-                        .properties(vec![FilterProp::HasColor {
-                            color: color.to_string(),
-                        }]),
-                )
-            } else if is_capitalized_words(descriptor) {
-                // Strip trailing 's' for the subtype name (Zombies -> Zombie)
-                let subtype_name = descriptor.trim_end_matches('s').to_string();
-                TargetFilter::Typed(
-                    TypedFilter::creature()
-                        .subtype(subtype_name)
-                        .controller(ControllerRef::You),
-                )
+            let full_subject = text[..yc_pos + " you control".len()].trim();
+            let typed_filter =
+                if let Some(filter) = parse_modified_creature_subject_filter(full_subject) {
+                    filter
+                } else if let Some(color) = parse_named_color(descriptor) {
+                    TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::HasColor {
+                                color: color.to_string(),
+                            }]),
+                    )
+                } else if is_capitalized_words(descriptor) {
+                    // Strip trailing 's' for the subtype name (Zombies -> Zombie)
+                    let subtype_name = descriptor.trim_end_matches('s').to_string();
+                    TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .subtype(subtype_name)
+                            .controller(ControllerRef::You),
+                    )
+                } else {
+                    return None;
+                };
+            let typed_filter = if is_other {
+                add_another_filter(typed_filter)
             } else {
-                return None;
+                typed_filter
             };
             return parse_continuous_gets_has(after_prefix, typed_filter);
         }
@@ -531,11 +531,48 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
         return parse_continuous_subject_filter(original_rest).map(add_another_filter);
     }
 
+    if let Some(filter) = parse_modified_creature_subject_filter(trimmed) {
+        return Some(filter);
+    }
+
     if let Some(filter) = parse_creature_subject_filter(trimmed) {
         return Some(filter);
     }
 
     parse_rule_static_subject_filter(trimmed)
+}
+
+fn parse_modified_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
+    let lower = subject.to_lowercase();
+    if lower == "equipped creature" {
+        return Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
+        ));
+    }
+
+    let controlled_patterns = [
+        ("tapped creatures you control", FilterProp::Tapped),
+        ("attacking creatures you control", FilterProp::Attacking),
+        ("equipped creatures you control", FilterProp::EquippedBy),
+    ];
+
+    for (pattern, property) in controlled_patterns {
+        if lower == pattern {
+            return Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![property]),
+            ));
+        }
+    }
+
+    if lower == "attacking creatures" {
+        return Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::Attacking]),
+        ));
+    }
+
+    None
 }
 
 fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
@@ -1704,6 +1741,92 @@ mod tests {
             .modifications
             .contains(&ContinuousModification::AddAbility {
                 ability: "{T}: Add two mana of any one color.".to_string(),
+            }));
+    }
+
+    #[test]
+    fn static_other_tapped_creatures_you_control_have_indestructible() {
+        let def =
+            parse_static_line("Other tapped creatures you control have indestructible.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Tapped, FilterProp::Another]),
+            ))
+        );
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Indestructible,
+            }));
+    }
+
+    #[test]
+    fn static_attacking_creatures_you_control_have_double_strike() {
+        let def = parse_static_line("Attacking creatures you control have double strike.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Attacking]),
+            ))
+        );
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::DoubleStrike,
+            }));
+    }
+
+    #[test]
+    fn static_during_your_turn_creatures_you_control_have_hexproof() {
+        let def =
+            parse_static_line("During your turn, creatures you control have hexproof.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.condition, Some(StaticCondition::DuringYourTurn));
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+        );
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Hexproof,
+            }));
+    }
+
+    #[test]
+    fn static_during_your_turn_equipped_creatures_you_control_have_double_strike() {
+        let def = parse_static_line(
+            "During your turn, equipped creatures you control have double strike and haste.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.condition, Some(StaticCondition::DuringYourTurn));
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::EquippedBy]),
+            ))
+        );
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::DoubleStrike,
+            }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
             }));
     }
 }

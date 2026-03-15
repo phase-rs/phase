@@ -41,9 +41,9 @@ mod tests {
         };
 
         let raw_candidates = candidate_actions(&state);
-        assert!(raw_candidates.iter().any(|candidate| {
-            matches!(candidate.action, GameAction::PassPriority)
-        }));
+        assert!(raw_candidates
+            .iter()
+            .any(|candidate| { matches!(candidate.action, GameAction::PassPriority) }));
 
         let validated_candidates = validated_candidate_actions(&state);
         assert!(validated_candidates.is_empty());
@@ -55,9 +55,9 @@ mod tests {
         let state = GameState::new_two_player(42);
 
         let validated_candidates = validated_candidate_actions(&state);
-        assert!(validated_candidates.iter().any(|candidate| {
-            matches!(candidate.action, GameAction::PassPriority)
-        }));
+        assert!(validated_candidates
+            .iter()
+            .any(|candidate| { matches!(candidate.action, GameAction::PassPriority) }));
 
         let actions = legal_actions(&state);
         assert!(actions

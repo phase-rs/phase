@@ -101,6 +101,7 @@ fn filter_inner(
             properties.iter().all(|p| {
                 matches_filter_prop(
                     p,
+                    state,
                     obj,
                     object_id,
                     source_id,
@@ -154,6 +155,7 @@ fn matches_type_filter(tf: &TypeFilter, obj: &GameObject) -> bool {
 /// Check if an object satisfies a single FilterProp.
 fn matches_filter_prop(
     prop: &FilterProp,
+    state: &GameState,
     obj: &GameObject,
     object_id: ObjectId,
     _source_id: ObjectId,
@@ -167,10 +169,12 @@ fn matches_filter_prop(
             // For now, permissive true -- tokens will be marked more explicitly later
             true
         }
-        FilterProp::Attacking => {
-            // Would check combat state -- permissive for now
-            true
-        }
+        FilterProp::Attacking => state.combat.as_ref().is_some_and(|combat| {
+            combat
+                .attackers
+                .iter()
+                .any(|attacker| attacker.object_id == object_id)
+        }),
         FilterProp::Tapped => obj.tapped,
         FilterProp::NonType { value } => {
             // Object does not have this type or subtype
@@ -666,5 +670,27 @@ mod tests {
             !matches_target_filter(&state, goblin, &filter, source),
             "Goblin should not match chosen creature type Elf"
         );
+    }
+
+    #[test]
+    fn attacking_property_matches_only_declared_attackers() {
+        use crate::game::combat::{AttackerInfo, CombatState};
+
+        let mut state = setup();
+        let attacker = add_creature(&mut state, PlayerId(0), "Attacker");
+        let bystander = add_creature(&mut state, PlayerId(0), "Bystander");
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo {
+                object_id: attacker,
+                defending_player: PlayerId(1),
+            }],
+            ..CombatState::default()
+        });
+
+        let filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Attacking]));
+
+        assert!(matches_target_filter(&state, attacker, &filter, attacker));
+        assert!(!matches_target_filter(&state, bystander, &filter, attacker));
     }
 }

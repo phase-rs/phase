@@ -34,6 +34,7 @@ pub mod shuffle;
 pub mod surveil;
 pub mod tap_untap;
 pub mod token;
+pub mod transform_effect;
 
 /// Dispatch to the appropriate effect handler using typed pattern matching.
 pub fn resolve_effect(
@@ -81,6 +82,7 @@ pub fn resolve_effect(
         Effect::Mana { .. } => mana::resolve(state, ability, events),
         Effect::Discard { .. } => discard::resolve(state, ability, events),
         Effect::Shuffle { .. } => shuffle::resolve(state, ability, events),
+        Effect::Transform { .. } => transform_effect::resolve(state, ability, events),
         Effect::SearchLibrary { .. } => search_library::resolve(state, ability, events),
         Effect::RevealHand { .. } => reveal_hand::resolve(state, ability, events),
         Effect::TargetOnly { .. } => Ok(()), // no-op: targeting is established at cast time

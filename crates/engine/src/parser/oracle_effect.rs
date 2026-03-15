@@ -174,7 +174,7 @@ enum UtilityImperativeAst {
     Prevent { text: String },
     Regenerate { text: String },
     Copy { target: TargetFilter },
-    Transform { text: String },
+    Transform { target: TargetFilter },
     Attach { target: TargetFilter },
 }
 
@@ -337,7 +337,7 @@ fn lower_imperative_clause(text: &str) -> ParsedEffectClause {
 }
 
 fn lower_subject_predicate_ast(
-    _subject: SubjectPhraseAst,
+    subject: SubjectPhraseAst,
     predicate: PredicateAst,
 ) -> ParsedEffectClause {
     match predicate {
@@ -356,7 +356,19 @@ fn lower_subject_predicate_ast(
             duration,
             sub_ability: None,
         },
-        PredicateAst::ImperativeFallback { text } => lower_imperative_clause(&text),
+        PredicateAst::ImperativeFallback { text } => {
+            if matches!(text.to_lowercase().as_str(), "shuffle" | "shuffles")
+                && matches!(
+                    subject.affected,
+                    TargetFilter::Player | TargetFilter::Controller
+                )
+            {
+                return parsed_clause(Effect::Shuffle {
+                    target: subject.affected,
+                });
+            }
+            lower_imperative_clause(&text)
+        }
     }
 }
 
@@ -1639,10 +1651,26 @@ fn parse_utility_imperative_ast(text: &str, lower: &str) -> Option<UtilityImpera
         let (target, _) = parse_target(&text[5..]);
         return Some(UtilityImperativeAst::Copy { target });
     }
-    if lower.starts_with("transform ") || lower == "transform" {
+    if matches!(
+        lower,
+        "transform"
+            | "transform ~"
+            | "transform this"
+            | "transform this creature"
+            | "transform this permanent"
+            | "transform this artifact"
+            | "transform this land"
+    ) {
         return Some(UtilityImperativeAst::Transform {
-            text: text.to_string(),
+            target: TargetFilter::SelfRef,
         });
+    }
+    if lower.starts_with("transform ") {
+        let rest = &text["transform ".len()..];
+        let (target, _) = parse_target(rest);
+        if !matches!(target, TargetFilter::Any) {
+            return Some(UtilityImperativeAst::Transform { target });
+        }
     }
     if lower.starts_with("attach ") {
         let to_pos = lower.find(" to ").map(|p| p + 4).unwrap_or(7);
@@ -1663,10 +1691,7 @@ fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect {
             description: Some(text),
         },
         UtilityImperativeAst::Copy { target } => Effect::CopySpell { target },
-        UtilityImperativeAst::Transform { text } => Effect::Unimplemented {
-            name: "transform".to_string(),
-            description: Some(text),
-        },
+        UtilityImperativeAst::Transform { target } => Effect::Transform { target },
         UtilityImperativeAst::Attach { target } => Effect::Attach { target },
     }
 }
@@ -1737,6 +1762,16 @@ fn lower_put_ast(ast: PutImperativeAst) -> Effect {
 }
 
 fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImperativeAst> {
+    if matches!(lower, "shuffle" | "then shuffle") {
+        return Some(ShuffleImperativeAst::ShuffleLibrary {
+            target: TargetFilter::Controller,
+        });
+    }
+    if matches!(lower, "that player shuffles" | "target player shuffles") {
+        return Some(ShuffleImperativeAst::ShuffleLibrary {
+            target: TargetFilter::Player,
+        });
+    }
     if !lower.starts_with("shuffle") || !lower.contains("library") {
         return None;
     }
@@ -2453,6 +2488,18 @@ fn parse_subject_application(subject: &str) -> Option<SubjectApplication> {
             target: None,
         });
     }
+    if lower == "that player" {
+        return Some(SubjectApplication {
+            affected: TargetFilter::Player,
+            target: None,
+        });
+    }
+    if lower == "that controller" {
+        return Some(SubjectApplication {
+            affected: TargetFilter::Controller,
+            target: None,
+        });
+    }
     if matches!(
         lower.as_str(),
         "~" | "this"
@@ -2470,8 +2517,7 @@ fn parse_subject_application(subject: &str) -> Option<SubjectApplication> {
     }
 
     let (filter, rest) = parse_type_phrase(subject);
-    if rest.trim().is_empty() && !matches!(filter, TargetFilter::Player | TargetFilter::Controller)
-    {
+    if rest.trim().is_empty() {
         return subject_filter_application(filter, false);
     }
 
@@ -2479,9 +2525,6 @@ fn parse_subject_application(subject: &str) -> Option<SubjectApplication> {
 }
 
 fn subject_filter_application(filter: TargetFilter, targeted: bool) -> Option<SubjectApplication> {
-    if matches!(filter, TargetFilter::Player | TargetFilter::Controller) {
-        return None;
-    }
     Some(SubjectApplication {
         target: targeted.then_some(filter.clone()),
         affected: filter,
@@ -4355,7 +4398,37 @@ mod tests {
         let e = parse_effect("Transform this creature");
         assert!(matches!(
             e,
-            Effect::Unimplemented { ref name, .. } if name == "transform"
+            Effect::Transform {
+                target: TargetFilter::SelfRef
+            }
+        ));
+    }
+
+    #[test]
+    fn effect_transform_target_creature() {
+        let e = parse_effect("Transform target creature");
+        assert!(matches!(e, Effect::Transform { .. }));
+    }
+
+    #[test]
+    fn effect_bare_shuffle_defaults_to_controller_library() {
+        let e = parse_effect("Shuffle");
+        assert!(matches!(
+            e,
+            Effect::Shuffle {
+                target: TargetFilter::Controller
+            }
+        ));
+    }
+
+    #[test]
+    fn effect_that_player_shuffles_targets_player() {
+        let e = parse_effect("That player shuffles");
+        assert!(matches!(
+            e,
+            Effect::Shuffle {
+                target: TargetFilter::Player
+            }
         ));
     }
 
