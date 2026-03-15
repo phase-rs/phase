@@ -1,3 +1,4 @@
+use crate::database::legality::LegalityFormat;
 use crate::database::CardDatabase;
 use crate::game::game_object::GameObject;
 use crate::game::static_abilities::{build_static_registry, StaticAbilityHandler};
@@ -11,7 +12,7 @@ use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CardCoverageResult {
@@ -26,8 +27,17 @@ pub struct CoverageSummary {
     pub total_cards: usize,
     pub supported_cards: usize,
     pub coverage_pct: f64,
+    #[serde(default)]
+    pub coverage_by_format: BTreeMap<String, FormatCoverageSummary>,
     pub cards: Vec<CardCoverageResult>,
     pub missing_handler_frequency: Vec<(String, usize)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FormatCoverageSummary {
+    pub total_cards: usize,
+    pub supported_cards: usize,
+    pub coverage_pct: f64,
 }
 
 /// Check whether a game object has any mechanics the engine cannot handle.
@@ -81,8 +91,12 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
 
     let mut cards = Vec::new();
     let mut freq: HashMap<String, usize> = HashMap::new();
+    let mut coverage_by_format_accumulators: BTreeMap<String, (usize, usize)> = LegalityFormat::ALL
+        .into_iter()
+        .map(|format| (format.as_key().to_string(), (0, 0)))
+        .collect();
 
-    for (_key, face) in card_db.face_iter() {
+    for (key, face) in card_db.face_iter() {
         let mut missing = Vec::new();
 
         // Check abilities
@@ -109,6 +123,21 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
             *freq.entry(m.clone()).or_default() += 1;
         }
 
+        for format in LegalityFormat::ALL {
+            if card_db
+                .legality_status(key, format)
+                .is_some_and(|status| status.is_legal())
+            {
+                let entry = coverage_by_format_accumulators
+                    .get_mut(format.as_key())
+                    .expect("all legality formats must be pre-seeded");
+                entry.0 += 1;
+                if supported {
+                    entry.1 += 1;
+                }
+            }
+        }
+
         cards.push(CardCoverageResult {
             card_name: face.name.clone(),
             set_code: String::new(),
@@ -128,10 +157,30 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
     let mut missing_handler_frequency: Vec<(String, usize)> = freq.into_iter().collect();
     missing_handler_frequency.sort_by(|a, b| b.1.cmp(&a.1));
 
+    let coverage_by_format = coverage_by_format_accumulators
+        .into_iter()
+        .map(|(format, (total_cards, supported_cards))| {
+            let coverage_pct = if total_cards > 0 {
+                (supported_cards as f64 / total_cards as f64) * 100.0
+            } else {
+                0.0
+            };
+            (
+                format,
+                FormatCoverageSummary {
+                    total_cards,
+                    supported_cards,
+                    coverage_pct,
+                },
+            )
+        })
+        .collect();
+
     CoverageSummary {
         total_cards,
         supported_cards,
         coverage_pct,
+        coverage_by_format,
         cards,
         missing_handler_frequency,
     }
@@ -342,6 +391,7 @@ pub fn is_fully_covered(summary: &CoverageSummary) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::legality::{legalities_to_export_map, LegalityStatus};
     use crate::types::ability::{AbilityKind, DamageAmount, Effect, TargetFilter};
     use crate::types::card_type::CardType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -503,5 +553,99 @@ mod tests {
             ));
 
         assert!(card_face_has_unimplemented_parts(&face));
+    }
+
+    #[test]
+    fn analyze_coverage_reports_legality_based_format_totals() {
+        let supported = serde_json::json!({
+            "alpha": {
+                "name": "Alpha",
+                "mana_cost": "NoCost",
+                "card_type": { "supertypes": [], "core_types": [], "subtypes": [] },
+                "power": null,
+                "toughness": null,
+                "loyalty": null,
+                "defense": null,
+                "oracle_text": null,
+                "non_ability_text": null,
+                "flavor_name": null,
+                "keywords": [],
+                "abilities": [],
+                "triggers": [],
+                "static_abilities": [],
+                "replacements": [],
+                "color_override": null,
+                "scryfall_oracle_id": null,
+                "legalities": legalities_to_export_map(&HashMap::from([
+                    (LegalityFormat::Standard, LegalityStatus::Legal),
+                    (LegalityFormat::Modern, LegalityStatus::Legal),
+                ])),
+            },
+            "beta": {
+                "name": "Beta",
+                "mana_cost": "NoCost",
+                "card_type": { "supertypes": [], "core_types": [], "subtypes": [] },
+                "power": null,
+                "toughness": null,
+                "loyalty": null,
+                "defense": null,
+                "oracle_text": null,
+                "non_ability_text": null,
+                "flavor_name": null,
+                "keywords": [],
+                "abilities": [{
+                    "kind": "Spell",
+                    "effect": { "type": "Unimplemented", "name": "beta_gap", "description": null },
+                    "cost": null,
+                    "sub_ability": null,
+                    "duration": null,
+                    "description": null,
+                    "target_prompt": null,
+                    "sorcery_speed": false,
+                    "condition": null,
+                    "optional_targeting": false
+                }],
+                "triggers": [],
+                "static_abilities": [],
+                "replacements": [],
+                "color_override": null,
+                "scryfall_oracle_id": null,
+                "legalities": legalities_to_export_map(&HashMap::from([
+                    (LegalityFormat::Standard, LegalityStatus::Legal),
+                    (LegalityFormat::Commander, LegalityStatus::Legal),
+                ])),
+            }
+        })
+        .to_string();
+
+        let db = CardDatabase::from_json_str(&supported).expect("test export should deserialize");
+        let summary = analyze_coverage(&db);
+
+        assert_eq!(summary.total_cards, 2);
+        assert_eq!(summary.supported_cards, 1);
+        assert_eq!(
+            summary.coverage_by_format.get("standard"),
+            Some(&FormatCoverageSummary {
+                total_cards: 2,
+                supported_cards: 1,
+                coverage_pct: 50.0,
+            })
+        );
+        assert_eq!(
+            summary.coverage_by_format.get("modern"),
+            Some(&FormatCoverageSummary {
+                total_cards: 1,
+                supported_cards: 1,
+                coverage_pct: 100.0,
+            })
+        );
+        assert_eq!(
+            summary.coverage_by_format.get("commander"),
+            Some(&FormatCoverageSummary {
+                total_cards: 1,
+                supported_cards: 0,
+                coverage_pct: 0.0,
+            })
+        );
     }
 }

@@ -1021,4 +1021,40 @@ mod tests {
             )
         }));
     }
+
+    #[test]
+    fn priority_actions_do_not_offer_lands_as_cast_spells() {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        create_object(
+            &mut state,
+            CardId(400),
+            PlayerId(0),
+            "Plains".to_string(),
+            Zone::Hand,
+        );
+        let land = state.players[0].hand[0];
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Plains".to_string());
+        }
+
+        let actions = candidate_actions(&state);
+        assert!(!actions.iter().any(|candidate| {
+            matches!(
+                candidate.action,
+                GameAction::CastSpell {
+                    card_id: CardId(400),
+                    ..
+                }
+            )
+        }));
+    }
 }

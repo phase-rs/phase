@@ -162,6 +162,15 @@ fn prepare_spell_cast(
             "Card is not in a castable zone".to_string(),
         ));
     }
+    if obj
+        .card_types
+        .core_types
+        .contains(&crate::types::card_type::CoreType::Land)
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "Lands are played, not cast".to_string(),
+        ));
+    }
 
     let ability_def = obj
         .abilities
@@ -1558,6 +1567,25 @@ mod tests {
         assert!(matches!(result, WaitingFor::Priority { .. }));
         assert_eq!(state.stack.len(), 1);
         assert!(state.players[0].hand.is_empty());
+    }
+
+    #[test]
+    fn cast_spell_rejects_lands() {
+        let mut state = setup_game_at_main_phase();
+        let land = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Plains".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&land).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes.push("Plains".to_string());
+
+        let result = handle_cast_spell(&mut state, PlayerId(0), CardId(11), &mut Vec::new());
+        assert!(result.is_err());
+        assert!(state.stack.is_empty());
     }
 
     #[test]

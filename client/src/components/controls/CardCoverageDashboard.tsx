@@ -74,8 +74,15 @@ interface CoverageSummary {
   total_cards: number;
   supported_cards: number;
   coverage_pct: number;
+  coverage_by_format?: Record<string, FormatCoverageSummary>;
   cards: CardCoverageResult[];
   missing_handler_frequency: [string, number][];
+}
+
+interface FormatCoverageSummary {
+  total_cards: number;
+  supported_cards: number;
+  coverage_pct: number;
 }
 
 type MainView = "card-coverage" | "supported-handlers";
@@ -169,7 +176,7 @@ function CardCoverageView() {
       <div className="flex-1 p-8 text-center text-sm text-slate-400">
         <p className="mb-2">No coverage data available.</p>
         <p className="font-mono text-xs text-slate-500">
-          Generate it with: cargo run --bin coverage-report -- /path/to/cards &gt; client/public/coverage-data.json
+          Generate it with: cargo run --bin coverage-report -- /path/to/cards --all &gt; client/public/coverage-data.json
         </p>
       </div>
     );
@@ -180,7 +187,7 @@ function CardCoverageView() {
       <div className="flex-1 p-8 text-center text-sm text-slate-400">
         <p className="mb-2">Coverage data is empty (0 cards analyzed).</p>
         <p className="font-mono text-xs text-slate-500">
-          Run: cargo run --bin coverage-report -- /path/to/cards &gt; client/public/coverage-data.json
+          Run: cargo run --bin coverage-report -- /path/to/cards --all &gt; client/public/coverage-data.json
         </p>
       </div>
     );
@@ -192,6 +199,9 @@ function CardCoverageView() {
       : coverage.coverage_pct > 40
         ? "from-yellow-600 to-yellow-400"
         : "from-red-600 to-red-400";
+  const formatCoverage = Object.entries(coverage.coverage_by_format ?? {}).filter(
+    ([, summary]) => summary.total_cards > 0,
+  );
 
   return (
     <>
@@ -211,6 +221,26 @@ function CardCoverageView() {
             style={{ width: `${Math.min(coverage.coverage_pct, 100)}%` }}
           />
         </div>
+        {formatCoverage.length > 0 && (
+          <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            {formatCoverage.map(([format, summary]) => (
+              <div
+                key={format}
+                className="rounded-[16px] border border-white/8 bg-black/18 px-3 py-3"
+              >
+                <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                  {format}
+                </div>
+                <div className="mt-1 text-sm text-slate-200">
+                  {summary.supported_cards} / {summary.total_cards} fully supported
+                </div>
+                <div className="mt-1 font-mono text-xs text-emerald-300">
+                  {summary.coverage_pct.toFixed(1)}%
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Filters */}

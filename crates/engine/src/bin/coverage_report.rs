@@ -36,6 +36,7 @@ fn main() {
             total_cards: 0,
             supported_cards: 0,
             coverage_pct: 0.0,
+            coverage_by_format: Default::default(),
             cards: vec![],
             missing_handler_frequency: vec![],
         };
@@ -57,6 +58,7 @@ fn main() {
                 total_cards: 0,
                 supported_cards: 0,
                 coverage_pct: 0.0,
+                coverage_by_format: Default::default(),
                 cards: vec![],
                 missing_handler_frequency: vec![],
             };
@@ -93,6 +95,15 @@ fn main() {
         "Coverage: {}/{} cards supported ({:.1}%)",
         summary.supported_cards, summary.total_cards, summary.coverage_pct
     );
+    for (format, format_summary) in &summary.coverage_by_format {
+        eprintln!(
+            "  {} legal: {}/{} fully supported ({:.1}%)",
+            format,
+            format_summary.supported_cards,
+            format_summary.total_cards,
+            format_summary.coverage_pct
+        );
+    }
 
     if ci_mode {
         if !is_fully_covered(&summary) {
@@ -167,6 +178,7 @@ fn filter_to_manifest(summary: CoverageSummary, manifest: &BTreeSet<String>) -> 
         total_cards,
         supported_cards,
         coverage_pct,
+        coverage_by_format: summary.coverage_by_format,
         cards,
         missing_handler_frequency,
     }
