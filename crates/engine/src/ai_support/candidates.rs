@@ -1,16 +1,14 @@
 use std::collections::{BTreeMap, HashSet};
 
+use crate::game::casting;
 use crate::game::combat::AttackTarget;
 use crate::game::deck_loading::DeckEntry;
-use crate::game::game_object::GameObject;
-use crate::game::mana_payment;
+use crate::game::mana_sources;
 use crate::types::ability::ChoiceType;
 use crate::types::ability::TargetRef;
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{GameState, TargetSelectionSlot, WaitingFor};
-use crate::types::keywords::Keyword;
-use crate::types::mana::{ManaCost, ManaCostShard, ManaType};
 use crate::types::match_config::DeckCardCount;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -291,18 +289,19 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
         }
     }
 
-    for &obj_id in &p.hand {
-        if let Some(obj) = state.objects.get(&obj_id) {
-            if can_cast(state, obj, player, is_main_phase, stack_empty, is_active) {
-                actions.push(candidate(
-                    GameAction::CastSpell {
-                        card_id: obj.card_id,
-                        targets: Vec::new(),
-                    },
-                    TacticalClass::Spell,
-                    Some(player),
-                ));
-            }
+    for object_id in casting::spell_objects_available_to_cast(state, player) {
+        let Some(obj) = state.objects.get(&object_id) else {
+            continue;
+        };
+        if casting::can_cast_object_now(state, player, object_id) {
+            actions.push(candidate(
+                GameAction::CastSpell {
+                    card_id: obj.card_id,
+                    targets: Vec::new(),
+                },
+                TacticalClass::Spell,
+                Some(player),
+            ));
         }
     }
 
@@ -312,6 +311,7 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                 for (i, ability_def) in obj.abilities.iter().enumerate() {
                     if ability_def.kind == crate::types::ability::AbilityKind::Activated
                         && !crate::game::mana_abilities::is_mana_ability(ability_def)
+                        && casting::can_activate_ability_now(state, player, obj_id, i)
                     {
                         actions.push(candidate(
                             GameAction::ActivateAbility {
@@ -609,6 +609,7 @@ fn mana_payment_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAct
             if obj.controller == player
                 && !obj.tapped
                 && obj.card_types.core_types.contains(&CoreType::Land)
+                && !mana_sources::activatable_land_mana_options(state, obj_id, player).is_empty()
             {
                 actions.push(candidate(
                     GameAction::TapLandForMana { object_id: obj_id },
@@ -620,170 +621,6 @@ fn mana_payment_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAct
     }
     actions
 }
-
-fn can_cast(
-    state: &GameState,
-    obj: &GameObject,
-    player: PlayerId,
-    is_main_phase: bool,
-    stack_empty: bool,
-    is_active: bool,
-) -> bool {
-    if obj.card_types.core_types.contains(&CoreType::Land) {
-        return false;
-    }
-
-    let is_instant =
-        obj.card_types.core_types.contains(&CoreType::Instant) || obj.has_keyword(&Keyword::Flash);
-    if !(is_instant || is_main_phase && stack_empty && is_active) {
-        return false;
-    }
-
-    let available = compute_available_mana(state, player);
-    can_afford_with(&available, &obj.mana_cost)
-}
-
-struct AvailableMana {
-    white: usize,
-    blue: usize,
-    black: usize,
-    red: usize,
-    green: usize,
-    colorless: usize,
-}
-
-impl AvailableMana {
-    fn total(&self) -> usize {
-        self.white + self.blue + self.black + self.red + self.green + self.colorless
-    }
-
-    fn count(&self, color: ManaType) -> usize {
-        match color {
-            ManaType::White => self.white,
-            ManaType::Blue => self.blue,
-            ManaType::Black => self.black,
-            ManaType::Red => self.red,
-            ManaType::Green => self.green,
-            ManaType::Colorless => self.colorless,
-        }
-    }
-}
-
-fn compute_available_mana(state: &GameState, player: PlayerId) -> AvailableMana {
-    let p = &state.players[player.0 as usize];
-    let pool = &p.mana_pool;
-
-    let mut available = AvailableMana {
-        white: pool.count_color(ManaType::White),
-        blue: pool.count_color(ManaType::Blue),
-        black: pool.count_color(ManaType::Black),
-        red: pool.count_color(ManaType::Red),
-        green: pool.count_color(ManaType::Green),
-        colorless: pool.count_color(ManaType::Colorless),
-    };
-
-    for &obj_id in &state.battlefield {
-        if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller != player
-                || obj.tapped
-                || !obj.card_types.core_types.contains(&CoreType::Land)
-            {
-                continue;
-            }
-            if let Some(mana_type) = obj
-                .card_types
-                .subtypes
-                .iter()
-                .find_map(|s| mana_payment::land_subtype_to_mana_type(s))
-            {
-                match mana_type {
-                    ManaType::White => available.white += 1,
-                    ManaType::Blue => available.blue += 1,
-                    ManaType::Black => available.black += 1,
-                    ManaType::Red => available.red += 1,
-                    ManaType::Green => available.green += 1,
-                    ManaType::Colorless => available.colorless += 1,
-                }
-            }
-        }
-    }
-
-    available
-}
-
-fn can_afford_with(available: &AvailableMana, cost: &ManaCost) -> bool {
-    match cost {
-        ManaCost::NoCost => false,
-        ManaCost::Cost { shards, generic } => {
-            let mut remaining = AvailableMana {
-                white: available.white,
-                blue: available.blue,
-                black: available.black,
-                red: available.red,
-                green: available.green,
-                colorless: available.colorless,
-            };
-
-            for shard in shards {
-                let color = shard_to_mana_type(shard);
-                if remaining.count(color) == 0 {
-                    return false;
-                }
-                match color {
-                    ManaType::White => remaining.white -= 1,
-                    ManaType::Blue => remaining.blue -= 1,
-                    ManaType::Black => remaining.black -= 1,
-                    ManaType::Red => remaining.red -= 1,
-                    ManaType::Green => remaining.green -= 1,
-                    ManaType::Colorless => remaining.colorless -= 1,
-                }
-            }
-
-            remaining.total() >= *generic as usize
-        }
-    }
-}
-
-fn shard_to_mana_type(shard: &ManaCostShard) -> ManaType {
-    match shard {
-        ManaCostShard::White | ManaCostShard::PhyrexianWhite | ManaCostShard::TwoWhite => {
-            ManaType::White
-        }
-        ManaCostShard::Blue | ManaCostShard::PhyrexianBlue | ManaCostShard::TwoBlue => {
-            ManaType::Blue
-        }
-        ManaCostShard::Black | ManaCostShard::PhyrexianBlack | ManaCostShard::TwoBlack => {
-            ManaType::Black
-        }
-        ManaCostShard::Red | ManaCostShard::PhyrexianRed | ManaCostShard::TwoRed => ManaType::Red,
-        ManaCostShard::Green | ManaCostShard::PhyrexianGreen | ManaCostShard::TwoGreen => {
-            ManaType::Green
-        }
-        ManaCostShard::Colorless => ManaType::Colorless,
-        ManaCostShard::WhiteBlue
-        | ManaCostShard::PhyrexianWhiteBlue
-        | ManaCostShard::ColorlessWhite => ManaType::White,
-        ManaCostShard::WhiteBlack | ManaCostShard::PhyrexianWhiteBlack => ManaType::White,
-        ManaCostShard::BlueBlack
-        | ManaCostShard::PhyrexianBlueBlack
-        | ManaCostShard::ColorlessBlue => ManaType::Blue,
-        ManaCostShard::BlueRed | ManaCostShard::PhyrexianBlueRed => ManaType::Blue,
-        ManaCostShard::BlackRed
-        | ManaCostShard::PhyrexianBlackRed
-        | ManaCostShard::ColorlessBlack => ManaType::Black,
-        ManaCostShard::BlackGreen | ManaCostShard::PhyrexianBlackGreen => ManaType::Black,
-        ManaCostShard::RedWhite
-        | ManaCostShard::PhyrexianRedWhite
-        | ManaCostShard::ColorlessRed => ManaType::Red,
-        ManaCostShard::RedGreen | ManaCostShard::PhyrexianRedGreen => ManaType::Red,
-        ManaCostShard::GreenWhite
-        | ManaCostShard::PhyrexianGreenWhite
-        | ManaCostShard::ColorlessGreen => ManaType::Green,
-        ManaCostShard::GreenBlue | ManaCostShard::PhyrexianGreenBlue => ManaType::Green,
-        ManaCostShard::X | ManaCostShard::Snow => ManaType::Colorless,
-    }
-}
-
 fn combinations(
     items: &[crate::types::identifiers::ObjectId],
     k: usize,
@@ -831,9 +668,13 @@ fn combinations_usize(items: &[usize], k: usize) -> Vec<Vec<usize>> {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::ChoiceType;
-    use crate::types::ability::TargetRef;
+    use crate::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, BasicLandType,
+        ChoiceType, ChosenAttribute, ChosenSubtypeKind, ContinuousModification, Effect,
+        ManaProduction, StaticDefinition, TargetFilter, TargetRef,
+    };
     use crate::types::identifiers::CardId;
+    use crate::types::mana::{ManaColor, ManaCostShard};
     use crate::types::zones::Zone;
 
     #[test]
@@ -936,5 +777,248 @@ mod tests {
                 ref sideboard,
             } if main.is_empty() && sideboard.is_empty()
         ));
+    }
+
+    #[test]
+    fn priority_actions_include_spell_castable_via_gloomlake_verge_blue_mana() {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let verge = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Gloomlake Verge".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&verge).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.abilities.push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Blue],
+                        },
+                        restrictions: vec![],
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+            obj.abilities.push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Black],
+                        },
+                        restrictions: vec![],
+                    },
+                )
+                .cost(AbilityCost::Tap)
+                .sub_ability(AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Unimplemented {
+                        name: "activate_only_if_controls_land_subtype_any".to_string(),
+                        description: Some("Island|Swamp".to_string()),
+                    },
+                )),
+            );
+        }
+
+        create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Spyglass Siren".to_string(),
+            Zone::Hand,
+        );
+        {
+            let siren = state.players[0].hand[0];
+            let obj = state.objects.get_mut(&siren).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = crate::types::mana::ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 0,
+            };
+        }
+
+        let actions = candidate_actions(&state);
+        assert!(actions.iter().any(|candidate| {
+            matches!(
+                candidate.action,
+                GameAction::CastSpell {
+                    card_id: CardId(101),
+                    ..
+                }
+            )
+        }));
+    }
+
+    #[test]
+    fn priority_actions_include_spell_castable_via_multiversal_passage_chosen_swamp() {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let passage = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Multiversal Passage".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&passage).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.chosen_attributes
+                .push(ChosenAttribute::BasicLandType(BasicLandType::Swamp));
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![ContinuousModification::AddChosenSubtype {
+                        kind: ChosenSubtypeKind::BasicLandType,
+                    }]),
+            );
+        }
+
+        let forest = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+        }
+
+        create_object(
+            &mut state,
+            CardId(202),
+            PlayerId(0),
+            "Deep-Cavern Bat".to_string(),
+            Zone::Hand,
+        );
+        {
+            let bat = state.players[0].hand[0];
+            let obj = state.objects.get_mut(&bat).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = crate::types::mana::ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 1,
+            };
+        }
+
+        state.layers_dirty = true;
+
+        let actions = candidate_actions(&state);
+        assert!(actions.iter().any(|candidate| {
+            matches!(
+                candidate.action,
+                GameAction::CastSpell {
+                    card_id: CardId(202),
+                    ..
+                }
+            )
+        }));
+    }
+
+    #[test]
+    fn priority_actions_exclude_activated_ability_with_unmet_restriction() {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let source = create_object(
+            &mut state,
+            CardId(300),
+            PlayerId(0),
+            "Relic".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.abilities.push(
+                AbilityDefinition::new(AbilityKind::Activated, Effect::Draw { count: 1 })
+                    .activation_restrictions(vec![ActivationRestriction::OnlyOnceEachTurn]),
+            );
+        }
+        state.activated_abilities_this_turn.insert((source, 0), 1);
+
+        let actions = candidate_actions(&state);
+        assert!(!actions.iter().any(|candidate| {
+            matches!(
+                candidate.action,
+                GameAction::ActivateAbility {
+                    source_id,
+                    ability_index: 0,
+                } if source_id == source
+            )
+        }));
+    }
+
+    #[test]
+    fn mana_payment_actions_exclude_lands_without_activatable_mana() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: PlayerId(0),
+        };
+
+        let blank_land = create_object(
+            &mut state,
+            CardId(301),
+            PlayerId(0),
+            "Blank Land".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&blank_land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+        }
+
+        let island = create_object(
+            &mut state,
+            CardId(302),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&island).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Island".to_string());
+        }
+
+        let actions = candidate_actions(&state);
+        assert!(actions.iter().any(|candidate| {
+            matches!(
+                candidate.action,
+                GameAction::TapLandForMana { object_id } if object_id == island
+            )
+        }));
+        assert!(!actions.iter().any(|candidate| {
+            matches!(
+                candidate.action,
+                GameAction::TapLandForMana { object_id } if object_id == blank_land
+            )
+        }));
     }
 }

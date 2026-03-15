@@ -281,7 +281,7 @@ export function ActionButton() {
 
   const visible = mode !== "hidden" || endTurnMode;
   const panelClassName =
-    "fixed z-30 flex max-w-[min(25rem,calc(100vw-1.25rem))] flex-col items-stretch gap-1.5 rounded-[20px] border border-white/10 bg-[#0b1020]/88 p-1.5 shadow-[0_20px_48px_rgba(0,0,0,0.44)] backdrop-blur-md sm:max-w-none sm:flex-row sm:items-center";
+    "fixed z-30 flex max-w-[min(25rem,calc(100vw-1.25rem))] flex-col items-stretch gap-1.5 rounded-[14px] border border-white/10 bg-[#0b1020]/88 p-1.5 shadow-[0_20px_48px_rgba(0,0,0,0.44)] backdrop-blur-md sm:max-w-none sm:flex-row sm:items-center";
   const primaryButtonClass = "w-full sm:w-auto sm:min-w-[10rem]";
   const secondaryButtonClass = "w-full sm:w-auto";
 

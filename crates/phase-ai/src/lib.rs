@@ -2,7 +2,6 @@ pub mod card_hints;
 pub mod combat_ai;
 pub mod config;
 pub mod eval;
-pub mod legal_actions;
 pub mod planner;
 pub mod policies;
 pub mod search;
@@ -17,5 +16,4 @@ pub use eval::{
     evaluate_creature, evaluate_for_planner, evaluate_state, evaluate_state_breakdown,
     strategic_intent, threat_level, EvalWeights, EvaluationBreakdown, StrategicIntent,
 };
-pub use legal_actions::get_legal_actions;
 pub use search::choose_action;

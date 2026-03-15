@@ -211,8 +211,13 @@ function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: str
   const title = CHOICE_TYPE_LABELS[typeKey] ?? "Make a Choice";
 
   return (
-    <ChoiceOverlay title={title} subtitle="Select one option">
-      <div className="mb-6 flex w-full max-w-3xl flex-wrap items-center justify-center gap-3 sm:mb-10">
+    <ChoiceOverlay
+      title={title}
+      subtitle="Select one option"
+      widthClassName="w-fit max-w-full"
+      maxWidthClassName="max-w-3xl"
+    >
+      <div className="mx-auto mb-6 flex w-fit max-w-3xl flex-wrap items-center justify-center gap-3 sm:mb-10">
         {data.options.map((option, index) => {
           const isSelected = selected === option;
           return (

@@ -66,21 +66,37 @@ pub(crate) fn emit_targeting_events(
     }
 }
 
-/// Cast a spell from hand (or command zone in Commander format).
-pub fn handle_cast_spell(
-    state: &mut GameState,
+#[derive(Debug, Clone)]
+struct PreparedSpellCast {
+    object_id: ObjectId,
+    card_id: CardId,
+    ability_def: AbilityDefinition,
+    mana_cost: crate::types::mana::ManaCost,
+    modal: Option<crate::types::ability::ModalChoice>,
+}
+
+fn default_spell_ability_def() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Unimplemented {
+            name: "PermanentNoncreature".to_string(),
+            description: None,
+        },
+    )
+}
+
+fn spell_object_id_for_card_id(
+    state: &GameState,
     player: PlayerId,
     card_id: CardId,
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
-    // 1. Find object in player's hand matching card_id
+) -> Result<ObjectId, EngineError> {
     let player_data = state
         .players
         .iter()
         .find(|p| p.id == player)
         .expect("player exists");
 
-    let object_id = player_data
+    player_data
         .hand
         .iter()
         .find(|&&obj_id| {
@@ -92,7 +108,6 @@ pub fn handle_cast_spell(
         })
         .copied()
         .or_else(|| {
-            // In Commander format, also check the command zone
             if !state.format_config.command_zone {
                 return None;
             }
@@ -107,57 +122,75 @@ pub fn handle_cast_spell(
                 })
                 .map(|obj| obj.id)
         })
-        .ok_or_else(|| EngineError::InvalidAction("Card not found in hand".to_string()))?;
+        .ok_or_else(|| EngineError::InvalidAction("Card not found in hand".to_string()))
+}
 
-    let obj = state.objects.get(&object_id).unwrap();
+pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
+    let player_data = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .expect("player exists");
 
-    // 2. Get the first ability (or use default for vanilla permanents)
-    let ability_def = if obj.abilities.is_empty() {
-        // Vanilla creatures/enchantments/etc. have no explicit ability text
-        // but are still castable -- they resolve by entering the battlefield.
-        AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::Unimplemented {
-                name: "PermanentNoncreature".to_string(),
-                description: None,
-            },
-        )
-    } else {
-        obj.abilities[0].clone()
-    };
+    let mut objects = player_data.hand.clone();
+    if state.format_config.command_zone {
+        objects.extend(
+            state
+                .objects
+                .values()
+                .filter(|obj| obj.owner == player && obj.zone == Zone::Command && obj.is_commander)
+                .map(|obj| obj.id),
+        );
+    }
+    objects
+}
 
-    // 3. Validate timing, including any parsed "as though it had flash" permission.
+fn prepare_spell_cast(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Result<PreparedSpellCast, EngineError> {
+    let obj = state
+        .objects
+        .get(&object_id)
+        .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
+    let castable_zone = obj.owner == player
+        && (obj.zone == Zone::Hand
+            || state.format_config.command_zone && obj.zone == Zone::Command && obj.is_commander);
+    if !castable_zone {
+        return Err(EngineError::InvalidAction(
+            "Card is not in a castable zone".to_string(),
+        ));
+    }
+
+    let ability_def = obj
+        .abilities
+        .first()
+        .cloned()
+        .unwrap_or_else(default_spell_ability_def);
+
     let flash_cost = restrictions::flash_timing_cost(state, player, obj);
-    let mut used_flash_timing = false;
+    let mut mana_cost = obj.mana_cost.clone();
     if let Err(base_timing_error) =
         restrictions::check_spell_timing(state, player, obj, &ability_def, false)
     {
-        if flash_cost.is_none() {
+        let Some(flash_cost) = flash_cost else {
             return Err(base_timing_error);
-        }
+        };
         restrictions::check_spell_timing(state, player, obj, &ability_def, true)?;
-        used_flash_timing = true;
+        mana_cost = restrictions::add_mana_cost(&mana_cost, &flash_cost);
     }
     restrictions::check_casting_restrictions(state, player, object_id, &obj.casting_restrictions)?;
 
-    // 3b. Color identity check (Commander format only)
-    if state.format_config.command_zone {
-        let obj = state.objects.get(&object_id).unwrap();
-        if !super::commander::can_cast_in_color_identity(state, &obj.color, player) {
-            return Err(EngineError::ActionNotAllowed(
-                "Card is outside commander's color identity".to_string(),
-            ));
-        }
+    if state.format_config.command_zone
+        && !super::commander::can_cast_in_color_identity(state, &obj.color, player)
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "Card is outside commander's color identity".to_string(),
+        ));
     }
 
-    // 4. Build ResolvedAbility from typed fields
-    let obj = state.objects.get(&object_id).unwrap();
-    let casting_from_command_zone = obj.zone == Zone::Command;
-    let modal = obj.modal.clone();
-    let mut mana_cost = obj.mana_cost.clone();
-
-    // Apply commander tax when casting from command zone
-    if casting_from_command_zone {
+    if obj.zone == Zone::Command {
         let tax = super::commander::commander_tax(state, object_id);
         if tax > 0 {
             match &mut mana_cost {
@@ -173,29 +206,47 @@ pub fn handle_cast_spell(
             }
         }
     }
-    if used_flash_timing {
-        let extra_cost = flash_cost.expect("flash timing cost checked above");
-        mana_cost = restrictions::add_mana_cost(&mana_cost, &extra_cost);
-    }
 
-    // 4b. Modal spells: require mode choice before targets/payment
-    if let Some(ref modal_choice) = modal {
+    Ok(PreparedSpellCast {
+        object_id,
+        card_id: obj.card_id,
+        ability_def,
+        mana_cost,
+        modal: obj.modal.clone(),
+    })
+}
+
+/// Cast a spell from hand (or command zone in Commander format).
+pub fn handle_cast_spell(
+    state: &mut GameState,
+    player: PlayerId,
+    card_id: CardId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let object_id = spell_object_id_for_card_id(state, player, card_id)?;
+    let prepared = prepare_spell_cast(state, player, object_id)?;
+
+    if let Some(ref modal_choice) = prepared.modal {
         // Cap max_choices to actual mode count
         let mut capped = modal_choice.clone();
         capped.max_choices = capped.max_choices.min(capped.mode_count);
         let target_constraints = target_constraints_from_modal(&capped);
 
         // Build a placeholder resolved ability -- will be replaced after mode selection
-        let placeholder =
-            ResolvedAbility::new(ability_def.effect.clone(), Vec::new(), object_id, player);
+        let placeholder = ResolvedAbility::new(
+            prepared.ability_def.effect.clone(),
+            Vec::new(),
+            prepared.object_id,
+            player,
+        );
         return Ok(WaitingFor::ModeChoice {
             player,
             modal: capped,
             pending_cast: Box::new(PendingCast {
-                object_id,
-                card_id,
+                object_id: prepared.object_id,
+                card_id: prepared.card_id,
                 ability: placeholder,
-                cost: mana_cost,
+                cost: prepared.mana_cost.clone(),
                 activation_cost: None,
                 activation_ability_index: None,
                 target_constraints,
@@ -204,11 +255,16 @@ pub fn handle_cast_spell(
     }
 
     let resolved = {
-        let mut r = ResolvedAbility::new(ability_def.effect.clone(), Vec::new(), object_id, player);
-        if let Some(sub) = &ability_def.sub_ability {
-            r = r.sub_ability(build_resolved_from_def(sub, object_id, player));
+        let mut r = ResolvedAbility::new(
+            prepared.ability_def.effect.clone(),
+            Vec::new(),
+            prepared.object_id,
+            player,
+        );
+        if let Some(sub) = &prepared.ability_def.sub_ability {
+            r = r.sub_ability(build_resolved_from_def(sub, prepared.object_id, player));
         }
-        if let Some(c) = ability_def.condition.clone() {
+        if let Some(c) = prepared.ability_def.condition.clone() {
             r = r.condition(c);
         }
         r
@@ -221,7 +277,7 @@ pub fn handle_cast_spell(
 
     // Check if this is an Aura spell -- Auras target via Enchant keyword, not via effect targets
     // Re-read obj after evaluate_layers (which needs &mut state)
-    let obj = state.objects.get(&object_id).unwrap();
+    let obj = state.objects.get(&prepared.object_id).unwrap();
     let is_aura = obj.card_types.subtypes.iter().any(|s| s == "Aura");
     if is_aura {
         let enchant_filter = obj.keywords.iter().find_map(|k| {
@@ -232,7 +288,7 @@ pub fn handle_cast_spell(
             }
         });
         if let Some(filter) = enchant_filter {
-            let legal = targeting::find_legal_targets(state, &filter, player, object_id);
+            let legal = targeting::find_legal_targets(state, &filter, player, prepared.object_id);
             if legal.is_empty() {
                 return Err(EngineError::ActionNotAllowed(
                     "No legal targets for Aura".to_string(),
@@ -246,17 +302,23 @@ pub fn handle_cast_spell(
                 let mut resolved = resolved;
                 assign_targets_in_chain(&mut resolved, &targets)?;
                 return check_additional_cost_or_pay(
-                    state, player, object_id, card_id, resolved, &mana_cost, events,
+                    state,
+                    player,
+                    prepared.object_id,
+                    prepared.card_id,
+                    resolved,
+                    &prepared.mana_cost,
+                    events,
                 );
             } else {
                 let selection = begin_target_selection(&target_slots, &[])?;
                 return Ok(WaitingFor::TargetSelection {
                     player,
                     pending_cast: Box::new(PendingCast {
-                        object_id,
-                        card_id,
+                        object_id: prepared.object_id,
+                        card_id: prepared.card_id,
                         ability: resolved,
-                        cost: mana_cost,
+                        cost: prepared.mana_cost.clone(),
                         activation_cost: None,
                         activation_ability_index: None,
                         target_constraints: Vec::new(),
@@ -274,7 +336,13 @@ pub fn handle_cast_spell(
             let mut resolved = resolved;
             assign_targets_in_chain(&mut resolved, &targets)?;
             return check_additional_cost_or_pay(
-                state, player, object_id, card_id, resolved, &mana_cost, events,
+                state,
+                player,
+                prepared.object_id,
+                prepared.card_id,
+                resolved,
+                &prepared.mana_cost,
+                events,
             );
         }
 
@@ -282,10 +350,10 @@ pub fn handle_cast_spell(
         return Ok(WaitingFor::TargetSelection {
             player,
             pending_cast: Box::new(PendingCast {
-                object_id,
-                card_id,
+                object_id: prepared.object_id,
+                card_id: prepared.card_id,
                 ability: resolved,
-                cost: mana_cost,
+                cost: prepared.mana_cost.clone(),
                 activation_cost: None,
                 activation_ability_index: None,
                 target_constraints: Vec::new(),
@@ -297,7 +365,13 @@ pub fn handle_cast_spell(
 
     // 6. Check additional cost, then pay mana cost
     check_additional_cost_or_pay(
-        state, player, object_id, card_id, resolved, &mana_cost, events,
+        state,
+        player,
+        prepared.object_id,
+        prepared.card_id,
+        resolved,
+        &prepared.mana_cost,
+        events,
     )
 }
 
@@ -308,6 +382,14 @@ pub fn spell_has_legal_targets(
     obj: &crate::game::game_object::GameObject,
     player: PlayerId,
 ) -> bool {
+    let mut simulated = state.clone();
+    if simulated.layers_dirty {
+        super::layers::evaluate_layers(&mut simulated);
+    }
+    let Some(obj) = simulated.objects.get(&obj.id) else {
+        return false;
+    };
+
     // Aura spells target via the Enchant keyword rather than the effect's target field.
     let is_aura = obj.card_types.subtypes.iter().any(|s| s == "Aura");
     if is_aura {
@@ -319,7 +401,7 @@ pub fn spell_has_legal_targets(
             }
         });
         return enchant_filter.is_some_and(|filter| {
-            !targeting::find_legal_targets(state, &filter, player, obj.id).is_empty()
+            !targeting::find_legal_targets(&simulated, &filter, player, obj.id).is_empty()
         });
     }
 
@@ -334,7 +416,7 @@ pub fn spell_has_legal_targets(
     };
 
     let resolved = build_resolved_from_def(ability_def, obj.id, player);
-    match build_target_slots(state, &resolved) {
+    match build_target_slots(&simulated, &resolved) {
         Ok(target_slots) => {
             if target_slots.is_empty() {
                 true
@@ -344,6 +426,54 @@ pub fn spell_has_legal_targets(
         }
         Err(_) => false,
     }
+}
+
+pub fn can_cast_object_now(state: &GameState, player: PlayerId, object_id: ObjectId) -> bool {
+    let Ok(prepared) = prepare_spell_cast(state, player, object_id) else {
+        return false;
+    };
+    let Some(obj) = state.objects.get(&prepared.object_id) else {
+        return false;
+    };
+
+    (prepared.modal.is_some() || spell_has_legal_targets(state, obj, player))
+        && can_pay_cost_after_auto_tap(state, player, prepared.object_id, &prepared.mana_cost)
+}
+
+/// Returns true if the player can pay this mana cost after auto-tapping
+/// currently activatable lands in a cloned game state.
+///
+/// Used by legal action generation so the frontend and engine agree on whether
+/// a spell is castable from the current board state.
+pub fn can_pay_cost_after_auto_tap(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+) -> bool {
+    let mut simulated = state.clone();
+    if simulated.layers_dirty {
+        super::layers::evaluate_layers(&mut simulated);
+    }
+    let spell_meta = simulated.objects.get(&source_id).map(|obj| SpellMeta {
+        types: obj
+            .card_types
+            .core_types
+            .iter()
+            .map(|ct| format!("{ct:?}"))
+            .collect(),
+        subtypes: obj.card_types.subtypes.clone(),
+    });
+
+    auto_tap_lands(&mut simulated, player, cost, &mut Vec::new());
+
+    simulated
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .is_some_and(|player_data| {
+            mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, spell_meta.as_ref())
+        })
 }
 
 /// Handle mode selection for a modal spell.
@@ -610,6 +740,10 @@ fn pay_mana_cost(
     cost: &crate::types::mana::ManaCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    if state.layers_dirty {
+        super::layers::evaluate_layers(state);
+    }
+
     let spell_meta = state.objects.get(&source_id).map(|obj| SpellMeta {
         types: obj
             .card_types
@@ -696,6 +830,84 @@ pub fn pay_ability_cost(
         _ => {}
     }
     Ok(())
+}
+
+fn can_pay_ability_cost_now(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+) -> bool {
+    let mut simulated = state.clone();
+    pay_ability_cost(&mut simulated, player, source_id, cost, &mut Vec::new()).is_ok()
+}
+
+pub fn can_activate_ability_now(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> bool {
+    let Some(obj) = state.objects.get(&source_id) else {
+        return false;
+    };
+    if obj.zone != Zone::Battlefield
+        || obj.controller != player
+        || ability_index >= obj.abilities.len()
+    {
+        return false;
+    }
+
+    let ability_def = obj.abilities[ability_index].clone();
+    if restrictions::check_activation_restrictions(
+        state,
+        player,
+        source_id,
+        ability_index,
+        &ability_def.activation_restrictions,
+    )
+    .is_err()
+    {
+        return false;
+    }
+    if ability_def
+        .cost
+        .as_ref()
+        .is_some_and(|cost| !can_pay_ability_cost_now(state, player, source_id, cost))
+    {
+        return false;
+    }
+
+    if let Some(ref modal) = ability_def.modal {
+        if ability_def.cost.as_ref().is_some_and(requires_untapped) && obj.tapped {
+            return false;
+        }
+        return modal.mode_count > 0;
+    }
+
+    let resolved = {
+        let mut ability =
+            ResolvedAbility::new(ability_def.effect.clone(), Vec::new(), source_id, player);
+        if let Some(sub) = &ability_def.sub_ability {
+            ability = ability.sub_ability(build_resolved_from_def(sub, source_id, player));
+        }
+        if let Some(condition) = ability_def.condition.clone() {
+            ability = ability.condition(condition);
+        }
+        ability
+    };
+
+    let mut simulated = state.clone();
+    if simulated.layers_dirty {
+        super::layers::evaluate_layers(&mut simulated);
+    }
+
+    match build_target_slots(&simulated, &resolved) {
+        Ok(target_slots) => {
+            target_slots.is_empty() || auto_select_targets(&target_slots, &[]).is_ok()
+        }
+        Err(_) => false,
+    }
 }
 
 pub fn handle_activate_ability(
@@ -1166,9 +1378,12 @@ fn auto_tap_lands(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::DamageAmount;
+    use crate::types::ability::{
+        BasicLandType, ChosenAttribute, ChosenSubtypeKind, ContinuousModification, DamageAmount,
+        StaticDefinition,
+    };
     use crate::types::card_type::CoreType;
-    use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::phase::Phase;
 
     fn setup_game_at_main_phase() -> GameState {
@@ -1193,6 +1408,25 @@ mod tests {
                 restrictions: Vec::new(),
             });
         }
+    }
+
+    fn add_basic_land(
+        state: &mut GameState,
+        card_id: CardId,
+        name: &str,
+        subtype: &str,
+    ) -> ObjectId {
+        let land = create_object(
+            state,
+            card_id,
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&land).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes.push(subtype.to_string());
+        land
     }
 
     fn create_instant_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
@@ -1703,6 +1937,67 @@ mod tests {
             result.is_err(),
             "expected cast to fail without Island/Swamp support"
         );
+    }
+
+    #[test]
+    fn auto_tap_uses_layer_derived_basic_land_type() {
+        let mut state = setup_game_at_main_phase();
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(25),
+            PlayerId(0),
+            "Deep-Cavern Bat".to_string(),
+            Zone::Hand,
+        );
+        {
+            let spell = state.objects.get_mut(&spell_id).unwrap();
+            spell.card_types.core_types.push(CoreType::Creature);
+            spell.abilities.push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "PermanentCreature".to_string(),
+                    description: None,
+                },
+            ));
+            spell.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 1,
+            };
+        }
+
+        let passage = create_object(
+            &mut state,
+            CardId(26),
+            PlayerId(0),
+            "Multiversal Passage".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&passage).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.chosen_attributes
+                .push(ChosenAttribute::BasicLandType(BasicLandType::Swamp));
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(crate::types::ability::TargetFilter::SelfRef)
+                    .modifications(vec![ContinuousModification::AddChosenSubtype {
+                        kind: ChosenSubtypeKind::BasicLandType,
+                    }]),
+            );
+        }
+
+        let forest = add_basic_land(&mut state, CardId(27), "Forest", "Forest");
+        state.layers_dirty = true;
+
+        let mut events = Vec::new();
+        let result = handle_cast_spell(&mut state, PlayerId(0), CardId(25), &mut events);
+        assert!(
+            result.is_ok(),
+            "expected chosen land subtype from layers to satisfy black mana"
+        );
+        assert!(state.objects[&passage].tapped);
+        assert!(state.objects[&forest].tapped);
     }
 
     #[test]

@@ -6,11 +6,13 @@ export function ChoiceOverlay({
   title,
   subtitle,
   children,
+  widthClassName = "w-full",
   maxWidthClassName = "max-w-6xl",
 }: {
   title: string;
   subtitle: string;
   children: React.ReactNode;
+  widthClassName?: string;
   maxWidthClassName?: string;
 }) {
   return (
@@ -18,7 +20,7 @@ export function ChoiceOverlay({
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
       <div className="relative flex min-h-full flex-col items-center justify-center pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
         <motion.div
-          className={`w-full overflow-hidden rounded-[28px] border border-white/10 bg-[#0b1020]/94 shadow-[0_32px_90px_rgba(0,0,0,0.48)] backdrop-blur-md ${maxWidthClassName}`}
+          className={`${widthClassName} overflow-hidden rounded-[28px] border border-white/10 bg-[#0b1020]/94 shadow-[0_32px_90px_rgba(0,0,0,0.48)] backdrop-blur-md ${maxWidthClassName}`}
           initial={{ opacity: 0, y: 18, scale: 0.98 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
           transition={{ duration: 0.24, ease: "easeOut" }}

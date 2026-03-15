@@ -672,6 +672,14 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         return Some(result);
     }
 
+    if let Some(result) = try_parse_another_controlled_subtype_enters(lower) {
+        return Some(result);
+    }
+
+    if let Some(result) = try_parse_controlled_subtype_attacks(lower) {
+        return Some(result);
+    }
+
     if let Some(result) = try_parse_one_or_more_combat_damage_to_player(lower) {
         return Some(result);
     }
@@ -773,23 +781,19 @@ fn try_parse_self_or_another_controlled_subtype_enters(
         let Some(subtype_text) = subject_text.trim().strip_suffix(" you control") else {
             continue;
         };
-        if subtype_text.split(" or ").any(is_core_type_name) {
+        let (_, remainder) = parse_type_phrase(subtype_text);
+        if remainder.len() < subtype_text.len() {
+            continue;
+        }
+        if !is_subtype_phrase(subtype_text) {
             continue;
         }
 
-        let mut subtype_filters = Vec::new();
-        for subtype in subtype_text
-            .split(" or ")
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            subtype_filters.push(TargetFilter::Typed(
-                TypedFilter::creature()
-                    .subtype(canonicalize_subtype_name(subtype))
-                    .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::Another]),
-            ));
-        }
+        let Some(subtype_filters) =
+            build_controlled_subtype_filters(subtype_text, true, ControllerRef::You)
+        else {
+            continue;
+        };
         if subtype_filters.is_empty() {
             continue;
         }
@@ -807,6 +811,72 @@ fn try_parse_self_or_another_controlled_subtype_enters(
     None
 }
 
+fn try_parse_another_controlled_subtype_enters(
+    lower: &str,
+) -> Option<(TriggerMode, TriggerDefinition)> {
+    for prefix in ["whenever another ", "when another "] {
+        let Some(rest) = lower.strip_prefix(prefix) else {
+            continue;
+        };
+        let Some(subject_text) = rest
+            .strip_suffix(" enters")
+            .or_else(|| rest.strip_suffix(" enters the battlefield"))
+        else {
+            continue;
+        };
+        let Some(subtype_text) = subject_text.trim().strip_suffix(" you control") else {
+            continue;
+        };
+        let (_, remainder) = parse_type_phrase(subtype_text);
+        if remainder.len() < subtype_text.len() {
+            continue;
+        }
+        if !is_subtype_phrase(subtype_text) {
+            continue;
+        }
+
+        let valid_card = build_controlled_subtype_filter(subtype_text, true, ControllerRef::You)?;
+
+        let mut def = make_base();
+        def.mode = TriggerMode::ChangesZone;
+        def.destination = Some(Zone::Battlefield);
+        def.valid_card = Some(valid_card);
+        return Some((TriggerMode::ChangesZone, def));
+    }
+
+    None
+}
+
+fn try_parse_controlled_subtype_attacks(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    for prefix in ["whenever a ", "whenever an ", "when a ", "when an "] {
+        let Some(rest) = lower.strip_prefix(prefix) else {
+            continue;
+        };
+        let Some(subject_text) = rest.strip_suffix(" attacks") else {
+            continue;
+        };
+        let Some(subtype_text) = subject_text.trim().strip_suffix(" you control") else {
+            continue;
+        };
+        let (_, remainder) = parse_type_phrase(subtype_text);
+        if remainder.len() < subtype_text.len() {
+            continue;
+        }
+        if !is_subtype_phrase(subtype_text) {
+            continue;
+        }
+
+        let valid_card = build_controlled_subtype_filter(subtype_text, false, ControllerRef::You)?;
+
+        let mut def = make_base();
+        def.mode = TriggerMode::Attacks;
+        def.valid_card = Some(valid_card);
+        return Some((TriggerMode::Attacks, def));
+    }
+
+    None
+}
+
 fn is_core_type_name(text: &str) -> bool {
     matches!(
         text,
@@ -819,6 +889,72 @@ fn is_core_type_name(text: &str) -> bool {
             | "card"
             | "permanent"
     )
+}
+
+fn is_non_subtype_subject_name(text: &str) -> bool {
+    matches!(
+        text,
+        "ability"
+            | "card"
+            | "commander"
+            | "opponent"
+            | "permanent"
+            | "player"
+            | "source"
+            | "spell"
+            | "token"
+    )
+}
+
+fn is_subtype_phrase(text: &str) -> bool {
+    text.split(" or ").all(|part| {
+        let trimmed = part.trim();
+        !trimmed.is_empty() && !is_core_type_name(trimmed) && !is_non_subtype_subject_name(trimmed)
+    })
+}
+
+fn build_controlled_subtype_filter(
+    subtype_text: &str,
+    another: bool,
+    controller: ControllerRef,
+) -> Option<TargetFilter> {
+    let filters = build_controlled_subtype_filters(subtype_text, another, controller)?;
+    Some(match filters.as_slice() {
+        [single] => single.clone(),
+        _ => TargetFilter::Or { filters },
+    })
+}
+
+fn build_controlled_subtype_filters(
+    subtype_text: &str,
+    another: bool,
+    controller: ControllerRef,
+) -> Option<Vec<TargetFilter>> {
+    let mut filters = Vec::new();
+
+    for subtype in subtype_text
+        .split(" or ")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if is_core_type_name(subtype) || is_non_subtype_subject_name(subtype) {
+            return None;
+        }
+
+        let mut typed = TypedFilter::default()
+            .subtype(canonicalize_subtype_name(subtype))
+            .controller(controller.clone());
+        if another {
+            typed = typed.properties(vec![FilterProp::Another]);
+        }
+        filters.push(TargetFilter::Typed(typed));
+    }
+
+    if filters.is_empty() {
+        None
+    } else {
+        Some(filters)
+    }
 }
 
 fn canonicalize_subtype_name(text: &str) -> String {
@@ -2253,6 +2389,51 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZone);
         assert!(matches!(def.valid_card, Some(TargetFilter::Or { .. })));
         assert_eq!(def.destination, Some(Zone::Battlefield));
+    }
+
+    #[test]
+    fn trigger_another_human_you_control_enters() {
+        let def = parse_trigger_line(
+            "Whenever another Human you control enters, draw a card.",
+            "Welcoming Vampire",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Human".to_string())
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another])
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_dragon_you_control_attacks() {
+        let def = parse_trigger_line(
+            "Whenever a Dragon you control attacks, create a Treasure token.",
+            "Ganax, Astral Hunter",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Dragon".to_string())
+                    .controller(ControllerRef::You)
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_samurai_or_warrior_attacks_alone_stays_unknown() {
+        let def = parse_trigger_line(
+            "Whenever a Samurai or Warrior you control attacks alone, draw a card.",
+            "Raiyuu, Storm's Edge",
+        );
+        assert!(matches!(def.mode, TriggerMode::Unknown(_)));
     }
 
     #[test]
