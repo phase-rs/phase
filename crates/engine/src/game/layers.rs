@@ -81,6 +81,11 @@ fn evaluate_condition(state: &GameState, condition: &StaticCondition, controller
                 .any(|&id| matches_target_filter(state, id, f, source_id)),
             None => true,
         },
+        StaticCondition::ChosenColorIs { color } => state
+            .objects
+            .get(&source_id)
+            .and_then(|obj| obj.chosen_color())
+            .is_some_and(|chosen| &chosen == color),
         StaticCondition::Unrecognized { .. } => true,
         StaticCondition::DuringYourTurn => state.active_player == controller,
         StaticCondition::None => true,

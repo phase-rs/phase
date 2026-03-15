@@ -576,6 +576,22 @@ fn parse_static_condition(text: &str) -> Option<StaticCondition> {
         return Some(condition);
     }
 
+    // "the chosen color is [color]"
+    if let Some(color_name) = lower.strip_prefix("the chosen color is ") {
+        use crate::types::mana::ManaColor;
+        let color = match color_name.trim().trim_end_matches('.') {
+            "white" => Some(ManaColor::White),
+            "blue" => Some(ManaColor::Blue),
+            "black" => Some(ManaColor::Black),
+            "red" => Some(ManaColor::Red),
+            "green" => Some(ManaColor::Green),
+            _ => None,
+        };
+        if let Some(c) = color {
+            return Some(StaticCondition::ChosenColorIs { color: c });
+        }
+    }
+
     None
 }
 
@@ -1496,10 +1512,25 @@ mod tests {
     // "enters with counters" is now parsed as a Moved replacement effect.
 
     #[test]
-    fn static_as_long_as_unrecognized_condition() {
-        // Complex conditions that the parser can't fully decompose → Unrecognized
+    fn static_as_long_as_chosen_color() {
         let def = parse_static_line(
-            "As long as you control a creature with power 4 or greater, Elemental Bond has hexproof.",
+            "As long as the chosen color is blue, enchanted creature has flying.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(matches!(
+            def.condition,
+            Some(StaticCondition::ChosenColorIs {
+                color: crate::types::mana::ManaColor::Blue
+            })
+        ));
+    }
+
+    #[test]
+    fn static_as_long_as_unrecognized_condition() {
+        // Conditions the parser can't yet decompose fall through to Unrecognized
+        let def = parse_static_line(
+            "As long as the number of cards in your hand is greater than your life total, this ability triggers.",
         )
         .unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);

@@ -638,6 +638,11 @@ pub enum StaticCondition {
         #[serde(default)]
         filter: Option<TargetFilter>,
     },
+    /// True when the source object's chosen color matches the given color.
+    /// Used for cards that choose a color on ETB and have color-conditional effects.
+    ChosenColorIs {
+        color: ManaColor,
+    },
     /// Condition text that the parser could not yet decompose into a typed variant.
     /// Evaluated permissively (always true) so the static effect still applies.
     Unrecognized {
