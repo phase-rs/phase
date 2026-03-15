@@ -44,6 +44,9 @@ pub fn transform_permanent(
             card_types: obj.card_types.clone(),
             keywords: obj.keywords.clone(),
             abilities: obj.abilities.clone(),
+            trigger_definitions: obj.trigger_definitions.clone(),
+            replacement_definitions: obj.replacement_definitions.clone(),
+            static_definitions: obj.base_static_definitions.clone(),
             color: obj.color.clone(),
         };
 
@@ -58,6 +61,14 @@ pub fn transform_permanent(
         obj.keywords = back_face.keywords.clone();
         obj.base_keywords = back_face.keywords;
         obj.abilities = back_face.abilities;
+        obj.base_abilities = obj.abilities.clone();
+        obj.trigger_definitions = back_face.trigger_definitions;
+        obj.base_trigger_definitions = obj.trigger_definitions.clone();
+        obj.replacement_definitions = back_face.replacement_definitions;
+        obj.base_replacement_definitions = obj.replacement_definitions.clone();
+        obj.static_definitions = back_face.static_definitions;
+        obj.base_static_definitions = obj.static_definitions.clone();
+        obj.granted_static_definitions.clear();
         obj.color = back_face.color.clone();
         obj.base_color = back_face.color;
 
@@ -73,6 +84,9 @@ pub fn transform_permanent(
             card_types: obj.card_types.clone(),
             keywords: obj.keywords.clone(),
             abilities: obj.abilities.clone(),
+            trigger_definitions: obj.trigger_definitions.clone(),
+            replacement_definitions: obj.replacement_definitions.clone(),
+            static_definitions: obj.base_static_definitions.clone(),
             color: obj.color.clone(),
         };
 
@@ -87,6 +101,14 @@ pub fn transform_permanent(
         obj.keywords = back_face.keywords.clone();
         obj.base_keywords = back_face.keywords;
         obj.abilities = back_face.abilities;
+        obj.base_abilities = obj.abilities.clone();
+        obj.trigger_definitions = back_face.trigger_definitions;
+        obj.base_trigger_definitions = obj.trigger_definitions.clone();
+        obj.replacement_definitions = back_face.replacement_definitions;
+        obj.base_replacement_definitions = obj.replacement_definitions.clone();
+        obj.static_definitions = back_face.static_definitions;
+        obj.base_static_definitions = obj.static_definitions.clone();
+        obj.granted_static_definitions.clear();
         obj.color = back_face.color.clone();
         obj.base_color = back_face.color;
 
@@ -142,6 +164,7 @@ mod tests {
                 description: None,
             },
         )];
+        obj.base_abilities = obj.abilities.clone();
         obj.color = vec![ManaColor::Green];
         obj.base_color = vec![ManaColor::Green];
 
@@ -162,6 +185,9 @@ mod tests {
                     description: None,
                 },
             )],
+            trigger_definitions: vec![],
+            replacement_definitions: vec![],
+            static_definitions: vec![],
             color: vec![ManaColor::Green, ManaColor::Red],
         });
 

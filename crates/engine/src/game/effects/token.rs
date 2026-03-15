@@ -358,6 +358,7 @@ pub fn resolve(
                                 core_types: attrs.core_types.clone(),
                                 subtypes: attrs.subtypes.clone(),
                             };
+                            obj.base_card_types = obj.card_types.clone();
                             obj.color = attrs.colors.clone();
                             obj.base_color = attrs.colors.clone();
                             obj.keywords = attrs.keywords.clone();
@@ -371,6 +372,7 @@ pub fn resolve(
                                 obj.base_power = Some(resolved_power);
                                 obj.base_toughness = Some(resolved_toughness);
                                 obj.card_types.core_types.push(CoreType::Creature);
+                                obj.base_card_types = obj.card_types.clone();
                             }
                         }
                         obj.tapped = tapped;

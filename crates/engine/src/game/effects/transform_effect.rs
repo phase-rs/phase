@@ -76,6 +76,7 @@ mod tests {
                 target: TargetFilter::SelfRef,
             },
         )];
+        obj.base_abilities = obj.abilities.clone();
         obj.color = vec![ManaColor::Green];
         obj.base_color = vec![ManaColor::Green];
         obj.back_face = Some(crate::game::game_object::BackFaceData {
@@ -89,6 +90,9 @@ mod tests {
             },
             keywords: vec![Keyword::Trample],
             abilities: vec![],
+            trigger_definitions: vec![],
+            replacement_definitions: vec![],
+            static_definitions: vec![],
             color: vec![ManaColor::Green, ManaColor::Red],
         });
         id

@@ -62,6 +62,9 @@ pub fn move_to_zone(
                 card_types: obj_mut.card_types.clone(),
                 keywords: obj_mut.keywords.clone(),
                 abilities: obj_mut.abilities.clone(),
+                trigger_definitions: obj_mut.trigger_definitions.clone(),
+                replacement_definitions: obj_mut.replacement_definitions.clone(),
+                static_definitions: obj_mut.base_static_definitions.clone(),
                 color: obj_mut.color.clone(),
             };
             obj_mut.name = back_face.name;
@@ -74,6 +77,14 @@ pub fn move_to_zone(
             obj_mut.keywords = back_face.keywords.clone();
             obj_mut.base_keywords = back_face.keywords;
             obj_mut.abilities = back_face.abilities;
+            obj_mut.base_abilities = obj_mut.abilities.clone();
+            obj_mut.trigger_definitions = back_face.trigger_definitions;
+            obj_mut.base_trigger_definitions = obj_mut.trigger_definitions.clone();
+            obj_mut.replacement_definitions = back_face.replacement_definitions;
+            obj_mut.base_replacement_definitions = obj_mut.replacement_definitions.clone();
+            obj_mut.static_definitions = back_face.static_definitions;
+            obj_mut.base_static_definitions = obj_mut.static_definitions.clone();
+            obj_mut.granted_static_definitions.clear();
             obj_mut.color = back_face.color.clone();
             obj_mut.base_color = back_face.color;
             obj_mut.back_face = Some(current_back);

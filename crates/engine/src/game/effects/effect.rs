@@ -78,8 +78,8 @@ fn apply_static_effect(
 
 fn apply_static_to_object(state: &mut GameState, obj_id: ObjectId, static_def: StaticDefinition) {
     if let Some(obj) = state.objects.get_mut(&obj_id) {
-        if !obj.static_definitions.contains(&static_def) {
-            obj.static_definitions.push(static_def);
+        if !obj.granted_static_definitions.contains(&static_def) {
+            obj.granted_static_definitions.push(static_def);
             state.layers_dirty = true;
         }
     }
@@ -131,7 +131,7 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(state.objects[&source]
-            .static_definitions
+            .granted_static_definitions
             .contains(&static_def));
     }
 
@@ -199,10 +199,10 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(state.objects[&your_creature]
-            .static_definitions
+            .granted_static_definitions
             .contains(&static_def));
         assert!(!state.objects[&opp_creature]
-            .static_definitions
+            .granted_static_definitions
             .contains(&static_def));
     }
 
@@ -267,11 +267,13 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(state.objects[&target_creature].static_definitions.len(), 1);
+        assert_eq!(state.objects[&target_creature].granted_static_definitions.len(), 1);
         assert_eq!(
-            state.objects[&target_creature].static_definitions[0].affected,
+            state.objects[&target_creature].granted_static_definitions[0].affected,
             Some(TargetFilter::SelfRef)
         );
-        assert!(state.objects[&other_creature].static_definitions.is_empty());
+        assert!(state.objects[&other_creature]
+            .granted_static_definitions
+            .is_empty());
     }
 }

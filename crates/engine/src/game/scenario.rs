@@ -10,8 +10,8 @@ use crate::game::engine::{apply, EngineError};
 use crate::game::game_object::GameObject;
 use crate::game::zones::create_object;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, AdditionalCost, DamageAmount, Effect, StaticDefinition,
-    TargetFilter, TriggerDefinition,
+    AbilityDefinition, AbilityKind, AdditionalCost, DamageAmount, Effect, ReplacementDefinition,
+    StaticDefinition, TargetFilter, TriggerDefinition,
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::{CoreType, Supertype};
@@ -102,6 +102,7 @@ impl GameScenario {
         let entered_turn = self.state.turn_number.saturating_sub(1);
         let obj = self.state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
         obj.power = Some(power);
         obj.toughness = Some(toughness);
         obj.base_power = Some(power);
@@ -146,20 +147,21 @@ impl GameScenario {
         let obj = self.state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
         obj.card_types.supertypes.push(Supertype::Basic);
+        obj.base_card_types = obj.card_types.clone();
         obj.entered_battlefield_turn = Some(self.state.turn_number.saturating_sub(1));
         // Add mana ability
-        obj.abilities.push(
-            AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::Mana {
-                    produced: crate::types::ability::ManaProduction::Fixed {
-                        colors: vec![color],
-                    },
-                    restrictions: vec![],
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: crate::types::ability::ManaProduction::Fixed {
+                    colors: vec![color],
                 },
-            )
-            .cost(crate::types::ability::AbilityCost::Tap),
-        );
+                restrictions: vec![],
+            },
+        )
+        .cost(crate::types::ability::AbilityCost::Tap);
+        obj.abilities.push(ability.clone());
+        obj.base_abilities.push(ability);
         id
     }
 
@@ -175,13 +177,16 @@ impl GameScenario {
         );
         let obj = self.state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Instant);
-        obj.abilities.push(AbilityDefinition::new(
+        obj.base_card_types = obj.card_types.clone();
+        let ability = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::DealDamage {
                 amount: DamageAmount::Fixed(3),
                 target: TargetFilter::Any,
             },
-        ));
+        );
+        obj.abilities.push(ability.clone());
+        obj.base_abilities.push(ability);
         id
     }
 
@@ -203,6 +208,7 @@ impl GameScenario {
         );
         let obj = self.state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
         obj.power = Some(power);
         obj.toughness = Some(toughness);
         obj.base_power = Some(power);
@@ -245,6 +251,11 @@ impl<'a> CardBuilder<'a> {
 
     fn obj(&mut self) -> &mut GameObject {
         self.state.objects.get_mut(&self.id).unwrap()
+    }
+
+    fn sync_base_card_types(&mut self) {
+        let obj = self.obj();
+        obj.base_card_types = obj.card_types.clone();
     }
 
     /// Push a keyword to both `keywords` (computed) and `base_keywords` (survives layer evaluation).
@@ -342,17 +353,33 @@ impl<'a> CardBuilder<'a> {
 
     /// Attach an ability definition with the given effect.
     pub fn with_ability(&mut self, effect: Effect) -> &mut Self {
-        self.obj()
-            .abilities
-            .push(AbilityDefinition::new(AbilityKind::Spell, effect));
+        let ability = AbilityDefinition::new(AbilityKind::Spell, effect);
+        let obj = self.obj();
+        obj.abilities.push(ability.clone());
+        obj.base_abilities.push(ability);
+        self
+    }
+
+    pub fn with_ability_definition(&mut self, ability: AbilityDefinition) -> &mut Self {
+        let obj = self.obj();
+        obj.abilities.push(ability.clone());
+        obj.base_abilities.push(ability);
         self
     }
 
     /// Attach a static ability definition.
     pub fn with_static(&mut self, mode: StaticMode) -> &mut Self {
-        self.obj()
-            .static_definitions
-            .push(StaticDefinition::new(mode));
+        let static_def = StaticDefinition::new(mode);
+        let obj = self.obj();
+        obj.static_definitions.push(static_def.clone());
+        obj.base_static_definitions.push(static_def);
+        self
+    }
+
+    pub fn with_static_definition(&mut self, static_def: StaticDefinition) -> &mut Self {
+        let obj = self.obj();
+        obj.static_definitions.push(static_def.clone());
+        obj.base_static_definitions.push(static_def);
         self
     }
 
@@ -361,17 +388,30 @@ impl<'a> CardBuilder<'a> {
         &mut self,
         modifications: Vec<crate::types::ability::ContinuousModification>,
     ) -> &mut Self {
-        self.obj()
-            .static_definitions
-            .push(StaticDefinition::continuous().modifications(modifications));
+        let static_def = StaticDefinition::continuous().modifications(modifications);
+        let obj = self.obj();
+        obj.static_definitions.push(static_def.clone());
+        obj.base_static_definitions.push(static_def);
         self
     }
 
     /// Attach a trigger definition.
     pub fn with_trigger(&mut self, mode: TriggerMode) -> &mut Self {
-        self.obj()
-            .trigger_definitions
-            .push(TriggerDefinition::new(mode));
+        let trigger = TriggerDefinition::new(mode);
+        let obj = self.obj();
+        obj.trigger_definitions.push(trigger.clone());
+        obj.base_trigger_definitions.push(trigger);
+        self
+    }
+
+    pub fn with_replacement(
+        &mut self,
+        event: crate::types::replacements::ReplacementEvent,
+    ) -> &mut Self {
+        let replacement = ReplacementDefinition::new(event);
+        let obj = self.obj();
+        obj.replacement_definitions.push(replacement.clone());
+        obj.base_replacement_definitions.push(replacement);
         self
     }
 
@@ -383,6 +423,7 @@ impl<'a> CardBuilder<'a> {
             .core_types
             .retain(|t| *t != CoreType::Creature);
         obj.card_types.core_types.push(CoreType::Instant);
+        self.sync_base_card_types();
         self
     }
 
@@ -392,6 +433,7 @@ impl<'a> CardBuilder<'a> {
             .core_types
             .retain(|t| *t != CoreType::Creature);
         obj.card_types.core_types.push(CoreType::Enchantment);
+        self.sync_base_card_types();
         self
     }
 
@@ -401,6 +443,7 @@ impl<'a> CardBuilder<'a> {
             .core_types
             .retain(|t| *t != CoreType::Creature);
         obj.card_types.core_types.push(CoreType::Sorcery);
+        self.sync_base_card_types();
         self
     }
 
@@ -410,6 +453,7 @@ impl<'a> CardBuilder<'a> {
             .core_types
             .retain(|t| *t != CoreType::Creature);
         obj.card_types.core_types.push(CoreType::Artifact);
+        self.sync_base_card_types();
         self
     }
 

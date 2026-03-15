@@ -210,9 +210,13 @@ pub fn create_object_from_card_face(
     obj.keywords = keywords.clone();
     obj.base_keywords = keywords;
     obj.abilities = card_face.abilities.clone();
+    obj.base_abilities = card_face.abilities.clone();
     obj.trigger_definitions = card_face.triggers.clone();
+    obj.base_trigger_definitions = card_face.triggers.clone();
     obj.static_definitions = card_face.static_abilities.clone();
+    obj.base_static_definitions = card_face.static_abilities.clone();
     obj.replacement_definitions = card_face.replacements.clone();
+    obj.base_replacement_definitions = card_face.replacements.clone();
     obj.color = color.clone();
     obj.base_color = color;
     obj.modal = card_face.modal.clone();
@@ -256,9 +260,13 @@ pub fn create_commander_from_card_face(
     obj.keywords = keywords.clone();
     obj.base_keywords = keywords;
     obj.abilities = card_face.abilities.clone();
+    obj.base_abilities = card_face.abilities.clone();
     obj.trigger_definitions = card_face.triggers.clone();
+    obj.base_trigger_definitions = card_face.triggers.clone();
     obj.static_definitions = card_face.static_abilities.clone();
+    obj.base_static_definitions = card_face.static_abilities.clone();
     obj.replacement_definitions = card_face.replacements.clone();
+    obj.base_replacement_definitions = card_face.replacements.clone();
     obj.color = color.clone();
     obj.base_color = color;
     obj.is_commander = true;

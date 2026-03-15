@@ -40,6 +40,21 @@ pub fn evaluate_layers(state: &mut GameState) {
                 obj.card_types = obj.base_card_types.clone();
             }
             obj.keywords = obj.base_keywords.clone();
+            if !obj.base_abilities.is_empty() {
+                obj.abilities = obj.base_abilities.clone();
+            }
+            if !obj.base_trigger_definitions.is_empty() {
+                obj.trigger_definitions = obj.base_trigger_definitions.clone();
+            }
+            if !obj.base_replacement_definitions.is_empty() {
+                obj.replacement_definitions = obj.base_replacement_definitions.clone();
+            }
+            if !obj.base_static_definitions.is_empty() || !obj.granted_static_definitions.is_empty()
+            {
+                obj.static_definitions = obj.base_static_definitions.clone();
+                obj.static_definitions
+                    .extend(obj.granted_static_definitions.clone());
+            }
             obj.color = obj.base_color.clone();
         }
     }
@@ -415,6 +430,9 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             }
             ContinuousModification::RemoveAllAbilities => {
                 obj.abilities.clear();
+                obj.trigger_definitions.clear();
+                obj.replacement_definitions.clear();
+                obj.static_definitions.clear();
                 obj.keywords.clear();
             }
             ContinuousModification::AddType { core_type } => {
@@ -473,16 +491,21 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::scenario::GameScenario;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ChosenSubtypeKind, ContinuousModification, ControllerRef, FilterProp, StaticDefinition,
-        TargetFilter, TypeFilter,
+        AbilityDefinition, AbilityKind, ChosenSubtypeKind, ContinuousModification, ControllerRef,
+        Effect, FilterProp, GainLifePlayer, LifeAmount, StaticDefinition, TargetFilter,
+        TypeFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
+    use crate::types::statics::StaticMode;
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
     fn setup() -> GameState {
@@ -967,6 +990,86 @@ mod tests {
             "Bear returns to base P/T after lord leaves"
         );
         assert_eq!(bear_obj.toughness, Some(2));
+    }
+
+    #[test]
+    fn test_remove_all_abilities_clears_all_computed_ability_buckets() {
+        let mut scenario = GameScenario::new();
+        let target = {
+            let mut card = scenario.add_creature(PlayerId(0), "Target", 2, 2);
+            card.flying()
+                .with_ability_definition(AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: LifeAmount::Fixed(1),
+                        player: GainLifePlayer::Controller,
+                    },
+                ))
+                .with_trigger(TriggerMode::Attacks)
+                .with_replacement(ReplacementEvent::GainLife)
+                .with_static(StaticMode::CantAttack);
+            card.id()
+        };
+        {
+            let mut card = scenario.add_creature(PlayerId(0), "Suppressor", 1, 1);
+            card.with_static_definition(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject(target))
+                    .modifications(vec![ContinuousModification::RemoveAllAbilities]),
+            );
+        }
+        let mut state = scenario.build().state().clone();
+
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&target).unwrap();
+        assert!(obj.keywords.is_empty());
+        assert!(obj.abilities.is_empty());
+        assert!(obj.trigger_definitions.is_empty());
+        assert!(obj.replacement_definitions.is_empty());
+        assert!(obj.static_definitions.is_empty());
+    }
+
+    #[test]
+    fn test_remove_all_abilities_reverts_to_base_when_source_leaves() {
+        let mut scenario = GameScenario::new();
+        let target = {
+            let mut card = scenario.add_creature(PlayerId(0), "Target", 2, 2);
+            card.flying()
+                .with_ability_definition(AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: LifeAmount::Fixed(1),
+                        player: GainLifePlayer::Controller,
+                    },
+                ))
+                .with_trigger(TriggerMode::Attacks)
+                .with_replacement(ReplacementEvent::GainLife)
+                .with_static(StaticMode::CantAttack);
+            card.id()
+        };
+        let suppressor = {
+            let mut card = scenario.add_creature(PlayerId(0), "Suppressor", 1, 1);
+            card.with_static_definition(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject(target))
+                    .modifications(vec![ContinuousModification::RemoveAllAbilities]),
+            );
+            card.id()
+        };
+        let mut state = scenario.build().state().clone();
+
+        evaluate_layers(&mut state);
+        state.battlefield.retain(|&id| id != suppressor);
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&target).unwrap();
+        assert_eq!(obj.keywords, vec![Keyword::Flying]);
+        assert_eq!(obj.abilities.len(), 1);
+        assert_eq!(obj.trigger_definitions.len(), 1);
+        assert_eq!(obj.replacement_definitions.len(), 1);
+        assert_eq!(obj.static_definitions.len(), 1);
     }
 
     #[test]

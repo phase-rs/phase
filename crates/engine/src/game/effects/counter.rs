@@ -112,8 +112,8 @@ fn apply_source_static(
     bound.affected = Some(TargetFilter::SpecificObject(source_permanent_id));
 
     if let Some(obj) = state.objects.get_mut(&counter_source_id) {
-        if !obj.static_definitions.contains(&bound) {
-            obj.static_definitions.push(bound);
+        if !obj.granted_static_definitions.contains(&bound) {
+            obj.granted_static_definitions.push(bound);
             state.layers_dirty = true;
         }
     }
@@ -291,11 +291,11 @@ mod tests {
         // Tidebinder should now have a static definition targeting the source permanent
         let tidebinder_obj = state.objects.get(&tidebinder).unwrap();
         assert_eq!(
-            tidebinder_obj.static_definitions.len(),
+            tidebinder_obj.granted_static_definitions.len(),
             1,
             "Tidebinder should have one static definition"
         );
-        let bound_static = &tidebinder_obj.static_definitions[0];
+        let bound_static = &tidebinder_obj.granted_static_definitions[0];
         assert_eq!(
             bound_static.affected,
             Some(TargetFilter::SpecificObject(source_permanent)),
@@ -359,7 +359,7 @@ mod tests {
         // Spell countered, but source_static should NOT be applied (it's a spell, not an ability)
         let tidebinder_obj = state.objects.get(&tidebinder).unwrap();
         assert!(
-            tidebinder_obj.static_definitions.is_empty(),
+            tidebinder_obj.granted_static_definitions.is_empty(),
             "source_static should not apply when countering a spell"
         );
     }

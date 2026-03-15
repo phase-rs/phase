@@ -26,6 +26,9 @@ pub struct BackFaceData {
     pub card_types: CardType,
     pub keywords: Vec<Keyword>,
     pub abilities: Vec<AbilityDefinition>,
+    pub trigger_definitions: Vec<TriggerDefinition>,
+    pub replacement_definitions: Vec<ReplacementDefinition>,
+    pub static_definitions: Vec<StaticDefinition>,
     pub color: Vec<ManaColor>,
 }
 
@@ -83,6 +86,7 @@ pub struct GameObject {
     pub trigger_definitions: Vec<TriggerDefinition>,
     pub replacement_definitions: Vec<ReplacementDefinition>,
     pub static_definitions: Vec<StaticDefinition>,
+    pub granted_static_definitions: Vec<StaticDefinition>,
     pub color: Vec<ManaColor>,
 
     // Back face data for double-faced cards (DFCs)
@@ -93,6 +97,10 @@ pub struct GameObject {
     pub base_toughness: Option<i32>,
     pub base_card_types: CardType,
     pub base_keywords: Vec<Keyword>,
+    pub base_abilities: Vec<AbilityDefinition>,
+    pub base_trigger_definitions: Vec<TriggerDefinition>,
+    pub base_replacement_definitions: Vec<ReplacementDefinition>,
+    pub base_static_definitions: Vec<StaticDefinition>,
     pub base_color: Vec<ManaColor>,
 
     // Timestamp for layer ordering
@@ -178,12 +186,17 @@ impl GameObject {
             trigger_definitions: Vec::new(),
             replacement_definitions: Vec::new(),
             static_definitions: Vec::new(),
+            granted_static_definitions: Vec::new(),
             color: Vec::new(),
             back_face: None,
             base_power: None,
             base_toughness: None,
             base_card_types: CardType::default(),
             base_keywords: Vec::new(),
+            base_abilities: Vec::new(),
+            base_trigger_definitions: Vec::new(),
+            base_replacement_definitions: Vec::new(),
+            base_static_definitions: Vec::new(),
             base_color: Vec::new(),
             timestamp: 0,
             entered_battlefield_turn: None,

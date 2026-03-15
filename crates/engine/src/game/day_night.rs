@@ -111,6 +111,9 @@ mod tests {
             },
             keywords: vec![Keyword::Nightbound],
             abilities: vec![],
+            trigger_definitions: vec![],
+            replacement_definitions: vec![],
+            static_definitions: vec![],
             color: vec![ManaColor::Green, ManaColor::Red],
         });
         id
