@@ -260,6 +260,29 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         }
     }
 
+    // --- "~ isn't a [type]" (type removal) ---
+    // e.g. "Erebos isn't a creature" from god-of-the-dead conditional
+    if let Some(type_rest) = lower.split("isn't a ").nth(1) {
+        use crate::types::card_type::CoreType;
+        let type_name = type_rest.trim().trim_end_matches('.');
+        let core_type = match type_name {
+            "creature" => Some(CoreType::Creature),
+            "artifact" => Some(CoreType::Artifact),
+            "enchantment" => Some(CoreType::Enchantment),
+            "land" => Some(CoreType::Land),
+            "planeswalker" => Some(CoreType::Planeswalker),
+            _ => None,
+        };
+        if let Some(ct) = core_type {
+            return Some(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![ContinuousModification::RemoveType { core_type: ct }])
+                    .description(text.to_string()),
+            );
+        }
+    }
+
     // --- "~ can't be blocked" ---
     if lower.contains("can't be blocked") {
         return Some(
@@ -495,7 +518,11 @@ fn parse_subject_continuous_static(text: &str) -> Option<StaticDefinition> {
 fn parse_conditional_static(text: &str) -> Option<StaticDefinition> {
     let conditional = text.strip_prefix("As long as ")?;
     let (condition_text, remainder) = conditional.split_once(", ")?;
-    let condition = parse_static_condition(condition_text)?;
+
+    let condition = parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
+        text: condition_text.to_string(),
+    });
+
     let mut def = parse_static_line(remainder.trim())?;
     if def.condition.is_some() {
         return None;
@@ -601,6 +628,18 @@ fn parse_presence_filter(text: &str) -> Option<TypedFilter> {
             // Multiple color options — we'd need an Or filter; for now handle as simple card match
             return Some(TypedFilter::card());
         }
+    }
+
+    // "creature with power N or greater/less/more"
+    // Reuses parse_number so both digits and words ("four") are handled.
+    if let Some(rest) = trimmed.strip_prefix("creature with power ") {
+        let (n, remainder) = parse_number(rest)?;
+        let prop = match remainder.trim() {
+            "or greater" | "or more" => FilterProp::PowerGE { value: n as i32 },
+            "or less" => FilterProp::PowerLE { value: n as i32 },
+            _ => return None,
+        };
+        return Some(TypedFilter::creature().properties(vec![prop]));
     }
 
     // Simple core types
@@ -1568,6 +1607,57 @@ mod tests {
         assert!(matches!(
             def.condition,
             Some(StaticCondition::IsPresent { filter: Some(_) })
+        ));
+    }
+
+    #[test]
+    fn static_control_creature_with_power_ge() {
+        // "creature with power 4 or greater" — digit form
+        let def = parse_static_line(
+            "As long as you control a creature with power 4 or greater, Inspiring Commander gets +1/+1.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(matches!(
+            def.condition,
+            Some(StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(_))
+            })
+        ));
+        // Modifications should include PT buff
+        assert!(def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddPower { value: 1 })));
+    }
+
+    #[test]
+    fn static_control_creature_with_power_ge_word() {
+        // "creature with power four or greater" — English word form via parse_number
+        let def = parse_static_line(
+            "As long as you control a creature with power four or greater, Target gets +2/+0.",
+        )
+        .unwrap();
+        assert!(matches!(
+            def.condition,
+            Some(StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(_))
+            })
+        ));
+    }
+
+    #[test]
+    fn static_control_creature_with_power_le() {
+        // "creature with power 2 or less"
+        let def = parse_static_line(
+            "As long as you control a creature with power 2 or less, Target gets -1/-0.",
+        )
+        .unwrap();
+        assert!(matches!(
+            def.condition,
+            Some(StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(_))
+            })
         ));
     }
 
