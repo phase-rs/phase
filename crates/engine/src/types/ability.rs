@@ -623,6 +623,40 @@ pub enum TargetFilter {
     AttachedTo,
 }
 
+/// A measurable game quantity referenced in a static condition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum QuantityRef {
+    /// Number of cards in the controller's hand.
+    HandSize,
+    /// Controller's current life total.
+    LifeTotal,
+    /// Number of cards in the controller's graveyard.
+    GraveyardSize,
+}
+
+/// Comparison operator used in static conditions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum Comparator {
+    GT,
+    LT,
+    GE,
+    LE,
+    EQ,
+}
+
+impl Comparator {
+    pub fn evaluate(self, lhs: i32, rhs: i32) -> bool {
+        match self {
+            Comparator::GT => lhs > rhs,
+            Comparator::LT => lhs < rhs,
+            Comparator::GE => lhs >= rhs,
+            Comparator::LE => lhs <= rhs,
+            Comparator::EQ => lhs == rhs,
+        }
+    }
+}
+
 /// Condition for static ability applicability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
@@ -642,6 +676,13 @@ pub enum StaticCondition {
     /// Used for cards that choose a color on ETB and have color-conditional effects.
     ChosenColorIs {
         color: ManaColor,
+    },
+    /// True when a measurable game quantity satisfies a comparison against another quantity.
+    /// Covers: "the number of cards in your hand is greater than your life total", etc.
+    QuantityComparison {
+        lhs: QuantityRef,
+        comparator: Comparator,
+        rhs: QuantityRef,
     },
     /// Condition text that the parser could not yet decompose into a typed variant.
     /// Evaluated permissively (always true) so the static effect still applies.

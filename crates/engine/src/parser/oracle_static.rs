@@ -5,8 +5,9 @@ use super::oracle_effect::parse_effect_chain;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{parse_number, strip_reminder_text};
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-    DynamicPTValue, FilterProp, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+    AbilityDefinition, AbilityKind, ChosenSubtypeKind, Comparator, ContinuousModification,
+    ControllerRef, DynamicPTValue, FilterProp, QuantityRef, StaticCondition, StaticDefinition,
+    TargetFilter, TypedFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
@@ -576,6 +577,11 @@ fn parse_static_condition(text: &str) -> Option<StaticCondition> {
         return Some(condition);
     }
 
+    // "the number of [quantity] is [comparator] [quantity]"
+    if let Some(condition) = parse_quantity_comparison(&lower) {
+        return Some(condition);
+    }
+
     // "the chosen color is [color]"
     if let Some(color_name) = lower.strip_prefix("the chosen color is ") {
         use crate::types::mana::ManaColor;
@@ -711,6 +717,47 @@ fn parse_color_list(text: &str) -> Option<Vec<crate::types::mana::ManaColor>> {
         return Some(colors);
     }
 
+    None
+}
+
+/// Parse "the number of [quantity] is [comparator] [quantity]" into a QuantityComparison.
+fn parse_quantity_comparison(lower: &str) -> Option<StaticCondition> {
+    let rest = lower.strip_prefix("the number of ")?;
+    let (lhs_text, comparison) = rest.split_once(" is ")?;
+    let lhs = parse_quantity_ref(lhs_text)?;
+    let (comparator, rhs_text) = parse_comparator_prefix(comparison)?;
+    let rhs = parse_quantity_ref(rhs_text.trim())?;
+    Some(StaticCondition::QuantityComparison { lhs, comparator, rhs })
+}
+
+/// Map a quantity phrase to a QuantityRef.
+fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
+    match text.trim().trim_end_matches('.') {
+        "cards in your hand" => Some(QuantityRef::HandSize),
+        "your life total" => Some(QuantityRef::LifeTotal),
+        "cards in your graveyard" => Some(QuantityRef::GraveyardSize),
+        _ => None,
+    }
+}
+
+/// Strip a comparator prefix from a comparison clause, returning (Comparator, remainder).
+fn parse_comparator_prefix(text: &str) -> Option<(Comparator, &str)> {
+    // Longer prefixes must be tried before shorter ones to avoid partial matches.
+    if let Some(rest) = text.strip_prefix("greater than or equal to ") {
+        return Some((Comparator::GE, rest));
+    }
+    if let Some(rest) = text.strip_prefix("less than or equal to ") {
+        return Some((Comparator::LE, rest));
+    }
+    if let Some(rest) = text.strip_prefix("greater than ") {
+        return Some((Comparator::GT, rest));
+    }
+    if let Some(rest) = text.strip_prefix("less than ") {
+        return Some((Comparator::LT, rest));
+    }
+    if let Some(rest) = text.strip_prefix("equal to ") {
+        return Some((Comparator::EQ, rest));
+    }
     None
 }
 
@@ -1527,10 +1574,29 @@ mod tests {
     }
 
     #[test]
-    fn static_as_long_as_unrecognized_condition() {
-        // Conditions the parser can't yet decompose fall through to Unrecognized
+    fn static_as_long_as_hand_size_gt_life() {
+        use crate::types::ability::{Comparator, QuantityRef};
         let def = parse_static_line(
-            "As long as the number of cards in your hand is greater than your life total, this ability triggers.",
+            "As long as the number of cards in your hand is greater than your life total, enchanted creature has trample.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(matches!(
+            def.condition,
+            Some(StaticCondition::QuantityComparison {
+                lhs: QuantityRef::HandSize,
+                comparator: Comparator::GT,
+                rhs: QuantityRef::LifeTotal,
+            })
+        ));
+    }
+
+    #[test]
+    fn static_as_long_as_unrecognized_condition() {
+        // Conditions the parser cannot yet decompose fall through to Unrecognized.
+        // The whole "As long as X, Y" string is captured permissively so the effect still fires.
+        let def = parse_static_line(
+            "As long as you cast this spell from exile, enchanted creature gets +1/+1.",
         )
         .unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);

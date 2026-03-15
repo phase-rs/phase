@@ -5,7 +5,8 @@ use crate::game::devotion::count_devotion;
 use crate::game::filter::matches_target_filter;
 use crate::game::game_object::CounterType;
 use crate::types::ability::{
-    ContinuousModification, Duration, DynamicPTValue, StaticCondition, TargetFilter, TypedFilter,
+    ContinuousModification, Duration, DynamicPTValue, QuantityRef, StaticCondition, TargetFilter,
+    TypedFilter,
 };
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -86,6 +87,17 @@ fn evaluate_condition(state: &GameState, condition: &StaticCondition, controller
             .get(&source_id)
             .and_then(|obj| obj.chosen_color())
             .is_some_and(|chosen| &chosen == color),
+        StaticCondition::QuantityComparison { lhs, comparator, rhs } => {
+            let resolve = |qty: &QuantityRef| -> i32 {
+                let player = state.players.iter().find(|p| p.id == controller);
+                match qty {
+                    QuantityRef::HandSize => player.map_or(0, |p| p.hand.len() as i32),
+                    QuantityRef::LifeTotal => player.map_or(0, |p| p.life),
+                    QuantityRef::GraveyardSize => player.map_or(0, |p| p.graveyard.len() as i32),
+                }
+            };
+            comparator.clone().evaluate(resolve(lhs), resolve(rhs))
+        }
         StaticCondition::Unrecognized { .. } => true,
         StaticCondition::DuringYourTurn => state.active_player == controller,
         StaticCondition::None => true,
