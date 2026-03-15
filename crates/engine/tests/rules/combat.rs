@@ -1,49 +1,6 @@
 #![allow(unused_imports)]
 use super::*;
 
-use engine::game::combat::AttackTarget;
-use engine::game::scenario::GameRunner;
-
-/// Helper: drive the engine from PreCombatMain through combat to completion.
-///
-/// Sets up at PreCombatMain, passes priority twice to advance to DeclareAttackers,
-/// then submits attacker/blocker declarations. The engine auto-resolves combat
-/// damage + SBAs after blockers are declared.
-fn run_combat(
-    runner: &mut GameRunner,
-    attacker_ids: Vec<engine::types::identifiers::ObjectId>,
-    blocker_assignments: Vec<(
-        engine::types::identifiers::ObjectId,
-        engine::types::identifiers::ObjectId,
-    )>,
-) {
-    // Pass priority twice (both players) to advance through BeginCombat -> DeclareAttackers
-    runner.pass_both_players();
-
-    // Build attacks: all attackers target player 1 (default 2-player behavior)
-    let attacks: Vec<_> = attacker_ids
-        .iter()
-        .map(|&id| (id, AttackTarget::Player(P1)))
-        .collect();
-
-    // Declare attackers
-    runner
-        .act(GameAction::DeclareAttackers { attacks })
-        .expect("DeclareAttackers should succeed");
-
-    // Declare blockers (engine may auto-skip if defending player has no valid blockers)
-    if matches!(
-        runner.state().waiting_for,
-        WaitingFor::DeclareBlockers { .. }
-    ) {
-        runner
-            .act(GameAction::DeclareBlockers {
-                assignments: blocker_assignments,
-            })
-            .expect("DeclareBlockers should succeed");
-    }
-}
-
 /// CR 510.1: Unblocked attacker deals combat damage to defending player
 #[test]
 fn unblocked_attacker_deals_damage_to_player() {
@@ -203,15 +160,11 @@ fn multiple_attackers_mixed_blocking() {
         vec![(blocker, attacker1)],
     );
 
-    let state = runner.state();
     // Unblocked attacker2 (2/2) deals 2 damage to P1
-    let p1_life = state.players.iter().find(|p| p.id == P1).unwrap().life;
-    assert_eq!(
-        p1_life, 18,
-        "Unblocked 2/2 should deal 2 damage to defending player"
-    );
+    assert_eq!(runner.life(P1), 18, "Unblocked 2/2 should deal 2 damage to defending player");
 
     // Blocked exchange: 3/3 vs 2/2 -- blocker dies, attacker takes 2 damage
+    let state = runner.state();
     assert!(
         !state.battlefield.contains(&blocker),
         "2/2 blocker should die to 3/3 attacker"

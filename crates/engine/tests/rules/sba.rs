@@ -1,9 +1,8 @@
 #![allow(unused_imports)]
 use super::*;
 
-use engine::types::ability::{DamageAmount, Effect, TargetFilter, TargetRef};
+use engine::types::ability::TargetRef;
 use engine::types::game_state::StackEntryKind;
-use engine::types::identifiers::{CardId, ObjectId};
 
 /// CR 704.5g: Creature with lethal damage is destroyed by state-based actions.
 ///
@@ -184,44 +183,21 @@ fn negative_life_player_loses() {
 /// A 5/5 creature taking 1 deathtouch damage should be destroyed.
 #[test]
 fn deathtouch_damage_is_lethal() {
-    // Build state directly to test SBA integration with deathtouch damage.
-    // The GameScenario builder doesn't expose &mut state after build(),
-    // so we construct a GameState with pre-marked deathtouch damage.
-    let mut state = engine::types::game_state::GameState::new_two_player(42);
-    state.phase = Phase::PreCombatMain;
-    state.turn_number = 2;
-    state.waiting_for = WaitingFor::Priority { player: P0 };
-    state.priority_player = P0;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
 
-    let card_id = engine::types::identifiers::CardId(state.next_object_id);
-    let id = engine::game::zones::create_object(
-        &mut state,
-        card_id,
-        P1,
-        "Giant".to_string(),
-        Zone::Battlefield,
-    );
-    {
-        let obj = state.objects.get_mut(&id).unwrap();
-        obj.card_types
-            .core_types
-            .push(engine::types::card_type::CoreType::Creature);
-        obj.power = Some(5);
-        obj.toughness = Some(5);
-        obj.base_power = Some(5);
-        obj.base_toughness = Some(5);
-        // 1 damage from a deathtouch source
-        obj.damage_marked = 1;
-        obj.dealt_deathtouch_damage = true;
-    }
+    let giant_id = {
+        let mut b = scenario.add_creature(P1, "Giant", 5, 5);
+        b.with_damage_marked(1).with_deathtouch_damage();
+        b.id()
+    };
 
-    // Run SBAs via apply (pass priority triggers SBA check)
-    let result = engine::game::apply(&mut state, GameAction::PassPriority);
+    let mut runner = scenario.build();
+    let result = runner.act(GameAction::PassPriority);
     assert!(result.is_ok());
 
-    // The 5/5 with deathtouch damage should be destroyed
     assert_eq!(
-        state.objects[&id].zone,
+        runner.state().objects[&giant_id].zone,
         Zone::Graveyard,
         "5/5 with deathtouch damage should be destroyed by SBAs"
     );

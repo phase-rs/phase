@@ -113,6 +113,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
 pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let active = state.active_player;
+
+    // Prune "until your next turn" transient effects for the active player (Rule 514.2)
+    super::layers::prune_until_next_turn_effects(state, active);
     let to_untap: Vec<_> = state
         .battlefield
         .iter()

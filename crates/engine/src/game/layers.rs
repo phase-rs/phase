@@ -25,6 +25,18 @@ pub fn prune_end_of_turn_effects(state: &mut GameState) {
     }
 }
 
+/// Remove transient `UntilYourNextTurn` effects whose controller's turn is starting.
+/// Called at the start of the active player's turn (untap step) per CR 514.2.
+pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: crate::types::player::PlayerId) {
+    let before = state.transient_continuous_effects.len();
+    state.transient_continuous_effects.retain(|e| {
+        !(e.duration == Duration::UntilYourNextTurn && e.controller == active_player)
+    });
+    if state.transient_continuous_effects.len() != before {
+        state.layers_dirty = true;
+    }
+}
+
 /// Remove transient effects whose source has left the battlefield.
 /// Called when an object leaves the battlefield.
 pub fn prune_host_left_effects(state: &mut GameState, departed_id: ObjectId) {
@@ -213,7 +225,7 @@ fn gather_active_continuous_effects(state: &GameState) -> Vec<ActiveContinuousEf
             for modification in &def.modifications {
                 effects.push(ActiveContinuousEffect {
                     source_id: id,
-                    def_index: def_idx,
+                    def_index: Some(def_idx),
                     layer: modification.layer(),
                     timestamp: obj.timestamp,
                     modification: modification.clone(),
@@ -268,7 +280,7 @@ fn gather_transient_continuous_effects(
         for modification in &tce.modifications {
             effects.push(ActiveContinuousEffect {
                 source_id: tce.source_id,
-                def_index: usize::MAX,
+                def_index: None,
                 layer: modification.layer(),
                 timestamp: tce.timestamp,
                 modification: modification.clone(),
@@ -370,7 +382,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
     // If b adds/removes abilities and a's filter checks for abilities
     let b_changes_abilities = matches!(
         &b.modification,
-        ContinuousModification::AddAbility { .. } | ContinuousModification::RemoveAllAbilities
+        ContinuousModification::GrantAbility { .. } | ContinuousModification::RemoveAllAbilities
     );
 
     if b_changes_abilities && filter_references_ability(&a.affected_filter) {
@@ -556,7 +568,9 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                     obj.toughness = Some(val);
                 }
             }
-            ContinuousModification::AddAbility { .. } => { /* TODO: future */ }
+            ContinuousModification::GrantAbility { definition } => {
+                obj.abilities.push(*definition.clone());
+            }
         }
     }
 }

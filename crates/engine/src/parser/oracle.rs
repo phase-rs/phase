@@ -2114,11 +2114,13 @@ mod tests {
         );
         assert!(r.abilities.is_empty());
         assert_eq!(r.statics.len(), 1);
-        assert!(r.statics[0].modifications.contains(
-            &crate::types::ability::ContinuousModification::AddAbility {
-                ability: "{T}: Add two mana of any one color.".to_string(),
-            }
-        ));
+        let grant = r.statics[0].modifications.iter().find(|m| {
+            matches!(m, crate::types::ability::ContinuousModification::GrantAbility { .. })
+        });
+        assert!(grant.is_some(), "should contain a GrantAbility modification");
+        if let crate::types::ability::ContinuousModification::GrantAbility { definition } = grant.unwrap() {
+            assert_eq!(definition.kind, crate::types::ability::AbilityKind::Activated);
+        }
     }
 
     #[test]

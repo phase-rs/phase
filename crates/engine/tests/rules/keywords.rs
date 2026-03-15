@@ -1,40 +1,6 @@
 #![allow(unused_imports)]
 use super::*;
 
-use engine::game::scenario::GameRunner;
-
-/// Helper: drive the engine from PreCombatMain through combat to completion.
-fn run_combat(
-    runner: &mut GameRunner,
-    attacker_ids: Vec<engine::types::identifiers::ObjectId>,
-    blocker_assignments: Vec<(
-        engine::types::identifiers::ObjectId,
-        engine::types::identifiers::ObjectId,
-    )>,
-) {
-    use engine::game::combat::AttackTarget;
-    use engine::types::player::PlayerId;
-    runner.pass_both_players();
-    let attacks: Vec<_> = attacker_ids
-        .iter()
-        .map(|&id| (id, AttackTarget::Player(PlayerId(1))))
-        .collect();
-    runner
-        .act(GameAction::DeclareAttackers { attacks })
-        .expect("DeclareAttackers should succeed");
-    // Engine may auto-skip DeclareBlockers if defending player has no valid blockers
-    if matches!(
-        runner.state().waiting_for,
-        WaitingFor::DeclareBlockers { .. }
-    ) {
-        runner
-            .act(GameAction::DeclareBlockers {
-                assignments: blocker_assignments,
-            })
-            .expect("DeclareBlockers should succeed");
-    }
-}
-
 /// CR 702.2c + CR 702.19b: Deathtouch + trample assigns lethal (1) to each blocker, tramples rest
 #[test]
 fn deathtouch_trample_assigns_one_to_blocker_tramples_rest() {
@@ -60,9 +26,8 @@ fn deathtouch_trample_assigns_one_to_blocker_tramples_rest() {
         !state.battlefield.contains(&blocker_id),
         "Blocker should die to 1 deathtouch damage"
     );
-    let p1_life = state.players.iter().find(|p| p.id == P1).unwrap().life;
     assert_eq!(
-        p1_life, 16,
+        runner.life(P1), 16,
         "4 trample damage should go to defending player (5 power - 1 lethal)"
     );
 
@@ -87,14 +52,8 @@ fn lifelink_gains_life_on_combat_damage() {
 
     run_combat(&mut runner, vec![attacker_id], vec![]);
 
-    let state = runner.state();
-    let p0_life = state.players.iter().find(|p| p.id == P0).unwrap().life;
-    let p1_life = state.players.iter().find(|p| p.id == P1).unwrap().life;
-    assert_eq!(
-        p0_life, 23,
-        "Lifelink attacker's controller should gain 3 life"
-    );
-    assert_eq!(p1_life, 17, "Defending player should take 3 damage");
+    assert_eq!(runner.life(P0), 23, "Lifelink attacker's controller should gain 3 life");
+    assert_eq!(runner.life(P1), 17, "Defending player should take 3 damage");
 }
 
 /// CR 702.15b + CR 510.1b: Lifelink + first strike -- life gained in first strike step
@@ -116,20 +75,15 @@ fn lifelink_first_strike_gains_life_in_first_step() {
         vec![(blocker_id, attacker_id)],
     );
 
-    let state = runner.state();
     // First strike step: 2/2 lifelink+first_strike deals 2 to 3/3 blocker. P0 gains 2 life.
     // 2 damage < 3 toughness, blocker survives first strike step.
     // Regular step: 3/3 blocker deals 3 to 2/2 attacker (lethal). Attacker dies.
     // The 2/2 first_strike already dealt damage so does NOT deal again in regular step.
-    let p0_life = state.players.iter().find(|p| p.id == P0).unwrap().life;
-    assert_eq!(
-        p0_life, 22,
-        "P0 should gain 2 life from first strike lifelink damage"
-    );
+    assert_eq!(runner.life(P0), 22, "P0 should gain 2 life from first strike lifelink damage");
 
     // Attacker (2/2) took 3 damage from blocker in regular step -- should die
     assert!(
-        !state.battlefield.contains(&attacker_id),
+        !runner.state().battlefield.contains(&attacker_id),
         "2/2 attacker should die to 3/3 blocker's regular damage"
     );
 }
@@ -148,12 +102,10 @@ fn flying_cannot_be_blocked_by_ground_creature() {
     let mut runner = scenario.build();
 
     // Advance to DeclareAttackers
-    use engine::game::combat::AttackTarget;
-    use engine::types::player::PlayerId;
     runner.pass_both_players();
     runner
         .act(GameAction::DeclareAttackers {
-            attacks: vec![(attacker_id, AttackTarget::Player(PlayerId(1)))],
+            attacks: vec![(attacker_id, AttackTarget::Player(P1))],
         })
         .expect("DeclareAttackers should succeed");
 
@@ -226,24 +178,15 @@ fn trample_lifelink_excess_damage() {
         vec![(blocker_id, attacker_id)],
     );
 
-    let state = runner.state();
     // 5/5 trample+lifelink vs 2/2 blocker:
     // 2 damage to blocker (lethal), 3 tramples to player
     // Lifelink: controller gains 5 life (total damage dealt = 2 + 3)
-    let p0_life = state.players.iter().find(|p| p.id == P0).unwrap().life;
-    let p1_life = state.players.iter().find(|p| p.id == P1).unwrap().life;
     assert!(
-        !state.battlefield.contains(&blocker_id),
+        !runner.state().battlefield.contains(&blocker_id),
         "2/2 blocker should die"
     );
-    assert_eq!(
-        p1_life, 17,
-        "3 trample damage should go to defending player"
-    );
-    assert_eq!(
-        p0_life, 25,
-        "P0 should gain 5 life from lifelink (2 to blocker + 3 to player)"
-    );
+    assert_eq!(runner.life(P1), 17, "3 trample damage should go to defending player");
+    assert_eq!(runner.life(P0), 25, "P0 should gain 5 life from lifelink (2 to blocker + 3 to player)");
 
     // Snapshot for regression anchoring
     insta::assert_json_snapshot!("keywords_trample_lifelink_excess", runner.snapshot());
@@ -265,10 +208,7 @@ fn vigilance_attacker_does_not_tap() {
     runner.pass_both_players();
     runner
         .act(GameAction::DeclareAttackers {
-            attacks: vec![(
-                attacker_id,
-                engine::game::combat::AttackTarget::Player(engine::types::player::PlayerId(1)),
-            )],
+            attacks: vec![(attacker_id, AttackTarget::Player(P1))],
         })
         .expect("Vigilance creature should be able to attack");
 

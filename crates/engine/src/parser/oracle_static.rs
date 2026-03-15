@@ -1,10 +1,12 @@
 use std::str::FromStr;
 
+use super::oracle_cost::parse_oracle_cost;
+use super::oracle_effect::parse_effect_chain;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{parse_number, strip_reminder_text};
 use crate::types::ability::{
-    ChosenSubtypeKind, ContinuousModification, ControllerRef, DynamicPTValue, FilterProp,
-    StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+    AbilityDefinition, AbilityKind, ChosenSubtypeKind, ContinuousModification, ControllerRef,
+    DynamicPTValue, FilterProp, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
@@ -883,8 +885,8 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         modifications.push(ContinuousModification::SetToughness { value: toughness });
     }
 
-    for ability in extract_quoted_abilities(text) {
-        modifications.push(ContinuousModification::AddAbility { ability });
+    for definition in parse_quoted_abilities(text) {
+        modifications.push(ContinuousModification::GrantAbility { definition: Box::new(definition) });
     }
 
     if let Some(keyword_text) = extract_keyword_clause(text) {
@@ -932,16 +934,21 @@ fn parse_single_pt_value(text: &str) -> Option<i32> {
     value.replace('+', "").parse::<i32>().ok()
 }
 
-fn extract_quoted_abilities(text: &str) -> Vec<String> {
-    let mut abilities = Vec::new();
+/// Extract quoted ability text from Oracle text and parse each into a typed AbilityDefinition.
+///
+/// Quoted abilities like `"{T}: Add two mana of any one color."` are parsed by splitting
+/// at the cost separator (`:` after mana/tap symbols) and reusing `parse_oracle_cost` +
+/// `parse_effect_chain`. Non-activated quoted text is parsed as a spell-like effect chain.
+fn parse_quoted_abilities(text: &str) -> Vec<AbilityDefinition> {
+    let mut definitions = Vec::new();
     let mut start = None;
 
     for (idx, ch) in text.char_indices() {
         if ch == '"' {
             if let Some(open) = start.take() {
-                let ability = text[open + 1..idx].trim();
-                if !ability.is_empty() {
-                    abilities.push(ability.to_string());
+                let ability_text = text[open + 1..idx].trim();
+                if !ability_text.is_empty() {
+                    definitions.push(parse_quoted_ability(ability_text));
                 }
             } else {
                 start = Some(idx);
@@ -949,7 +956,53 @@ fn extract_quoted_abilities(text: &str) -> Vec<String> {
         }
     }
 
-    abilities
+    definitions
+}
+
+/// Parse a single quoted ability string into a typed AbilityDefinition.
+///
+/// If the text contains a cost separator (e.g., `{T}: ...`), it's treated as an
+/// activated ability with the cost parsed separately. Otherwise it's treated as
+/// a spell-like effect.
+fn parse_quoted_ability(text: &str) -> AbilityDefinition {
+    // Find the cost/effect separator — look for ": " after a cost-like prefix
+    // (mana symbols, {T}, loyalty, etc.)
+    if let Some(colon_pos) = find_cost_separator(text) {
+        let cost_text = text[..colon_pos].trim();
+        let effect_text = text[colon_pos + 1..].trim();
+        let cost = parse_oracle_cost(cost_text);
+        let mut def = parse_effect_chain(effect_text, AbilityKind::Activated);
+        def.cost = Some(cost);
+        def.description = Some(text.to_string());
+        def
+    } else {
+        // No cost separator — treat as spell-like ability text
+        let mut def = parse_effect_chain(text, AbilityKind::Spell);
+        def.description = Some(text.to_string());
+        def
+    }
+}
+
+/// Find the position of the cost/effect separator colon in ability text.
+///
+/// Looks for `: ` or `:\n` that appears after cost-like content (mana symbols,
+/// {T}, numeric loyalty). Returns the byte offset of the colon, or None.
+fn find_cost_separator(text: &str) -> Option<usize> {
+    // Walk through looking for ':' that follows a closing brace or known cost prefix
+    for (idx, ch) in text.char_indices() {
+        if ch == ':' && idx > 0 {
+            let prefix = &text[..idx];
+            // Must have cost-like content before the colon
+            let has_cost = prefix.contains('{')
+                || prefix.trim().parse::<i32>().is_ok()
+                || prefix.trim().starts_with('+')
+                || prefix.trim().starts_with('\u{2212}'); // minus sign for loyalty
+            if has_cost {
+                return Some(idx);
+            }
+        }
+    }
+    None
 }
 
 /// Split a keyword list like "flying and trample" or "flying, trample, and haste".
@@ -1737,11 +1790,15 @@ mod tests {
     fn static_enchanted_land_has_quoted_ability() {
         let def = parse_static_line("Enchanted land has \"{T}: Add two mana of any one color.\"")
             .unwrap();
-        assert!(def
-            .modifications
-            .contains(&ContinuousModification::AddAbility {
-                ability: "{T}: Add two mana of any one color.".to_string(),
-            }));
+        // Should produce a GrantAbility with a typed activated AbilityDefinition
+        let grant = def.modifications.iter().find(|m| {
+            matches!(m, ContinuousModification::GrantAbility { .. })
+        });
+        assert!(grant.is_some(), "should contain a GrantAbility modification");
+        if let ContinuousModification::GrantAbility { definition } = grant.unwrap() {
+            assert_eq!(definition.kind, AbilityKind::Activated);
+            assert!(definition.cost.is_some());
+        }
     }
 
     #[test]

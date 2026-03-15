@@ -1887,8 +1887,8 @@ pub enum ContinuousModification {
     RemoveKeyword {
         keyword: Keyword,
     },
-    AddAbility {
-        ability: String,
+    GrantAbility {
+        definition: Box<AbilityDefinition>,
     },
     RemoveAllAbilities,
     AddType {
@@ -2302,8 +2302,14 @@ mod tests {
             ContinuousModification::RemoveKeyword {
                 keyword: Keyword::Defender,
             },
-            ContinuousModification::AddAbility {
-                ability: "Hexproof".to_string(),
+            ContinuousModification::GrantAbility {
+                definition: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Unimplemented {
+                        name: "Hexproof".to_string(),
+                        description: None,
+                    },
+                )),
             },
             ContinuousModification::RemoveAllAbilities,
             ContinuousModification::AddType {

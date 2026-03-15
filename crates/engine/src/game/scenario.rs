@@ -491,6 +491,18 @@ impl<'a> CardBuilder<'a> {
         self.obj().additional_cost = Some(cost);
         self
     }
+
+    /// Pre-mark damage on this permanent (for SBA / deathtouch tests).
+    pub fn with_damage_marked(&mut self, damage: u32) -> &mut Self {
+        self.obj().damage_marked = damage;
+        self
+    }
+
+    /// Mark that this permanent has been dealt damage from a deathtouch source.
+    pub fn with_deathtouch_damage(&mut self) -> &mut Self {
+        self.obj().dealt_deathtouch_damage = true;
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -513,6 +525,14 @@ impl GameRunner {
         &self.state
     }
 
+    /// Get a mutable reference to the current game state.
+    ///
+    /// Use this escape hatch to configure game state that the builder doesn't
+    /// expose (e.g., `waiting_for`, `combat`, `active_player`).
+    pub fn state_mut(&mut self) -> &mut GameState {
+        &mut self.state
+    }
+
     /// Pass priority for both players (P0 then P1, or whichever order is appropriate).
     pub fn pass_both_players(&mut self) {
         // Pass twice -- once for each player
@@ -532,6 +552,31 @@ impl GameRunner {
                 break;
             }
         }
+    }
+
+    /// Get a player's life total.
+    pub fn life(&self, player: PlayerId) -> i32 {
+        self.state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .map(|p| p.life)
+            .unwrap_or(0)
+    }
+
+    /// Count objects on the battlefield owned by a player.
+    pub fn battlefield_count(&self, player: PlayerId) -> usize {
+        self.state
+            .battlefield
+            .iter()
+            .filter(|&&id| {
+                self.state
+                    .objects
+                    .get(&id)
+                    .map(|o| o.owner == player)
+                    .unwrap_or(false)
+            })
+            .count()
     }
 
     /// Produce a `GameSnapshot` of the current state (no events).

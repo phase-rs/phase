@@ -67,7 +67,7 @@ impl ContinuousModification {
             | ContinuousModification::SetDynamicToughness { .. } => Layer::CharDef,
             ContinuousModification::AddKeyword { .. }
             | ContinuousModification::RemoveKeyword { .. }
-            | ContinuousModification::AddAbility { .. }
+            | ContinuousModification::GrantAbility { .. }
             | ContinuousModification::RemoveAllAbilities => Layer::Ability,
             ContinuousModification::AddType { .. }
             | ContinuousModification::RemoveType { .. }
@@ -86,7 +86,9 @@ impl ContinuousModification {
 #[derive(Debug, Clone)]
 pub struct ActiveContinuousEffect {
     pub source_id: ObjectId,
-    pub def_index: usize,
+    /// Index into the source object's `static_definitions` array, or `None` for
+    /// transient effects that have no backing static definition on any object.
+    pub def_index: Option<usize>,
     pub layer: Layer,
     pub timestamp: u64,
     pub modification: ContinuousModification,
@@ -164,8 +166,14 @@ mod tests {
             Layer::Ability
         );
         assert_eq!(
-            ContinuousModification::AddAbility {
-                ability: "Hexproof".to_string()
+            ContinuousModification::GrantAbility {
+                definition: Box::new(crate::types::ability::AbilityDefinition::new(
+                    crate::types::ability::AbilityKind::Spell,
+                    crate::types::ability::Effect::Unimplemented {
+                        name: "Hexproof".to_string(),
+                        description: None,
+                    },
+                ))
             }
             .layer(),
             Layer::Ability
