@@ -200,6 +200,7 @@ pub fn create_object_from_card_face(
 
     let obj = state.objects.get_mut(&obj_id).expect("just created");
     obj.card_types = card_face.card_type.clone();
+    obj.base_card_types = card_face.card_type.clone();
     obj.mana_cost = card_face.mana_cost.clone();
     obj.power = power;
     obj.toughness = toughness;
@@ -245,6 +246,7 @@ pub fn create_commander_from_card_face(
 
     let obj = state.objects.get_mut(&obj_id).expect("just created");
     obj.card_types = card_face.card_type.clone();
+    obj.base_card_types = card_face.card_type.clone();
     obj.mana_cost = card_face.mana_cost.clone();
     obj.power = power;
     obj.toughness = toughness;

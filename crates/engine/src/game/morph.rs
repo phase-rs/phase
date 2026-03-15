@@ -78,6 +78,7 @@ pub fn play_face_down(
         core_types: vec![CoreType::Creature],
         subtypes: vec![],
     };
+    obj.base_card_types = obj.card_types.clone();
     obj.keywords = Vec::new();
     obj.base_keywords = Vec::new();
     obj.abilities = Vec::new();
@@ -161,6 +162,7 @@ pub fn turn_face_up(
     obj.base_power = back_face.power;
     obj.base_toughness = back_face.toughness;
     obj.card_types = back_face.card_types;
+    obj.base_card_types = obj.card_types.clone();
     obj.keywords = back_face.keywords.clone();
     obj.base_keywords = back_face.keywords;
     obj.abilities = back_face.abilities;
@@ -244,6 +246,7 @@ pub fn manifest(
         core_types: vec![CoreType::Creature],
         subtypes: vec![],
     };
+    obj.base_card_types = obj.card_types.clone();
     obj.keywords = Vec::new();
     obj.base_keywords = Vec::new();
     obj.abilities = Vec::new();

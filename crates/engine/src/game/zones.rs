@@ -70,6 +70,7 @@ pub fn move_to_zone(
             obj_mut.base_power = back_face.power;
             obj_mut.base_toughness = back_face.toughness;
             obj_mut.card_types = back_face.card_types;
+            obj_mut.base_card_types = obj_mut.card_types.clone();
             obj_mut.keywords = back_face.keywords.clone();
             obj_mut.base_keywords = back_face.keywords;
             obj_mut.abilities = back_face.abilities;

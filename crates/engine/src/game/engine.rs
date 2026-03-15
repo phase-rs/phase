@@ -66,6 +66,7 @@ fn sync_waiting_for(state: &mut GameState, waiting_for: &WaitingFor) {
 
 fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResult, EngineError> {
     let mut events = Vec::new();
+    let mut triggers_processed_inline = false;
 
     // Validate and process action against current WaitingFor
     let waiting_for = match (&state.waiting_for.clone(), action) {
@@ -266,6 +267,10 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
 
             // Process triggers for AttackersDeclared
             triggers::process_triggers(state, &events);
+            triggers_processed_inline = true;
+            if let Some(waiting_for) = begin_pending_trigger_target_selection(state)? {
+                return Ok(ActionResult { events, waiting_for });
+            }
 
             if attacks.is_empty() {
                 // No attackers: skip to EndCombat
@@ -276,6 +281,11 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 state.combat = None;
                 turns::advance_phase(state, &mut events);
                 turns::auto_advance(state, &mut events)
+            } else if !state.stack.is_empty() {
+                priority::reset_priority(state);
+                WaitingFor::Priority {
+                    player: state.active_player,
+                }
             } else {
                 // Advance to DeclareBlockers
                 turns::advance_phase(state, &mut events);
@@ -291,10 +301,21 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
 
             // Process triggers for BlockersDeclared
             triggers::process_triggers(state, &events);
+            triggers_processed_inline = true;
+            if let Some(waiting_for) = begin_pending_trigger_target_selection(state)? {
+                return Ok(ActionResult { events, waiting_for });
+            }
 
-            // Advance to CombatDamage
-            turns::advance_phase(state, &mut events);
-            turns::auto_advance(state, &mut events)
+            if !state.stack.is_empty() {
+                priority::reset_priority(state);
+                WaitingFor::Priority {
+                    player: state.active_player,
+                }
+            } else {
+                // Advance to CombatDamage
+                turns::advance_phase(state, &mut events);
+                turns::auto_advance(state, &mut events)
+            }
         }
         (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacement { index }) => {
             match super::replacement::continue_replacement(state, index, &mut events) {
@@ -1019,7 +1040,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
     };
 
     // Run state-based actions after every action (except during mulligan/game over)
-    if matches!(waiting_for, WaitingFor::Priority { .. }) {
+    if matches!(waiting_for, WaitingFor::Priority { .. }) && !triggers_processed_inline {
         sba::check_state_based_actions(state, &mut events);
 
         // Check exile returns -- must happen after SBAs (which may move sources off battlefield)
@@ -1055,26 +1076,13 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
         let stack_before = state.stack.len();
         triggers::process_triggers(state, &filtered_events);
 
-        // Check if a trigger needs target selection from the player
-        if let Some(trigger) = state.pending_trigger.as_ref() {
-            let target_slots = build_target_slots(state, &trigger.ability)?;
-            if !target_slots.is_empty() {
-                let player = trigger.controller;
-                let target_constraints = trigger.target_constraints.clone();
-                let selection = begin_target_selection(&target_slots, &target_constraints)?;
-                let wf = WaitingFor::TriggerTargetSelection {
-                    player,
-                    target_slots,
-                    target_constraints,
-                    selection,
-                };
-                state.waiting_for = wf.clone();
-                derive_display_state(state);
-                return Ok(ActionResult {
-                    events,
-                    waiting_for: wf,
-                });
-            }
+        if let Some(wf) = begin_pending_trigger_target_selection(state)? {
+            state.waiting_for = wf.clone();
+            derive_display_state(state);
+            return Ok(ActionResult {
+                events,
+                waiting_for: wf,
+            });
         }
 
         // If triggers were placed on stack, grant priority to active player
@@ -1101,6 +1109,29 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
         events,
         waiting_for,
     })
+}
+
+fn begin_pending_trigger_target_selection(
+    state: &mut GameState,
+) -> Result<Option<WaitingFor>, EngineError> {
+    let Some(trigger) = state.pending_trigger.as_ref() else {
+        return Ok(None);
+    };
+
+    let target_slots = build_target_slots(state, &trigger.ability)?;
+    if target_slots.is_empty() {
+        return Ok(None);
+    }
+
+    let player = trigger.controller;
+    let target_constraints = trigger.target_constraints.clone();
+    let selection = begin_target_selection(&target_slots, &target_constraints)?;
+    Ok(Some(WaitingFor::TriggerTargetSelection {
+        player,
+        target_slots,
+        target_constraints,
+        selection,
+    }))
 }
 
 /// Apply ETB counters from replacement effects to an object entering the battlefield.
@@ -3981,12 +4012,15 @@ mod exile_return_tests {
 #[cfg(test)]
 mod phase_trigger_regression_tests {
     use super::*;
+    use crate::game::combat::AttackTarget;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, GainLifePlayer, LifeAmount, TriggerDefinition,
+        AbilityDefinition, AbilityKind, ControllerRef, Effect, FilterProp, GainLifePlayer,
+        LifeAmount, TargetFilter, TriggerDefinition, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
+    use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
@@ -4170,6 +4204,149 @@ mod phase_trigger_regression_tests {
                 player: PlayerId(1)
             }
         ));
+    }
+
+    #[test]
+    fn attack_trigger_resolves_before_combat_damage_and_only_once() {
+        let mut state = new_game(42);
+        state.turn_number = 5;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let ajani = create_object(
+            &mut state,
+            CardId(400),
+            PlayerId(0),
+            "Ajani's Pridemate".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&ajani).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.color = vec![ManaColor::White];
+            obj.base_color = vec![ManaColor::White];
+            obj.entered_battlefield_turn = Some(4);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::LifeGained)
+                    .valid_target(TargetFilter::Controller)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::PutCounter {
+                            counter_type: "P1P1".to_string(),
+                            count: 1,
+                            target: TargetFilter::SelfRef,
+                        },
+                    )),
+            );
+        }
+
+        let linden = create_object(
+            &mut state,
+            CardId(401),
+            PlayerId(0),
+            "Linden, the Steadfast Queen".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&linden).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+            obj.base_power = Some(3);
+            obj.base_toughness = Some(3);
+            obj.color = vec![ManaColor::White];
+            obj.base_color = vec![ManaColor::White];
+            obj.entered_battlefield_turn = Some(4);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Attacks)
+                    .valid_card(TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::HasColor {
+                                color: "White".to_string(),
+                            }]),
+                    ))
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::GainLife {
+                            amount: LifeAmount::Fixed(1),
+                            player: GainLifePlayer::Controller,
+                        },
+                    )),
+            );
+        }
+
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![ajani, linden],
+            valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        };
+
+        let declare_result = apply(
+            &mut state,
+            GameAction::DeclareAttackers {
+                attacks: vec![(ajani, AttackTarget::Player(PlayerId(1)))],
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            declare_result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        assert_eq!(state.stack.len(), 1, "Linden should create exactly one stack entry");
+        assert_eq!(state.phase, Phase::DeclareAttackers);
+
+        apply(&mut state, GameAction::PassPriority).unwrap();
+        let linden_resolve = apply(&mut state, GameAction::PassPriority).unwrap();
+
+        assert!(matches!(
+            linden_resolve.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        assert_eq!(state.players[0].life, 21, "Linden should gain life once");
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Ajani's Pridemate should trigger from Linden's life gain"
+        );
+        assert_eq!(state.objects[&ajani].power, Some(2));
+        assert_eq!(state.objects[&ajani].toughness, Some(2));
+
+        apply(&mut state, GameAction::PassPriority).unwrap();
+        let pridemate_resolve = apply(&mut state, GameAction::PassPriority).unwrap();
+
+        assert!(matches!(
+            pridemate_resolve.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        assert!(state.stack.is_empty());
+        assert_eq!(state.objects[&ajani].power, Some(3));
+        assert_eq!(state.objects[&ajani].toughness, Some(3));
+
+        apply(&mut state, GameAction::PassPriority).unwrap();
+        let combat_result = apply(&mut state, GameAction::PassPriority).unwrap();
+
+        assert!(matches!(combat_result.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.phase, Phase::PostCombatMain);
+        assert_eq!(
+            state.players[1].life, 17,
+            "Ajani should deal 3 after receiving the pre-damage counter"
+        );
+        assert_eq!(state.players[0].life, 21, "No duplicate Linden life gain should occur");
+        assert_eq!(state.objects[&ajani].power, Some(3));
+        assert_eq!(state.objects[&ajani].toughness, Some(3));
     }
 
     #[test]

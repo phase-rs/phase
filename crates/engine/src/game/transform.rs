@@ -54,6 +54,7 @@ pub fn transform_permanent(
         obj.base_power = back_face.power;
         obj.base_toughness = back_face.toughness;
         obj.card_types = back_face.card_types;
+        obj.base_card_types = obj.card_types.clone();
         obj.keywords = back_face.keywords.clone();
         obj.base_keywords = back_face.keywords;
         obj.abilities = back_face.abilities;
@@ -82,6 +83,7 @@ pub fn transform_permanent(
         obj.base_power = back_face.power;
         obj.base_toughness = back_face.toughness;
         obj.card_types = back_face.card_types;
+        obj.base_card_types = obj.card_types.clone();
         obj.keywords = back_face.keywords.clone();
         obj.base_keywords = back_face.keywords;
         obj.abilities = back_face.abilities;
@@ -130,6 +132,7 @@ mod tests {
             core_types: vec![CoreType::Creature],
             subtypes: vec!["Human".to_string(), "Werewolf".to_string()],
         };
+        obj.base_card_types = obj.card_types.clone();
         obj.keywords = vec![Keyword::Vigilance];
         obj.base_keywords = vec![Keyword::Vigilance];
         obj.abilities = vec![crate::types::ability::AbilityDefinition::new(

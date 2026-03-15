@@ -91,6 +91,7 @@ pub struct GameObject {
     // Base characteristics (for layer system)
     pub base_power: Option<i32>,
     pub base_toughness: Option<i32>,
+    pub base_card_types: CardType,
     pub base_keywords: Vec<Keyword>,
     pub base_color: Vec<ManaColor>,
 
@@ -181,6 +182,7 @@ impl GameObject {
             back_face: None,
             base_power: None,
             base_toughness: None,
+            base_card_types: CardType::default(),
             base_keywords: Vec::new(),
             base_color: Vec::new(),
             timestamp: 0,

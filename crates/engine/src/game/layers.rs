@@ -33,10 +33,14 @@ pub fn evaluate_layers(state: &mut GameState) {
             if obj.base_toughness.is_some() {
                 obj.toughness = obj.base_toughness;
             }
-            obj.keywords = obj.base_keywords.clone();
-            if !obj.base_color.is_empty() {
-                obj.color = obj.base_color.clone();
+            if !obj.base_card_types.supertypes.is_empty()
+                || !obj.base_card_types.core_types.is_empty()
+                || !obj.base_card_types.subtypes.is_empty()
+            {
+                obj.card_types = obj.base_card_types.clone();
             }
+            obj.keywords = obj.base_keywords.clone();
+            obj.color = obj.base_color.clone();
         }
     }
 
@@ -477,6 +481,7 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -501,6 +506,7 @@ mod tests {
         let ts = state.next_timestamp();
         let obj = state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
         obj.power = Some(power);
         obj.toughness = Some(toughness);
         obj.base_power = Some(power);
@@ -616,6 +622,7 @@ mod tests {
         {
             let obj = state.objects.get_mut(&artifact).unwrap();
             obj.card_types.core_types.push(CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
             obj.power = Some(0);
             obj.toughness = Some(0);
             obj.base_power = Some(0);
@@ -691,6 +698,7 @@ mod tests {
         {
             let obj = state.objects.get_mut(&artifact).unwrap();
             obj.card_types.core_types.push(CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
             obj.power = Some(0);
             obj.toughness = Some(0);
             obj.base_power = Some(0);
@@ -959,6 +967,88 @@ mod tests {
             "Bear returns to base P/T after lord leaves"
         );
         assert_eq!(bear_obj.toughness, Some(2));
+    }
+
+    #[test]
+    fn test_type_change_reverts_to_base_when_source_leaves() {
+        let mut state = setup();
+
+        let artifact = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        let art_ts = state.next_timestamp();
+        {
+            let obj = state.objects.get_mut(&artifact).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = art_ts;
+        }
+
+        let animator = make_creature(&mut state, "Animator", 1, 1, PlayerId(0));
+        let artifact_you_ctrl =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You));
+        state
+            .objects
+            .get_mut(&animator)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::continuous()
+                    .affected(artifact_you_ctrl)
+                    .modifications(vec![ContinuousModification::AddType {
+                        core_type: CoreType::Creature,
+                    }]),
+            );
+
+        evaluate_layers(&mut state);
+        assert!(state.objects[&artifact]
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature));
+
+        state.battlefield.retain(|&id| id != animator);
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&artifact).unwrap();
+        assert_eq!(obj.card_types.core_types, vec![CoreType::Artifact]);
+    }
+
+    #[test]
+    fn test_color_change_reverts_to_base_when_source_leaves() {
+        let mut state = setup();
+
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        let painter = make_creature(&mut state, "Painter", 1, 1, PlayerId(0));
+
+        state
+            .objects
+            .get_mut(&painter)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject(bear))
+                    .modifications(vec![ContinuousModification::SetColor {
+                        colors: vec![ManaColor::Blue],
+                    }]),
+            );
+
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&bear].color, vec![ManaColor::Blue]);
+
+        state.battlefield.retain(|&id| id != painter);
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        assert!(
+            state.objects[&bear].color.is_empty(),
+            "Color should revert to printed/base color when the source leaves"
+        );
     }
 
     #[test]

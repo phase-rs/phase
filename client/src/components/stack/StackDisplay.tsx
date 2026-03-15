@@ -8,8 +8,8 @@ import { getStackCardSize } from "../board/boardSizing.ts";
 
 const EMPTY_STACK: StackEntryType[] = [];
 
-const STAGGER_Y = 28;
-const STAGGER_X = 8;
+const STAGGER_Y = 24;
+const STAGGER_X = 10;
 const PANEL_PADDING_X = 16;
 const PANEL_PADDING_Y = 14;
 const PANEL_HEADER_HEIGHT = 36;
@@ -59,7 +59,7 @@ export function StackDisplay() {
 
   if (fullStack.length === 0) return null;
 
-  const displayStack = [...fullStack].reverse();
+  const displayStack = fullStack;
   const rawCardSize = getStackCardSize(fullStack.length);
   const widthScale =
     viewport.width < 640 ? 0.58 :
@@ -168,14 +168,14 @@ export function StackDisplay() {
                     key={entry.id}
                     entry={entry}
                     index={index}
-                    isTop={index === 0}
+                    isTop={index === displayStack.length - 1}
                     isPending={pendingEntry != null && entry.id === pendingEntry.id}
                     cardSize={cardSize}
                     style={{
                       position: "absolute",
                       top: index * staggerY,
                       left: index * staggerX,
-                      zIndex: displayStack.length - index,
+                      zIndex: index + 1,
                     }}
                   />
                 ))}
