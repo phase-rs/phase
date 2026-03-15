@@ -180,6 +180,9 @@ pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) {
 /// choose which cards to discard down to maximum hand size, or `None` if
 /// cleanup completes immediately.
 pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
+    // Prune "until end of turn" transient continuous effects (Rule 514.2)
+    super::layers::prune_end_of_turn_effects(state);
+
     // Check day/night transition at cleanup (per Rule 727.2)
     day_night::check_day_night_transition(state, events);
 

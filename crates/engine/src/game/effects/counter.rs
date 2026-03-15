@@ -1,7 +1,8 @@
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
 use crate::game::zones;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+    Duration, Effect, EffectError, EffectKind, ResolvedAbility, StaticDefinition, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, StackEntryKind};
@@ -89,9 +90,10 @@ pub fn resolve(
     Ok(())
 }
 
-/// Apply a source_static to the counter's source, targeting the countered ability's
-/// source permanent. The static is bound with `SpecificObject(source_permanent_id)`
-/// so it naturally stops applying when the counter's source leaves the battlefield.
+/// Register a transient continuous effect for a counter's source_static.
+///
+/// The effect targets the countered ability's source permanent and persists
+/// as long as the counter source (e.g., Tidebinder) remains on the battlefield.
 fn apply_source_static(
     state: &mut GameState,
     counter_source_id: ObjectId,
@@ -108,15 +110,20 @@ fn apply_source_static(
         return;
     }
 
-    let mut bound = static_def.clone();
-    bound.affected = Some(TargetFilter::SpecificObject(source_permanent_id));
+    let controller = state
+        .objects
+        .get(&counter_source_id)
+        .map(|o| o.controller)
+        .unwrap_or_default();
 
-    if let Some(obj) = state.objects.get_mut(&counter_source_id) {
-        if !obj.granted_static_definitions.contains(&bound) {
-            obj.granted_static_definitions.push(bound);
-            state.layers_dirty = true;
-        }
-    }
+    state.add_transient_continuous_effect(
+        counter_source_id,
+        controller,
+        Duration::UntilHostLeavesPlay,
+        TargetFilter::SpecificObject(source_permanent_id),
+        static_def.modifications.clone(),
+        static_def.condition.clone(),
+    );
 }
 
 #[cfg(test)]
@@ -234,7 +241,7 @@ mod tests {
 
     #[test]
     fn counter_ability_applies_source_static_to_counter_source() {
-        use crate::types::ability::{ContinuousModification, StaticDefinition};
+        use crate::types::ability::{ContinuousModification, Duration, StaticDefinition};
 
         let mut state = GameState::new_two_player(42);
 
@@ -288,21 +295,26 @@ mod tests {
         // Ability should be removed from stack
         assert!(state.stack.is_empty(), "ability should be countered");
 
-        // Tidebinder should now have a static definition targeting the source permanent
-        let tidebinder_obj = state.objects.get(&tidebinder).unwrap();
+        // Should register a transient continuous effect targeting the source permanent
         assert_eq!(
-            tidebinder_obj.granted_static_definitions.len(),
+            state.transient_continuous_effects.len(),
             1,
-            "Tidebinder should have one static definition"
+            "Should have one transient continuous effect"
         );
-        let bound_static = &tidebinder_obj.granted_static_definitions[0];
+        let tce = &state.transient_continuous_effects[0];
+        assert_eq!(tce.source_id, tidebinder, "source should be Tidebinder");
         assert_eq!(
-            bound_static.affected,
-            Some(TargetFilter::SpecificObject(source_permanent)),
-            "static should target the source permanent"
+            tce.affected,
+            TargetFilter::SpecificObject(source_permanent),
+            "should target the source permanent"
         );
         assert_eq!(
-            bound_static.modifications,
+            tce.duration,
+            Duration::UntilHostLeavesPlay,
+            "should persist while Tidebinder is on battlefield"
+        );
+        assert_eq!(
+            tce.modifications,
             vec![ContinuousModification::RemoveAllAbilities],
             "should remove all abilities"
         );
@@ -357,9 +369,8 @@ mod tests {
         resolve(&mut state, &counter_ability, &mut events).unwrap();
 
         // Spell countered, but source_static should NOT be applied (it's a spell, not an ability)
-        let tidebinder_obj = state.objects.get(&tidebinder).unwrap();
         assert!(
-            tidebinder_obj.granted_static_definitions.is_empty(),
+            state.transient_continuous_effects.is_empty(),
             "source_static should not apply when countering a spell"
         );
     }

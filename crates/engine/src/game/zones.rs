@@ -84,7 +84,6 @@ pub fn move_to_zone(
             obj_mut.base_replacement_definitions = obj_mut.replacement_definitions.clone();
             obj_mut.static_definitions = back_face.static_definitions;
             obj_mut.base_static_definitions = obj_mut.static_definitions.clone();
-            obj_mut.granted_static_definitions.clear();
             obj_mut.color = back_face.color.clone();
             obj_mut.base_color = back_face.color;
             obj_mut.back_face = Some(current_back);
@@ -121,6 +120,11 @@ pub fn move_to_zone(
     // Mark layers dirty when objects enter or leave the battlefield
     if from == Zone::Battlefield || to == Zone::Battlefield {
         state.layers_dirty = true;
+    }
+
+    // Prune host-bound transient effects when a permanent leaves the battlefield
+    if from == Zone::Battlefield {
+        super::layers::prune_host_left_effects(state, object_id);
     }
 
     super::restrictions::record_zone_change(state, object_id, from, to);

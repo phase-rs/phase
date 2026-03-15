@@ -97,7 +97,6 @@ pub fn play_face_down(
     obj.base_replacement_definitions = Vec::new();
     obj.static_definitions = Vec::new();
     obj.base_static_definitions = Vec::new();
-    obj.granted_static_definitions = Vec::new();
     obj.color = Vec::new();
     obj.base_color = Vec::new();
 
@@ -189,7 +188,6 @@ pub fn turn_face_up(
     obj.base_replacement_definitions = obj.replacement_definitions.clone();
     obj.static_definitions = back_face.static_definitions;
     obj.base_static_definitions = obj.static_definitions.clone();
-    obj.granted_static_definitions.clear();
     obj.color = back_face.color.clone();
     obj.base_color = back_face.color;
     obj.back_face = None;
@@ -284,7 +282,6 @@ pub fn manifest(
     obj.base_replacement_definitions = Vec::new();
     obj.static_definitions = Vec::new();
     obj.base_static_definitions = Vec::new();
-    obj.granted_static_definitions = Vec::new();
     obj.color = Vec::new();
     obj.base_color = Vec::new();
     obj.back_face = Some(original);

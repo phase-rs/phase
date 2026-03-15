@@ -86,7 +86,6 @@ pub struct GameObject {
     pub trigger_definitions: Vec<TriggerDefinition>,
     pub replacement_definitions: Vec<ReplacementDefinition>,
     pub static_definitions: Vec<StaticDefinition>,
-    pub granted_static_definitions: Vec<StaticDefinition>,
     pub color: Vec<ManaColor>,
 
     // Back face data for double-faced cards (DFCs)
@@ -186,7 +185,6 @@ impl GameObject {
             trigger_definitions: Vec::new(),
             replacement_definitions: Vec::new(),
             static_definitions: Vec::new(),
-            granted_static_definitions: Vec::new(),
             color: Vec::new(),
             back_face: None,
             base_power: None,

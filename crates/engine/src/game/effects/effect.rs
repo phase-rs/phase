@@ -1,14 +1,17 @@
 use crate::game::filter;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+    Duration, Effect, EffectError, EffectKind, ResolvedAbility, StaticDefinition, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 
-/// Effect effect: creates a temporary game effect (emblem-like).
-/// Reads typed GenericEffect { static_abilities, duration } fields.
-/// Applies referenced static abilities directly to targeted objects.
+/// Effect handler: creates transient continuous effects from a GenericEffect.
+///
+/// Resolved GenericEffect definitions are registered as state-level transient
+/// continuous effects with explicit durations, rather than being pushed onto
+/// individual game objects. This ensures proper layer evaluation and cleanup.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -16,13 +19,18 @@ pub fn resolve(
 ) -> Result<(), EffectError> {
     if let Effect::GenericEffect {
         static_abilities,
+        duration,
         target,
-        ..
     } = &ability.effect
     {
-        // Apply each static ability definition to targets
+        let dur = ability
+            .duration
+            .clone()
+            .or(duration.clone())
+            .unwrap_or(Duration::UntilEndOfTurn);
+
         for static_def in static_abilities {
-            apply_static_effect(state, ability, static_def.clone(), target.as_ref());
+            register_transient_effect(state, ability, static_def, target.as_ref(), &dur);
         }
     }
 
@@ -34,27 +42,45 @@ pub fn resolve(
     Ok(())
 }
 
-fn apply_static_effect(
+fn register_transient_effect(
     state: &mut GameState,
     ability: &ResolvedAbility,
-    static_def: StaticDefinition,
+    static_def: &StaticDefinition,
     target_filter: Option<&TargetFilter>,
+    duration: &Duration,
 ) {
+    // Targeted effects: register one transient effect per target object
     if !ability.targets.is_empty() {
         for target in &ability.targets {
             if let TargetRef::Object(obj_id) = target {
-                let mut bound_static_def = static_def.clone();
-                bound_static_def.affected = Some(TargetFilter::SelfRef);
-                apply_static_to_object(state, *obj_id, bound_static_def);
+                state.add_transient_continuous_effect(
+                    ability.source_id,
+                    ability.controller,
+                    duration.clone(),
+                    TargetFilter::SpecificObject(*obj_id),
+                    static_def.modifications.clone(),
+                    static_def.condition.clone(),
+                );
             }
         }
         return;
     }
 
+    // Non-targeted: resolve the affected filter
     match target_filter.or(static_def.affected.as_ref()) {
-        Some(TargetFilter::SelfRef) => apply_static_to_object(state, ability.source_id, static_def),
+        Some(TargetFilter::SelfRef) => {
+            state.add_transient_continuous_effect(
+                ability.source_id,
+                ability.controller,
+                duration.clone(),
+                TargetFilter::SpecificObject(ability.source_id),
+                static_def.modifications.clone(),
+                static_def.condition.clone(),
+            );
+        }
         Some(TargetFilter::Player | TargetFilter::Controller | TargetFilter::None) | None => {}
         Some(filter) => {
+            // Broadcast filter: find matching objects at resolution time and bind each
             let matching: Vec<ObjectId> = state
                 .battlefield
                 .iter()
@@ -70,17 +96,15 @@ fn apply_static_effect(
                 .copied()
                 .collect();
             for obj_id in matching {
-                apply_static_to_object(state, obj_id, static_def.clone());
+                state.add_transient_continuous_effect(
+                    ability.source_id,
+                    ability.controller,
+                    duration.clone(),
+                    TargetFilter::SpecificObject(obj_id),
+                    static_def.modifications.clone(),
+                    static_def.condition.clone(),
+                );
             }
-        }
-    }
-}
-
-fn apply_static_to_object(state: &mut GameState, obj_id: ObjectId, static_def: StaticDefinition) {
-    if let Some(obj) = state.objects.get_mut(&obj_id) {
-        if !obj.granted_static_definitions.contains(&static_def) {
-            obj.granted_static_definitions.push(static_def);
-            state.layers_dirty = true;
         }
     }
 }
@@ -99,7 +123,7 @@ mod tests {
     use crate::types::zones::Zone;
 
     #[test]
-    fn generic_effect_applies_to_source_for_self_ref() {
+    fn generic_effect_registers_transient_effect_for_self_ref() {
         let mut state = GameState::new_two_player(42);
         let source = create_object(
             &mut state,
@@ -117,7 +141,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::GenericEffect {
-                static_abilities: vec![static_def.clone()],
+                static_abilities: vec![static_def],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
             },
@@ -130,13 +154,21 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert!(state.objects[&source]
-            .granted_static_definitions
-            .contains(&static_def));
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+        let tce = &state.transient_continuous_effects[0];
+        assert_eq!(tce.source_id, source);
+        assert_eq!(tce.affected, TargetFilter::SpecificObject(source));
+        assert_eq!(tce.duration, Duration::UntilEndOfTurn);
+        assert_eq!(
+            tce.modifications,
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }]
+        );
     }
 
     #[test]
-    fn generic_effect_applies_to_matching_battlefield_filter() {
+    fn generic_effect_registers_transient_effect_for_matching_filter() {
         let mut state = GameState::new_two_player(42);
         let source = create_object(
             &mut state,
@@ -185,7 +217,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::GenericEffect {
-                static_abilities: vec![static_def.clone()],
+                static_abilities: vec![static_def],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
             },
@@ -198,16 +230,16 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert!(state.objects[&your_creature]
-            .granted_static_definitions
-            .contains(&static_def));
-        assert!(!state.objects[&opp_creature]
-            .granted_static_definitions
-            .contains(&static_def));
+        // Should create transient effect for your_creature only
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+        assert_eq!(
+            state.transient_continuous_effects[0].affected,
+            TargetFilter::SpecificObject(your_creature)
+        );
     }
 
     #[test]
-    fn generic_effect_binds_targeted_object_statics_to_self_ref() {
+    fn generic_effect_binds_targeted_object_to_specific_object() {
         let mut state = GameState::new_two_player(42);
         let source = create_object(
             &mut state,
@@ -267,13 +299,10 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(state.objects[&target_creature].granted_static_definitions.len(), 1);
+        assert_eq!(state.transient_continuous_effects.len(), 1);
         assert_eq!(
-            state.objects[&target_creature].granted_static_definitions[0].affected,
-            Some(TargetFilter::SelfRef)
+            state.transient_continuous_effects[0].affected,
+            TargetFilter::SpecificObject(target_creature)
         );
-        assert!(state.objects[&other_creature]
-            .granted_static_definitions
-            .is_empty());
     }
 }

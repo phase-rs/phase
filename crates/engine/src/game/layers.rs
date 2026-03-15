@@ -5,13 +5,37 @@ use crate::game::devotion::count_devotion;
 use crate::game::filter::matches_target_filter;
 use crate::game::game_object::CounterType;
 use crate::types::ability::{
-    ContinuousModification, DynamicPTValue, StaticCondition, TargetFilter, TypedFilter,
+    ContinuousModification, Duration, DynamicPTValue, StaticCondition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::layers::{ActiveContinuousEffect, Layer};
 use crate::types::statics::StaticMode;
+
+/// Remove transient effects that have expired based on their duration.
+/// Called during cleanup (end of turn) to prune `UntilEndOfTurn` effects.
+pub fn prune_end_of_turn_effects(state: &mut GameState) {
+    let before = state.transient_continuous_effects.len();
+    state
+        .transient_continuous_effects
+        .retain(|e| e.duration != Duration::UntilEndOfTurn);
+    if state.transient_continuous_effects.len() != before {
+        state.layers_dirty = true;
+    }
+}
+
+/// Remove transient effects whose source has left the battlefield.
+/// Called when an object leaves the battlefield.
+pub fn prune_host_left_effects(state: &mut GameState, departed_id: ObjectId) {
+    let before = state.transient_continuous_effects.len();
+    state.transient_continuous_effects.retain(|e| {
+        !(e.duration == Duration::UntilHostLeavesPlay && e.source_id == departed_id)
+    });
+    if state.transient_continuous_effects.len() != before {
+        state.layers_dirty = true;
+    }
+}
 
 /// Evaluate all continuous effects through the seven-layer system.
 ///
@@ -49,11 +73,8 @@ pub fn evaluate_layers(state: &mut GameState) {
             if !obj.base_replacement_definitions.is_empty() {
                 obj.replacement_definitions = obj.base_replacement_definitions.clone();
             }
-            if !obj.base_static_definitions.is_empty() || !obj.granted_static_definitions.is_empty()
-            {
+            if !obj.base_static_definitions.is_empty() {
                 obj.static_definitions = obj.base_static_definitions.clone();
-                obj.static_definitions
-                    .extend(obj.granted_static_definitions.clone());
             }
             obj.color = obj.base_color.clone();
         }
@@ -204,7 +225,59 @@ fn gather_active_continuous_effects(state: &GameState) -> Vec<ActiveContinuousEf
         }
     }
 
+    // Gather transient continuous effects from state-level storage
+    gather_transient_continuous_effects(state, &mut effects);
+
     effects
+}
+
+/// Collect active transient effects, filtering out expired host-bound effects.
+fn gather_transient_continuous_effects(
+    state: &GameState,
+    effects: &mut Vec<ActiveContinuousEffect>,
+) {
+    for tce in &state.transient_continuous_effects {
+        // UntilHostLeavesPlay: skip if source is no longer on the battlefield
+        if tce.duration == Duration::UntilHostLeavesPlay
+            && !state.battlefield.contains(&tce.source_id)
+        {
+            continue;
+        }
+
+        // Evaluate condition (same logic as intrinsic statics)
+        if let Some(ref condition) = tce.condition {
+            let controller = tce.controller;
+            match condition {
+                StaticCondition::DevotionGE { colors, threshold } => {
+                    let devotion = count_devotion(state, controller, colors);
+                    if devotion < *threshold {
+                        continue;
+                    }
+                }
+                StaticCondition::DuringYourTurn => {
+                    if state.active_player != controller {
+                        continue;
+                    }
+                }
+                StaticCondition::None => {}
+                // Other conditions not expected on transient effects currently
+                _ => {}
+            }
+        }
+
+        for modification in &tce.modifications {
+            effects.push(ActiveContinuousEffect {
+                source_id: tce.source_id,
+                def_index: usize::MAX,
+                layer: modification.layer(),
+                timestamp: tce.timestamp,
+                modification: modification.clone(),
+                affected_filter: tce.affected.clone(),
+                mode: StaticMode::Continuous,
+                characteristic_defining: false,
+            });
+        }
+    }
 }
 
 /// Evaluate a comparison string like "LT5", "GE7" against a value.

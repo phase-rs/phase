@@ -68,7 +68,6 @@ pub fn transform_permanent(
         obj.base_replacement_definitions = obj.replacement_definitions.clone();
         obj.static_definitions = back_face.static_definitions;
         obj.base_static_definitions = obj.static_definitions.clone();
-        obj.granted_static_definitions.clear();
         obj.color = back_face.color.clone();
         obj.base_color = back_face.color;
 
@@ -108,7 +107,6 @@ pub fn transform_permanent(
         obj.base_replacement_definitions = obj.replacement_definitions.clone();
         obj.static_definitions = back_face.static_definitions;
         obj.base_static_definitions = obj.static_definitions.clone();
-        obj.granted_static_definitions.clear();
         obj.color = back_face.color.clone();
         obj.base_color = back_face.color;
 

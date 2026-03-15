@@ -5,8 +5,9 @@ use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    AbilityCost, AbilityDefinition, AdditionalCost, ChoiceType, ChoiceValue, ModalChoice,
-    ResolvedAbility, TargetFilter, TargetRef, TriggerCondition,
+    AbilityCost, AbilityDefinition, AdditionalCost, ChoiceType, ChoiceValue,
+    ContinuousModification, Duration, ModalChoice, ResolvedAbility, StaticCondition, TargetFilter,
+    TargetRef, TriggerCondition,
 };
 use super::events::GameEvent;
 use super::format::FormatConfig;
@@ -319,6 +320,12 @@ pub struct GameState {
     pub layers_dirty: bool,
     pub next_timestamp: u64,
 
+    // Runtime continuous effects (from resolved spells/abilities, not printed card text)
+    #[serde(default)]
+    pub transient_continuous_effects: Vec<TransientContinuousEffect>,
+    #[serde(default)]
+    pub next_continuous_effect_id: u64,
+
     // Day/night tracking
     #[serde(default)]
     pub day_night: Option<DayNight>,
@@ -433,6 +440,25 @@ pub struct GameState {
     pub all_card_names: Vec<String>,
 }
 
+/// A runtime-generated continuous effect stored at state level.
+///
+/// Unlike `StaticDefinition` (which represents intrinsic/printed card text),
+/// transient effects are created by resolving spells and abilities at runtime
+/// (e.g., "target creature gets +3/+3 until end of turn"). They participate
+/// in layer evaluation alongside intrinsic statics but have explicit lifetimes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransientContinuousEffect {
+    pub id: u64,
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+    pub timestamp: u64,
+    pub duration: Duration,
+    pub affected: TargetFilter,
+    pub modifications: Vec<ContinuousModification>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<StaticCondition>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingReplacement {
     pub proposed: ProposedEvent,
@@ -480,6 +506,8 @@ impl GameState {
             post_replacement_effect: None,
             layers_dirty: true,
             next_timestamp: 1,
+            transient_continuous_effects: Vec::new(),
+            next_continuous_effect_id: 1,
             day_night: None,
             spells_cast_this_turn: 0,
             pending_trigger: None,
@@ -535,6 +563,34 @@ impl GameState {
         let ts = self.next_timestamp;
         self.next_timestamp += 1;
         ts
+    }
+
+    /// Register a transient continuous effect and mark layers dirty.
+    pub fn add_transient_continuous_effect(
+        &mut self,
+        source_id: ObjectId,
+        controller: PlayerId,
+        duration: Duration,
+        affected: TargetFilter,
+        modifications: Vec<ContinuousModification>,
+        condition: Option<StaticCondition>,
+    ) -> u64 {
+        let id = self.next_continuous_effect_id;
+        self.next_continuous_effect_id += 1;
+        let timestamp = self.next_timestamp();
+        self.transient_continuous_effects
+            .push(TransientContinuousEffect {
+                id,
+                source_id,
+                controller,
+                timestamp,
+                duration,
+                affected,
+                modifications,
+                condition,
+            });
+        self.layers_dirty = true;
+        id
     }
 }
 
