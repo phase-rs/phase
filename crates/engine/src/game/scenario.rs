@@ -38,7 +38,7 @@ pub const P1: PlayerId = PlayerId(1);
 /// Mutable builder that constructs a GameState with predefined board state,
 /// phase, turn, and card objects -- all with zero filesystem dependencies.
 pub struct GameScenario {
-    state: GameState,
+    pub(crate) state: GameState,
 }
 
 impl Default for GameScenario {

@@ -24,18 +24,14 @@ pub fn derive_display_state(state: &mut GameState) {
         obj.available_mana_colors.clear();
     }
 
-    // Compute per-card devotion for cards with CheckSVar/DevotionGE conditions
+    // Compute per-card devotion for cards with DevotionGE conditions
     // (Theros gods pattern — derive colors from the card's own base_color)
     let devotion_cards: Vec<_> = state
         .objects
         .iter()
         .filter_map(|(&id, obj)| {
             let has_devotion_static = obj.static_definitions.iter().any(|def| {
-                matches!(
-                    &def.condition,
-                    Some(StaticCondition::CheckSVar { .. })
-                        | Some(StaticCondition::DevotionGE { .. })
-                )
+                matches!(&def.condition, Some(StaticCondition::DevotionGE { .. }))
             });
             if has_devotion_static && !obj.base_color.is_empty() {
                 let devotion = count_devotion(state, obj.controller, &obj.base_color);

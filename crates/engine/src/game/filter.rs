@@ -98,17 +98,14 @@ fn filter_inner(
             let source_attached_to = source_obj.and_then(|s| s.attached_to);
             let source_chosen_creature_type =
                 source_obj.and_then(|s| s.chosen_creature_type().map(|t| t.to_string()));
+            let source_ctx = SourceContext {
+                id: source_id,
+                controller: source_controller,
+                attached_to: source_attached_to,
+                chosen_creature_type: source_chosen_creature_type.as_deref(),
+            };
             properties.iter().all(|p| {
-                matches_filter_prop(
-                    p,
-                    state,
-                    obj,
-                    object_id,
-                    source_id,
-                    source_controller,
-                    source_attached_to,
-                    source_chosen_creature_type.as_deref(),
-                )
+                matches_filter_prop(p, state, obj, object_id, &source_ctx)
             })
         }
         TargetFilter::Not { filter: inner } => {
@@ -152,16 +149,21 @@ fn matches_type_filter(tf: &TypeFilter, obj: &GameObject) -> bool {
     }
 }
 
+/// Context about the source of an ability, used during filter property evaluation.
+struct SourceContext<'a> {
+    id: ObjectId,
+    controller: Option<PlayerId>,
+    attached_to: Option<ObjectId>,
+    chosen_creature_type: Option<&'a str>,
+}
+
 /// Check if an object satisfies a single FilterProp.
 fn matches_filter_prop(
     prop: &FilterProp,
     state: &GameState,
     obj: &GameObject,
     object_id: ObjectId,
-    _source_id: ObjectId,
-    source_controller: Option<PlayerId>,
-    source_attached_to: Option<ObjectId>,
-    source_chosen_creature_type: Option<&str>,
+    source: &SourceContext<'_>,
 ) -> bool {
     match prop {
         FilterProp::Token => {
@@ -238,14 +240,14 @@ fn matches_filter_prop(
         }
         FilterProp::InZone { zone } => obj.zone == *zone,
         FilterProp::Owned { controller } => match controller {
-            ControllerRef::You => source_controller == Some(obj.owner),
+            ControllerRef::You => source.controller == Some(obj.owner),
             ControllerRef::Opponent => {
-                source_controller.is_some() && source_controller != Some(obj.owner)
+                source.controller.is_some() && source.controller != Some(obj.owner)
             }
         },
-        FilterProp::EnchantedBy => source_attached_to == Some(object_id),
-        FilterProp::EquippedBy => source_attached_to == Some(object_id),
-        FilterProp::Another => object_id != _source_id,
+        FilterProp::EnchantedBy => source.attached_to == Some(object_id),
+        FilterProp::EquippedBy => source.attached_to == Some(object_id),
+        FilterProp::Another => object_id != source.id,
         FilterProp::HasColor { color } => {
             use crate::types::mana::ManaColor;
             let mana_color = match color.as_str() {
@@ -271,7 +273,7 @@ fn matches_filter_prop(
                 Err(_) => true, // Unknown supertype — permissive
             }
         }
-        FilterProp::IsChosenCreatureType => match source_chosen_creature_type {
+        FilterProp::IsChosenCreatureType => match source.chosen_creature_type {
             Some(chosen) => obj
                 .card_types
                 .subtypes

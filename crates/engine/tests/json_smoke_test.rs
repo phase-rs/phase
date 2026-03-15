@@ -7,15 +7,15 @@
 use std::path::Path;
 
 use engine::database::card_db::CardDatabase;
-use engine::game::apply;
-use engine::game::deck_loading::create_object_from_card_face;
+use engine::game::combat::AttackTarget;
+use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{AbilityCost, AbilityKind, Effect, ManaProduction, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card::CardLayout;
 use engine::types::game_state::WaitingFor;
 use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
-use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 fn data_dir() -> std::path::PathBuf {
@@ -134,56 +134,27 @@ fn test_scryfall_oracle_id_populated() {
 fn test_smoke_game_cast_spell() {
     let db = load_test_db();
 
-    // Get card faces from loaded database
-    let forest_face = db
-        .get_face_by_name("Forest")
-        .expect("Forest should be loaded");
-    let bolt_face = db
-        .get_face_by_name("Lightning Bolt")
-        .expect("Lightning Bolt should be loaded");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let forest_id = scenario.add_real_card(P0, "Forest", Zone::Battlefield, &db);
+    let bolt_id = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, &db);
 
-    // Set up game state at main phase
-    let mut state = engine::game::new_game(42);
-    state.turn_number = 2;
-    state.phase = Phase::PreCombatMain;
-    state.active_player = PlayerId(0);
-    state.priority_player = PlayerId(0);
-    state.waiting_for = WaitingFor::Priority {
-        player: PlayerId(0),
-    };
-
-    // Add Forest to P0's battlefield
-    let forest_id = create_object_from_card_face(&mut state, forest_face, PlayerId(0));
-    {
-        let obj = state.objects.get_mut(&forest_id).unwrap();
-        obj.zone = Zone::Battlefield;
-        obj.entered_battlefield_turn = Some(1);
-    }
-    state.battlefield.push(forest_id);
-    state.players[0].library.retain(|id| *id != forest_id);
+    let mut runner = scenario.build();
 
     assert!(
-        !state.objects[&forest_id].abilities.is_empty(),
+        !runner.state().objects[&forest_id].abilities.is_empty(),
         "Forest game object should have a mana ability"
     );
+    assert_eq!(runner.life(P1), 20, "P1 starts at 20 life");
 
-    // Add Lightning Bolt to P0's hand
-    let bolt_id = create_object_from_card_face(&mut state, bolt_face, PlayerId(0));
-    let bolt_card_id = state.objects[&bolt_id].card_id;
-    {
-        let obj = state.objects.get_mut(&bolt_id).unwrap();
-        obj.zone = Zone::Hand;
-    }
-    state.players[0].hand.push(bolt_id);
-    state.players[0].library.retain(|id| *id != bolt_id);
-
-    assert_eq!(state.players[1].life, 20, "P1 starts at 20 life");
+    let bolt_card_id = runner.state().objects[&bolt_id].card_id;
 
     // Add red mana to P0's pool
-    state
+    runner
+        .state_mut()
         .players
         .iter_mut()
-        .find(|p| p.id == PlayerId(0))
+        .find(|p| p.id == P0)
         .unwrap()
         .mana_pool
         .add(ManaUnit {
@@ -194,14 +165,12 @@ fn test_smoke_game_cast_spell() {
         });
 
     // Cast Lightning Bolt
-    let result = apply(
-        &mut state,
-        GameAction::CastSpell {
+    let result = runner
+        .act(GameAction::CastSpell {
             card_id: bolt_card_id,
             targets: vec![],
-        },
-    )
-    .unwrap();
+        })
+        .unwrap();
 
     assert!(
         matches!(result.waiting_for, WaitingFor::TargetSelection { .. }),
@@ -209,115 +178,67 @@ fn test_smoke_game_cast_spell() {
     );
 
     // Select player 1 as target
-    let result = apply(
-        &mut state,
-        GameAction::SelectTargets {
-            targets: vec![TargetRef::Player(PlayerId(1))],
-        },
-    )
-    .unwrap();
+    let result = runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(P1)],
+        })
+        .unwrap();
     assert!(
         matches!(result.waiting_for, WaitingFor::Priority { .. }),
         "After selecting targets, should return to priority"
     );
-    assert_eq!(state.stack.len(), 1, "Bolt should be on the stack");
+    assert_eq!(runner.state().stack.len(), 1, "Bolt should be on the stack");
 
     // Both players pass priority to resolve
-    apply(&mut state, GameAction::PassPriority).unwrap();
-    apply(&mut state, GameAction::PassPriority).unwrap();
+    runner.pass_both_players();
 
     assert!(
-        state.stack.is_empty(),
+        runner.state().stack.is_empty(),
         "Stack should be empty after resolution"
     );
-    assert_eq!(
-        state.players[1].life, 17,
-        "P1 should have 17 life after Lightning Bolt (20 - 3)"
-    );
+    assert_eq!(runner.life(P1), 17, "P1 should have 17 life after Lightning Bolt (20 - 3)");
 }
 
 #[test]
 fn test_smoke_game_combat_damage() {
     let db = load_test_db();
 
-    let bears_face = db
-        .get_face_by_name("Grizzly Bears")
-        .expect("Grizzly Bears should be loaded");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bears_id = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, &db);
 
-    let mut state = engine::game::new_game(42);
-    state.turn_number = 2;
-    state.phase = Phase::PreCombatMain;
-    state.active_player = PlayerId(0);
-    state.priority_player = PlayerId(0);
-    state.waiting_for = WaitingFor::Priority {
-        player: PlayerId(0),
-    };
+    let mut runner = scenario.build();
 
-    let bears_id = create_object_from_card_face(&mut state, bears_face, PlayerId(0));
-    {
-        let obj = state.objects.get_mut(&bears_id).unwrap();
-        obj.zone = Zone::Battlefield;
-        obj.entered_battlefield_turn = Some(1);
-    }
-    state.battlefield.push(bears_id);
-    state.players[0].library.retain(|id| *id != bears_id);
+    assert_eq!(runner.life(P1), 20);
 
-    assert_eq!(state.players[1].life, 20);
-
-    // Advance to combat
-    apply(&mut state, GameAction::PassPriority).unwrap();
-    apply(&mut state, GameAction::PassPriority).unwrap();
-
-    for _ in 0..10 {
-        if matches!(state.waiting_for, WaitingFor::DeclareAttackers { .. }) {
-            break;
-        }
-        let _ = apply(&mut state, GameAction::PassPriority);
-    }
+    // Advance from PreCombatMain to DeclareAttackers
+    runner.pass_both_players();
 
     assert!(
-        matches!(state.waiting_for, WaitingFor::DeclareAttackers { .. }),
+        matches!(runner.state().waiting_for, WaitingFor::DeclareAttackers { .. }),
         "Should be waiting for DeclareAttackers, got {:?}",
-        state.waiting_for
+        runner.state().waiting_for
     );
 
-    apply(
-        &mut state,
-        GameAction::DeclareAttackers {
-            attacks: vec![(
-                bears_id,
-                engine::game::combat::AttackTarget::Player(engine::types::player::PlayerId(1)),
-            )],
-        },
-    )
-    .unwrap();
-
-    for _ in 0..10 {
-        if matches!(state.waiting_for, WaitingFor::DeclareBlockers { .. }) {
-            break;
-        }
-        let _ = apply(&mut state, GameAction::PassPriority);
-    }
-
-    if matches!(state.waiting_for, WaitingFor::DeclareBlockers { .. }) {
-        apply(
-            &mut state,
-            GameAction::DeclareBlockers {
-                assignments: vec![],
-            },
-        )
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(bears_id, AttackTarget::Player(P1))],
+        })
         .unwrap();
+
+    if matches!(runner.state().waiting_for, WaitingFor::DeclareBlockers { .. }) {
+        runner
+            .act(GameAction::DeclareBlockers { assignments: vec![] })
+            .unwrap();
     }
 
+    // Pass priority through combat damage resolution
     for _ in 0..20 {
-        if state.players[1].life < 20 {
+        if runner.life(P1) < 20 {
             break;
         }
-        let _ = apply(&mut state, GameAction::PassPriority);
+        let _ = runner.act(GameAction::PassPriority);
     }
 
-    assert_eq!(
-        state.players[1].life, 18,
-        "P1 should have 18 life after Grizzly Bears combat damage (20 - 2)"
-    );
+    assert_eq!(runner.life(P1), 18, "P1 should have 18 life after Grizzly Bears combat damage (20 - 2)");
 }

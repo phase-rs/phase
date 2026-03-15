@@ -638,9 +638,10 @@ pub enum StaticCondition {
         #[serde(default)]
         filter: Option<TargetFilter>,
     },
-    CheckSVar {
-        var: String,
-        compare: String,
+    /// Condition text that the parser could not yet decompose into a typed variant.
+    /// Evaluated permissively (always true) so the static effect still applies.
+    Unrecognized {
+        text: String,
     },
     DuringYourTurn,
     None,
@@ -2423,9 +2424,8 @@ mod tests {
                         .into(),
                 ),
             },
-            StaticCondition::CheckSVar {
-                var: "X".to_string(),
-                compare: "GE5".to_string(),
+            StaticCondition::Unrecognized {
+                text: "some complex condition".to_string(),
             },
             StaticCondition::None,
         ];

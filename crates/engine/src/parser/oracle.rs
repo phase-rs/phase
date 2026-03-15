@@ -1258,7 +1258,7 @@ fn parse_mode_ast(text: &str) -> ModeAst {
     }
 }
 
-fn split_short_label_prefix<'a>(text: &'a str, max_words: usize) -> Option<(&'a str, &'a str)> {
+fn split_short_label_prefix(text: &str, max_words: usize) -> Option<(&str, &str)> {
     for sep in [" — ", " – ", " - "] {
         if let Some(pos) = text.find(sep) {
             let prefix = text[..pos].trim();

@@ -29,6 +29,7 @@ pub mod replacement;
 pub mod restrictions;
 pub mod sba;
 pub mod scenario;
+pub mod scenario_db;
 pub mod stack;
 pub mod static_abilities;
 pub mod targeting;

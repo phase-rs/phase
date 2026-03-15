@@ -66,7 +66,7 @@ enum ClauseAst {
     },
     SubjectPredicate {
         subject: SubjectPhraseAst,
-        predicate: PredicateAst,
+        predicate: Box<PredicateAst>,
     },
     Conditional {
         clause: Box<ClauseAst>,
@@ -311,7 +311,7 @@ fn lower_clause_ast(ast: ClauseAst) -> ParsedEffectClause {
     match ast {
         ClauseAst::Imperative { text } => lower_imperative_clause(&text),
         ClauseAst::SubjectPredicate { subject, predicate } => {
-            lower_subject_predicate_ast(subject, predicate)
+            lower_subject_predicate_ast(subject, *predicate)
         }
         ClauseAst::Conditional { clause } => {
             // Phase 2 preserves current semantics for generic leading conditionals:
@@ -2304,7 +2304,7 @@ fn try_parse_subject_predicate_ast(text: &str) -> Option<ClauseAst> {
                 affected: application.affected,
                 target: application.target,
             },
-            predicate: PredicateAst::ImperativeFallback { text: stripped },
+            predicate: Box::new(PredicateAst::ImperativeFallback { text: stripped }),
         });
     }
 
@@ -2330,7 +2330,7 @@ where
             affected: application.affected,
             target: application.target,
         },
-        predicate: build_predicate(clause.effect, clause.duration, clause.sub_ability),
+        predicate: Box::new(build_predicate(clause.effect, clause.duration, clause.sub_ability)),
     }
 }
 

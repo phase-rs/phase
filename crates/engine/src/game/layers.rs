@@ -11,6 +11,7 @@ use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::layers::{ActiveContinuousEffect, Layer};
+use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 
 /// Remove transient effects that have expired based on their duration.
@@ -27,7 +28,7 @@ pub fn prune_end_of_turn_effects(state: &mut GameState) {
 
 /// Remove transient `UntilYourNextTurn` effects whose controller's turn is starting.
 /// Called at the start of the active player's turn (untap step) per CR 514.2.
-pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: crate::types::player::PlayerId) {
+pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: PlayerId) {
     let before = state.transient_continuous_effects.len();
     state.transient_continuous_effects.retain(|e| {
         !(e.duration == Duration::UntilYourNextTurn && e.controller == active_player)
@@ -46,6 +47,43 @@ pub fn prune_host_left_effects(state: &mut GameState, departed_id: ObjectId) {
     });
     if state.transient_continuous_effects.len() != before {
         state.layers_dirty = true;
+    }
+}
+
+/// Evaluate a `StaticCondition` for the given controller.
+/// Returns `true` if the condition is met (effect should apply), `false` otherwise.
+///
+/// Used by both intrinsic (permanent-based) and transient (state-level) continuous
+/// effects so that condition evaluation is consistent regardless of effect origin.
+/// Evaluate a `StaticCondition` for the given controller and source object.
+/// Returns `true` if the condition is met (effect should apply), `false` otherwise.
+///
+/// Used by both intrinsic (permanent-based) and transient (state-level) continuous
+/// effects so that condition evaluation is consistent regardless of effect origin.
+fn evaluate_condition(state: &GameState, condition: &StaticCondition, controller: PlayerId, source_id: ObjectId) -> bool {
+    match condition {
+        StaticCondition::DevotionGE { colors, threshold } => {
+            count_devotion(state, controller, colors) >= *threshold
+        }
+        StaticCondition::LifeMoreThanStartingBy { amount } => {
+            state
+                .players
+                .iter()
+                .find(|p| p.id == controller)
+                .is_some_and(|player| {
+                    player.life >= state.format_config.starting_life + *amount
+                })
+        }
+        StaticCondition::IsPresent { filter } => match filter {
+            Some(f) => state
+                .objects
+                .keys()
+                .any(|&id| matches_target_filter(state, id, f, source_id)),
+            None => true,
+        },
+        StaticCondition::Unrecognized { .. } => true,
+        StaticCondition::DuringYourTurn => state.active_player == controller,
+        StaticCondition::None => true,
     }
 }
 
@@ -181,41 +219,8 @@ fn gather_active_continuous_effects(state: &GameState) -> Vec<ActiveContinuousEf
 
             // Evaluate condition if present
             if let Some(ref condition) = def.condition {
-                match condition {
-                    StaticCondition::DevotionGE { colors, threshold } => {
-                        let devotion = count_devotion(state, obj.controller, colors);
-                        if devotion < *threshold {
-                            continue;
-                        }
-                    }
-                    StaticCondition::LifeMoreThanStartingBy { amount } => {
-                        let Some(player) = state.players.iter().find(|p| p.id == obj.controller)
-                        else {
-                            continue;
-                        };
-                        let threshold = state.format_config.starting_life + *amount;
-                        if player.life < threshold {
-                            continue;
-                        }
-                    }
-                    StaticCondition::IsPresent { .. } => {
-                        // TODO: evaluate presence check
-                    }
-                    StaticCondition::CheckSVar { compare, .. } => {
-                        // Legacy path: evaluate compare string against devotion if colors available
-                        if !obj.base_color.is_empty() {
-                            let devotion = count_devotion(state, obj.controller, &obj.base_color);
-                            if !evaluate_compare(compare, devotion) {
-                                continue;
-                            }
-                        }
-                    }
-                    StaticCondition::DuringYourTurn => {
-                        if state.active_player != obj.controller {
-                            continue;
-                        }
-                    }
-                    StaticCondition::None => {}
+                if !evaluate_condition(state, condition, obj.controller, id) {
+                    continue;
                 }
             }
 
@@ -256,24 +261,10 @@ fn gather_transient_continuous_effects(
             continue;
         }
 
-        // Evaluate condition (same logic as intrinsic statics)
+        // Evaluate condition using the shared evaluator
         if let Some(ref condition) = tce.condition {
-            let controller = tce.controller;
-            match condition {
-                StaticCondition::DevotionGE { colors, threshold } => {
-                    let devotion = count_devotion(state, controller, colors);
-                    if devotion < *threshold {
-                        continue;
-                    }
-                }
-                StaticCondition::DuringYourTurn => {
-                    if state.active_player != controller {
-                        continue;
-                    }
-                }
-                StaticCondition::None => {}
-                // Other conditions not expected on transient effects currently
-                _ => {}
+            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
             }
         }
 
@@ -289,27 +280,6 @@ fn gather_transient_continuous_effects(
                 characteristic_defining: false,
             });
         }
-    }
-}
-
-/// Evaluate a comparison string like "LT5", "GE7" against a value.
-fn evaluate_compare(compare_str: &str, count: u32) -> bool {
-    if compare_str.len() < 3 {
-        return true;
-    }
-    let (op, num_str) = (&compare_str[..2], &compare_str[2..]);
-    let threshold: u32 = match num_str.parse() {
-        Ok(n) => n,
-        Err(_) => return true,
-    };
-    match op {
-        "GE" => count >= threshold,
-        "LE" => count <= threshold,
-        "EQ" => count == threshold,
-        "NE" => count != threshold,
-        "GT" => count > threshold,
-        "LT" => count < threshold,
-        _ => true,
     }
 }
 

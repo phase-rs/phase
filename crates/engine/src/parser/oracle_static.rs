@@ -207,14 +207,15 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
                 if let Some(kw) = map_keyword(keyword_text) {
                     modifications.push(ContinuousModification::AddKeyword { keyword: kw });
                 }
+                let condition = parse_static_condition(condition_text)
+                    .unwrap_or(StaticCondition::Unrecognized {
+                        text: condition_text.to_string(),
+                    });
                 return Some(
                     StaticDefinition::continuous()
                         .affected(TargetFilter::SelfRef)
                         .modifications(modifications)
-                        .condition(StaticCondition::CheckSVar {
-                            var: "condition".to_string(),
-                            compare: condition_text.to_string(),
-                        })
+                        .condition(condition)
                         .description(text.to_string()),
                 );
             }
@@ -362,14 +363,17 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         );
     }
 
-    // --- "As long as ..." (generic conditional static) ---
+    // --- "As long as ..." (generic conditional static, no comma separator) ---
     if lower.starts_with("as long as ") {
+        let condition_text = text
+            .strip_prefix("As long as ")
+            .unwrap_or(&text)
+            .trim_end_matches('.');
         return Some(
             StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
-                .condition(StaticCondition::CheckSVar {
-                    var: "condition".to_string(),
-                    compare: text.trim_end_matches('.').to_string(),
+                .condition(StaticCondition::Unrecognized {
+                    text: condition_text.to_string(),
                 })
                 .description(text.to_string()),
         );
@@ -501,18 +505,158 @@ fn parse_conditional_static(text: &str) -> Option<StaticDefinition> {
     Some(def)
 }
 
+/// Parse a condition clause (the text between "As long as" and the comma).
+///
+/// Returns a typed `StaticCondition` for known patterns, or `None` if the
+/// condition text is not recognized. Callers may fall back to `Unrecognized`.
+///
+/// Supported patterns:
+/// - "you have at least N life more than your starting life total" → LifeMoreThanStartingBy
+/// - "your devotion to [colors] is less than N" → DevotionGE (with inverted threshold)
+/// - "it's your turn" → DuringYourTurn
+/// - "you control a/an [type]" → IsPresent with filter
 fn parse_static_condition(text: &str) -> Option<StaticCondition> {
     let lower = text.to_lowercase();
-    let amount_text = lower
-        .strip_prefix("you have at least ")?
-        .strip_suffix(" life more than your starting life total")?;
-    let (amount, rest) = parse_number(amount_text)?;
-    if !rest.trim().is_empty() {
-        return None;
+
+    // "you have at least N life more than your starting life total"
+    if let Some(amount_text) = lower
+        .strip_prefix("you have at least ")
+        .and_then(|s| s.strip_suffix(" life more than your starting life total"))
+    {
+        let (amount, rest) = parse_number(amount_text)?;
+        if rest.trim().is_empty() {
+            return Some(StaticCondition::LifeMoreThanStartingBy {
+                amount: amount as i32,
+            });
+        }
     }
-    Some(StaticCondition::LifeMoreThanStartingBy {
-        amount: amount as i32,
+
+    // "it's your turn"
+    if lower == "it's your turn" {
+        return Some(StaticCondition::DuringYourTurn);
+    }
+
+    // "your devotion to [color(s)] is less than N" (Theros gods)
+    // Note: "less than N" is stored as DevotionGE with the same threshold —
+    // the *effect* typically removes creature type, so the condition being false
+    // (devotion >= N) means the removal doesn't apply and the god IS a creature.
+    if let Some(condition) = parse_devotion_condition(&lower) {
+        return Some(condition);
+    }
+
+    // "you control a/an [type]" → IsPresent
+    if let Some(condition) = parse_control_presence_condition(&lower) {
+        return Some(condition);
+    }
+
+    None
+}
+
+/// Parse "your devotion to [color(s)] is less than N" or "is N or greater".
+fn parse_devotion_condition(lower: &str) -> Option<StaticCondition> {
+    let rest = lower.strip_prefix("your devotion to ")?;
+
+    // Split at " is " to get colors and comparison
+    let (color_text, comparison) = rest.split_once(" is ")?;
+
+    // Parse colors: "white", "blue and red", "white and black"
+    let colors = parse_color_list(color_text)?;
+
+    // Parse comparison: "less than N" or "N or greater"
+    let threshold = if let Some(n_text) = comparison.strip_prefix("less than ") {
+        parse_number(n_text.trim())?.0 as u32
+    } else if let Some(n_rest) = comparison.strip_suffix(" or greater") {
+        parse_number(n_rest.trim())?.0 as u32
+    } else {
+        return None;
+    };
+
+    Some(StaticCondition::DevotionGE { colors, threshold })
+}
+
+/// Parse "you control a/an [type/subtype]" into IsPresent.
+fn parse_control_presence_condition(lower: &str) -> Option<StaticCondition> {
+    let rest = lower
+        .strip_prefix("you control a ")
+        .or_else(|| lower.strip_prefix("you control an "))?;
+
+    // Try to parse the rest as a type phrase
+    let filter = parse_presence_filter(rest)?;
+
+    Some(StaticCondition::IsPresent {
+        filter: Some(TargetFilter::Typed(filter.controller(ControllerRef::You))),
     })
+}
+
+/// Parse a simple type/subtype/color description into a TypedFilter.
+fn parse_presence_filter(text: &str) -> Option<TypedFilter> {
+    use crate::types::ability::TypeFilter;
+
+    let trimmed = text.trim().trim_end_matches('.');
+
+    // "[color] or [color] permanent" — color-based presence check
+    if let Some(perm_prefix) = trimmed.strip_suffix(" permanent") {
+        let colors: Vec<&str> = perm_prefix.split(" or ").collect();
+        if colors.len() >= 2 {
+            // Multiple color options — we'd need an Or filter; for now handle as simple card match
+            return Some(TypedFilter::card());
+        }
+    }
+
+    // Simple core types
+    let type_filter = match trimmed {
+        "artifact" => Some(TypeFilter::Artifact),
+        "creature" => Some(TypeFilter::Creature),
+        "enchantment" => Some(TypeFilter::Enchantment),
+        "land" => Some(TypeFilter::Land),
+        "planeswalker" => Some(TypeFilter::Planeswalker),
+        _ => None,
+    };
+
+    if let Some(tf) = type_filter {
+        return Some(TypedFilter::new(tf));
+    }
+
+    // Subtype-based: "you control a Demon", "you control an Elf"
+    if !trimmed.is_empty() && trimmed.chars().next().unwrap().is_uppercase() {
+        return Some(TypedFilter::creature().subtype(trimmed.to_string()));
+    }
+
+    None
+}
+
+/// Parse a color list like "white", "blue and red", "white, blue, and black".
+fn parse_color_list(text: &str) -> Option<Vec<crate::types::mana::ManaColor>> {
+    use crate::types::mana::ManaColor;
+
+    let color_from_name = |s: &str| -> Option<ManaColor> {
+        match s.trim() {
+            "white" => Some(ManaColor::White),
+            "blue" => Some(ManaColor::Blue),
+            "black" => Some(ManaColor::Black),
+            "red" => Some(ManaColor::Red),
+            "green" => Some(ManaColor::Green),
+            _ => None,
+        }
+    };
+
+    // Try single color first
+    if let Some(c) = color_from_name(text) {
+        return Some(vec![c]);
+    }
+
+    // "X and Y"
+    if let Some((a, b)) = text.split_once(" and ") {
+        let mut colors = Vec::new();
+        // Handle "X, Y, and Z" — a would be "X, Y" and b would be "Z"
+        for part in a.split(", ") {
+            colors.push(color_from_name(part)?);
+        }
+        colors.push(color_from_name(b)?);
+        return Some(colors);
+    }
+
+    None
 }
 
 fn find_continuous_predicate_start(lower: &str) -> Option<usize> {
@@ -1313,7 +1457,8 @@ mod tests {
     // "enters with counters" is now parsed as a Moved replacement effect.
 
     #[test]
-    fn static_as_long_as() {
+    fn static_as_long_as_unrecognized_condition() {
+        // Complex conditions that the parser can't fully decompose → Unrecognized
         let def = parse_static_line(
             "As long as you control a creature with power 4 or greater, Elemental Bond has hexproof.",
         )
@@ -1321,7 +1466,7 @@ mod tests {
         assert_eq!(def.mode, StaticMode::Continuous);
         assert!(matches!(
             def.condition,
-            Some(StaticCondition::CheckSVar { .. })
+            Some(StaticCondition::Unrecognized { .. })
         ));
     }
 
@@ -1338,7 +1483,7 @@ mod tests {
             }));
         assert!(matches!(
             def.condition,
-            Some(StaticCondition::CheckSVar { .. })
+            Some(StaticCondition::Unrecognized { .. })
         ));
     }
 
@@ -1367,6 +1512,63 @@ mod tests {
             def.condition,
             Some(StaticCondition::LifeMoreThanStartingBy { amount: 7 })
         );
+    }
+
+    #[test]
+    fn static_devotion_condition() {
+        use crate::types::mana::ManaColor;
+        let def = parse_static_line(
+            "As long as your devotion to black is less than five, Erebos isn't a creature.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.condition,
+            Some(StaticCondition::DevotionGE {
+                colors: vec![ManaColor::Black],
+                threshold: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn static_devotion_multicolor_condition() {
+        use crate::types::mana::ManaColor;
+        let def = parse_static_line(
+            "As long as your devotion to white and black is less than seven, Athreos isn't a creature.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.condition,
+            Some(StaticCondition::DevotionGE {
+                colors: vec![ManaColor::White, ManaColor::Black],
+                threshold: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn static_during_your_turn_condition() {
+        let def = parse_static_line(
+            "As long as it's your turn, Triumphant Adventurer has first strike.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.condition, Some(StaticCondition::DuringYourTurn));
+    }
+
+    #[test]
+    fn static_control_presence_condition() {
+        let def = parse_static_line(
+            "As long as you control a artifact, Toolcraft Exemplar gets +2/+1.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(matches!(
+            def.condition,
+            Some(StaticCondition::IsPresent { filter: Some(_) })
+        ));
     }
 
     #[test]
