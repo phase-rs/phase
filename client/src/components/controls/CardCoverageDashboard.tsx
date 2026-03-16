@@ -63,11 +63,23 @@ const SUPPORTED_REPLACEMENTS = [
 
 // --- Per-card coverage types ---
 
+type ParseCategory = "keyword" | "ability" | "trigger" | "static" | "replacement" | "cost";
+
+interface ParsedItem {
+  category: ParseCategory;
+  label: string;
+  source_text?: string;
+  supported: boolean;
+  children?: ParsedItem[];
+}
+
 interface CardCoverageResult {
   card_name: string;
   set_code: string;
   supported: boolean;
   missing_handlers: string[];
+  oracle_text?: string;
+  parse_details?: ParsedItem[];
 }
 
 interface CoverageSummary {
@@ -138,6 +150,7 @@ function CardCoverageView() {
   const [coverage, setCoverage] = useState<CoverageSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [expandedCard, setExpandedCard] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
 
@@ -264,75 +277,35 @@ function CardCoverageView() {
       </div>
 
       {/* Card list */}
-      <div className="hidden flex-1 overflow-y-auto md:block">
-        <table className="w-full text-sm">
-          <thead className="sticky top-0 bg-[#0b1020]/98 text-left text-slate-500 backdrop-blur-md">
-            <tr>
-              <th className="px-6 py-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em]">Name</th>
-              <th className="px-6 py-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em]">Status</th>
-              <th className="px-6 py-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em]">Missing Handlers</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredCards.map((card, i) => (
-              <tr key={i} className="border-t border-white/6 text-slate-200 transition hover:bg-white/[0.03]">
-                <td className="px-6 py-3">{card.card_name}</td>
-                <td className="px-6 py-3">
+      <div className="flex-1 overflow-y-auto">
+        <div className="divide-y divide-white/6">
+          {filteredCards.map((card, i) => {
+            const isExpanded = expandedCard === `${card.card_name}-${i}`;
+            const cardKey = `${card.card_name}-${i}`;
+            return (
+              <div key={cardKey}>
+                <button
+                  onClick={() => setExpandedCard(isExpanded ? null : cardKey)}
+                  className="flex w-full items-center gap-3 px-4 py-3 text-left text-sm text-slate-200 transition hover:bg-white/[0.03] sm:px-6"
+                >
+                  <span className={`text-[10px] text-slate-500 transition ${isExpanded ? "rotate-90" : ""}`}>
+                    &#9654;
+                  </span>
+                  <span className="min-w-0 flex-1 truncate">{card.card_name}</span>
                   {card.supported ? (
-                    <span className="rounded-full border border-emerald-400/30 bg-emerald-500/12 px-2 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-emerald-300">
+                    <span className="shrink-0 rounded-full border border-emerald-400/30 bg-emerald-500/12 px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-emerald-300">
                       Supported
                     </span>
                   ) : (
-                    <span className="rounded-full border border-rose-400/30 bg-rose-500/12 px-2 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-rose-300">
+                    <span className="shrink-0 rounded-full border border-rose-400/30 bg-rose-500/12 px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-rose-300">
                       Missing
                     </span>
                   )}
-                </td>
-                <td className="px-6 py-3 text-xs text-slate-500">
-                  {card.missing_handlers.length > 0 ? card.missing_handlers.join(", ") : "Fully covered"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {filteredCards.length === 0 && (
-          <p className="py-10 text-center text-sm text-slate-500">No cards match the current filters.</p>
-        )}
-      </div>
-      <div className="flex-1 overflow-y-auto px-4 py-3 md:hidden">
-        <div className="space-y-3">
-          {filteredCards.map((card, i) => (
-            <article
-              key={`${card.card_name}-${i}`}
-              className="rounded-[18px] border border-white/8 bg-black/16 p-4"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="text-sm font-semibold text-slate-100">{card.card_name}</div>
-                  <div className="mt-1 text-[11px] uppercase tracking-[0.16em] text-slate-500">
-                    {card.set_code || "Unknown Set"}
-                  </div>
-                </div>
-                {card.supported ? (
-                  <span className="shrink-0 rounded-full border border-emerald-400/30 bg-emerald-500/12 px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-emerald-300">
-                    Supported
-                  </span>
-                ) : (
-                  <span className="shrink-0 rounded-full border border-rose-400/30 bg-rose-500/12 px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-rose-300">
-                    Missing
-                  </span>
-                )}
+                </button>
+                {isExpanded && <CardParseDetail card={card} />}
               </div>
-              <div className="mt-3">
-                <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
-                  Missing Handlers
-                </div>
-                <div className="mt-1 text-xs text-slate-400">
-                  {card.missing_handlers.length > 0 ? card.missing_handlers.join(", ") : "Fully covered"}
-                </div>
-              </div>
-            </article>
-          ))}
+            );
+          })}
         </div>
         {filteredCards.length === 0 && (
           <p className="py-10 text-center text-sm text-slate-500">No cards match the current filters.</p>
@@ -363,6 +336,126 @@ function CardCoverageView() {
         Showing {filteredCards.length} of {coverage.total_cards} cards
       </div>
     </>
+  );
+}
+
+// --- Parse detail components ---
+
+const CATEGORY_LABELS: Record<ParseCategory, string> = {
+  keyword: "Keyword",
+  ability: "Ability",
+  trigger: "Trigger",
+  static: "Static",
+  replacement: "Replacement",
+  cost: "Cost",
+};
+
+const CATEGORY_COLORS: Record<ParseCategory, string> = {
+  keyword: "text-violet-300",
+  ability: "text-sky-300",
+  trigger: "text-amber-300",
+  static: "text-teal-300",
+  replacement: "text-orange-300",
+  cost: "text-rose-300",
+};
+
+function CardParseDetail({ card }: { card: CardCoverageResult }) {
+  const grouped = useMemo(() => {
+    const details = card.parse_details ?? [];
+    const groups: Record<string, ParsedItem[]> = {};
+    for (const item of details) {
+      const key = item.category;
+      (groups[key] ??= []).push(item);
+    }
+    return groups;
+  }, [card.parse_details]);
+
+  const categoryOrder: ParseCategory[] = ["keyword", "ability", "trigger", "static", "replacement", "cost"];
+  const activeCategories = categoryOrder.filter((c) => grouped[c]?.length);
+
+  return (
+    <div className="border-t border-white/6 bg-white/[0.02] px-6 py-4 sm:px-8">
+      {/* Oracle text */}
+      {card.oracle_text && (
+        <div className="mb-4">
+          <div className="mb-1.5 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
+            Oracle Text
+          </div>
+          <div className="rounded-[12px] border border-white/8 bg-black/24 px-3 py-2.5 font-mono text-xs leading-relaxed text-slate-300">
+            {card.oracle_text.split("\n").map((line, i) => (
+              <div key={i}>{line}</div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Parse tree */}
+      {activeCategories.length > 0 ? (
+        <div className="space-y-3">
+          <div className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
+            Parse Breakdown
+          </div>
+          {activeCategories.map((category) => (
+            <div key={category}>
+              <div className={`mb-1 text-[11px] font-semibold uppercase tracking-[0.16em] ${CATEGORY_COLORS[category]}`}>
+                {CATEGORY_LABELS[category]}s ({grouped[category].length})
+              </div>
+              <div className="space-y-0.5">
+                {grouped[category].map((item, i) => (
+                  <ParseTreeNode key={i} item={item} depth={0} />
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="text-xs text-slate-500">No parsed items (vanilla card).</div>
+      )}
+
+      {/* Missing handlers summary */}
+      {card.missing_handlers.length > 0 && (
+        <div className="mt-3 text-xs text-slate-500">
+          <span className="font-semibold text-rose-400">Missing: </span>
+          {card.missing_handlers.join(", ")}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ParseTreeNode({ item, depth }: { item: ParsedItem; depth: number }) {
+  const hasChildren = (item.children?.length ?? 0) > 0;
+  const dotColor = item.supported ? "text-emerald-400" : "text-rose-400";
+  const labelColor = item.supported ? "text-slate-200" : "text-rose-300";
+
+  return (
+    <div style={{ paddingLeft: `${depth * 16}px` }}>
+      <div className="flex items-start gap-1.5 rounded-[8px] px-2 py-1 transition hover:bg-white/[0.03]">
+        <span className={`mt-0.5 text-[8px] ${dotColor}`}>&#9679;</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-baseline gap-2">
+            <span className={`text-xs font-medium ${labelColor}`}>{item.label}</span>
+            <span className={`text-[10px] ${CATEGORY_COLORS[item.category]}`}>
+              {CATEGORY_LABELS[item.category]}
+            </span>
+            {!item.supported && (
+              <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-rose-400">
+                unsupported
+              </span>
+            )}
+          </div>
+          {item.source_text && (
+            <div className="mt-0.5 font-mono text-[11px] leading-snug text-slate-500">
+              {item.source_text}
+            </div>
+          )}
+        </div>
+      </div>
+      {hasChildren &&
+        item.children!.map((child, i) => (
+          <ParseTreeNode key={i} item={child} depth={depth + 1} />
+        ))}
+    </div>
   );
 }
 

@@ -14,12 +14,49 @@ use crate::types::triggers::TriggerMode;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
+/// A lightweight node in the parse tree for a single card, representing one
+/// parsed item (keyword, ability, trigger, static, or replacement) with its
+/// support status and any nested children (sub-abilities, modal modes, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParsedItem {
+    /// Category of the parsed item.
+    pub category: ParseCategory,
+    /// Human-readable label (e.g. "DealDamage", "Flying", "ChangesZone").
+    pub label: String,
+    /// Original Oracle text fragment that produced this item, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_text: Option<String>,
+    /// Whether this specific item is supported by the engine.
+    pub supported: bool,
+    /// Nested items (sub-abilities, modal choices, composite costs).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub children: Vec<ParsedItem>,
+}
+
+/// The category of a parsed item in the coverage tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParseCategory {
+    Keyword,
+    Ability,
+    Trigger,
+    Static,
+    Replacement,
+    Cost,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CardCoverageResult {
     pub card_name: String,
     pub set_code: String,
     pub supported: bool,
     pub missing_handlers: Vec<String>,
+    /// Original Oracle text for the card face.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oracle_text: Option<String>,
+    /// Hierarchical parse tree showing what each piece of Oracle text was parsed into.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub parse_details: Vec<ParsedItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +75,195 @@ pub struct FormatCoverageSummary {
     pub total_cards: usize,
     pub supported_cards: usize,
     pub coverage_pct: f64,
+}
+
+/// Extract the effect variant name (e.g. "DealDamage", "Draw", "Unimplemented")
+/// by serializing to JSON and reading the serde `type` tag.
+fn effect_type_name(effect: &Effect) -> String {
+    serde_json::to_value(effect)
+        .ok()
+        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from))
+        .unwrap_or_else(|| "Unknown".to_string())
+}
+
+/// Extract a human-readable label for a keyword.
+fn keyword_label(kw: &Keyword) -> String {
+    serde_json::to_value(kw)
+        .ok()
+        .and_then(|v| match &v {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Object(map) => map.keys().next().cloned(),
+            _ => None,
+        })
+        .unwrap_or_else(|| format!("{kw:?}"))
+}
+
+/// Build a hierarchical parse tree from a `CardFace`, checking each item against
+/// the engine's trigger and static registries for support status.
+pub fn build_parse_details(
+    face: &CardFace,
+    trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+) -> Vec<ParsedItem> {
+    let mut items = Vec::new();
+
+    // Keywords
+    for kw in &face.keywords {
+        items.push(ParsedItem {
+            category: ParseCategory::Keyword,
+            label: keyword_label(kw),
+            source_text: None,
+            supported: !matches!(kw, Keyword::Unknown(_)),
+            children: vec![],
+        });
+    }
+
+    // Activated/spell abilities
+    for def in &face.abilities {
+        items.push(build_ability_item(def));
+    }
+
+    // Triggers
+    for trig in &face.triggers {
+        let mode_supported = !matches!(&trig.mode, TriggerMode::Unknown(_))
+            && trigger_registry.contains_key(&trig.mode);
+        let mut children = Vec::new();
+        if let Some(execute) = &trig.execute {
+            children.push(build_ability_item(execute));
+        }
+        items.push(ParsedItem {
+            category: ParseCategory::Trigger,
+            label: format!("{}", trig.mode),
+            source_text: trig.description.clone(),
+            supported: mode_supported && children.iter().all(|c| c.is_fully_supported()),
+            children,
+        });
+    }
+
+    // Static abilities
+    for stat in &face.static_abilities {
+        items.push(ParsedItem {
+            category: ParseCategory::Static,
+            label: format!("{}", stat.mode),
+            source_text: stat.description.clone(),
+            supported: static_registry.contains_key(&stat.mode),
+            children: vec![],
+        });
+    }
+
+    // Replacement effects
+    for repl in &face.replacements {
+        let mut children = Vec::new();
+        let mut execute_supported = true;
+        if let Some(execute) = &repl.execute {
+            let item = build_ability_item(execute);
+            execute_supported = item.is_fully_supported();
+            children.push(item);
+        }
+        if let ReplacementMode::Optional {
+            decline: Some(decline),
+        } = &repl.mode
+        {
+            let item = build_ability_item(decline);
+            if !item.is_fully_supported() {
+                execute_supported = false;
+            }
+            children.push(item);
+        }
+        items.push(ParsedItem {
+            category: ParseCategory::Replacement,
+            label: format!("{}", repl.event),
+            source_text: repl.description.clone(),
+            supported: execute_supported,
+            children,
+        });
+    }
+
+    // Additional cost
+    if let Some(additional_cost) = &face.additional_cost {
+        build_additional_cost_items(additional_cost, &mut items);
+    }
+
+    items
+}
+
+/// Build a `ParsedItem` for a single `AbilityDefinition`, recursing into
+/// sub-abilities and modal abilities.
+fn build_ability_item(def: &AbilityDefinition) -> ParsedItem {
+    let label = effect_type_name(&def.effect);
+    let supported = !matches!(&def.effect, Effect::Unimplemented { .. });
+    let source_text = def
+        .description
+        .clone()
+        .or_else(|| match &def.effect {
+            Effect::Unimplemented { description, .. } => description.clone(),
+            _ => None,
+        });
+
+    let mut children = Vec::new();
+
+    // Cost
+    if let Some(cost) = &def.cost {
+        build_cost_item(cost, &mut children);
+    }
+
+    // Sub-ability chain
+    if let Some(sub) = &def.sub_ability {
+        children.push(build_ability_item(sub));
+    }
+
+    // Modal abilities
+    for mode_ability in &def.mode_abilities {
+        children.push(build_ability_item(mode_ability));
+    }
+
+    ParsedItem {
+        category: ParseCategory::Ability,
+        label,
+        source_text,
+        supported,
+        children,
+    }
+}
+
+/// Build `ParsedItem` nodes for ability costs, only emitting items for
+/// composite or unimplemented costs (simple costs are not interesting).
+fn build_cost_item(cost: &AbilityCost, items: &mut Vec<ParsedItem>) {
+    match cost {
+        AbilityCost::Composite { costs } => {
+            for nested in costs {
+                build_cost_item(nested, items);
+            }
+        }
+        AbilityCost::Unimplemented { description } => {
+            items.push(ParsedItem {
+                category: ParseCategory::Cost,
+                label: description.clone(),
+                source_text: Some(description.clone()),
+                supported: false,
+                children: vec![],
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Build `ParsedItem` nodes for additional costs (kicker, etc.).
+fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec<ParsedItem>) {
+    match additional_cost {
+        AdditionalCost::Optional(cost) => build_cost_item(cost, items),
+        AdditionalCost::Choice(first, second) => {
+            build_cost_item(first, items);
+            build_cost_item(second, items);
+        }
+    }
+}
+
+impl ParsedItem {
+    /// Returns true if this item and all its children are supported.
+    pub fn is_fully_supported(&self) -> bool {
+        self.supported && self.children.iter().all(ParsedItem::is_fully_supported)
+    }
 }
 
 /// Check whether a game object has any mechanics the engine cannot handle.
@@ -138,11 +364,15 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
             }
         }
 
+        let parse_details = build_parse_details(face, &trigger_registry, &static_registry);
+
         cards.push(CardCoverageResult {
             card_name: face.name.clone(),
             set_code: String::new(),
             supported,
             missing_handlers: missing,
+            oracle_text: face.oracle_text.clone(),
+            parse_details,
         });
     }
 
