@@ -198,6 +198,7 @@ These patterns must be used on first write, not fixed after clippy complains:
 - **`rsplit(' ').next()`** to get the last word, not `rsplit().collect::<Vec>().first()`
 - **Exhaustive `match`** without wildcard fallbacks when the enum is known — let the compiler catch missing arms
 - **Reuse existing building blocks** before writing one-off string logic. Search the codebase for helpers like `contains_possessive`, `contains_object_pronoun`, `parse_target`, `parse_type_phrase`, `parse_number` in `oracle_util.rs` and `oracle_target.rs`
+- **NEVER match on verbatim Oracle text strings** (e.g. `if lower == "the number of cards in your hand is greater than your life total"`). This is the single most prohibited pattern in the codebase. Every Oracle phrase must be decomposed into typed building blocks (grammar prefix/suffix stripping, composable helpers, typed enum variants). A verbatim string match handles exactly one card and poisons the parser architecture permanently. Instead: identify the grammatical structure, add typed `QuantityRef`/`Comparator`/`FilterProp` variants as needed, and parse with `strip_prefix`/`split_once` + helpers so the pattern covers every card in the class.
 
 - Rust: `cargo fmt` + `clippy -D warnings` enforced in CI
 - TypeScript: ESLint with `@typescript-eslint/recommended`, unused vars prefixed with `_`

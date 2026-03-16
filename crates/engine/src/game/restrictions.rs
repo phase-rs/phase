@@ -3,7 +3,7 @@ use std::str::FromStr;
 use crate::game::game_object::{parse_counter_type, CounterType, GameObject};
 use crate::parser::oracle_util::parse_number;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, ActivationRestriction, CastingRestriction,
+    AbilityCost, AbilityDefinition, ActivationRestriction, CastingRestriction, Comparator,
     SpellCastingOptionKind,
 };
 use crate::types::card_type::{CoreType, Supertype};
@@ -377,7 +377,14 @@ pub fn evaluate_condition_text(
     evaluate_condition(state, player, source_id, &condition)
 }
 
+/// A player-relative quantity that can be measured for any participant.
+/// Used in QuantityVsEachOpponent to compare the active player against each opponent.
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum PlayerQuantity {
+    HandSize,
+    ControlledCreatureCount,
+}
+
 enum RestrictionCondition {
     SourceInZone(Zone),
     SourceIsAttacking,
@@ -408,7 +415,11 @@ enum RestrictionCondition {
     OpponentPoisonAtLeast(u32),
     HandSizeExact(usize),
     HandSizeOneOf(Vec<usize>),
-    HandSizeMoreThanEachOpponent,
+    QuantityVsEachOpponent {
+        lhs: PlayerQuantity,
+        comparator: Comparator,
+        rhs: PlayerQuantity,
+    },
     CreaturesYouControlTotalPowerAtLeast(i32),
     YouControlLandSubtypeAny(Vec<String>),
     YouControlSubtypeCountAtLeast {
@@ -438,7 +449,6 @@ enum RestrictionCondition {
     YouControlSnowPermanentCountAtLeast(usize),
     YouControlDifferentPowerCreatureCountAtLeast(usize),
     YouControlLandsWithSameNameAtLeast(usize),
-    YouControlFewerCreaturesThanEachOpponent,
     YouControlNoCreatures,
     YouAttackedThisTurn,
     YouAttackedWithAtLeast(u32),
@@ -638,13 +648,16 @@ fn evaluate_condition(
         RestrictionCondition::HandSizeOneOf(counts) => {
             counts.contains(&player_hand_size(state, player))
         }
-        RestrictionCondition::HandSizeMoreThanEachOpponent => {
-            let hand_size = player_hand_size(state, player);
+        RestrictionCondition::QuantityVsEachOpponent { lhs, comparator, rhs } => {
+            let lhs_val = resolve_player_quantity(state, lhs, player);
             state
                 .players
                 .iter()
                 .filter(|candidate| candidate.id != player)
-                .all(|candidate| hand_size > candidate.hand.len())
+                .all(|candidate| {
+                    let rhs_val = resolve_player_quantity(state, rhs, candidate.id);
+                    comparator.clone().evaluate(lhs_val as i32, rhs_val as i32)
+                })
         }
         RestrictionCondition::CreaturesYouControlTotalPowerAtLeast(minimum) => {
             total_power_of_controlled_creatures(state, player) >= *minimum
@@ -718,21 +731,6 @@ fn evaluate_condition(
             controlled_objects_matching_count(state, player, |obj| {
                 obj.card_types.core_types.contains(&CoreType::Creature)
             }) == 0
-        }
-        RestrictionCondition::YouControlFewerCreaturesThanEachOpponent => {
-            let your_creatures = controlled_objects_matching_count(state, player, |obj| {
-                obj.card_types.core_types.contains(&CoreType::Creature)
-            });
-            state
-                .players
-                .iter()
-                .filter(|candidate| candidate.id != player)
-                .all(|candidate| {
-                    your_creatures
-                        < controlled_objects_matching_count(state, candidate.id, |obj| {
-                            obj.card_types.core_types.contains(&CoreType::Creature)
-                        })
-                })
         }
         RestrictionCondition::YouAttackedThisTurn => {
             state.players_attacked_this_turn.contains(&player)
@@ -947,6 +945,21 @@ fn player_hand_size(state: &crate::types::game_state::GameState, player: PlayerI
         .unwrap_or(0)
 }
 
+fn resolve_player_quantity(
+    state: &crate::types::game_state::GameState,
+    quantity: &PlayerQuantity,
+    player: PlayerId,
+) -> usize {
+    match quantity {
+        PlayerQuantity::HandSize => player_hand_size(state, player),
+        PlayerQuantity::ControlledCreatureCount => {
+            controlled_objects_matching_count(state, player, |obj| {
+                obj.card_types.core_types.contains(&CoreType::Creature)
+            })
+        }
+    }
+}
+
 fn player_graveyard_ids(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
@@ -1141,7 +1154,11 @@ fn parse_you_control_condition(text: &str) -> Option<RestrictionCondition> {
             Some(RestrictionCondition::YouControlAnotherColorlessCreature)
         }
         "you control fewer creatures than each opponent" => {
-            Some(RestrictionCondition::YouControlFewerCreaturesThanEachOpponent)
+            Some(RestrictionCondition::QuantityVsEachOpponent {
+                lhs: PlayerQuantity::ControlledCreatureCount,
+                comparator: Comparator::LT,
+                rhs: PlayerQuantity::ControlledCreatureCount,
+            })
         }
         "you control no creatures" => Some(RestrictionCondition::YouControlNoCreatures),
         _ => {
@@ -1212,7 +1229,11 @@ fn parse_hand_condition(text: &str) -> Option<RestrictionCondition> {
     match text {
         "you have no cards in hand" => Some(RestrictionCondition::HandSizeExact(0)),
         "you have more cards in hand than each opponent" => {
-            Some(RestrictionCondition::HandSizeMoreThanEachOpponent)
+            Some(RestrictionCondition::QuantityVsEachOpponent {
+                lhs: PlayerQuantity::HandSize,
+                comparator: Comparator::GT,
+                rhs: PlayerQuantity::HandSize,
+            })
         }
         "you have exactly zero or seven cards in hand" => {
             Some(RestrictionCondition::HandSizeOneOf(vec![0, 7]))
