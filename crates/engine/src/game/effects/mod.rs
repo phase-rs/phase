@@ -93,6 +93,10 @@ pub fn resolve_effect(
         Effect::Suspect { .. } => suspect::resolve(state, ability, events),
         Effect::SolveCase => solve_case::resolve(state, ability, events),
         Effect::CreateDelayedTrigger { .. } => delayed_trigger::resolve(state, ability, events),
+        Effect::AddRestriction { .. } => {
+            // TODO(Plan 02): wire restriction application to GameState.restrictions
+            Ok(())
+        }
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);

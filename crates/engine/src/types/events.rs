@@ -7,7 +7,7 @@ use super::phase::Phase;
 use super::player::PlayerId;
 use super::zones::Zone;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum GameEvent {
     GameStarted,

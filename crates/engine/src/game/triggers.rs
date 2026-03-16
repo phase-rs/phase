@@ -262,6 +262,7 @@ pub fn push_pending_trigger_to_stack(
             source_id: trigger.source_id,
             ability: trigger.ability,
             condition: trigger.condition,
+            trigger_event: None,
         },
     };
     stack::push_to_stack(state, entry, events);
@@ -548,7 +549,13 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
         | Effect::RevealHand { target, .. } => {
             if matches!(
                 target,
-                TargetFilter::None | TargetFilter::SelfRef | TargetFilter::Controller
+                TargetFilter::None
+                    | TargetFilter::SelfRef
+                    | TargetFilter::Controller
+                    | TargetFilter::TriggeringSpellController
+                    | TargetFilter::TriggeringSpellOwner
+                    | TargetFilter::TriggeringPlayer
+                    | TargetFilter::TriggeringSource
             ) {
                 None
             } else {
@@ -561,7 +568,13 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
         } => {
             if matches!(
                 target,
-                TargetFilter::None | TargetFilter::SelfRef | TargetFilter::Controller
+                TargetFilter::None
+                    | TargetFilter::SelfRef
+                    | TargetFilter::Controller
+                    | TargetFilter::TriggeringSpellController
+                    | TargetFilter::TriggeringSpellOwner
+                    | TargetFilter::TriggeringPlayer
+                    | TargetFilter::TriggeringSource
             ) {
                 None
             } else {
@@ -1038,10 +1051,15 @@ fn target_filter_matches_object(
         }
         TargetFilter::LastCreated => state.last_created_token_ids.contains(&object_id),
         // CR 603.7: Match objects in a tracked set from the originating effect.
-        TargetFilter::TrackedSet(id) => state
+        TargetFilter::TrackedSet { id } => state
             .tracked_object_sets
             .get(id)
             .is_some_and(|set| set.contains(&object_id)),
+        // CR 603.7c: Event-context references resolve to players, not objects.
+        TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource => false,
     }
 }
 

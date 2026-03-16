@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
-    AbilityDefinition, AdditionalCost, BasicLandType, CastingRestriction, ChosenAttribute,
-    ChosenSubtypeKind, ModalChoice, ReplacementDefinition, SolveCondition, SpellCastingOption,
-    StaticDefinition, TriggerDefinition,
+    AbilityDefinition, AdditionalCost, BasicLandType, CastingPermission, CastingRestriction,
+    ChosenAttribute, ChosenSubtypeKind, ModalChoice, ReplacementDefinition, SolveCondition,
+    SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card::PrintedCardRef;
 use crate::types::card_type::CardType;
@@ -171,6 +171,10 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub casting_options: Vec<SpellCastingOption>,
 
+    /// CR 715.5: Runtime casting permissions (e.g., Adventure creature castable from exile).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub casting_permissions: Vec<CastingPermission>,
+
     /// Choices made as this permanent entered (e.g., "choose a color").
     /// Persists for the object's lifetime on the battlefield.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -239,6 +243,7 @@ impl GameObject {
             additional_cost: None,
             casting_restrictions: Vec::new(),
             casting_options: Vec::new(),
+            casting_permissions: Vec::new(),
             chosen_attributes: Vec::new(),
             is_suspected: false,
             case_state: None,

@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use super::ability::{
     AbilityCost, AbilityDefinition, AdditionalCost, ChoiceType, ChoiceValue,
-    ContinuousModification, DelayedTriggerCondition, Duration, ModalChoice, ResolvedAbility,
-    StaticCondition, TargetFilter, TargetRef, TriggerCondition,
+    ContinuousModification, DelayedTriggerCondition, Duration, GameRestriction, ModalChoice,
+    ResolvedAbility, StaticCondition, TargetFilter, TargetRef, TriggerCondition,
 };
 use super::events::GameEvent;
 use super::format::FormatConfig;
@@ -302,6 +302,9 @@ pub enum StackEntryKind {
         ability: ResolvedAbility,
         #[serde(default)]
         condition: Option<TriggerCondition>,
+        /// CR 603.7c: The event that caused this trigger, for event-context resolution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_event: Option<GameEvent>,
     },
 }
 
@@ -481,6 +484,16 @@ pub struct GameState {
     /// Consumed by sub_abilities referencing "it"/"them" via TargetFilter::LastCreated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_created_token_ids: Vec<ObjectId>,
+
+    /// Active game-level restrictions (e.g., damage prevention disabled).
+    /// Checked by relevant game systems; expired entries cleaned up at phase transitions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restrictions: Vec<GameRestriction>,
+
+    /// Transient: set by stack.rs before resolving a triggered ability, cleared after.
+    /// Used by event-context TargetFilter variants to resolve trigger event data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_trigger_event: Option<GameEvent>,
 }
 
 /// A runtime-generated continuous effect stored at state level.
@@ -597,6 +610,8 @@ impl GameState {
             all_creature_types: Vec::new(),
             all_card_names: Vec::new(),
             last_created_token_ids: Vec::new(),
+            restrictions: Vec::new(),
+            current_trigger_event: None,
         }
     }
 

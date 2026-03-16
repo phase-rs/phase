@@ -428,6 +428,7 @@ mod tests {
                 source_id,
                 ability,
                 condition: None,
+                trigger_event: None,
             },
         });
 

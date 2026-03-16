@@ -273,6 +273,7 @@ mod tests {
                 source_id: source_permanent,
                 ability: make_dummy_ability(source_permanent, PlayerId(1)),
                 condition: None,
+                trigger_event: None,
             },
         });
 

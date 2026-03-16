@@ -127,10 +127,15 @@ fn filter_inner(
             .is_some_and(|attached| attached == object_id),
         TargetFilter::LastCreated => state.last_created_token_ids.contains(&object_id),
         // CR 603.7: Match objects in a tracked set from the originating effect.
-        TargetFilter::TrackedSet(id) => state
+        TargetFilter::TrackedSet { id } => state
             .tracked_object_sets
             .get(id)
             .is_some_and(|set| set.contains(&object_id)),
+        // CR 603.7c: Event-context references resolve to players, not objects.
+        TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource => false,
     }
 }
 

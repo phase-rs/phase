@@ -790,6 +790,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                     source_id: trigger.source_id,
                     ability,
                     condition: trigger.condition.clone(),
+                    trigger_event: None,
                 },
             };
             super::stack::push_to_stack(state, entry, &mut events);
@@ -844,6 +845,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                             source_id: trigger.source_id,
                             ability,
                             condition: trigger.condition.clone(),
+                            trigger_event: None,
                         },
                     };
                     super::stack::push_to_stack(state, entry, &mut events);

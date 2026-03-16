@@ -454,6 +454,54 @@ pub enum Duration {
     Permanent,
 }
 
+// ---------------------------------------------------------------------------
+// Game restriction system — composable runtime restrictions
+// ---------------------------------------------------------------------------
+
+/// A game-level restriction that modifies how rules are applied.
+/// Stored in `GameState::restrictions` and evaluated by relevant game systems.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum GameRestriction {
+    /// CR 614.16: Damage prevention effects are suppressed.
+    DamagePreventionDisabled {
+        source: ObjectId,
+        expiry: RestrictionExpiry,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<RestrictionScope>,
+    },
+}
+
+/// When a game restriction expires.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum RestrictionExpiry {
+    EndOfTurn,
+    EndOfCombat,
+}
+
+/// Limits the scope of a game restriction to specific sources or targets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum RestrictionScope {
+    SourcesControlledBy(PlayerId),
+    SpecificSource(ObjectId),
+    DamageToTarget(ObjectId),
+}
+
+// ---------------------------------------------------------------------------
+// Casting permissions — per-object casting grants
+// ---------------------------------------------------------------------------
+
+/// A permission granted to a `GameObject` allowing it to be cast under specific conditions.
+/// Stored in `GameObject::casting_permissions`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum CastingPermission {
+    /// CR 715.5: After Adventure resolves to exile, creature face castable from exile.
+    AdventureCreature,
+}
+
 /// When a delayed triggered ability fires (CR 603.7).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
@@ -653,7 +701,17 @@ pub enum TargetFilter {
     LastCreated,
     /// Matches exactly the objects in a tracked set.
     /// CR 603.7: Delayed triggers act on specific objects from the originating effect.
-    TrackedSet(super::identifiers::TrackedSetId),
+    TrackedSet {
+        id: super::identifiers::TrackedSetId,
+    },
+    /// CR 603.7c: Resolves to the controller of the spell/ability that triggered this.
+    TriggeringSpellController,
+    /// CR 603.7c: Resolves to the owner of the spell/ability that triggered this.
+    TriggeringSpellOwner,
+    /// CR 603.7c: Resolves to the player involved in the triggering event.
+    TriggeringPlayer,
+    /// CR 603.7c: Resolves to the source object of the triggering event.
+    TriggeringSource,
 }
 
 /// A dynamic game quantity — a runtime lookup into the game state.
@@ -899,6 +957,8 @@ pub enum SpellCastingOptionKind {
     AlternativeCost,
     CastWithoutManaCost,
     AsThoughHadFlash,
+    /// CR 715.3a: Cast the Adventure half of an Adventure card.
+    CastAdventure,
 }
 
 // ---------------------------------------------------------------------------
@@ -1202,6 +1262,10 @@ pub enum Effect {
         #[serde(default)]
         uses_tracked_set: bool,
     },
+    /// CR 614.16: Apply a game-level restriction (e.g., disable damage prevention).
+    AddRestriction {
+        restriction: GameRestriction,
+    },
     /// Semantic marker for effects the engine has not yet implemented a handler for.
     /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.
     Unimplemented {
@@ -1312,6 +1376,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Suspect { .. } => "Suspect",
         Effect::SolveCase => "SolveCase",
         Effect::CreateDelayedTrigger { .. } => "CreateDelayedTrigger",
+        Effect::AddRestriction { .. } => "AddRestriction",
         Effect::Unimplemented { name, .. } => name,
     }
 }
@@ -1372,6 +1437,7 @@ pub enum EffectKind {
     Suspect,
     SolveCase,
     CreateDelayedTrigger,
+    AddRestriction,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
     Equip,
@@ -1432,6 +1498,7 @@ impl From<&Effect> for EffectKind {
             Effect::Suspect { .. } => EffectKind::Suspect,
             Effect::SolveCase => EffectKind::SolveCase,
             Effect::CreateDelayedTrigger { .. } => EffectKind::CreateDelayedTrigger,
+            Effect::AddRestriction { .. } => EffectKind::AddRestriction,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,
         }
     }
