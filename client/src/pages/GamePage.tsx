@@ -465,15 +465,21 @@ function GamePageContent({
         style={{ paddingTop: "var(--game-top-overlay-offset, 0px)" }}
       >
         {/* Opponent hand at top */}
-        <OpponentHand showCards={showAiHand} />
+        <div className="relative z-20 shrink-0">
+          <OpponentHand showCards={showAiHand} />
+        </div>
 
         {/* Opponent avatar centered below their hand */}
-        <OpponentHud
-          opponentName={isOnlineMode ? opponentDisplayName : undefined}
-        />
+        <div className="relative z-20 shrink-0">
+          <OpponentHud
+            opponentName={isOnlineMode ? opponentDisplayName : undefined}
+          />
+        </div>
 
         {/* Battlefield */}
-        <GameBoard />
+        <div className="relative z-10 min-h-0 flex-1">
+          <GameBoard />
+        </div>
 
         {/* Player avatar centered with flanking phase indicators */}
         <PlayerHud />

@@ -5,6 +5,7 @@ use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
 use super::game_object::GameObject;
+use super::printed_cards::{apply_back_face_to_object, snapshot_object_face};
 
 /// Allocate a new ObjectId, create a GameObject with defaults, insert into state.objects, and add to the specified zone.
 pub fn create_object(
@@ -54,38 +55,8 @@ pub fn move_to_zone(
     // DFC Rule 711.8: transformed permanents revert to front face on zone change
     if obj_mut.transformed {
         if let Some(back_face) = obj_mut.back_face.clone() {
-            // Restore front face characteristics from stored back_face (which holds the front face)
-            let current_back = super::game_object::BackFaceData {
-                name: obj_mut.name.clone(),
-                power: obj_mut.power,
-                toughness: obj_mut.toughness,
-                card_types: obj_mut.card_types.clone(),
-                keywords: obj_mut.keywords.clone(),
-                abilities: obj_mut.abilities.clone(),
-                trigger_definitions: obj_mut.trigger_definitions.clone(),
-                replacement_definitions: obj_mut.replacement_definitions.clone(),
-                static_definitions: obj_mut.base_static_definitions.clone(),
-                color: obj_mut.color.clone(),
-            };
-            obj_mut.name = back_face.name;
-            obj_mut.power = back_face.power;
-            obj_mut.toughness = back_face.toughness;
-            obj_mut.base_power = back_face.power;
-            obj_mut.base_toughness = back_face.toughness;
-            obj_mut.card_types = back_face.card_types;
-            obj_mut.base_card_types = obj_mut.card_types.clone();
-            obj_mut.keywords = back_face.keywords.clone();
-            obj_mut.base_keywords = back_face.keywords;
-            obj_mut.abilities = back_face.abilities;
-            obj_mut.base_abilities = obj_mut.abilities.clone();
-            obj_mut.trigger_definitions = back_face.trigger_definitions;
-            obj_mut.base_trigger_definitions = obj_mut.trigger_definitions.clone();
-            obj_mut.replacement_definitions = back_face.replacement_definitions;
-            obj_mut.base_replacement_definitions = obj_mut.replacement_definitions.clone();
-            obj_mut.static_definitions = back_face.static_definitions;
-            obj_mut.base_static_definitions = obj_mut.static_definitions.clone();
-            obj_mut.color = back_face.color.clone();
-            obj_mut.base_color = back_face.color;
+            let current_back = snapshot_object_face(obj_mut);
+            apply_back_face_to_object(obj_mut, back_face);
             obj_mut.back_face = Some(current_back);
             obj_mut.transformed = false;
         }

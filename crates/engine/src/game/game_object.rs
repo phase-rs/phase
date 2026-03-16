@@ -7,6 +7,7 @@ use crate::types::ability::{
     ChosenSubtypeKind, ModalChoice, ReplacementDefinition, SpellCastingOption, StaticDefinition,
     TriggerDefinition,
 };
+use crate::types::card::PrintedCardRef;
 use crate::types::card_type::CardType;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -23,13 +24,20 @@ pub struct BackFaceData {
     pub name: String,
     pub power: Option<i32>,
     pub toughness: Option<i32>,
+    pub loyalty: Option<u32>,
     pub card_types: CardType,
+    pub mana_cost: ManaCost,
     pub keywords: Vec<Keyword>,
     pub abilities: Vec<AbilityDefinition>,
     pub trigger_definitions: Vec<TriggerDefinition>,
     pub replacement_definitions: Vec<ReplacementDefinition>,
     pub static_definitions: Vec<StaticDefinition>,
     pub color: Vec<ManaColor>,
+    pub printed_ref: Option<PrintedCardRef>,
+    pub modal: Option<ModalChoice>,
+    pub additional_cost: Option<AdditionalCost>,
+    pub casting_restrictions: Vec<CastingRestriction>,
+    pub casting_options: Vec<SpellCastingOption>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -91,6 +99,7 @@ pub struct GameObject {
     pub replacement_definitions: Vec<ReplacementDefinition>,
     pub static_definitions: Vec<StaticDefinition>,
     pub color: Vec<ManaColor>,
+    pub printed_ref: Option<PrintedCardRef>,
 
     // Back face data for double-faced cards (DFCs)
     pub back_face: Option<BackFaceData>,
@@ -190,6 +199,7 @@ impl GameObject {
             replacement_definitions: Vec::new(),
             static_definitions: Vec::new(),
             color: Vec::new(),
+            printed_ref: None,
             back_face: None,
             base_power: None,
             base_toughness: None,

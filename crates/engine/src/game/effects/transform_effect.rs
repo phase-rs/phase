@@ -83,17 +83,24 @@ mod tests {
             name: "Back Face".to_string(),
             power: Some(4),
             toughness: Some(4),
+            loyalty: None,
             card_types: CardType {
                 supertypes: vec![],
                 core_types: vec![CoreType::Creature],
                 subtypes: vec!["Werewolf".to_string()],
             },
+            mana_cost: crate::types::mana::ManaCost::default(),
             keywords: vec![Keyword::Trample],
             abilities: vec![],
             trigger_definitions: vec![],
             replacement_definitions: vec![],
             static_definitions: vec![],
             color: vec![ManaColor::Green, ManaColor::Red],
+            printed_ref: None,
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: vec![],
+            casting_options: vec![],
         });
         id
     }

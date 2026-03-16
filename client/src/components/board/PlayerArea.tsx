@@ -134,7 +134,7 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
     >
       <div
         className={`flex min-w-0 flex-1 flex-col gap-2 px-1 ${
-          mode === "full" ? "pt-2 pb-4" : "py-2"
+          mode === "full" ? "pt-2 pb-4" : "justify-end py-2"
         } ${
           isCommander ? (mode === "focused" ? "pb-16" : "pb-24") : ""
         }`}

@@ -4,14 +4,13 @@ use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
 use crate::database::CardDatabase;
-use crate::types::ability::PtValue;
 use crate::types::card::CardFace;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::CardId;
-use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+use super::printed_cards::apply_card_face_to_object;
 use super::zones::create_object;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,89 +93,6 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
     }
 }
 
-/// Derive ManaColor values from a ManaCostShard.
-fn shard_colors(shard: &ManaCostShard) -> Vec<ManaColor> {
-    match shard {
-        ManaCostShard::White | ManaCostShard::TwoWhite | ManaCostShard::PhyrexianWhite => {
-            vec![ManaColor::White]
-        }
-        ManaCostShard::Blue | ManaCostShard::TwoBlue | ManaCostShard::PhyrexianBlue => {
-            vec![ManaColor::Blue]
-        }
-        ManaCostShard::Black | ManaCostShard::TwoBlack | ManaCostShard::PhyrexianBlack => {
-            vec![ManaColor::Black]
-        }
-        ManaCostShard::Red | ManaCostShard::TwoRed | ManaCostShard::PhyrexianRed => {
-            vec![ManaColor::Red]
-        }
-        ManaCostShard::Green | ManaCostShard::TwoGreen | ManaCostShard::PhyrexianGreen => {
-            vec![ManaColor::Green]
-        }
-        ManaCostShard::WhiteBlue | ManaCostShard::PhyrexianWhiteBlue => {
-            vec![ManaColor::White, ManaColor::Blue]
-        }
-        ManaCostShard::WhiteBlack | ManaCostShard::PhyrexianWhiteBlack => {
-            vec![ManaColor::White, ManaColor::Black]
-        }
-        ManaCostShard::BlueBlack | ManaCostShard::PhyrexianBlueBlack => {
-            vec![ManaColor::Blue, ManaColor::Black]
-        }
-        ManaCostShard::BlueRed | ManaCostShard::PhyrexianBlueRed => {
-            vec![ManaColor::Blue, ManaColor::Red]
-        }
-        ManaCostShard::BlackRed | ManaCostShard::PhyrexianBlackRed => {
-            vec![ManaColor::Black, ManaColor::Red]
-        }
-        ManaCostShard::BlackGreen | ManaCostShard::PhyrexianBlackGreen => {
-            vec![ManaColor::Black, ManaColor::Green]
-        }
-        ManaCostShard::RedWhite | ManaCostShard::PhyrexianRedWhite => {
-            vec![ManaColor::Red, ManaColor::White]
-        }
-        ManaCostShard::RedGreen | ManaCostShard::PhyrexianRedGreen => {
-            vec![ManaColor::Red, ManaColor::Green]
-        }
-        ManaCostShard::GreenWhite | ManaCostShard::PhyrexianGreenWhite => {
-            vec![ManaColor::Green, ManaColor::White]
-        }
-        ManaCostShard::GreenBlue | ManaCostShard::PhyrexianGreenBlue => {
-            vec![ManaColor::Green, ManaColor::Blue]
-        }
-        ManaCostShard::ColorlessWhite => vec![ManaColor::White],
-        ManaCostShard::ColorlessBlue => vec![ManaColor::Blue],
-        ManaCostShard::ColorlessBlack => vec![ManaColor::Black],
-        ManaCostShard::ColorlessRed => vec![ManaColor::Red],
-        ManaCostShard::ColorlessGreen => vec![ManaColor::Green],
-        ManaCostShard::Colorless | ManaCostShard::Snow | ManaCostShard::X => vec![],
-    }
-}
-
-/// Derive color identity from a ManaCost by collecting unique ManaColor values from shards.
-pub(crate) fn derive_colors_from_mana_cost(mana_cost: &ManaCost) -> Vec<ManaColor> {
-    match mana_cost {
-        ManaCost::NoCost => vec![],
-        ManaCost::Cost { shards, .. } => {
-            let mut colors = Vec::new();
-            for shard in shards {
-                for color in shard_colors(shard) {
-                    if !colors.contains(&color) {
-                        colors.push(color);
-                    }
-                }
-            }
-            colors
-        }
-    }
-}
-
-/// Extract i32 from a typed PtValue. Variable P/T defaults to 0 at runtime.
-fn parse_pt(val: &Option<PtValue>) -> Option<i32> {
-    val.as_ref().map(|pt| match pt {
-        PtValue::Fixed(n) => *n,
-        PtValue::Variable(_) => 0,
-    })
-}
-
 /// Create a fully-populated GameObject from a CardFace and place it in the owner's library.
 pub fn create_object_from_card_face(
     state: &mut GameState,
@@ -186,43 +102,8 @@ pub fn create_object_from_card_face(
     let card_id = CardId(state.next_object_id);
     let obj_id = create_object(state, card_id, owner, card_face.name.clone(), Zone::Library);
 
-    let power = parse_pt(&card_face.power);
-    let toughness = parse_pt(&card_face.toughness);
-    let loyalty = card_face
-        .loyalty
-        .as_ref()
-        .and_then(|s| s.parse::<u32>().ok());
-    let keywords = card_face.keywords.clone();
-    let color = card_face
-        .color_override
-        .clone()
-        .unwrap_or_else(|| derive_colors_from_mana_cost(&card_face.mana_cost));
-
     let obj = state.objects.get_mut(&obj_id).expect("just created");
-    obj.card_types = card_face.card_type.clone();
-    obj.base_card_types = card_face.card_type.clone();
-    obj.mana_cost = card_face.mana_cost.clone();
-    obj.power = power;
-    obj.toughness = toughness;
-    obj.base_power = power;
-    obj.base_toughness = toughness;
-    obj.loyalty = loyalty;
-    obj.keywords = keywords.clone();
-    obj.base_keywords = keywords;
-    obj.abilities = card_face.abilities.clone();
-    obj.base_abilities = card_face.abilities.clone();
-    obj.trigger_definitions = card_face.triggers.clone();
-    obj.base_trigger_definitions = card_face.triggers.clone();
-    obj.static_definitions = card_face.static_abilities.clone();
-    obj.base_static_definitions = card_face.static_abilities.clone();
-    obj.replacement_definitions = card_face.replacements.clone();
-    obj.base_replacement_definitions = card_face.replacements.clone();
-    obj.color = color.clone();
-    obj.base_color = color;
-    obj.modal = card_face.modal.clone();
-    obj.additional_cost = card_face.additional_cost.clone();
-    obj.casting_restrictions = card_face.casting_restrictions.clone();
-    obj.casting_options = card_face.casting_options.clone();
+    apply_card_face_to_object(obj, card_face);
 
     obj_id
 }
@@ -236,44 +117,9 @@ pub fn create_commander_from_card_face(
     let card_id = CardId(state.next_object_id);
     let obj_id = create_object(state, card_id, owner, card_face.name.clone(), Zone::Command);
 
-    let power = parse_pt(&card_face.power);
-    let toughness = parse_pt(&card_face.toughness);
-    let loyalty = card_face
-        .loyalty
-        .as_ref()
-        .and_then(|s| s.parse::<u32>().ok());
-    let keywords = card_face.keywords.clone();
-    let color = card_face
-        .color_override
-        .clone()
-        .unwrap_or_else(|| derive_colors_from_mana_cost(&card_face.mana_cost));
-
     let obj = state.objects.get_mut(&obj_id).expect("just created");
-    obj.card_types = card_face.card_type.clone();
-    obj.base_card_types = card_face.card_type.clone();
-    obj.mana_cost = card_face.mana_cost.clone();
-    obj.power = power;
-    obj.toughness = toughness;
-    obj.base_power = power;
-    obj.base_toughness = toughness;
-    obj.loyalty = loyalty;
-    obj.keywords = keywords.clone();
-    obj.base_keywords = keywords;
-    obj.abilities = card_face.abilities.clone();
-    obj.base_abilities = card_face.abilities.clone();
-    obj.trigger_definitions = card_face.triggers.clone();
-    obj.base_trigger_definitions = card_face.triggers.clone();
-    obj.static_definitions = card_face.static_abilities.clone();
-    obj.base_static_definitions = card_face.static_abilities.clone();
-    obj.replacement_definitions = card_face.replacements.clone();
-    obj.base_replacement_definitions = card_face.replacements.clone();
-    obj.color = color.clone();
-    obj.base_color = color;
+    apply_card_face_to_object(obj, card_face);
     obj.is_commander = true;
-    obj.modal = card_face.modal.clone();
-    obj.additional_cost = card_face.additional_cost.clone();
-    obj.casting_restrictions = card_face.casting_restrictions.clone();
-    obj.casting_options = card_face.casting_options.clone();
 
     obj_id
 }

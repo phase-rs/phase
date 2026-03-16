@@ -9,6 +9,12 @@ use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrintedCardRef {
+    pub oracle_id: String,
+    pub face_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardFace {
     pub name: String,
     pub mana_cost: ManaCost,

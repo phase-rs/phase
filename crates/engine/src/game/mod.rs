@@ -24,6 +24,7 @@ pub mod morph;
 pub mod mulligan;
 pub mod planeswalker;
 pub mod players;
+pub mod printed_cards;
 pub mod priority;
 pub mod replacement;
 pub mod restrictions;
@@ -51,6 +52,7 @@ pub use game_object::{BackFaceData, CounterType, GameObject};
 pub use keywords::parse_keywords;
 pub use layers::evaluate_layers;
 pub use mana_payment::{can_pay, pay_cost, produce_mana, PaymentError};
+pub use printed_cards::rehydrate_game_from_card_db;
 pub use triggers::process_triggers;
 pub use zones::{
     add_to_zone, create_object, move_to_library_position, move_to_zone, remove_from_zone,

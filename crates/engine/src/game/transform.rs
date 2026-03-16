@@ -4,7 +4,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
 use super::engine::EngineError;
-use super::game_object::BackFaceData;
+use super::printed_cards::{apply_back_face_to_object, snapshot_object_face};
 
 /// Transform a permanent between its front and back face.
 ///
@@ -36,81 +36,13 @@ pub fn transform_permanent(
     let obj = state.objects.get_mut(&object_id).unwrap();
 
     if obj.transformed {
-        // Transforming back to front: swap back_face with current, restoring front face
-        let current_back = BackFaceData {
-            name: obj.name.clone(),
-            power: obj.power,
-            toughness: obj.toughness,
-            card_types: obj.card_types.clone(),
-            keywords: obj.keywords.clone(),
-            abilities: obj.abilities.clone(),
-            trigger_definitions: obj.trigger_definitions.clone(),
-            replacement_definitions: obj.replacement_definitions.clone(),
-            static_definitions: obj.base_static_definitions.clone(),
-            color: obj.color.clone(),
-        };
-
-        // Restore front face from back_face
-        obj.name = back_face.name;
-        obj.power = back_face.power;
-        obj.toughness = back_face.toughness;
-        obj.base_power = back_face.power;
-        obj.base_toughness = back_face.toughness;
-        obj.card_types = back_face.card_types;
-        obj.base_card_types = obj.card_types.clone();
-        obj.keywords = back_face.keywords.clone();
-        obj.base_keywords = back_face.keywords;
-        obj.abilities = back_face.abilities;
-        obj.base_abilities = obj.abilities.clone();
-        obj.trigger_definitions = back_face.trigger_definitions;
-        obj.base_trigger_definitions = obj.trigger_definitions.clone();
-        obj.replacement_definitions = back_face.replacement_definitions;
-        obj.base_replacement_definitions = obj.replacement_definitions.clone();
-        obj.static_definitions = back_face.static_definitions;
-        obj.base_static_definitions = obj.static_definitions.clone();
-        obj.color = back_face.color.clone();
-        obj.base_color = back_face.color;
-
-        // Store current (back) face data so we can transform again
+        let current_back = snapshot_object_face(obj);
+        apply_back_face_to_object(obj, back_face);
         obj.back_face = Some(current_back);
         obj.transformed = false;
     } else {
-        // Transforming front to back: swap current with back_face
-        let current_front = BackFaceData {
-            name: obj.name.clone(),
-            power: obj.power,
-            toughness: obj.toughness,
-            card_types: obj.card_types.clone(),
-            keywords: obj.keywords.clone(),
-            abilities: obj.abilities.clone(),
-            trigger_definitions: obj.trigger_definitions.clone(),
-            replacement_definitions: obj.replacement_definitions.clone(),
-            static_definitions: obj.base_static_definitions.clone(),
-            color: obj.color.clone(),
-        };
-
-        // Apply back face characteristics
-        obj.name = back_face.name;
-        obj.power = back_face.power;
-        obj.toughness = back_face.toughness;
-        obj.base_power = back_face.power;
-        obj.base_toughness = back_face.toughness;
-        obj.card_types = back_face.card_types;
-        obj.base_card_types = obj.card_types.clone();
-        obj.keywords = back_face.keywords.clone();
-        obj.base_keywords = back_face.keywords;
-        obj.abilities = back_face.abilities;
-        obj.base_abilities = obj.abilities.clone();
-        obj.trigger_definitions = back_face.trigger_definitions;
-        obj.base_trigger_definitions = obj.trigger_definitions.clone();
-        obj.replacement_definitions = back_face.replacement_definitions;
-        obj.base_replacement_definitions = obj.replacement_definitions.clone();
-        obj.static_definitions = back_face.static_definitions;
-        obj.base_static_definitions = obj.static_definitions.clone();
-        obj.color = back_face.color.clone();
-        obj.base_color = back_face.color;
-
-        // Store front face data for transforming back
+        let current_front = snapshot_object_face(obj);
+        apply_back_face_to_object(obj, back_face);
         obj.back_face = Some(current_front);
         obj.transformed = true;
     }
@@ -170,11 +102,13 @@ mod tests {
             name: "Werewolf Back".to_string(),
             power: Some(4),
             toughness: Some(4),
+            loyalty: None,
             card_types: CardType {
                 supertypes: vec![],
                 core_types: vec![CoreType::Creature],
                 subtypes: vec!["Werewolf".to_string()],
             },
+            mana_cost: crate::types::mana::ManaCost::default(),
             keywords: vec![Keyword::Trample],
             abilities: vec![crate::types::ability::AbilityDefinition::new(
                 crate::types::ability::AbilityKind::Spell,
@@ -187,6 +121,11 @@ mod tests {
             replacement_definitions: vec![],
             static_definitions: vec![],
             color: vec![ManaColor::Green, ManaColor::Red],
+            printed_ref: None,
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: vec![],
+            casting_options: vec![],
         });
 
         id

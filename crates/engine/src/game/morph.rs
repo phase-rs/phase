@@ -10,7 +10,7 @@ use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
 use super::engine::EngineError;
-use super::game_object::BackFaceData;
+use super::printed_cards::{apply_back_face_to_object, snapshot_object_face};
 
 /// Stores the original characteristics of a face-down card so they can be
 /// restored when the card is turned face up.
@@ -57,18 +57,7 @@ pub fn play_face_down(
     }
 
     // Store original characteristics before overriding
-    let original = BackFaceData {
-        name: obj.name.clone(),
-        power: obj.power,
-        toughness: obj.toughness,
-        card_types: obj.card_types.clone(),
-        keywords: obj.keywords.clone(),
-        abilities: obj.abilities.clone(),
-        trigger_definitions: obj.trigger_definitions.clone(),
-        replacement_definitions: obj.replacement_definitions.clone(),
-        static_definitions: obj.base_static_definitions.clone(),
-        color: obj.color.clone(),
-    };
+    let original = snapshot_object_face(obj);
 
     // Move to battlefield
     super::zones::move_to_zone(state, object_id, Zone::Battlefield, events);
@@ -171,25 +160,7 @@ pub fn turn_face_up(
     // Restore original characteristics
     let obj = state.objects.get_mut(&object_id).unwrap();
     obj.face_down = false;
-    obj.name = back_face.name;
-    obj.power = back_face.power;
-    obj.toughness = back_face.toughness;
-    obj.base_power = back_face.power;
-    obj.base_toughness = back_face.toughness;
-    obj.card_types = back_face.card_types;
-    obj.base_card_types = obj.card_types.clone();
-    obj.keywords = back_face.keywords.clone();
-    obj.base_keywords = back_face.keywords;
-    obj.abilities = back_face.abilities;
-    obj.base_abilities = obj.abilities.clone();
-    obj.trigger_definitions = back_face.trigger_definitions;
-    obj.base_trigger_definitions = obj.trigger_definitions.clone();
-    obj.replacement_definitions = back_face.replacement_definitions;
-    obj.base_replacement_definitions = obj.replacement_definitions.clone();
-    obj.static_definitions = back_face.static_definitions;
-    obj.base_static_definitions = obj.static_definitions.clone();
-    obj.color = back_face.color.clone();
-    obj.base_color = back_face.color;
+    apply_back_face_to_object(obj, back_face);
     obj.back_face = None;
 
     state.layers_dirty = true;
@@ -242,18 +213,7 @@ pub fn manifest(
     let obj = state.objects.get(&object_id).unwrap();
 
     // Store original characteristics
-    let original = BackFaceData {
-        name: obj.name.clone(),
-        power: obj.power,
-        toughness: obj.toughness,
-        card_types: obj.card_types.clone(),
-        keywords: obj.keywords.clone(),
-        abilities: obj.abilities.clone(),
-        trigger_definitions: obj.trigger_definitions.clone(),
-        replacement_definitions: obj.replacement_definitions.clone(),
-        static_definitions: obj.base_static_definitions.clone(),
-        color: obj.color.clone(),
-    };
+    let original = snapshot_object_face(obj);
 
     // Move from library to battlefield
     super::zones::move_to_zone(state, object_id, Zone::Battlefield, events);

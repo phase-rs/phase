@@ -27,17 +27,14 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
   if (!opponent) return null;
 
   const cardCount = opponent.hand.length;
+  const center = cardCount > 0 ? (cardCount - 1) / 2 : 0;
 
-  if (cardCount === 0) return null;
-
-  const center = (cardCount - 1) / 2;
-
-  // Base offset pushes cards partially offscreen
-  const BASE_Y = -25;
+  // Keep the opponent hand visible within the top chrome area.
+  const BASE_Y = 8;
 
   return (
     <div
-      className="flex items-start justify-center overflow-hidden px-4 py-1"
+      className="flex min-h-[calc(var(--card-h)*0.42)] items-start justify-center overflow-visible px-4 pt-5 pb-1"
       style={{ perspective: "800px" }}
     >
       <AnimatePresence>

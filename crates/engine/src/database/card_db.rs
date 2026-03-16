@@ -5,13 +5,14 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use super::legality::{normalize_legalities, CardLegalities, LegalityFormat, LegalityStatus};
-use crate::types::card::{CardFace, CardRules};
+use crate::types::card::{CardFace, CardRules, PrintedCardRef};
 
 use std::io::BufReader;
 
 pub struct CardDatabase {
     pub(crate) cards: HashMap<String, CardRules>,
     pub(crate) face_index: HashMap<String, CardFace>,
+    pub(crate) oracle_id_index: HashMap<String, Vec<String>>,
     pub(crate) legalities: HashMap<String, CardLegalities>,
     pub(crate) errors: Vec<(PathBuf, String)>,
 }
@@ -40,10 +41,14 @@ impl CardDatabase {
 
     fn from_export_entries(entries: HashMap<String, CardExportEntry>) -> Self {
         let mut face_index = HashMap::with_capacity(entries.len());
+        let mut oracle_id_index: HashMap<String, Vec<String>> = HashMap::new();
         let mut legalities = HashMap::new();
 
         for (_name, entry) in entries {
             let key = entry.face.name.to_lowercase();
+            if let Some(oracle_id) = entry.face.scryfall_oracle_id.clone() {
+                oracle_id_index.entry(oracle_id).or_default().push(key.clone());
+            }
             face_index.insert(key.clone(), entry.face);
 
             let normalized = normalize_legalities(&entry.legalities);
@@ -55,6 +60,7 @@ impl CardDatabase {
         Self {
             cards: HashMap::new(),
             face_index,
+            oracle_id_index,
             legalities,
             errors: Vec::new(),
         }
@@ -66,6 +72,14 @@ impl CardDatabase {
 
     pub fn get_face_by_name(&self, name: &str) -> Option<&CardFace> {
         self.face_index.get(&name.to_lowercase())
+    }
+
+    pub fn get_face_by_printed_ref(&self, printed_ref: &PrintedCardRef) -> Option<&CardFace> {
+        self.oracle_id_index
+            .get(&printed_ref.oracle_id)?
+            .iter()
+            .filter_map(|name| self.face_index.get(name))
+            .find(|face| face.name == printed_ref.face_name)
     }
 
     pub fn get_legalities(&self, name: &str) -> Option<&CardLegalities> {

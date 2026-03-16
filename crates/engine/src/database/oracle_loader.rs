@@ -6,7 +6,7 @@ use std::str::FromStr;
 use crate::database::card_db::CardDatabase;
 use crate::database::legality::normalize_legalities;
 use crate::database::mtgjson::{load_atomic_cards, parse_mtgjson_mana_cost, AtomicCard};
-use crate::game::deck_loading::derive_colors_from_mana_cost;
+use crate::game::printed_cards::derive_colors_from_mana_cost;
 use crate::parser::oracle::parse_oracle_text;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, ContinuousModification,
@@ -344,6 +344,7 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
     Ok(CardDatabase {
         cards,
         face_index,
+        oracle_id_index: HashMap::new(),
         legalities,
         errors,
     })

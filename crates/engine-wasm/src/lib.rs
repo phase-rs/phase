@@ -10,9 +10,11 @@ use engine::ai_support::legal_actions;
 use engine::database::CardDatabase;
 use engine::game::engine::apply;
 use engine::game::{
-    evaluate_deck_compatibility, load_deck_into_state, resolve_deck_list, start_game,
-    DeckCompatibilityRequest, DeckList,
+    evaluate_deck_compatibility, load_deck_into_state, rehydrate_game_from_card_db,
+    resolve_deck_list, start_game, DeckCompatibilityRequest, DeckList,
 };
+use engine::game::derived::derive_display_state;
+use engine::game::layers::evaluate_layers;
 use engine::types::format::FormatConfig;
 use engine::types::match_config::MatchConfig;
 use engine::types::{
@@ -196,6 +198,15 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
     let mut state: GameState = serde_json::from_str(json_str)
         .map_err(|e| JsValue::from_str(&format!("Failed to deserialize GameState: {}", e)))?;
     state.rng = ChaCha20Rng::seed_from_u64(state.rng_seed);
+    CARD_DB.with(|cell| {
+        if let Some(db) = cell.borrow().as_ref() {
+            rehydrate_game_from_card_db(&mut state, db);
+        }
+    });
+    if state.layers_dirty {
+        evaluate_layers(&mut state);
+    }
+    derive_display_state(&mut state);
     GAME_STATE.with(|gs| {
         *gs.borrow_mut() = Some(state);
     });
@@ -345,3 +356,159 @@ const _: () = {
         let _ = std::any::type_name::<Zone>();
     }
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine::game::deck_loading::create_object_from_card_face;
+    use engine::types::ability::{AbilityDefinition, AbilityKind, ContinuousModification, DamageAmount, Duration, Effect, TargetFilter};
+    use engine::types::card::CardFace;
+    use engine::types::card_type::{CardType, CoreType};
+    use engine::types::identifiers::ObjectId;
+    use engine::types::keywords::Keyword;
+    use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+    use engine::types::player::PlayerId;
+    use engine::types::statics::StaticMode;
+    use engine::types::zones::Zone;
+
+    fn make_face(name: &str, oracle_id: &str, keyword: Keyword) -> CardFace {
+        CardFace {
+            name: name.to_string(),
+            mana_cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1,
+            },
+            card_type: CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Bear".to_string()],
+            },
+            power: Some(engine::types::ability::PtValue::Fixed(2)),
+            toughness: Some(engine::types::ability::PtValue::Fixed(2)),
+            loyalty: None,
+            defense: None,
+            oracle_text: None,
+            non_ability_text: None,
+            flavor_name: None,
+            keywords: vec![keyword],
+            abilities: vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: DamageAmount::Fixed(3),
+                    target: TargetFilter::Any,
+                },
+            )],
+            triggers: vec![],
+            static_abilities: vec![],
+            replacements: vec![],
+            color_override: Some(vec![ManaColor::Green]),
+            scryfall_oracle_id: Some(oracle_id.to_string()),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: vec![],
+            casting_options: vec![],
+        }
+    }
+
+    fn load_db_with_updated_face() {
+        let json = serde_json::json!({
+            "test card": {
+                "name": "Test Card",
+                "mana_cost": { "Cost": { "shards": ["Green"], "generic": 1 } },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": ["Bear"] },
+                "power": { "type": "Fixed", "value": 2 },
+                "toughness": { "type": "Fixed", "value": 2 },
+                "loyalty": null,
+                "defense": null,
+                "oracle_text": null,
+                "non_ability_text": null,
+                "flavor_name": null,
+                "keywords": ["Trample"],
+                "abilities": [{
+                    "kind": "Spell",
+                    "effect": {
+                        "type": "DealDamage",
+                        "amount": { "type": "Fixed", "value": 4 },
+                        "target": { "type": "Any" }
+                    },
+                    "cost": null,
+                    "sub_ability": null,
+                    "duration": null,
+                    "description": null,
+                    "target_prompt": null,
+                    "sorcery_speed": false
+                }],
+                "triggers": [],
+                "static_abilities": [],
+                "replacements": [],
+                "color_override": ["Green"],
+                "scryfall_oracle_id": "oracle-1"
+            }
+        })
+        .to_string();
+        load_card_database(&json).unwrap();
+    }
+
+    #[test]
+    fn restore_rehydrates_saved_state_when_db_loaded() {
+        load_db_with_updated_face();
+
+        let mut state = GameState::new_two_player(42);
+        let card = make_face("Test Card", "oracle-1", Keyword::Vigilance);
+        let object_id = create_object_from_card_face(&mut state, &card, PlayerId(0));
+        engine::game::zones::move_to_zone(&mut state, object_id, Zone::Battlefield, &mut Vec::new());
+        let obj = state.objects.get_mut(&object_id).unwrap();
+        obj.counters.insert(engine::game::CounterType::Plus1Plus1, 1);
+        state.add_transient_continuous_effect(
+            object_id,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject(object_id),
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }],
+            None,
+        );
+        evaluate_layers(&mut state);
+        derive_display_state(&mut state);
+
+        let json = serde_json::to_string(&state).unwrap();
+        restore_game_state(&json).unwrap();
+        let restored: GameState = serde_wasm_bindgen::from_value(get_game_state()).unwrap();
+        let obj = restored.objects.get(&object_id).unwrap();
+
+        assert_eq!(obj.printed_ref.as_ref().unwrap().oracle_id, "oracle-1");
+        assert!(obj.base_keywords.contains(&Keyword::Trample));
+        assert!(obj.keywords.contains(&Keyword::Flying));
+        assert_eq!(
+            obj.counters
+                .get(&engine::game::CounterType::Plus1Plus1)
+                .copied(),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn restore_keeps_legacy_state_without_printed_ref() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = ObjectId(1);
+        state.objects.insert(
+            object_id,
+            engine::game::GameObject::new(
+                object_id,
+                engine::types::identifiers::CardId(1),
+                PlayerId(0),
+                "Legacy Card".to_string(),
+                Zone::Hand,
+            ),
+        );
+        state.players[0].hand.push(object_id);
+
+        let json = serde_json::to_string(&state).unwrap();
+        restore_game_state(&json).unwrap();
+        let restored: GameState = serde_wasm_bindgen::from_value(get_game_state()).unwrap();
+
+        assert!(restored.objects[&object_id].printed_ref.is_none());
+        assert_eq!(restored.objects[&object_id].name, "Legacy Card");
+    }
+}
