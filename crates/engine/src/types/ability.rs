@@ -623,7 +623,7 @@ pub enum TargetFilter {
     AttachedTo,
 }
 
-/// A measurable game quantity referenced in a static condition.
+/// A dynamic game quantity — a runtime lookup into the game state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum QuantityRef {
@@ -633,6 +633,20 @@ pub enum QuantityRef {
     LifeTotal,
     /// Number of cards in the controller's graveyard.
     GraveyardSize,
+    /// Controller's life total minus the format's starting life total.
+    /// Used for "N or more life more than your starting life total" conditions.
+    LifeAboveStarting,
+}
+
+/// An expression that produces an integer for quantity comparisons.
+/// Either a dynamic game-state lookup or a literal constant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum QuantityExpr {
+    /// A dynamic quantity looked up from the current game state.
+    Ref { qty: QuantityRef },
+    /// A literal integer constant.
+    Fixed { value: i32 },
 }
 
 /// Comparison operator used in static conditions.
@@ -665,9 +679,6 @@ pub enum StaticCondition {
         colors: Vec<ManaColor>,
         threshold: u32,
     },
-    LifeMoreThanStartingBy {
-        amount: i32,
-    },
     IsPresent {
         #[serde(default)]
         filter: Option<TargetFilter>,
@@ -677,12 +688,13 @@ pub enum StaticCondition {
     ChosenColorIs {
         color: ManaColor,
     },
-    /// True when a measurable game quantity satisfies a comparison against another quantity.
-    /// Covers: "the number of cards in your hand is greater than your life total", etc.
+    /// True when a measurable quantity expression satisfies a comparison against another.
+    /// Supports quantity-vs-quantity ("hand size > life total") and quantity-vs-constant
+    /// ("life above starting >= 7") via `QuantityExpr::Fixed`.
     QuantityComparison {
-        lhs: QuantityRef,
+        lhs: QuantityExpr,
         comparator: Comparator,
-        rhs: QuantityRef,
+        rhs: QuantityExpr,
     },
     /// Condition text that the parser could not yet decompose into a typed variant.
     /// Evaluated permissively (always true) so the static effect still applies.
@@ -1354,11 +1366,15 @@ impl From<&Effect> for EffectKind {
 // Ability kinds
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
 pub enum AbilityKind {
+    #[default]
     Spell,
     Activated,
     Database,
+    /// Pre-game abilities: "If this card is in your opening hand, you may begin the game with..."
+    /// Fired during game setup, not during normal stack resolution.
+    BeginGame,
 }
 
 // ---------------------------------------------------------------------------
@@ -1996,6 +2012,11 @@ pub struct ResolvedAbility {
     pub targets: Vec<TargetRef>,
     pub source_id: ObjectId,
     pub controller: PlayerId,
+    /// The kind of ability this was (activated, triggered, static, etc.).
+    /// Carried through from `AbilityDefinition` to allow resolution guards (e.g. skipping
+    /// `BeginGame` abilities during normal stack resolution).
+    #[serde(default)]
+    pub kind: AbilityKind,
     #[serde(default)]
     pub sub_ability: Option<Box<ResolvedAbility>>,
     #[serde(default)]
@@ -2024,12 +2045,18 @@ impl ResolvedAbility {
             targets,
             source_id,
             controller,
+            kind: AbilityKind::default(),
             sub_ability: None,
             duration: None,
             condition: None,
             context: SpellContext::default(),
             optional_targeting: false,
         }
+    }
+
+    pub fn kind(mut self, kind: AbilityKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     pub fn sub_ability(mut self, ability: ResolvedAbility) -> Self {
@@ -2462,7 +2489,11 @@ mod tests {
                 colors: vec![ManaColor::White, ManaColor::Blue],
                 threshold: 7,
             },
-            StaticCondition::LifeMoreThanStartingBy { amount: 7 },
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref { qty: QuantityRef::LifeAboveStarting },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 7 },
+            },
             StaticCondition::IsPresent {
                 filter: Some(
                     TypedFilter::creature()

@@ -6,8 +6,8 @@ use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{parse_number, strip_reminder_text};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChosenSubtypeKind, Comparator, ContinuousModification,
-    ControllerRef, DynamicPTValue, FilterProp, QuantityRef, StaticCondition, StaticDefinition,
-    TargetFilter, TypedFilter,
+    ControllerRef, DynamicPTValue, FilterProp, QuantityExpr, QuantityRef, StaticCondition,
+    StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
@@ -553,8 +553,10 @@ fn parse_static_condition(text: &str) -> Option<StaticCondition> {
     {
         let (amount, rest) = parse_number(amount_text)?;
         if rest.trim().is_empty() {
-            return Some(StaticCondition::LifeMoreThanStartingBy {
-                amount: amount as i32,
+            return Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref { qty: QuantityRef::LifeAboveStarting },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: amount as i32 },
             });
         }
     }
@@ -727,10 +729,14 @@ fn parse_quantity_comparison(lower: &str) -> Option<StaticCondition> {
     let lhs = parse_quantity_ref(lhs_text)?;
     let (comparator, rhs_text) = parse_comparator_prefix(comparison)?;
     let rhs = parse_quantity_ref(rhs_text.trim())?;
-    Some(StaticCondition::QuantityComparison { lhs, comparator, rhs })
+    Some(StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref { qty: lhs },
+        comparator,
+        rhs: QuantityExpr::Ref { qty: rhs },
+    })
 }
 
-/// Map a quantity phrase to a QuantityRef.
+/// Map a quantity phrase to a dynamic QuantityRef.
 fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
     match text.trim().trim_end_matches('.') {
         "cards in your hand" => Some(QuantityRef::HandSize),
@@ -1575,7 +1581,7 @@ mod tests {
 
     #[test]
     fn static_as_long_as_hand_size_gt_life() {
-        use crate::types::ability::{Comparator, QuantityRef};
+        use crate::types::ability::{Comparator, QuantityExpr, QuantityRef};
         let def = parse_static_line(
             "As long as the number of cards in your hand is greater than your life total, enchanted creature has trample.",
         )
@@ -1584,9 +1590,9 @@ mod tests {
         assert!(matches!(
             def.condition,
             Some(StaticCondition::QuantityComparison {
-                lhs: QuantityRef::HandSize,
+                lhs: QuantityExpr::Ref { qty: QuantityRef::HandSize },
                 comparator: Comparator::GT,
-                rhs: QuantityRef::LifeTotal,
+                rhs: QuantityExpr::Ref { qty: QuantityRef::LifeTotal },
             })
         ));
     }
@@ -1646,7 +1652,11 @@ mod tests {
             .contains(&ContinuousModification::AddToughness { value: 2 }));
         assert_eq!(
             def.condition,
-            Some(StaticCondition::LifeMoreThanStartingBy { amount: 7 })
+            Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref { qty: QuantityRef::LifeAboveStarting },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 7 },
+            })
         );
     }
 

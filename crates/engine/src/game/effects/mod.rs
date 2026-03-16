@@ -1,4 +1,4 @@
-use crate::types::ability::{AbilityCondition, Effect, EffectError, ResolvedAbility};
+use crate::types::ability::{AbilityCondition, AbilityKind, Effect, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 
@@ -112,6 +112,11 @@ pub fn resolve_ability_chain(
     // Safety limit to prevent stack overflow on pathological data
     if depth > 20 {
         return Err(EffectError::ChainTooDeep);
+    }
+
+    // BeginGame abilities are handled at game-start setup, not during stack resolution
+    if matches!(ability.kind, AbilityKind::BeginGame) {
+        return Ok(());
     }
 
     // Skip no-op unimplemented effects

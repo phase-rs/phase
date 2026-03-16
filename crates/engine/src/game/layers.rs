@@ -5,8 +5,8 @@ use crate::game::devotion::count_devotion;
 use crate::game::filter::matches_target_filter;
 use crate::game::game_object::CounterType;
 use crate::types::ability::{
-    ContinuousModification, Duration, DynamicPTValue, QuantityRef, StaticCondition, TargetFilter,
-    TypedFilter,
+    ContinuousModification, Duration, DynamicPTValue, QuantityExpr, QuantityRef, StaticCondition,
+    TargetFilter, TypedFilter,
 };
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -66,15 +66,6 @@ fn evaluate_condition(state: &GameState, condition: &StaticCondition, controller
         StaticCondition::DevotionGE { colors, threshold } => {
             count_devotion(state, controller, colors) >= *threshold
         }
-        StaticCondition::LifeMoreThanStartingBy { amount } => {
-            state
-                .players
-                .iter()
-                .find(|p| p.id == controller)
-                .is_some_and(|player| {
-                    player.life >= state.format_config.starting_life + *amount
-                })
-        }
         StaticCondition::IsPresent { filter } => match filter {
             Some(f) => state
                 .objects
@@ -88,12 +79,19 @@ fn evaluate_condition(state: &GameState, condition: &StaticCondition, controller
             .and_then(|obj| obj.chosen_color())
             .is_some_and(|chosen| &chosen == color),
         StaticCondition::QuantityComparison { lhs, comparator, rhs } => {
-            let resolve = |qty: &QuantityRef| -> i32 {
+            let resolve = |expr: &QuantityExpr| -> i32 {
                 let player = state.players.iter().find(|p| p.id == controller);
-                match qty {
-                    QuantityRef::HandSize => player.map_or(0, |p| p.hand.len() as i32),
-                    QuantityRef::LifeTotal => player.map_or(0, |p| p.life),
-                    QuantityRef::GraveyardSize => player.map_or(0, |p| p.graveyard.len() as i32),
+                match expr {
+                    QuantityExpr::Fixed { value: n } => *n,
+                    QuantityExpr::Ref { qty } => match qty {
+                        QuantityRef::HandSize => player.map_or(0, |p| p.hand.len() as i32),
+                        QuantityRef::LifeTotal => player.map_or(0, |p| p.life),
+                        QuantityRef::GraveyardSize => {
+                            player.map_or(0, |p| p.graveyard.len() as i32)
+                        }
+                        QuantityRef::LifeAboveStarting => player
+                            .map_or(0, |p| p.life - state.format_config.starting_life),
+                    },
                 }
             };
             comparator.clone().evaluate(resolve(lhs), resolve(rhs))
@@ -655,7 +653,11 @@ mod tests {
                 ContinuousModification::AddPower { value: 2 },
                 ContinuousModification::AddToughness { value: 2 },
             ])
-            .condition(StaticCondition::LifeMoreThanStartingBy { amount: 7 });
+            .condition(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref { qty: QuantityRef::LifeAboveStarting },
+                comparator: crate::types::ability::Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 7 },
+            });
         state
             .objects
             .get_mut(&leyline)

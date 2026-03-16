@@ -225,6 +225,23 @@ pub fn parse_oracle_text(
             }
         }
 
+        // Priority 8c: "If this card is in your opening hand, you may begin the game with it on the battlefield"
+        if lower.contains("opening hand") && lower.contains("begin the game") {
+            result.abilities.push(
+                AbilityDefinition::new(
+                    AbilityKind::BeginGame,
+                    Effect::ChangeZone {
+                        destination: crate::types::zones::Zone::Battlefield,
+                        target: crate::types::ability::TargetFilter::SelfRef,
+                        origin: Some(crate::types::zones::Zone::Hand),
+                    },
+                )
+                .description(line.to_string()),
+            );
+            i += 1;
+            continue;
+        }
+
         // Priority 8b: "As an additional cost to cast this spell"
         if lower.starts_with("as an additional cost") {
             result.additional_cost = parse_additional_cost_line(&lower, &line);

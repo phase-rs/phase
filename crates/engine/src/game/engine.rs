@@ -1193,7 +1193,8 @@ fn resolved_ability_from_definition(
     controller: PlayerId,
     targets: Vec<TargetRef>,
 ) -> ResolvedAbility {
-    let mut resolved = ResolvedAbility::new(def.effect.clone(), targets, source_id, controller);
+    let mut resolved =
+        ResolvedAbility::new(def.effect.clone(), targets, source_id, controller).kind(def.kind);
     if let Some(sub) = &def.sub_ability {
         resolved = resolved.sub_ability(resolved_ability_from_definition(
             sub,

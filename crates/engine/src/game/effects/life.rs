@@ -70,6 +70,7 @@ pub fn resolve_gain(
                     .ok_or(EffectError::PlayerNotFound)?;
                 player.life += gain_amount as i32;
                 player.life_gained_this_turn += gain_amount;
+                state.layers_dirty = true;
 
                 events.push(GameEvent::LifeChanged {
                     player_id,
@@ -121,6 +122,7 @@ pub fn apply_damage_life_loss(
                     player.life -= loss_amount as i32;
                     player.life_lost_this_turn += loss_amount;
                 }
+                state.layers_dirty = true;
                 events.push(GameEvent::LifeChanged {
                     player_id: pid,
                     amount: -(loss_amount as i32),
@@ -137,6 +139,7 @@ pub fn apply_damage_life_loss(
                 player.life -= amount as i32;
                 player.life_lost_this_turn += amount;
             }
+            state.layers_dirty = true;
             events.push(GameEvent::LifeChanged {
                 player_id,
                 amount: -(amount as i32),
@@ -191,6 +194,7 @@ pub fn resolve_lose(
                     .ok_or(EffectError::PlayerNotFound)?;
                 player.life -= loss_amount as i32;
                 player.life_lost_this_turn += loss_amount;
+                state.layers_dirty = true;
 
                 events.push(GameEvent::LifeChanged {
                     player_id,

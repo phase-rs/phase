@@ -150,8 +150,15 @@ fn draw_applier(
 
 // --- 5. GainLife ---
 
-fn gain_life_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
-    matches!(event, ProposedEvent::LifeGain { .. })
+fn gain_life_matcher(event: &ProposedEvent, source: ObjectId, state: &GameState) -> bool {
+    if let ProposedEvent::LifeGain { player_id, .. } = event {
+        state
+            .objects
+            .get(&source)
+            .is_some_and(|obj| obj.controller == *player_id)
+    } else {
+        false
+    }
 }
 
 fn gain_life_applier(

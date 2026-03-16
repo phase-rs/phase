@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    AbilityDefinition, Effect, ModalChoice, ModalSelectionConstraint, ResolvedAbility,
-    TargetFilter, TargetRef,
+    AbilityDefinition, Effect, ModalChoice, ModalSelectionConstraint, ResolvedAbility, TargetFilter,
+    TargetRef,
 };
 use crate::types::game_state::{
     GameState, TargetSelectionConstraint, TargetSelectionProgress, TargetSelectionSlot,
@@ -17,7 +17,8 @@ pub fn build_resolved_from_def(
     source_id: ObjectId,
     controller: PlayerId,
 ) -> ResolvedAbility {
-    let mut resolved = ResolvedAbility::new(def.effect.clone(), Vec::new(), source_id, controller);
+    let mut resolved = ResolvedAbility::new(def.effect.clone(), Vec::new(), source_id, controller)
+        .kind(def.kind);
     if let Some(sub) = &def.sub_ability {
         resolved = resolved.sub_ability(build_resolved_from_def(sub, source_id, controller));
     }
