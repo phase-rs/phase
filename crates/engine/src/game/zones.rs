@@ -25,7 +25,7 @@ pub fn create_object(
     id
 }
 
-/// Move an object from its current zone to a destination zone, updating all bookkeeping and emitting a ZoneChanged event.
+/// CR 400.7: Move an object to a new zone. An object that moves to a new zone becomes a new object.
 pub fn move_to_zone(
     state: &mut GameState,
     object_id: ObjectId,
@@ -52,7 +52,7 @@ pub fn move_to_zone(
     let obj_mut = state.objects.get_mut(&object_id).unwrap();
     obj_mut.zone = to;
 
-    // DFC Rule 711.8: transformed permanents revert to front face on zone change
+    // CR 711.8: Transformed permanents revert to front face on zone change.
     if obj_mut.transformed {
         if let Some(back_face) = obj_mut.back_face.clone() {
             let current_back = snapshot_object_face(obj_mut);
@@ -62,7 +62,7 @@ pub fn move_to_zone(
         }
     }
 
-    // Track when objects enter the battlefield (for summoning sickness)
+    // CR 302.6: Track when objects enter the battlefield (for summoning sickness).
     if to == Zone::Battlefield {
         obj_mut.entered_battlefield_turn = Some(state.turn_number);
     }

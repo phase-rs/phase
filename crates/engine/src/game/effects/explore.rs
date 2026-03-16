@@ -77,7 +77,7 @@ pub fn resolve(
         .ok_or(EffectError::PlayerNotFound)?;
 
     if player.library.is_empty() {
-        // Nothing to explore -- just put a +1/+1 counter (per MTG rules, explore with empty library)
+        // CR 701.40a: Explore with empty library — just put a +1/+1 counter.
         add_explore_counter(state, explorer_id, events);
 
         events.push(GameEvent::EffectResolved {

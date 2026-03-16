@@ -146,7 +146,7 @@ pub enum ManaCostShard {
 
 impl ManaCostShard {
     /// Returns true if this shard contributes to devotion for the given color.
-    /// Per MTG rule 700.5, each mana symbol that is or contains the color counts.
+    /// CR 700.5: Each mana symbol that is or contains the color counts.
     /// Hybrid symbols count toward each of their colors. A single hybrid symbol
     /// contributes 1 to multi-color devotion (not once per color).
     pub fn contributes_to(&self, color: ManaColor) -> bool {

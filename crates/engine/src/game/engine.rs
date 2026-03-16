@@ -639,7 +639,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             }
             state.waiting_for.clone()
         }
-        // DiscardToHandSize: player chose which cards to discard during cleanup (Rule 514.1).
+        // CR 514.1: Player chose which cards to discard during cleanup.
         (
             WaitingFor::DiscardToHandSize {
                 player,

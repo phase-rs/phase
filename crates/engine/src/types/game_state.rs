@@ -31,7 +31,7 @@ fn default_game_number() -> u8 {
     1
 }
 
-/// Tracks whether the game is in day or night state (MTG Rule 727).
+/// Tracks whether the game is in day or night state (CR 727).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DayNight {
     Day,
@@ -266,7 +266,7 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ability_index: Option<usize>,
         /// For activated abilities: the cost to pay after mode selection.
-        /// Per MTG CR 602.2a: announce → choose modes → choose targets → pay costs.
+        /// CR 602.2a: Announce → choose modes → choose targets → pay costs.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ability_cost: Option<AbilityCost>,
     },

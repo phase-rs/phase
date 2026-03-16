@@ -5,7 +5,7 @@ use crate::types::keywords::{Keyword, ProtectionTarget};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
-/// Find legal targets using a typed TargetFilter.
+/// Find legal targets using a typed TargetFilter (CR 115.3).
 ///
 /// Evaluates battlefield objects against the filter using the typed filter system,
 /// and includes players/stack spells where appropriate.
@@ -131,7 +131,7 @@ pub fn validate_targets(
         .collect()
 }
 
-/// Returns true if ALL original targets are now illegal (spell fizzles per rule 608.2b).
+/// Returns true if ALL original targets are now illegal (spell fizzles per CR 608.2b).
 pub fn check_fizzle(original_targets: &[TargetRef], legal_targets: &[TargetRef]) -> bool {
     if original_targets.is_empty() {
         return false; // Spells with no targets never fizzle
@@ -218,7 +218,7 @@ fn add_players(state: &GameState, targets: &mut Vec<TargetRef>) {
     }
 }
 
-/// Check if an object has protection from the given source (works in any zone per MTG rules).
+/// Check if an object has protection from the given source (CR 702.16a: works in any zone).
 fn is_protected_from(
     obj: &crate::game::game_object::GameObject,
     source_id: ObjectId,
@@ -246,16 +246,18 @@ fn is_protected_from(
     false
 }
 
-/// Full battlefield targeting check: shroud + hexproof + protection (702.16a).
+/// Full battlefield targeting check: shroud + hexproof + protection (CR 702.16a).
 fn can_target(
     obj: &crate::game::game_object::GameObject,
     source_controller: PlayerId,
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
+    // CR 702.18a: Shroud — can't be the target of spells or abilities.
     if obj.has_keyword(&Keyword::Shroud) {
         return false;
     }
+    // CR 702.11b: Hexproof — can't be targeted by opponents.
     if obj.has_keyword(&Keyword::Hexproof) && obj.controller != source_controller {
         return false;
     }

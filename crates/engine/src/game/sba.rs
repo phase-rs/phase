@@ -9,8 +9,8 @@ use super::zones;
 
 const MAX_SBA_ITERATIONS: u32 = 9;
 
-/// Run state-based actions in a fixpoint loop until no more actions are performed,
-/// capped at MAX_SBA_ITERATIONS per Forge's convention.
+/// CR 704.3: Run state-based actions in a fixpoint loop until no more actions are performed,
+/// capped at MAX_SBA_ITERATIONS.
 pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // Evaluate layers before SBA checks so computed P/T is current
     if state.layers_dirty {
@@ -20,7 +20,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
     for _ in 0..MAX_SBA_ITERATIONS {
         let mut any_performed = false;
 
-        // 704.5a: Player at 0 or less life loses the game
+        // CR 704.5a: A player with 0 or less life loses the game.
         check_player_life(state, events, &mut any_performed);
 
         // If game is over, stop immediately
@@ -28,7 +28,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             return;
         }
 
-        // 704.5c: Player with 10 or more poison counters loses the game
+        // CR 704.5c: A player with ten or more poison counters loses the game.
         check_poison_counters(state, events, &mut any_performed);
 
         // If game is over, stop immediately
@@ -36,8 +36,8 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             return;
         }
 
-        // 704.6d: Commander damage -- player who has received 21+ combat damage
-        // from a single commander loses the game
+        // CR 704.6d: A player who has been dealt 21 or more combat damage by the same
+        // commander loses the game.
         check_commander_damage(state, events, &mut any_performed);
 
         // If game is over, stop immediately
@@ -45,22 +45,24 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             return;
         }
 
-        // 704.5f: Creature with 0 or less toughness goes to graveyard
+        // CR 704.5f: A creature with toughness 0 or less is put into its owner's graveyard.
         check_zero_toughness(state, events, &mut any_performed);
 
-        // 704.5g: Creature with lethal damage marked is destroyed
+        // CR 704.5g: A creature with lethal damage marked on it is destroyed.
         check_lethal_damage(state, events, &mut any_performed);
 
-        // 704.5j: Legend rule
+        // CR 704.5j: If a player controls two or more legendary permanents with the same name,
+        // that player chooses one and the rest are put into their owners' graveyards.
         check_legend_rule(state, events, &mut any_performed);
 
-        // 704.5n: Unattached aura goes to graveyard
+        // CR 704.5n: If an Aura is attached to an illegal object or player, it is put into
+        // its owner's graveyard.
         check_unattached_auras(state, events, &mut any_performed);
 
-        // 704.5p: Equipment with invalid attached_to gets unattached (stays on battlefield)
+        // CR 704.5p: If an Equipment is attached to an illegal permanent, it becomes unattached.
         check_unattached_equipment(state, &mut any_performed);
 
-        // 704.5i: Planeswalker with 0 loyalty goes to graveyard
+        // CR 704.5i: If a planeswalker has loyalty 0, it is put into its owner's graveyard.
         check_zero_loyalty(state, events, &mut any_performed);
 
         if !any_performed {

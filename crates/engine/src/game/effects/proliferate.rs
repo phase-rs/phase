@@ -6,7 +6,7 @@ use crate::types::game_state::GameState;
 /// Proliferate: for each permanent that has a counter and each player that has a
 /// poison counter, add one additional counter of each type already present.
 ///
-/// Per MTG rules, the controller chooses which permanents/players to proliferate.
+/// CR 701.27a: The controller chooses which permanents/players to proliferate.
 /// For simplicity, we proliferate all eligible permanents and players automatically.
 pub fn resolve(
     state: &mut GameState,

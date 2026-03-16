@@ -5,10 +5,11 @@ use crate::types::player::PlayerId;
 use super::players;
 use super::turns;
 
-/// Handle a priority pass from the current priority player.
+/// Handle a priority pass from the current priority player (CR 117.4).
 ///
 /// Uses a BTreeSet (priority_passes) to track which players have passed consecutively.
-/// The stack resolves (or phase advances) only when ALL living players have passed.
+/// CR 117.4: When all players pass in succession, the top object on the stack resolves
+/// (or the phase advances if the stack is empty).
 /// Any non-pass action clears the set (handled by callers via `reset_priority`).
 pub fn handle_priority_pass(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
     // Record this player's pass
@@ -22,16 +23,16 @@ pub fn handle_priority_pass(state: &mut GameState, events: &mut Vec<GameEvent>) 
     let living_count = state.players.iter().filter(|p| !p.is_eliminated).count();
 
     if state.priority_passes.len() >= living_count {
-        // All living players have passed consecutively
+        // CR 117.4: All living players have passed consecutively.
         state.priority_passes.clear();
         state.priority_pass_count = 0;
 
         if state.stack.is_empty() {
-            // Empty stack: advance to next phase
+            // CR 117.4: Empty stack — advance to next phase.
             turns::advance_phase(state, events);
             turns::auto_advance(state, events)
         } else {
-            // Non-empty stack: resolve top of stack
+            // CR 117.4: Non-empty stack — resolve top object.
             super::stack::resolve_top(state, events);
 
             // If resolve_top set an interactive WaitingFor (e.g. RevealChoice,
@@ -48,7 +49,7 @@ pub fn handle_priority_pass(state: &mut GameState, events: &mut Vec<GameEvent>) 
             }
         }
     } else {
-        // Not all players have passed yet — advance to next living player
+        // CR 116.3: Not all players have passed yet — advance to next living player.
         let next = next_priority_player(state);
         state.priority_player = next;
 
@@ -58,10 +59,10 @@ pub fn handle_priority_pass(state: &mut GameState, events: &mut Vec<GameEvent>) 
     }
 }
 
-/// Determine the next player to receive priority, using APNAP order.
+/// Determine the next player to receive priority, using APNAP order (CR 101.4).
 ///
 /// For non-team formats: next living player in seat order after current priority player.
-/// For team-based formats (2HG): APNAP within teams — active team members first,
+/// For team-based formats (2HG): CR 101.4 APNAP within teams — active team members first,
 /// then opponent team members.
 fn next_priority_player(state: &GameState) -> PlayerId {
     if state.format_config.team_based {

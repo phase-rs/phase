@@ -5,7 +5,7 @@ use crate::types::player::PlayerId;
 /// Count a player's devotion to the given colors.
 ///
 /// Devotion is the number of mana symbols among mana costs of permanents
-/// the player controls that are of any of the specified colors (MTG rule 700.5).
+/// the player controls that are of any of the specified colors (CR 700.5).
 /// A hybrid symbol like {W/U} counts as one symbol toward both white and blue,
 /// but only contributes 1 to multi-color devotion (e.g., devotion to white and blue).
 pub fn count_devotion(state: &GameState, player: PlayerId, colors: &[ManaColor]) -> u32 {

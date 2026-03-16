@@ -501,7 +501,7 @@ fn try_parse_event(
         return Some((TriggerMode::ChangesZone, def));
     }
 
-    // "dies" / "is put into a graveyard from the battlefield" (synonym per MTG rule 700.4)
+    // CR 700.4: "Dies" means "is put into a graveyard from the battlefield."
     if rest.starts_with("dies")
         || rest.starts_with("is put into a graveyard from the battlefield")
         || rest.starts_with("are put into a graveyard from the battlefield")
@@ -2143,7 +2143,7 @@ mod tests {
 
     #[test]
     fn trigger_put_into_graveyard_from_battlefield_self() {
-        // "is put into a graveyard from the battlefield" is a synonym for "dies" (MTG rule 700.4)
+        // CR 700.4: "Is put into a graveyard from the battlefield" is a synonym for "dies."
         let def = parse_trigger_line(
             "When ~ is put into a graveyard from the battlefield, return ~ to its owner's hand.",
             "Rancor",

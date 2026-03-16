@@ -27,8 +27,8 @@ use super::zones;
 
 /// Emit `BecomesTarget` and `CrimeCommitted` events for each target.
 ///
-/// Called whenever targets are locked in for a spell or ability. Per MTG rules,
-/// targeting an opponent, their permanent, or a card in their graveyard is a crime.
+/// Called whenever targets are locked in for a spell or ability. CR 702.9c:
+/// Targeting an opponent, their permanent, or a card in their graveyard is a crime.
 pub(crate) fn emit_targeting_events(
     state: &GameState,
     targets: &[TargetRef],
@@ -955,7 +955,7 @@ pub fn handle_activate_ability(
         &ability_def.activation_restrictions,
     )?;
 
-    // Per MTG CR 602.2a: announce → choose modes → choose targets → pay costs.
+    // CR 602.2a: Announce → choose modes → choose targets → pay costs.
     // Modal detection must happen BEFORE cost payment.
     if let Some(ref modal) = ability_def.modal {
         // Pre-validate tap cost for modals — fail fast before presenting the choice

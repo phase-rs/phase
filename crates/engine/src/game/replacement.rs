@@ -11,6 +11,7 @@ use crate::types::proposed_event::{ProposedEvent, ReplacementId};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
+/// CR 614.1: Replacement effects modify events as they would occur.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReplacementResult {
     Execute(ProposedEvent),
@@ -667,7 +668,7 @@ pub fn find_applicable_replacements(
 ) -> Vec<ReplacementId> {
     let mut candidates = Vec::new();
 
-    // MTG Rule 614.12: Self-replacement effects on a card entering the battlefield
+    // CR 614.12: Self-replacement effects on a card entering the battlefield.
     // apply even though the card isn't on the battlefield yet. We must scan the
     // entering card in addition to battlefield/command zone permanents.
     let entering_object_id = match event {

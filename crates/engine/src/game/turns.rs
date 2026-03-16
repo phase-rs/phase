@@ -33,6 +33,7 @@ pub fn next_phase(phase: Phase) -> Phase {
     PHASE_ORDER[(idx + 1) % PHASE_ORDER.len()]
 }
 
+/// CR 500.4: Advance to the next phase/step, clearing mana pools.
 pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let next = next_phase(state.phase);
 
@@ -43,7 +44,7 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     state.phase = next;
 
-    // Clear mana pools on phase transition
+    // CR 500.4: Mana pools empty between phases/steps.
     for player in &mut state.players {
         player.mana_pool.clear();
     }
@@ -112,6 +113,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     });
 }
 
+/// CR 502.3: During the untap step, the active player untaps each permanent they control.
 pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let active = state.active_player;
 
@@ -169,6 +171,7 @@ pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
     }
 }
 
+/// CR 504.1: During the draw step, the active player draws a card.
 pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let active = state.active_player;
     let player = state
@@ -198,15 +201,15 @@ pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) {
 /// choose which cards to discard down to maximum hand size, or `None` if
 /// cleanup completes immediately.
 pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
-    // Prune "until end of turn" transient continuous effects (Rule 514.2)
+    // CR 514.2: Prune "until end of turn" transient continuous effects.
     super::layers::prune_end_of_turn_effects(state);
 
-    // Check day/night transition at cleanup (per Rule 727.2)
+    // CR 727.2: Check day/night transition at cleanup.
     day_night::check_day_night_transition(state, events);
 
     let active = state.active_player;
 
-    // Discard down to maximum hand size (Rule 514.1)
+    // CR 514.1: Discard down to maximum hand size.
     let player = state
         .players
         .iter()
@@ -224,7 +227,7 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
         });
     }
 
-    // Clear damage on all battlefield creatures
+    // CR 514.3: Damage on creatures is removed at cleanup.
     let to_clear: Vec<_> = state
         .battlefield
         .iter()
@@ -293,8 +296,8 @@ pub fn finish_cleanup_discard(
     }
 }
 
+/// CR 103.7a: The player who goes first skips their first draw step.
 pub fn should_skip_draw(state: &GameState) -> bool {
-    // First turn of the game (turn 1 = first player's first turn)
     state.turn_number == 1
 }
 

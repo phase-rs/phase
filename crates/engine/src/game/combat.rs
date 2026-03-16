@@ -90,12 +90,13 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
             return Err(format!("{:?} is tapped", id));
         }
 
-        // Must not have Defender
+        // CR 702.3: Defender — a creature with defender can't attack.
         if obj.has_keyword(&Keyword::Defender) {
             return Err(format!("{:?} has Defender", id));
         }
 
-        // Summoning sickness: must have Haste or have been on battlefield since before this turn
+        // CR 302.6: Summoning sickness — must have haste or have been under controller's
+        // control since the beginning of the turn.
         if !obj.has_keyword(&Keyword::Haste) {
             if let Some(etb_turn) = obj.entered_battlefield_turn {
                 if etb_turn >= state.turn_number {
@@ -187,8 +188,8 @@ pub fn validate_blockers(
             ));
         }
 
-        // Protection: creature with protection from a quality can't be blocked by
-        // creatures matching that quality
+        // CR 702.16e: Protection — a creature with protection can't be blocked by
+        // creatures with the specified quality.
         for kw in &attacker.keywords {
             match kw {
                 Keyword::Protection(ProtectionTarget::Color(color)) => {
@@ -211,7 +212,7 @@ pub fn validate_blockers(
             }
         }
 
-        // Flying: can only be blocked by creatures with Flying or Reach
+        // CR 702.9b: Flying — can only be blocked by creatures with flying or reach.
         if attacker.has_keyword(&Keyword::Flying)
             && !blocker.has_keyword(&Keyword::Flying)
             && !blocker.has_keyword(&Keyword::Reach)
@@ -222,8 +223,8 @@ pub fn validate_blockers(
             ));
         }
 
-        // Shadow: shadow creatures can only be blocked by shadow creatures,
-        // and non-shadow creatures can't be blocked by shadow creatures
+        // CR 702.28a: Shadow — can only be blocked by creatures with shadow,
+        // and cannot block creatures without shadow.
         let attacker_has_shadow = attacker.has_keyword(&Keyword::Shadow);
         let blocker_has_shadow = blocker.has_keyword(&Keyword::Shadow);
         if attacker_has_shadow && !blocker_has_shadow {
@@ -239,7 +240,7 @@ pub fn validate_blockers(
             ));
         }
 
-        // Fear (MTG 702.36): can only be blocked by artifact creatures or black creatures
+        // CR 702.36: Fear — can only be blocked by artifact creatures or black creatures.
         if attacker.has_keyword(&Keyword::Fear)
             && !blocker.card_types.core_types.contains(&CoreType::Artifact)
             && !blocker.color.contains(&ManaColor::Black)
@@ -250,8 +251,8 @@ pub fn validate_blockers(
             ));
         }
 
-        // Intimidate (MTG 702.13): can only be blocked by artifact creatures or
-        // creatures sharing a color with the attacker
+        // CR 702.13: Intimidate — can only be blocked by artifact creatures or creatures
+        // sharing a color with the attacker.
         if attacker.has_keyword(&Keyword::Intimidate)
             && !blocker.card_types.core_types.contains(&CoreType::Artifact)
             && !attacker.color.iter().any(|c| blocker.color.contains(c))
@@ -262,7 +263,7 @@ pub fn validate_blockers(
             ));
         }
 
-        // Skulk (MTG 702.120): cannot be blocked by creatures with strictly greater power
+        // CR 702.120: Skulk — cannot be blocked by creatures with strictly greater power.
         if attacker.has_keyword(&Keyword::Skulk)
             && blocker.power.unwrap_or(0) > attacker.power.unwrap_or(0)
         {
@@ -275,7 +276,7 @@ pub fn validate_blockers(
             ));
         }
 
-        // Horsemanship (MTG 702.30): can only be blocked by creatures with horsemanship
+        // CR 702.30: Horsemanship — can only be blocked by creatures with horsemanship.
         if attacker.has_keyword(&Keyword::Horsemanship)
             && !blocker.has_keyword(&Keyword::Horsemanship)
         {
@@ -291,7 +292,7 @@ pub fn validate_blockers(
             .push(blocker_id);
     }
 
-    // Menace: if an attacker has Menace, it must be blocked by 2+ creatures or not at all
+    // CR 702.110b: Menace — must be blocked by two or more creatures or not at all.
     for (attacker_id, blockers) in &blockers_per_attacker {
         if let Some(attacker) = state.objects.get(attacker_id) {
             if attacker.has_keyword(&Keyword::Menace) && blockers.len() < 2 {

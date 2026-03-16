@@ -8,6 +8,7 @@ use super::effects;
 use super::targeting;
 use super::zones;
 
+/// CR 405.1: Add an object to the stack.
 pub fn push_to_stack(state: &mut GameState, entry: StackEntry, events: &mut Vec<GameEvent>) {
     events.push(GameEvent::StackPushed {
         object_id: entry.id,
@@ -15,6 +16,7 @@ pub fn push_to_stack(state: &mut GameState, entry: StackEntry, events: &mut Vec<
     state.stack.push(entry);
 }
 
+/// CR 608.2: Resolve the top object on the stack.
 pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let entry = match state.stack.pop() {
         Some(e) => e,
@@ -56,7 +58,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         let validated = validate_targets_in_chain(state, &ability);
         let legal_targets = flatten_targets_in_chain(&validated);
         if targeting::check_fizzle(&original_targets, &legal_targets) {
-            // Fizzle: all targets illegal -- move card to graveyard without executing
+            // CR 608.2b: Fizzle — all targets illegal, spell is countered on resolution.
             if is_spell {
                 zones::move_to_zone(state, entry.id, Zone::Graveyard, events);
             }
@@ -70,11 +72,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         execute_effect(state, &ability, events);
     }
 
-    // Determine destination zone for spells
+    // CR 608.3: Determine destination zone for spells.
     if is_spell {
         let dest = if is_permanent_type(state, entry.id) {
+            // CR 608.3: Permanent spells enter the battlefield.
             Zone::Battlefield
         } else {
+            // CR 608.2: Non-permanent spells are put into owner's graveyard.
             Zone::Graveyard
         };
         zones::move_to_zone(state, entry.id, dest, events);

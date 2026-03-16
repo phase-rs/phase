@@ -205,7 +205,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
     });
 
     // Reverse so NAP triggers are placed first (bottom of stack), AP triggers last (top).
-    // LIFO means AP triggers resolve last, which is correct per MTG 603.3b.
+    // CR 603.3b: LIFO means AP triggers resolve last (APNAP ordering).
     pending.reverse();
 
     let mut events_out = Vec::new();

@@ -39,7 +39,7 @@ pub enum ChoiceType {
     LandType,
 }
 
-/// The five basic land types (MTG Rule 305.6).
+/// The five basic land types (CR 305.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub enum BasicLandType {
     Plains,

@@ -12,8 +12,8 @@ use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::proposed_event::ProposedEvent;
 
-/// Resolve combat damage with first strike / double strike support.
-/// If any creature in combat has FirstStrike or DoubleStrike, two damage sub-steps run.
+/// Resolve combat damage with first strike / double strike support (CR 510.1).
+/// CR 702.7b: If any creature has first strike or double strike, two damage sub-steps run.
 /// Between sub-steps: SBAs are checked and triggers processed.
 pub fn resolve_combat_damage(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let combat = match &state.combat {
@@ -63,7 +63,7 @@ pub fn resolve_combat_damage(state: &mut GameState, events: &mut Vec<GameEvent>)
     }
 }
 
-/// First strike damage step: only FirstStrike and DoubleStrike creatures deal damage.
+/// CR 702.7b: First strike damage step — only FirstStrike and DoubleStrike creatures deal damage.
 fn first_strike_damage_step(state: &mut GameState) -> Vec<GameEvent> {
     let combat = match &state.combat {
         Some(c) => c.clone(),
@@ -131,7 +131,7 @@ fn first_strike_damage_step(state: &mut GameState) -> Vec<GameEvent> {
     apply_combat_damage(state, &all_assignments)
 }
 
-/// Regular damage step: creatures WITHOUT FirstStrike (already dealt) + DoubleStrike creatures deal damage.
+/// CR 510.2: Regular damage step — creatures without FirstStrike (already dealt) + DoubleStrike creatures deal damage.
 fn regular_damage_step(state: &mut GameState) -> Vec<GameEvent> {
     let combat = match &state.combat {
         Some(c) => c.clone(),
@@ -208,7 +208,7 @@ fn regular_damage_step(state: &mut GameState) -> Vec<GameEvent> {
     apply_combat_damage(state, &all_assignments)
 }
 
-/// Determine how an attacker assigns its damage.
+/// Determine how an attacker assigns its damage (CR 510.1c).
 fn assign_attacker_damage(
     state: &GameState,
     attacker_id: ObjectId,
@@ -239,7 +239,7 @@ fn assign_attacker_damage(
         Some(blockers) => {
             if blockers.len() == 1 {
                 if has_trample {
-                    // Single blocker with trample: assign lethal then excess to player
+                    // CR 702.19b: Trample — assign lethal to blocker, excess to defending player.
                     let lethal = lethal_damage_needed(state, blockers[0], has_deathtouch);
                     let to_blocker = power.min(lethal);
                     let excess = power.saturating_sub(to_blocker);
@@ -313,13 +313,14 @@ fn assign_attacker_damage(
 }
 
 /// How much damage is needed to kill this creature.
+/// CR 702.2c: Deathtouch — any amount of damage from a deathtouch source is lethal.
 fn lethal_damage_needed(
     state: &GameState,
     object_id: ObjectId,
     source_has_deathtouch: bool,
 ) -> u32 {
     if source_has_deathtouch {
-        // With deathtouch, 1 damage is lethal
+        // CR 702.2c + CR 702.19b: With deathtouch, 1 damage is lethal.
         return 1;
     }
     state
@@ -377,7 +378,7 @@ fn apply_combat_damage(
             DamageTarget::Player(id) => TargetRef::Player(*id),
         };
 
-        // Protection: prevent combat damage from sources with matching quality
+        // CR 702.16b: Protection prevents damage from sources with matching quality.
         if let DamageTarget::Object(target_id) = &assignment.target {
             if let (Some(target_obj), Some(source_obj)) =
                 (state.objects.get(target_id), state.objects.get(source_id))
@@ -407,7 +408,7 @@ fn apply_combat_damage(
                     match t {
                         TargetRef::Object(target_id) => {
                             if source_has_wither || source_has_infect {
-                                // Wither/Infect: apply -1/-1 counters instead of damage
+                                // CR 702.79b + CR 702.89b: Wither/Infect apply -1/-1 counters instead of damage.
                                 if let Some(target_obj) = state.objects.get_mut(target_id) {
                                     let counter =
                                         crate::game::game_object::CounterType::Minus1Minus1;
@@ -443,7 +444,7 @@ fn apply_combat_damage(
                         }
                         TargetRef::Player(player_id) => {
                             if source_has_infect {
-                                // Infect: poison counters instead of life loss
+                                // CR 702.89b: Infect — deals damage to players as poison counters.
                                 if let Some(player) =
                                     state.players.iter_mut().find(|p| p.id == *player_id)
                                 {
@@ -508,7 +509,7 @@ fn apply_combat_damage(
             }
         };
 
-        // Lifelink: source's controller gains life equal to damage dealt.
+        // CR 702.15b: Lifelink — source's controller gains life equal to damage dealt.
         // Route through the replacement pipeline so effects like Leyline of Hope apply.
         if source_has_lifelink && actual_amount > 0 {
             apply_life_gain(state, source_controller, actual_amount, &mut events);

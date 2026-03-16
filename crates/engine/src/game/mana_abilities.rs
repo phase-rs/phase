@@ -8,8 +8,8 @@ use super::effects::mana::resolve_mana_types;
 use super::engine::EngineError;
 use super::mana_payment;
 
-/// Check if a typed ability definition represents a mana ability (MTG Rule 605).
-/// Mana abilities produce mana and resolve immediately without using the stack.
+/// Check if a typed ability definition represents a mana ability (CR 605).
+/// CR 605.3: Mana abilities produce mana and resolve immediately without using the stack.
 pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
     matches!(ability_def.effect, Effect::Mana { .. })
 }

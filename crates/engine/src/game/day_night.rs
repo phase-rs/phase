@@ -6,7 +6,7 @@ use super::transform;
 
 /// Check and apply day/night transition at end of turn.
 ///
-/// Per MTG Rule 727:
+/// CR 727:
 /// - If it's currently Day and the active player cast no spells this turn, it becomes Night.
 /// - If it's currently Night and the active player cast 2+ spells this turn, it becomes Day.
 /// - On transition, all Daybound/Nightbound permanents transform accordingly.
@@ -53,7 +53,7 @@ pub fn check_day_night_transition(state: &mut GameState, events: &mut Vec<GameEv
 
 /// Initialize day/night to Day when a daybound/nightbound card first enters the game.
 ///
-/// Per MTG Rule 727.1: The game starts with no day/night designation. Once a permanent
+/// CR 727.1: The game starts with no day/night designation. Once a permanent
 /// with daybound or nightbound enters the battlefield, it becomes day (if not already set).
 pub fn initialize_day_night(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if state.day_night.is_some() {

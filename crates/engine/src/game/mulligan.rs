@@ -11,10 +11,11 @@ use crate::types::zones::Zone;
 use super::turns;
 use super::zones;
 
+/// CR 103.4: Starting hand size is seven cards.
 const STARTING_HAND_SIZE: usize = 7;
 const MAX_MULLIGANS: u8 = 7;
 
-/// Start the mulligan process: shuffle libraries and draw 7 for each player.
+/// CR 103.4: Start the mulligan process — shuffle libraries and draw 7 for each player.
 pub fn start_mulligan(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
     events.push(GameEvent::MulliganStarted);
 
