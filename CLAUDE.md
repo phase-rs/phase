@@ -25,6 +25,18 @@ phase.rs is a Magic: The Gathering game engine written in Rust (compiling to nat
 - Am I solving one card or a pattern? → Build the building block, not the special case.
 - Is this the Rust way? → Check how `std` and well-known crates solve similar problems.
 
+### CRITICAL: Multi-Agent Safety — Do Not Revert Other Agents' Work
+
+**NEVER revert, overwrite, remove, or undo changes that you did not make.** Multiple AI agents may be working on this codebase concurrently. If you encounter unfamiliar code, new types, new files, or changes you don't recognize:
+
+1. **Do not delete or rewrite them.** They are another agent's in-progress work.
+2. **Work around them.** Your edits must be surgical — add only what you need without disturbing surrounding code.
+3. **Never use `Write` to replace an entire file** when `Edit` with a targeted `old_string`→`new_string` would suffice. Whole-file rewrites destroy other agents' concurrent changes.
+4. **If a file has been modified since you last read it**, re-read it before editing. The new content is intentional.
+5. **Never `git checkout`, `git restore`, or `git stash`** files you didn't modify. These operations destroy other agents' uncommitted work.
+
+Violating this rule causes cascading failures across the team. Treat every line you didn't write as load-bearing.
+
 ### CRITICAL: Building Blocks and Architecture Purity
 
 **Before writing any logic, search for existing building blocks.** The codebase has composable helpers for parsing (`parse_type_phrase`, `parse_non_prefix`, `parse_number`, `parse_target`, `parse_continuous_modifications`), filtering (`FilterProp` variants, `TargetFilter`), and game mechanics (`enter_tapped`, `enter_with_counters`, the replacement pipeline). Duplicating what these already do is a defect.
