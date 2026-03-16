@@ -129,7 +129,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, show
     return {
       creatures: partition.creatures.length,
       lands: partition.lands.length,
-      other: partition.other.length,
+      other: partition.support.length + partition.planeswalkers.length + partition.other.length,
     };
   }, [gameState, playerId]);
 

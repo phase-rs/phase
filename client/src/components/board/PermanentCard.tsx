@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -59,6 +59,8 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   const isActivatable = activatableCount > 0;
 
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const [baseSize, setBaseSize] = useState({ width: 0, height: 0 });
 
   const allExileLinks = useGameStore((s) => s.gameState?.exile_links);
   const exileLinks = useMemo(
@@ -152,9 +154,44 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   // Tap rotation: 17deg in MTGA mode, 90deg in classic mode
   const tapAngle = tapRotation === "mtga" ? 17 : 90;
   const tapOpacity = tapRotation === "mtga" && obj.tapped && !isAttacking ? 0.85 : 1;
+  const isRotated = isAttacking || obj.tapped;
+
+  useEffect(() => {
+    const element = cardRef.current;
+    if (!element) return;
+
+    const updateSize = () => {
+      setBaseSize({
+        width: element.offsetWidth,
+        height: element.offsetHeight,
+      });
+    };
+
+    updateSize();
+
+    if (typeof ResizeObserver === "undefined") {
+      return undefined;
+    }
+
+    const resizeObserver = new ResizeObserver(updateSize);
+    resizeObserver.observe(element);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [battlefieldCardDisplay, objectId]);
 
   // Attacker slide-forward: player creatures slide up, opponent creatures slide down
   const attackSlide = isAttacking ? (obj.controller === playerId ? -30 : 30) : 0;
+  const tapLiftCompensation = useMemo(() => {
+    if (!isRotated || baseSize.width === 0 || baseSize.height === 0) return 0;
+
+    const radians = Math.abs(tapAngle) * Math.PI / 180;
+    const rotatedHeight =
+      (baseSize.height * Math.cos(radians)) + (baseSize.width * Math.sin(radians));
+
+    return Math.max(0, (rotatedHeight - baseSize.height) / 2);
+  }, [baseSize.height, baseSize.width, isRotated, tapAngle]);
 
   const handleClick = () => {
     if (combatMode === "attackers") {
@@ -184,12 +221,16 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
 
   return (
     <motion.div
+      ref={cardRef}
       data-object-id={objectId}
       layoutId={`permanent-${objectId}`}
       className="relative inline-flex w-fit cursor-pointer rounded-lg self-start"
+      originX={0.5}
+      originY={0.5}
       style={{
         filter: sicknessFilter,
         boxShadow: sicknessGlow,
+        transformOrigin: "center center",
         // Reserve space above for tucked attachments
         marginTop:
           obj.attachments.length > 0
@@ -202,9 +243,9 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
             : undefined,
       }}
       animate={{
-        rotate: isAttacking || obj.tapped ? tapAngle : 0,
+        rotate: isRotated ? tapAngle : 0,
         opacity: tapOpacity,
-        y: attackSlide,
+        y: attackSlide + tapLiftCompensation,
       }}
       transition={{ type: "spring", stiffness: 300, damping: 20 }}
       onClick={handleClick}

@@ -19,11 +19,14 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
   const motionLife = useMotionValue(life);
   const displayed = useTransform(motionLife, (v) => Math.round(v));
   const [flashColor, setFlashColor] = useState<"red" | "green" | null>(null);
+  const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Animate life total immediately when the animation step fires, so the counter
   // updates in sync with the damage/heal visual rather than after all animations.
   // Pre-updating prevLife suppresses the redundant re-animation from the deferred
   // gameStore state update that follows once all animations complete.
+  // Flash timer is managed via ref — returning a cleanup would cancel it when
+  // activeStep advances to the next step, preventing the flash from ever clearing.
   useEffect(() => {
     if (!activeStep) return;
     for (const effect of activeStep.effects) {
@@ -32,9 +35,10 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
       const newLife = prevLife.current + effect.event.data.amount;
       animate(motionLife, newLife, { duration: 0.3 });
       setFlashColor(effect.event.data.amount < 0 ? "red" : "green");
-      const timer = setTimeout(() => setFlashColor(null), 400);
+      if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+      flashTimerRef.current = setTimeout(() => setFlashColor(null), 400);
       prevLife.current = newLife;
-      return () => clearTimeout(timer);
+      return;
     }
   }, [activeStep, playerId, motionLife]);
 

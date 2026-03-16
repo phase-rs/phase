@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::game::game_object::CounterType;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -138,7 +139,28 @@ pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
         match replacement::replace_event(state, proposed, events) {
             ReplacementResult::Execute(event) => {
                 if let ProposedEvent::Untap { object_id, .. } = event {
-                    if let Some(obj) = state.objects.get_mut(&object_id) {
+                    // CR 122.1g: If a permanent with a stun counter would become untapped,
+                    // instead remove a stun counter from it.
+                    let stun_count = state
+                        .objects
+                        .get(&object_id)
+                        .and_then(|obj| obj.counters.get(&CounterType::Stun).copied())
+                        .unwrap_or(0);
+                    if stun_count > 0 {
+                        if let Some(obj) = state.objects.get_mut(&object_id) {
+                            if let Some(entry) = obj.counters.get_mut(&CounterType::Stun) {
+                                *entry -= 1;
+                                if *entry == 0 {
+                                    obj.counters.remove(&CounterType::Stun);
+                                }
+                            }
+                        }
+                        events.push(GameEvent::CounterRemoved {
+                            object_id,
+                            counter_type: "stun".to_string(),
+                            count: 1,
+                        });
+                    } else if let Some(obj) = state.objects.get_mut(&object_id) {
                         obj.tapped = false;
                         events.push(GameEvent::PermanentUntapped { object_id });
                     }
@@ -848,6 +870,97 @@ mod tests {
             matches!(state.waiting_for, WaitingFor::GameOver { winner: Some(PlayerId(0)) }),
             "state.waiting_for should be GameOver, got {:?}",
             state.waiting_for
+        );
+    }
+
+    #[test]
+    fn stun_counter_prevents_untap_and_removes_counter() {
+        // CR 122.1g: A stun counter prevents a permanent from untapping;
+        // instead, one stun counter is removed.
+        use crate::types::zones::Zone;
+
+        let mut state = setup();
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.tapped = true;
+        obj.counters.insert(CounterType::Stun, 2);
+
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+
+        let obj = &state.objects[&obj_id];
+        assert!(obj.tapped, "creature should remain tapped after stun counter removal");
+        assert_eq!(
+            obj.counters.get(&CounterType::Stun).copied().unwrap_or(0),
+            1,
+            "one stun counter should be removed"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::CounterRemoved { object_id, counter_type, count: 1 }
+                    if *object_id == obj_id && counter_type == "stun"
+            )),
+            "CounterRemoved event should be emitted"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, GameEvent::PermanentUntapped { .. })),
+            "PermanentUntapped should not be emitted when stun counter is present"
+        );
+    }
+
+    #[test]
+    fn stun_counter_removed_at_zero_cleans_up_entry() {
+        // When the last stun counter is removed, the entry should be gone from the map.
+        use crate::types::zones::Zone;
+
+        let mut state = setup();
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.tapped = true;
+        obj.counters.insert(CounterType::Stun, 1);
+
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+
+        let obj = &state.objects[&obj_id];
+        assert!(!obj.counters.contains_key(&CounterType::Stun), "stun entry should be removed at zero");
+        assert!(obj.tapped, "creature still tapped after final stun counter removed");
+    }
+
+    #[test]
+    fn no_stun_counter_untaps_normally() {
+        use crate::types::zones::Zone;
+
+        let mut state = setup();
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&obj_id).unwrap().tapped = true;
+
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+
+        assert!(!state.objects[&obj_id].tapped, "creature should untap normally");
+        assert!(
+            events.iter().any(|e| matches!(e, GameEvent::PermanentUntapped { object_id } if *object_id == obj_id)),
+            "PermanentUntapped event should be emitted"
         );
     }
 }

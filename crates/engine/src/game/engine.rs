@@ -1153,14 +1153,8 @@ fn apply_etb_counters(
     counters: &[(String, u32)],
     events: &mut Vec<GameEvent>,
 ) {
-    use super::game_object::CounterType;
     for (counter_type_str, count) in counters {
-        let ct = match counter_type_str.as_str() {
-            "P1P1" | "+1/+1" => CounterType::Plus1Plus1,
-            "M1M1" | "-1/-1" => CounterType::Minus1Minus1,
-            "LOYALTY" => CounterType::Loyalty,
-            other => CounterType::Generic(other.to_string()),
-        };
+        let ct = super::game_object::parse_counter_type(counter_type_str);
         *obj.counters.entry(ct).or_insert(0) += count;
         events.push(GameEvent::CounterAdded {
             object_id: obj.id,

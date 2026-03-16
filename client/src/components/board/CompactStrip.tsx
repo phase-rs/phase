@@ -30,7 +30,7 @@ export function CompactStrip({ playerId, onClick, isActive }: CompactStripProps)
       counts: {
         creatures: partition.creatures.length,
         lands: partition.lands.length,
-        other: partition.other.length,
+        other: partition.support.length + partition.planeswalkers.length + partition.other.length,
       },
     };
   }, [gameState, playerId]);

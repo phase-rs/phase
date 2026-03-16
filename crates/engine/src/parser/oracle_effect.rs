@@ -5333,6 +5333,26 @@ mod tests {
     }
 
     #[test]
+    fn put_stun_counter_on_target() {
+        // "put a stun counter on [target]" — used by cards like Wall of Frost
+        let e = parse_effect("put a stun counter on target creature");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = e
+        else {
+            panic!("Expected PutCounter, got {e:?}");
+        };
+        assert_eq!(counter_type, "stun");
+        assert_eq!(count, 1);
+        assert!(
+            matches!(target, TargetFilter::Typed(_)),
+            "target should be a typed creature filter, got {target:?}"
+        );
+    }
+
+    #[test]
     fn remove_counter_from_it_is_self_ref() {
         let e = parse_effect("remove a time counter from it");
         assert!(matches!(

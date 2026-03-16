@@ -4,13 +4,14 @@ import { GroupedPermanentDisplay } from "./GroupedPermanent.tsx";
 
 interface BattlefieldRowProps {
   groups: GroupedPermanent[];
-  rowType: "creatures" | "lands" | "other";
+  rowType: "creatures" | "lands" | "support" | "other";
   className?: string;
 }
 
 const ROW_JUSTIFY: Record<string, string> = {
   creatures: "justify-center",
   lands: "justify-start",
+  support: "justify-end",
   other: "justify-end",
 };
 

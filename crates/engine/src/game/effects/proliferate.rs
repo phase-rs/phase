@@ -52,6 +52,7 @@ pub fn resolve(
                 CounterType::Plus1Plus1 => "P1P1".to_string(),
                 CounterType::Minus1Minus1 => "M1M1".to_string(),
                 CounterType::Loyalty => "LOYALTY".to_string(),
+                CounterType::Stun => "stun".to_string(),
                 CounterType::Generic(s) => s.clone(),
             };
 

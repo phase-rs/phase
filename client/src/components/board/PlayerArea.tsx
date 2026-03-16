@@ -21,7 +21,7 @@ const LAND_COL_STYLE = {
 } as React.CSSProperties;
 
 /** Scale for enchantment/artifact column (right) */
-const OTHER_SCALE = 0.85;
+const OTHER_SCALE = 0.95;
 
 const OTHER_COL_STYLE = {
   "--art-crop-w": `calc(var(--art-crop-base) * var(--card-size-scale) * ${OTHER_SCALE})`,
@@ -66,6 +66,8 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
     return {
       creatures: groupByName(resolveObjects(partition.creatures)),
       lands: groupByName(resolveObjects(partition.lands)),
+      support: groupByName(resolveObjects(partition.support)),
+      planeswalkers: groupByName(resolveObjects(partition.planeswalkers)),
       other: groupByName(resolveObjects(partition.other)),
     };
   }, [gameState, playerId]);
@@ -86,17 +88,25 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
   const player = gameState.players[playerId];
   const isCommander = gameState.format_config?.format === "Commander";
   const isEliminated = player?.is_eliminated ?? false;
+  const isMirrored = mode === "focused";
 
   const creatures = creatureOverride ?? partitioned?.creatures ?? [];
-
-  return (
+  const planeswalkerLane = (partitioned?.planeswalkers.length ?? 0) > 0 ? (
     <div
-      className={`relative flex min-h-0 flex-1 ${isEliminated ? "opacity-40 grayscale" : ""}`}
-      data-testid={`player-area-${playerId}`}
+      className={`z-10 flex h-full flex-shrink-0 flex-col flex-wrap-reverse gap-2 px-1 py-2 ${
+        isCommander ? (mode === "focused" ? "pb-16" : "pb-24") : ""
+      }`}
+      style={OTHER_COL_STYLE}
     >
-      {/* Lands -- left column, flows top-to-bottom then wraps into additional columns */}
+      {partitioned?.planeswalkers.map((g) => (
+        <GroupedPermanentDisplay key={g.ids[0]} group={g} />
+      ))}
+    </div>
+  ) : null;
+  const middleRow = (
+    <div className="flex min-h-0 items-start justify-between gap-4">
       <div
-        className="z-10 flex h-full flex-shrink-0 flex-col flex-wrap gap-2 px-1 py-2"
+        className="z-10 flex min-w-0 basis-0 flex-1 flex-wrap items-start justify-start gap-2"
         style={LAND_COL_STYLE}
       >
         {partitioned?.lands.map((g) => (
@@ -104,23 +114,50 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
         ))}
         {landColumnExtra}
       </div>
-      {/* Creatures -- center area, gets remaining space */}
       <div
-        className={`flex flex-1 flex-col ${mode === "full" ? "pt-2 pb-4" : "justify-end py-2"} gap-1`}
-      >
-        <BattlefieldRow groups={creatures} rowType="creatures" />
-      </div>
-      {/* Enchantments/artifacts -- right column */}
-      <div
-        className={`z-10 flex h-full flex-shrink-0 flex-col flex-wrap-reverse gap-2 px-1 py-2 ${
-          isCommander ? (mode === "focused" ? "pb-16" : "pb-24") : ""
-        }`}
+        className="z-10 flex min-w-0 basis-0 flex-1 justify-end"
         style={OTHER_COL_STYLE}
       >
-        {partitioned?.other.map((g) => (
-          <GroupedPermanentDisplay key={g.ids[0]} group={g} />
-        ))}
+        <BattlefieldRow
+          groups={partitioned?.support ?? []}
+          rowType="support"
+          className="ml-auto w-full justify-end px-0"
+        />
       </div>
+    </div>
+  );
+
+  return (
+    <div
+      className={`relative flex min-h-0 flex-1 ${isEliminated ? "opacity-40 grayscale" : ""}`}
+      data-testid={`player-area-${playerId}`}
+    >
+      <div
+        className={`flex min-w-0 flex-1 flex-col gap-2 px-1 ${
+          mode === "full" ? "pt-2 pb-4" : "py-2"
+        } ${
+          isCommander ? (mode === "focused" ? "pb-16" : "pb-24") : ""
+        }`}
+      >
+        {isMirrored ? (
+          <>
+            <BattlefieldRow groups={partitioned?.other ?? []} rowType="other" />
+            {middleRow}
+            <div className="mt-auto">
+              <BattlefieldRow groups={creatures} rowType="creatures" />
+            </div>
+          </>
+        ) : (
+          <>
+            <div>
+              <BattlefieldRow groups={creatures} rowType="creatures" />
+            </div>
+            {middleRow}
+            <BattlefieldRow groups={partitioned?.other ?? []} rowType="other" />
+          </>
+        )}
+      </div>
+      {planeswalkerLane}
       {/* Commander display overlay */}
       {isCommander && (
         <div className="absolute right-2 bottom-2 z-20 flex flex-col gap-1">

@@ -37,6 +37,9 @@ pub enum CounterType {
     Plus1Plus1,
     Minus1Minus1,
     Loyalty,
+    /// CR 122.1g: A stun counter prevents a permanent from untapping.
+    /// At the beginning of each untap step, one stun counter is removed instead of untapping.
+    Stun,
     Generic(String),
 }
 
@@ -45,6 +48,7 @@ pub fn parse_counter_type(text: &str) -> CounterType {
         "P1P1" | "+1/+1" | "plus1plus1" => CounterType::Plus1Plus1,
         "M1M1" | "-1/-1" | "minus1minus1" => CounterType::Minus1Minus1,
         "LOYALTY" | "loyalty" => CounterType::Loyalty,
+        "stun" | "STUN" => CounterType::Stun,
         other => CounterType::Generic(other.to_string()),
     }
 }
