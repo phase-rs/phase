@@ -8,13 +8,13 @@ use wasm_bindgen::prelude::*;
 
 use engine::ai_support::legal_actions;
 use engine::database::CardDatabase;
+use engine::game::derived::derive_display_state;
 use engine::game::engine::apply;
+use engine::game::layers::evaluate_layers;
 use engine::game::{
     evaluate_deck_compatibility, load_deck_into_state, rehydrate_game_from_card_db,
     resolve_deck_list, start_game, DeckCompatibilityRequest, DeckList,
 };
-use engine::game::derived::derive_display_state;
-use engine::game::layers::evaluate_layers;
 use engine::types::format::FormatConfig;
 use engine::types::match_config::MatchConfig;
 use engine::types::{
@@ -361,7 +361,10 @@ const _: () = {
 mod tests {
     use super::*;
     use engine::game::deck_loading::create_object_from_card_face;
-    use engine::types::ability::{AbilityDefinition, AbilityKind, ContinuousModification, DamageAmount, Duration, Effect, TargetFilter};
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ContinuousModification, DamageAmount, Duration, Effect,
+        TargetFilter,
+    };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
     use engine::types::identifiers::ObjectId;
@@ -407,6 +410,7 @@ mod tests {
             additional_cost: None,
             casting_restrictions: vec![],
             casting_options: vec![],
+            solve_condition: None,
         }
     }
 
@@ -456,9 +460,15 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let card = make_face("Test Card", "oracle-1", Keyword::Vigilance);
         let object_id = create_object_from_card_face(&mut state, &card, PlayerId(0));
-        engine::game::zones::move_to_zone(&mut state, object_id, Zone::Battlefield, &mut Vec::new());
+        engine::game::zones::move_to_zone(
+            &mut state,
+            object_id,
+            Zone::Battlefield,
+            &mut Vec::new(),
+        );
         let obj = state.objects.get_mut(&object_id).unwrap();
-        obj.counters.insert(engine::game::CounterType::Plus1Plus1, 1);
+        obj.counters
+            .insert(engine::game::CounterType::Plus1Plus1, 1);
         state.add_transient_continuous_effect(
             object_id,
             PlayerId(0),

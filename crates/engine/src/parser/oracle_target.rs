@@ -101,6 +101,12 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     let offset = lower.len() - lower_trimmed.len();
     pos += offset;
 
+    // Handle "other" prefix: "other creatures", "other nonland permanents"
+    if lower_trimmed.starts_with("other ") {
+        properties.push(FilterProp::Another);
+        pos += offset + "other ".len();
+    }
+
     if let Some((prop, consumed)) = parse_combat_status_prefix(&lower[pos..]) {
         properties.push(prop);
         pos += consumed;
@@ -166,13 +172,29 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         );
     }
 
-    // Check controller suffix
-    let mut controller = parse_controller_suffix(&lower[pos..]);
-    let ctrl_len = controller.as_ref().map_or(0, |c| match c {
-        ControllerRef::You => " you control".len(),
-        ControllerRef::Opponent => " an opponent controls".len(),
-    });
-    pos += ctrl_len;
+    // CR 108.3 + CR 110.2: Ownership and control are distinct; "you own and control" satisfies both.
+    let mut controller = None;
+    let own_ctrl = lower[pos..].trim_start();
+    let own_ctrl_offset = lower[pos..].len() - own_ctrl.len();
+    if own_ctrl.starts_with("you own and control") {
+        controller = Some(ControllerRef::You);
+        properties.push(FilterProp::Owned {
+            controller: ControllerRef::You,
+        });
+        pos += own_ctrl_offset + "you own and control".len();
+    } else if own_ctrl.starts_with("you own") && !own_ctrl.starts_with("you own and") {
+        properties.push(FilterProp::Owned {
+            controller: ControllerRef::You,
+        });
+        pos += own_ctrl_offset + "you own".len();
+    } else {
+        controller = parse_controller_suffix(&lower[pos..]);
+        let ctrl_len = controller.as_ref().map_or(0, |c| match c {
+            ControllerRef::You => " you control".len(),
+            ControllerRef::Opponent => " an opponent controls".len(),
+        });
+        pos += ctrl_len;
+    }
 
     // Check "with power N or less/greater" suffix
     if let Some((prop, consumed)) = parse_mana_value_suffix(&lower[pos..]) {
@@ -936,6 +958,51 @@ mod tests {
                     value: "vigilance".to_string(),
                 },
             ]))
+        );
+    }
+
+    #[test]
+    fn other_nonland_permanents_you_own_and_control() {
+        let (f, _) = parse_type_phrase("other nonland permanents you own and control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .controller(ControllerRef::You)
+                    .properties(vec![
+                        FilterProp::Another,
+                        FilterProp::NonType {
+                            value: "land".to_string(),
+                        },
+                        FilterProp::Owned {
+                            controller: ControllerRef::You,
+                        },
+                    ])
+            )
+        );
+    }
+
+    #[test]
+    fn permanents_you_own() {
+        let (f, _) = parse_type_phrase("permanents you own");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::Owned {
+                controller: ControllerRef::You,
+            }]))
+        );
+    }
+
+    #[test]
+    fn other_creatures_you_control() {
+        let (f, _) = parse_type_phrase("other creatures you control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another])
+            )
         );
     }
 }

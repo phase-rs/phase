@@ -13,6 +13,7 @@ pub mod copy_spell;
 pub mod counter;
 pub mod counters;
 pub mod deal_damage;
+pub mod delayed_trigger;
 pub mod destroy;
 pub mod dig;
 pub mod discard;
@@ -31,7 +32,9 @@ pub mod sacrifice;
 pub mod scry;
 pub mod search_library;
 pub mod shuffle;
+pub mod solve_case;
 pub mod surveil;
+pub mod suspect;
 pub mod tap_untap;
 pub mod token;
 pub mod transform_effect;
@@ -87,6 +90,9 @@ pub fn resolve_effect(
         Effect::RevealHand { .. } => reveal_hand::resolve(state, ability, events),
         Effect::TargetOnly { .. } => Ok(()), // no-op: targeting is established at cast time
         Effect::Choose { .. } => choose::resolve(state, ability, events),
+        Effect::Suspect { .. } => suspect::resolve(state, ability, events),
+        Effect::SolveCase => solve_case::resolve(state, ability, events),
+        Effect::CreateDelayedTrigger { .. } => delayed_trigger::resolve(state, ability, events),
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);
@@ -150,6 +156,7 @@ pub fn resolve_ability_chain(
                 | WaitingFor::SearchChoice { .. }
                 | WaitingFor::TriggerTargetSelection { .. }
                 | WaitingFor::NamedChoice { .. }
+                | WaitingFor::MultiTargetSelection { .. }
         ) {
             let mut sub_clone = sub.as_ref().clone();
             if sub_clone.targets.is_empty() && !ability.targets.is_empty() {

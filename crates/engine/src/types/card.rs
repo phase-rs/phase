@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ability::{
     AbilityDefinition, AdditionalCost, CastingRestriction, ModalChoice, PtValue,
-    ReplacementDefinition, SpellCastingOption, StaticDefinition, TriggerDefinition,
+    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
 use super::card_type::CardType;
 use super::keywords::Keyword;
@@ -14,7 +14,7 @@ pub struct PrintedCardRef {
     pub face_name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardFace {
     pub name: String,
     pub mana_cost: ManaCost,
@@ -48,6 +48,9 @@ pub struct CardFace {
     /// Spell-casting options ("you may pay ... rather than pay this spell's mana cost", etc.).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub casting_options: Vec<SpellCastingOption>,
+    /// CR 719.1: Solve condition for Case enchantments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solve_condition: Option<SolveCondition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

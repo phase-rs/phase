@@ -196,7 +196,11 @@ fn test_smoke_game_cast_spell() {
         runner.state().stack.is_empty(),
         "Stack should be empty after resolution"
     );
-    assert_eq!(runner.life(P1), 17, "P1 should have 17 life after Lightning Bolt (20 - 3)");
+    assert_eq!(
+        runner.life(P1),
+        17,
+        "P1 should have 17 life after Lightning Bolt (20 - 3)"
+    );
 }
 
 #[test]
@@ -215,7 +219,10 @@ fn test_smoke_game_combat_damage() {
     runner.pass_both_players();
 
     assert!(
-        matches!(runner.state().waiting_for, WaitingFor::DeclareAttackers { .. }),
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        ),
         "Should be waiting for DeclareAttackers, got {:?}",
         runner.state().waiting_for
     );
@@ -226,9 +233,14 @@ fn test_smoke_game_combat_damage() {
         })
         .unwrap();
 
-    if matches!(runner.state().waiting_for, WaitingFor::DeclareBlockers { .. }) {
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareBlockers { .. }
+    ) {
         runner
-            .act(GameAction::DeclareBlockers { assignments: vec![] })
+            .act(GameAction::DeclareBlockers {
+                assignments: vec![],
+            })
             .unwrap();
     }
 
@@ -240,5 +252,9 @@ fn test_smoke_game_combat_damage() {
         let _ = runner.act(GameAction::PassPriority);
     }
 
-    assert_eq!(runner.life(P1), 18, "P1 should have 18 life after Grizzly Bears combat damage (20 - 2)");
+    assert_eq!(
+        runner.life(P1),
+        18,
+        "P1 should have 18 life after Grizzly Bears combat damage (20 - 2)"
+    );
 }

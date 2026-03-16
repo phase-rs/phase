@@ -454,6 +454,31 @@ pub enum Duration {
     Permanent,
 }
 
+/// When a delayed triggered ability fires (CR 603.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum DelayedTriggerCondition {
+    /// "at the beginning of the next [phase]"
+    /// CR 603.7: fires on next PhaseChanged for that phase.
+    AtNextPhase { phase: Phase },
+    /// "at the beginning of your next [phase]"
+    /// Fires only when the specified player is active.
+    AtNextPhaseForPlayer { phase: Phase, player: PlayerId },
+    /// "when [object] leaves the battlefield"
+    WhenLeavesPlay {
+        object_id: super::identifiers::ObjectId,
+    },
+}
+
+/// Specifies variable-count targeting for "any number of" effects.
+/// CR 601.2c: Player chooses targets during resolution.
+/// CR 115.1d: "Any number" means zero or more.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MultiTargetSpec {
+    pub min: usize,
+    pub max: usize,
+}
+
 // ---------------------------------------------------------------------------
 // TargetFilter -- replaces TargetSpec entirely
 // ---------------------------------------------------------------------------
@@ -535,6 +560,8 @@ pub enum FilterProp {
     /// Matches objects whose subtypes include the source object's chosen creature type.
     /// Used for "of the chosen type" patterns (Cavern of Souls, Metallic Mimic).
     IsChosenCreatureType,
+    /// CR 702.157a: Matches suspected creatures.
+    Suspected,
     Other {
         value: String,
     },
@@ -621,6 +648,12 @@ pub enum TargetFilter {
     /// Matches the permanent that the trigger source (Equipment/Aura) is attached to.
     /// Used for "equipped creature" / "enchanted creature" trigger subjects.
     AttachedTo,
+    /// Resolves to the most recently created token(s) from Effect::Token.
+    /// Used for "create X and [verb] it" patterns (e.g. "create a token and suspect it").
+    LastCreated,
+    /// Matches exactly the objects in a tracked set.
+    /// CR 603.7: Delayed triggers act on specific objects from the originating effect.
+    TrackedSet(super::identifiers::TrackedSetId),
 }
 
 /// A dynamic game quantity — a runtime lookup into the game state.
@@ -669,6 +702,21 @@ impl Comparator {
             Comparator::EQ => lhs == rhs,
         }
     }
+}
+
+/// CR 719.1: Condition that must be met for a Case to become solved.
+/// Evaluated by the auto-solve trigger at end step (CR 719.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum SolveCondition {
+    /// "You control no suspected Skeletons" → count matching objects == 0
+    ObjectCount {
+        filter: TargetFilter,
+        comparator: Comparator,
+        threshold: u32,
+    },
+    /// Fallback for conditions the parser cannot decompose.
+    Text { description: String },
 }
 
 /// Condition for static ability applicability.
@@ -1136,6 +1184,24 @@ pub enum Effect {
         #[serde(default)]
         persist: bool,
     },
+    /// CR 702.157a: Suspect target creature — it gains menace and "can't block."
+    Suspect {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
+    /// CR 719.2: Solve the source Case — it becomes solved.
+    SolveCase,
+    /// CR 603.7: Creates a delayed triggered ability during resolution.
+    /// The delayed trigger fires once at the specified condition, then is removed.
+    CreateDelayedTrigger {
+        /// When the delayed trigger fires.
+        condition: DelayedTriggerCondition,
+        /// The effect to execute when it fires.
+        effect: Box<AbilityDefinition>,
+        /// If true, resolve the effect against the tracked object set from the parent.
+        #[serde(default)]
+        uses_tracked_set: bool,
+    },
     /// Semantic marker for effects the engine has not yet implemented a handler for.
     /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.
     Unimplemented {
@@ -1243,6 +1309,9 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::RevealHand { .. } => "RevealHand",
         Effect::TargetOnly { .. } => "TargetOnly",
         Effect::Choose { .. } => "Choose",
+        Effect::Suspect { .. } => "Suspect",
+        Effect::SolveCase => "SolveCase",
+        Effect::CreateDelayedTrigger { .. } => "CreateDelayedTrigger",
         Effect::Unimplemented { name, .. } => name,
     }
 }
@@ -1300,6 +1369,9 @@ pub enum EffectKind {
     SearchLibrary,
     TargetOnly,
     Choose,
+    Suspect,
+    SolveCase,
+    CreateDelayedTrigger,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
     Equip,
@@ -1357,6 +1429,9 @@ impl From<&Effect> for EffectKind {
             Effect::RevealHand { .. } => EffectKind::Reveal,
             Effect::TargetOnly { .. } => EffectKind::TargetOnly,
             Effect::Choose { .. } => EffectKind::Choose,
+            Effect::Suspect { .. } => EffectKind::Suspect,
+            Effect::SolveCase => EffectKind::SolveCase,
+            Effect::CreateDelayedTrigger { .. } => EffectKind::CreateDelayedTrigger,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,
         }
     }
@@ -1428,8 +1503,14 @@ pub enum ActivationRestriction {
     BeforeCombatDamage,
     OnlyOnceEachTurn,
     OnlyOnce,
-    MaxTimesEachTurn { count: u8 },
-    RequiresCondition { text: String },
+    MaxTimesEachTurn {
+        count: u8,
+    },
+    RequiresCondition {
+        text: String,
+    },
+    /// CR 719.4: This ability can only be activated while the source Case is solved.
+    IsSolved,
 }
 
 /// Structured spell-casting restrictions parsed from Oracle text.
@@ -1485,6 +1566,11 @@ pub struct AbilityDefinition {
     /// When true, targeting is optional ("up to one"). Player may choose zero targets.
     #[serde(default)]
     pub optional_targeting: bool,
+    /// Variable-count targeting: min/max targets the player can choose.
+    /// When present, resolution enters MultiTargetSelection instead of immediate resolve.
+    /// CR 601.2c + CR 115.1d.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_target: Option<MultiTargetSpec>,
     /// Modal metadata for activated/triggered abilities with "Choose one —" etc.
     /// When present, the ability pauses for mode selection before resolving.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1511,9 +1597,15 @@ impl AbilityDefinition {
             activation_restrictions: Vec::new(),
             condition: None,
             optional_targeting: false,
+            multi_target: None,
             modal: None,
             mode_abilities: Vec::new(),
         }
+    }
+
+    pub fn multi_target(mut self, spec: MultiTargetSpec) -> Self {
+        self.multi_target = Some(spec);
+        self
     }
 
     pub fn cost(mut self, cost: AbilityCost) -> Self {
@@ -1616,6 +1708,9 @@ pub enum TriggerCondition {
     Descended,
     /// "if you control N or more creatures"
     ControlCreatures { minimum: u32 },
+    /// CR 719.2: Intervening-if for Case auto-solve.
+    /// True when the source Case is unsolved AND its solve condition is met.
+    SolveConditionMet,
 
     // -- Combinators --
     /// All conditions must be true ("if you gained and lost life this turn")
@@ -2490,7 +2585,9 @@ mod tests {
                 threshold: 7,
             },
             StaticCondition::QuantityComparison {
-                lhs: QuantityExpr::Ref { qty: QuantityRef::LifeAboveStarting },
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeAboveStarting,
+                },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 7 },
             },

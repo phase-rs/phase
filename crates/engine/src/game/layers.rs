@@ -31,9 +31,9 @@ pub fn prune_end_of_turn_effects(state: &mut GameState) {
 /// Called at the start of the active player's turn (untap step) per CR 514.2.
 pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: PlayerId) {
     let before = state.transient_continuous_effects.len();
-    state.transient_continuous_effects.retain(|e| {
-        !(e.duration == Duration::UntilYourNextTurn && e.controller == active_player)
-    });
+    state
+        .transient_continuous_effects
+        .retain(|e| !(e.duration == Duration::UntilYourNextTurn && e.controller == active_player));
     if state.transient_continuous_effects.len() != before {
         state.layers_dirty = true;
     }
@@ -43,9 +43,9 @@ pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: Playe
 /// Called when an object leaves the battlefield.
 pub fn prune_host_left_effects(state: &mut GameState, departed_id: ObjectId) {
     let before = state.transient_continuous_effects.len();
-    state.transient_continuous_effects.retain(|e| {
-        !(e.duration == Duration::UntilHostLeavesPlay && e.source_id == departed_id)
-    });
+    state
+        .transient_continuous_effects
+        .retain(|e| !(e.duration == Duration::UntilHostLeavesPlay && e.source_id == departed_id));
     if state.transient_continuous_effects.len() != before {
         state.layers_dirty = true;
     }
@@ -61,7 +61,12 @@ pub fn prune_host_left_effects(state: &mut GameState, departed_id: ObjectId) {
 ///
 /// Used by both intrinsic (permanent-based) and transient (state-level) continuous
 /// effects so that condition evaluation is consistent regardless of effect origin.
-fn evaluate_condition(state: &GameState, condition: &StaticCondition, controller: PlayerId, source_id: ObjectId) -> bool {
+fn evaluate_condition(
+    state: &GameState,
+    condition: &StaticCondition,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> bool {
     match condition {
         StaticCondition::DevotionGE { colors, threshold } => {
             count_devotion(state, controller, colors) >= *threshold
@@ -78,7 +83,11 @@ fn evaluate_condition(state: &GameState, condition: &StaticCondition, controller
             .get(&source_id)
             .and_then(|obj| obj.chosen_color())
             .is_some_and(|chosen| &chosen == color),
-        StaticCondition::QuantityComparison { lhs, comparator, rhs } => {
+        StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } => {
             let resolve = |expr: &QuantityExpr| -> i32 {
                 let player = state.players.iter().find(|p| p.id == controller);
                 match expr {
@@ -89,8 +98,9 @@ fn evaluate_condition(state: &GameState, condition: &StaticCondition, controller
                         QuantityRef::GraveyardSize => {
                             player.map_or(0, |p| p.graveyard.len() as i32)
                         }
-                        QuantityRef::LifeAboveStarting => player
-                            .map_or(0, |p| p.life - state.format_config.starting_life),
+                        QuantityRef::LifeAboveStarting => {
+                            player.map_or(0, |p| p.life - state.format_config.starting_life)
+                        }
                     },
                 }
             };
@@ -567,16 +577,15 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-        Effect, FilterProp, GainLifePlayer, LifeAmount, StaticDefinition, TargetFilter,
-        TypeFilter,
+        Effect, FilterProp, GainLifePlayer, LifeAmount, StaticDefinition, TargetFilter, TypeFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
-    use crate::types::statics::StaticMode;
     use crate::types::replacements::ReplacementEvent;
+    use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
@@ -654,7 +663,9 @@ mod tests {
                 ContinuousModification::AddToughness { value: 2 },
             ])
             .condition(StaticCondition::QuantityComparison {
-                lhs: QuantityExpr::Ref { qty: QuantityRef::LifeAboveStarting },
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeAboveStarting,
+                },
                 comparator: crate::types::ability::Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 7 },
             });
@@ -1168,8 +1179,9 @@ mod tests {
         }
 
         let animator = make_creature(&mut state, "Animator", 1, 1, PlayerId(0));
-        let artifact_you_ctrl =
-            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You));
+        let artifact_you_ctrl = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
+        );
         state
             .objects
             .get_mut(&animator)

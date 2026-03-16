@@ -21,13 +21,19 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         None => return,
     };
 
-    // Intervening-if: recheck condition at resolution time for triggered abilities
+    // CR 603.4: Intervening-if condition rechecked at resolution time.
     if let StackEntryKind::TriggeredAbility {
         condition: Some(ref condition),
+        source_id,
         ..
     } = entry.kind
     {
-        if !super::triggers::check_trigger_condition(state, condition, entry.controller) {
+        if !super::triggers::check_trigger_condition(
+            state,
+            condition,
+            entry.controller,
+            Some(source_id),
+        ) {
             events.push(GameEvent::StackResolved {
                 object_id: entry.id,
             });

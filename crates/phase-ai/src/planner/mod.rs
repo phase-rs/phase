@@ -698,7 +698,8 @@ pub fn acting_player(state: &GameState) -> Option<PlayerId> {
         | WaitingFor::ModeChoice { player, .. }
         | WaitingFor::DiscardToHandSize { player, .. }
         | WaitingFor::OptionalCostChoice { player, .. }
-        | WaitingFor::AbilityModeChoice { player, .. } => Some(*player),
+        | WaitingFor::AbilityModeChoice { player, .. }
+        | WaitingFor::MultiTargetSelection { player, .. } => Some(*player),
         WaitingFor::GameOver { .. } => None,
     }
 }

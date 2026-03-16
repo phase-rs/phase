@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     AbilityDefinition, AdditionalCost, BasicLandType, CastingRestriction, ChosenAttribute,
-    ChosenSubtypeKind, ModalChoice, ReplacementDefinition, SpellCastingOption, StaticDefinition,
-    TriggerDefinition,
+    ChosenSubtypeKind, ModalChoice, ReplacementDefinition, SolveCondition, SpellCastingOption,
+    StaticDefinition, TriggerDefinition,
 };
 use crate::types::card::PrintedCardRef;
 use crate::types::card_type::CardType;
@@ -59,6 +59,13 @@ pub fn parse_counter_type(text: &str) -> CounterType {
         "stun" => CounterType::Stun,
         other => CounterType::Generic(other.to_string()),
     }
+}
+
+/// CR 719.1: Tracks the solve state of a Case enchantment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaseState {
+    pub is_solved: bool,
+    pub solve_condition: SolveCondition,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +175,16 @@ pub struct GameObject {
     /// Persists for the object's lifetime on the battlefield.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_attributes: Vec<ChosenAttribute>,
+
+    /// CR 702.157a: Whether this creature is currently suspected.
+    /// The designation is the source of truth; menace and CantBlock are derived
+    /// via `base_keywords`/`base_static_definitions` (Option C architecture).
+    #[serde(default)]
+    pub is_suspected: bool,
+
+    /// CR 719.1: Case enchantment solve state. Present only on Case permanents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub case_state: Option<CaseState>,
 }
 
 impl GameObject {
@@ -223,6 +240,8 @@ impl GameObject {
             casting_restrictions: Vec::new(),
             casting_options: Vec::new(),
             chosen_attributes: Vec::new(),
+            is_suspected: false,
+            case_state: None,
         }
     }
 

@@ -6,12 +6,12 @@ use serde::{Deserialize, Serialize};
 
 use super::ability::{
     AbilityCost, AbilityDefinition, AdditionalCost, ChoiceType, ChoiceValue,
-    ContinuousModification, Duration, ModalChoice, ResolvedAbility, StaticCondition, TargetFilter,
-    TargetRef, TriggerCondition,
+    ContinuousModification, DelayedTriggerCondition, Duration, ModalChoice, ResolvedAbility,
+    StaticCondition, TargetFilter, TargetRef, TriggerCondition,
 };
 use super::events::GameEvent;
 use super::format::FormatConfig;
-use super::identifiers::{CardId, ObjectId};
+use super::identifiers::{CardId, ObjectId, TrackedSetId};
 use super::mana::ManaCost;
 use super::match_config::{MatchConfig, MatchPhase, MatchScore};
 use super::phase::Phase;
@@ -50,6 +50,23 @@ pub struct CommanderDamageEntry {
     pub player: PlayerId,
     pub commander: ObjectId,
     pub damage: u32,
+}
+
+/// CR 603.7: A delayed triggered ability created during resolution of a spell or ability.
+/// Fires once at the specified condition, then is removed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelayedTrigger {
+    /// When this trigger fires.
+    pub condition: DelayedTriggerCondition,
+    /// The ability to execute when it fires.
+    pub ability: ResolvedAbility,
+    /// CR 603.7d: Controller (the player who created it).
+    pub controller: PlayerId,
+    /// Source permanent that created this delayed trigger.
+    pub source_id: ObjectId,
+    /// Whether this trigger fires once and is removed (most delayed triggers).
+    /// CR 603.7c.
+    pub one_shot: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,6 +239,16 @@ pub enum WaitingFor {
         cost: AdditionalCost,
         pending_cast: Box<PendingCast>,
     },
+    /// CR 601.2c: Player chooses any number of legal targets from a set.
+    /// Used for "exile any number of" and similar variable-count targeting.
+    MultiTargetSelection {
+        player: PlayerId,
+        legal_targets: Vec<ObjectId>,
+        min_targets: usize,
+        max_targets: usize,
+        /// The pending ability to execute with selected targets injected.
+        pending_ability: Box<ResolvedAbility>,
+    },
     /// Player must choose modes for a modal activated or triggered ability.
     /// Unlike ModeChoice (which is casting-specific via PendingCast), this variant
     /// is decoupled from PendingCast and carries the mode ability definitions directly.
@@ -340,6 +367,17 @@ pub struct GameState {
     #[serde(default)]
     pub exile_links: Vec<ExileLink>,
 
+    /// CR 603.7: Delayed triggered abilities waiting to fire.
+    #[serde(default)]
+    pub delayed_triggers: Vec<DelayedTrigger>,
+
+    /// CR 603.7: Object sets tracked for delayed triggers ("those cards", "that creature").
+    #[serde(default)]
+    pub tracked_object_sets: HashMap<TrackedSetId, Vec<ObjectId>>,
+
+    #[serde(default)]
+    pub next_tracked_set_id: u64,
+
     // Commander support
     #[serde(default)]
     pub commander_cast_count: HashMap<ObjectId, u32>,
@@ -438,6 +476,11 @@ pub struct GameState {
     /// "name a card" choices. Skipped in serialization to avoid sending 30k+ names.
     #[serde(skip)]
     pub all_card_names: Vec<String>,
+
+    /// Object IDs from the most recently resolved Effect::Token.
+    /// Consumed by sub_abilities referencing "it"/"them" via TargetFilter::LastCreated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub last_created_token_ids: Vec<ObjectId>,
 }
 
 /// A runtime-generated continuous effect stored at state level.
@@ -512,6 +555,9 @@ impl GameState {
             spells_cast_this_turn: 0,
             pending_trigger: None,
             exile_links: Vec::new(),
+            delayed_triggers: Vec::new(),
+            tracked_object_sets: HashMap::new(),
+            next_tracked_set_id: 1,
             commander_cast_count: HashMap::new(),
             seat_order,
             format_config: config,
@@ -550,6 +596,7 @@ impl GameState {
             last_named_choice: None,
             all_creature_types: Vec::new(),
             all_card_names: Vec::new(),
+            last_created_token_ids: Vec::new(),
         }
     }
 
@@ -626,6 +673,9 @@ impl PartialEq for GameState {
             && self.spells_cast_this_turn == other.spells_cast_this_turn
             && self.pending_trigger == other.pending_trigger
             && self.exile_links == other.exile_links
+            && self.delayed_triggers == other.delayed_triggers
+            && self.tracked_object_sets == other.tracked_object_sets
+            && self.next_tracked_set_id == other.next_tracked_set_id
             && self.commander_cast_count == other.commander_cast_count
             && self.seat_order == other.seat_order
             && self.format_config == other.format_config

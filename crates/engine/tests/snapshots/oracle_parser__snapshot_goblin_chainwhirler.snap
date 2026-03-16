@@ -46,7 +46,7 @@ expression: result
       "secondary": false,
       "valid_target": null,
       "valid_source": null,
-      "description": null,
+      "description": "When Goblin Chainwhirler enters the battlefield, it deals 1 damage to each opponent and each creature and planeswalker they control.",
       "constraint": null,
       "condition": null
     }

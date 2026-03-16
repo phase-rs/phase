@@ -208,10 +208,11 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
                 if let Some(kw) = map_keyword(keyword_text) {
                     modifications.push(ContinuousModification::AddKeyword { keyword: kw });
                 }
-                let condition = parse_static_condition(condition_text)
-                    .unwrap_or(StaticCondition::Unrecognized {
+                let condition = parse_static_condition(condition_text).unwrap_or(
+                    StaticCondition::Unrecognized {
                         text: condition_text.to_string(),
-                    });
+                    },
+                );
                 return Some(
                     StaticDefinition::continuous()
                         .affected(TargetFilter::SelfRef)
@@ -520,9 +521,10 @@ fn parse_conditional_static(text: &str) -> Option<StaticDefinition> {
     let conditional = text.strip_prefix("As long as ")?;
     let (condition_text, remainder) = conditional.split_once(", ")?;
 
-    let condition = parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
-        text: condition_text.to_string(),
-    });
+    let condition =
+        parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
+            text: condition_text.to_string(),
+        });
 
     let mut def = parse_static_line(remainder.trim())?;
     if def.condition.is_some() {
@@ -554,9 +556,13 @@ fn parse_static_condition(text: &str) -> Option<StaticCondition> {
         let (amount, rest) = parse_number(amount_text)?;
         if rest.trim().is_empty() {
             return Some(StaticCondition::QuantityComparison {
-                lhs: QuantityExpr::Ref { qty: QuantityRef::LifeAboveStarting },
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeAboveStarting,
+                },
                 comparator: Comparator::GE,
-                rhs: QuantityExpr::Fixed { value: amount as i32 },
+                rhs: QuantityExpr::Fixed {
+                    value: amount as i32,
+                },
             });
         }
     }
@@ -1138,7 +1144,9 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     }
 
     for definition in parse_quoted_abilities(text) {
-        modifications.push(ContinuousModification::GrantAbility { definition: Box::new(definition) });
+        modifications.push(ContinuousModification::GrantAbility {
+            definition: Box::new(definition),
+        });
     }
 
     if let Some(keyword_text) = extract_keyword_clause(text) {
@@ -1590,9 +1598,13 @@ mod tests {
         assert!(matches!(
             def.condition,
             Some(StaticCondition::QuantityComparison {
-                lhs: QuantityExpr::Ref { qty: QuantityRef::HandSize },
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize
+                },
                 comparator: Comparator::GT,
-                rhs: QuantityExpr::Ref { qty: QuantityRef::LifeTotal },
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal
+                },
             })
         ));
     }
@@ -1653,7 +1665,9 @@ mod tests {
         assert_eq!(
             def.condition,
             Some(StaticCondition::QuantityComparison {
-                lhs: QuantityExpr::Ref { qty: QuantityRef::LifeAboveStarting },
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeAboveStarting
+                },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 7 },
             })
@@ -1696,20 +1710,18 @@ mod tests {
 
     #[test]
     fn static_during_your_turn_condition() {
-        let def = parse_static_line(
-            "As long as it's your turn, Triumphant Adventurer has first strike.",
-        )
-        .unwrap();
+        let def =
+            parse_static_line("As long as it's your turn, Triumphant Adventurer has first strike.")
+                .unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);
         assert_eq!(def.condition, Some(StaticCondition::DuringYourTurn));
     }
 
     #[test]
     fn static_control_presence_condition() {
-        let def = parse_static_line(
-            "As long as you control a artifact, Toolcraft Exemplar gets +2/+1.",
-        )
-        .unwrap();
+        let def =
+            parse_static_line("As long as you control a artifact, Toolcraft Exemplar gets +2/+1.")
+                .unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);
         assert!(matches!(
             def.condition,
@@ -2190,10 +2202,14 @@ mod tests {
         let def = parse_static_line("Enchanted land has \"{T}: Add two mana of any one color.\"")
             .unwrap();
         // Should produce a GrantAbility with a typed activated AbilityDefinition
-        let grant = def.modifications.iter().find(|m| {
-            matches!(m, ContinuousModification::GrantAbility { .. })
-        });
-        assert!(grant.is_some(), "should contain a GrantAbility modification");
+        let grant = def
+            .modifications
+            .iter()
+            .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }));
+        assert!(
+            grant.is_some(),
+            "should contain a GrantAbility modification"
+        );
         if let ContinuousModification::GrantAbility { definition } = grant.unwrap() {
             assert_eq!(definition.kind, AbilityKind::Activated);
             assert!(definition.cost.is_some());

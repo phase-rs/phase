@@ -269,7 +269,10 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             triggers::process_triggers(state, &events);
             triggers_processed_inline = true;
             if let Some(waiting_for) = begin_pending_trigger_target_selection(state)? {
-                return Ok(ActionResult { events, waiting_for });
+                return Ok(ActionResult {
+                    events,
+                    waiting_for,
+                });
             }
 
             if attacks.is_empty() {
@@ -303,7 +306,10 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             triggers::process_triggers(state, &events);
             triggers_processed_inline = true;
             if let Some(waiting_for) = begin_pending_trigger_target_selection(state)? {
-                return Ok(ActionResult { events, waiting_for });
+                return Ok(ActionResult {
+                    events,
+                    waiting_for,
+                });
             }
 
             if !state.stack.is_empty() {
@@ -1031,6 +1037,54 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 WaitingFor::Priority { player: p }
             }
         }
+        // CR 601.2c: Player selected targets from a multi-target set ("any number of").
+        (
+            WaitingFor::MultiTargetSelection {
+                player,
+                legal_targets,
+                min_targets,
+                max_targets,
+                pending_ability,
+            },
+            GameAction::SelectCards { cards: selected },
+        ) => {
+            let p = *player;
+            let legal = legal_targets.clone();
+            let min = *min_targets;
+            let max = *max_targets;
+            let mut ability = pending_ability.as_ref().clone();
+
+            // CR 601.2c: Validate target count is within the declared range.
+            if selected.len() < min || selected.len() > max {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must select between {} and {} targets, got {}",
+                    min,
+                    max,
+                    selected.len()
+                )));
+            }
+
+            // CR 115.1d: Each selected target must be a legal target.
+            for id in &selected {
+                if !legal.contains(id) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected target not in legal set".to_string(),
+                    ));
+                }
+            }
+
+            ability.targets = selected.iter().map(|&id| TargetRef::Object(id)).collect();
+
+            state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
+            let _ = effects::resolve_ability_chain(state, &ability, &mut events, 0);
+
+            if let Some(cont) = state.pending_continuation.take() {
+                let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
+            }
+
+            state.waiting_for.clone()
+        }
         (waiting, action) => {
             return Err(EngineError::ActionNotAllowed(format!(
                 "Cannot perform {:?} while waiting for {:?}",
@@ -1046,6 +1100,10 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
         // Check exile returns -- must happen after SBAs (which may move sources off battlefield)
         // and before triggers (so returned permanents get ETB triggers)
         check_exile_returns(state, &mut events);
+
+        // CR 603.7: Check delayed triggers before processing regular triggers.
+        let delayed_events = triggers::check_delayed_triggers(state, &events);
+        events.extend(delayed_events);
 
         // SBA might have set game over
         if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
@@ -4309,7 +4367,11 @@ mod phase_trigger_regression_tests {
                 player: PlayerId(0)
             }
         ));
-        assert_eq!(state.stack.len(), 1, "Linden should create exactly one stack entry");
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Linden should create exactly one stack entry"
+        );
         assert_eq!(state.phase, Phase::DeclareAttackers);
 
         apply(&mut state, GameAction::PassPriority).unwrap();
@@ -4346,13 +4408,19 @@ mod phase_trigger_regression_tests {
         apply(&mut state, GameAction::PassPriority).unwrap();
         let combat_result = apply(&mut state, GameAction::PassPriority).unwrap();
 
-        assert!(matches!(combat_result.waiting_for, WaitingFor::Priority { .. }));
+        assert!(matches!(
+            combat_result.waiting_for,
+            WaitingFor::Priority { .. }
+        ));
         assert_eq!(state.phase, Phase::PostCombatMain);
         assert_eq!(
             state.players[1].life, 17,
             "Ajani should deal 3 after receiving the pre-damage counter"
         );
-        assert_eq!(state.players[0].life, 21, "No duplicate Linden life gain should occur");
+        assert_eq!(
+            state.players[0].life, 21,
+            "No duplicate Linden life gain should occur"
+        );
         assert_eq!(state.objects[&ajani].power, Some(3));
         assert_eq!(state.objects[&ajani].toughness, Some(3));
     }

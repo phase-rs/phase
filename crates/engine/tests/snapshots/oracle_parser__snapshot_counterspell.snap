@@ -25,7 +25,7 @@ expression: result
       "cost": null,
       "sub_ability": null,
       "duration": null,
-      "description": null,
+      "description": "Counter target spell.",
       "target_prompt": null,
       "sorcery_speed": false,
       "condition": null,

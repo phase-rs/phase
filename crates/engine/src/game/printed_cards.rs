@@ -57,6 +57,16 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     obj.additional_cost = card_face.additional_cost.clone();
     obj.casting_restrictions = card_face.casting_restrictions.clone();
     obj.casting_options = card_face.casting_options.clone();
+
+    // CR 719.1: Initialize Case solve state from the card face.
+    if card_face.card_type.subtypes.iter().any(|s| s == "Case") {
+        if let Some(ref sc) = card_face.solve_condition {
+            obj.case_state = Some(super::game_object::CaseState {
+                is_solved: false,
+                solve_condition: sc.clone(),
+            });
+        }
+    }
 }
 
 pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &CardFace) {

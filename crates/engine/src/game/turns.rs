@@ -855,12 +855,22 @@ mod tests {
         let wf = auto_advance(&mut state, &mut events);
 
         assert!(
-            matches!(wf, WaitingFor::GameOver { winner: Some(PlayerId(0)) }),
+            matches!(
+                wf,
+                WaitingFor::GameOver {
+                    winner: Some(PlayerId(0))
+                }
+            ),
             "auto_advance should propagate GameOver when combat damage kills opponent, got {:?}",
             wf
         );
         assert!(
-            matches!(state.waiting_for, WaitingFor::GameOver { winner: Some(PlayerId(0)) }),
+            matches!(
+                state.waiting_for,
+                WaitingFor::GameOver {
+                    winner: Some(PlayerId(0))
+                }
+            ),
             "state.waiting_for should be GameOver, got {:?}",
             state.waiting_for
         );
@@ -888,7 +898,10 @@ mod tests {
         execute_untap(&mut state, &mut events);
 
         let obj = &state.objects[&obj_id];
-        assert!(obj.tapped, "creature should remain tapped after stun counter removal");
+        assert!(
+            obj.tapped,
+            "creature should remain tapped after stun counter removal"
+        );
         assert_eq!(
             obj.counters.get(&CounterType::Stun).copied().unwrap_or(0),
             1,
@@ -903,7 +916,9 @@ mod tests {
             "CounterRemoved event should be emitted"
         );
         assert!(
-            !events.iter().any(|e| matches!(e, GameEvent::PermanentUntapped { .. })),
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::PermanentUntapped { .. })),
             "PermanentUntapped should not be emitted when stun counter is present"
         );
     }
@@ -929,8 +944,14 @@ mod tests {
         execute_untap(&mut state, &mut events);
 
         let obj = &state.objects[&obj_id];
-        assert!(!obj.counters.contains_key(&CounterType::Stun), "stun entry should be removed at zero");
-        assert!(obj.tapped, "creature still tapped after final stun counter removed");
+        assert!(
+            !obj.counters.contains_key(&CounterType::Stun),
+            "stun entry should be removed at zero"
+        );
+        assert!(
+            obj.tapped,
+            "creature still tapped after final stun counter removed"
+        );
     }
 
     #[test]
@@ -950,9 +971,14 @@ mod tests {
         let mut events = Vec::new();
         execute_untap(&mut state, &mut events);
 
-        assert!(!state.objects[&obj_id].tapped, "creature should untap normally");
         assert!(
-            events.iter().any(|e| matches!(e, GameEvent::PermanentUntapped { object_id } if *object_id == obj_id)),
+            !state.objects[&obj_id].tapped,
+            "creature should untap normally"
+        );
+        assert!(
+            events.iter().any(
+                |e| matches!(e, GameEvent::PermanentUntapped { object_id } if *object_id == obj_id)
+            ),
             "PermanentUntapped event should be emitted"
         );
     }

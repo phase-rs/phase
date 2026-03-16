@@ -66,7 +66,7 @@ fn collect_matching_triggers(
                     continue;
                 }
                 if let Some(ref condition) = trig_def.condition {
-                    if !check_trigger_condition(state, condition, controller) {
+                    if !check_trigger_condition(state, condition, controller, Some(obj_id)) {
                         continue;
                     }
                 }
@@ -267,6 +267,88 @@ pub fn push_pending_trigger_to_stack(
     stack::push_to_stack(state, entry, events);
 }
 
+/// CR 603.7: Check if any delayed triggers should fire based on recent events.
+/// Matching delayed triggers are removed from state and placed on the stack.
+pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Vec<GameEvent> {
+    if state.delayed_triggers.is_empty() {
+        return vec![];
+    }
+
+    let mut fired_indices = Vec::new();
+
+    for (idx, delayed) in state.delayed_triggers.iter().enumerate() {
+        if delayed_trigger_matches(&delayed.condition, events, state) {
+            fired_indices.push(idx);
+        }
+    }
+
+    if fired_indices.is_empty() {
+        return vec![];
+    }
+
+    // Remove in reverse order to preserve indices
+    let mut fired = Vec::new();
+    for &idx in fired_indices.iter().rev() {
+        fired.push(state.delayed_triggers.remove(idx));
+    }
+    fired.reverse(); // Restore original order
+
+    let mut new_events = Vec::new();
+
+    // CR 603.3b: APNAP ordering — active player's triggers go on stack last (resolve first).
+    // Sort so NAP triggers come first (pushed to stack bottom), AP triggers last (stack top).
+    fired.sort_by_key(|t| {
+        let is_nap = if t.controller == state.active_player {
+            0
+        } else {
+            1
+        };
+        (is_nap, state.turn_number)
+    });
+    fired.reverse();
+
+    for trigger in fired {
+        let pending = PendingTrigger {
+            source_id: trigger.source_id,
+            controller: trigger.controller,
+            condition: None,
+            ability: trigger.ability,
+            timestamp: state.turn_number,
+            target_constraints: Vec::new(),
+        };
+        push_pending_trigger_to_stack(state, pending, &mut new_events);
+    }
+
+    new_events
+}
+
+/// CR 603.7: Check if a delayed trigger condition is met by recent events.
+fn delayed_trigger_matches(
+    condition: &crate::types::ability::DelayedTriggerCondition,
+    events: &[GameEvent],
+    state: &GameState,
+) -> bool {
+    use crate::types::ability::DelayedTriggerCondition;
+
+    match condition {
+        DelayedTriggerCondition::AtNextPhase { phase } => events
+            .iter()
+            .any(|e| matches!(e, GameEvent::PhaseChanged { phase: p } if p == phase)),
+        DelayedTriggerCondition::AtNextPhaseForPlayer { phase, player } => {
+            state.active_player == *player
+                && events
+                    .iter()
+                    .any(|e| matches!(e, GameEvent::PhaseChanged { phase: p } if p == phase))
+        }
+        DelayedTriggerCondition::WhenLeavesPlay { object_id } => events.iter().any(|e| {
+            matches!(e,
+                GameEvent::ZoneChanged { object_id: id, from: Zone::Battlefield, .. }
+                if *id == *object_id
+            )
+        }),
+    }
+}
+
 /// Check whether a trigger's constraint allows it to fire.
 fn check_trigger_constraint(
     state: &GameState,
@@ -302,10 +384,14 @@ fn check_trigger_constraint(
 ///
 /// Predicates check player/game state directly.
 /// Combinators (`And`/`Or`) recurse into their children.
+///
+/// `source_id` is required for conditions like `SolveConditionMet` that need
+/// to inspect the trigger's source object (e.g., the Case's solve condition).
 pub(crate) fn check_trigger_condition(
     state: &GameState,
     condition: &TriggerCondition,
     controller: PlayerId,
+    source_id: Option<ObjectId>,
 ) -> bool {
     match condition {
         TriggerCondition::GainedLife { minimum } => {
@@ -328,12 +414,48 @@ pub(crate) fn check_trigger_condition(
                 .count();
             count >= *minimum as usize
         }
+        // CR 719.2: True when the source Case is unsolved and its solve condition is met.
+        TriggerCondition::SolveConditionMet => source_id
+            .and_then(|id| state.objects.get(&id))
+            .and_then(|obj| obj.case_state.as_ref())
+            .is_some_and(|cs| !cs.is_solved && evaluate_solve_condition(state, cs, controller)),
         TriggerCondition::And { conditions } => conditions
             .iter()
-            .all(|c| check_trigger_condition(state, c, controller)),
+            .all(|c| check_trigger_condition(state, c, controller, source_id)),
         TriggerCondition::Or { conditions } => conditions
             .iter()
-            .any(|c| check_trigger_condition(state, c, controller)),
+            .any(|c| check_trigger_condition(state, c, controller, source_id)),
+    }
+}
+
+/// CR 719.2: Evaluate a Case's solve condition against the current game state.
+/// Returns true when the Case is unsolved and its condition is currently met.
+fn evaluate_solve_condition(
+    state: &GameState,
+    cs: &crate::game::game_object::CaseState,
+    controller: PlayerId,
+) -> bool {
+    use crate::types::ability::SolveCondition;
+
+    match &cs.solve_condition {
+        SolveCondition::ObjectCount {
+            filter,
+            comparator,
+            threshold,
+        } => {
+            let count = state
+                .battlefield
+                .iter()
+                .filter(|&&id| {
+                    state.objects.get(&id).is_some_and(|obj| {
+                        obj.controller == controller
+                            && super::filter::matches_target_filter(state, id, filter, id)
+                    })
+                })
+                .count() as i32;
+            comparator.clone().evaluate(count, *threshold as i32)
+        }
+        SolveCondition::Text { .. } => false, // Undecomposed conditions never auto-solve
     }
 }
 
@@ -560,6 +682,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // Promoted trigger matchers -- crime mechanic (OTJ+)
     r.insert(TriggerMode::CommitCrime, match_commit_crime);
 
+    // Promoted trigger matchers -- Case enchantments (MKM+)
+    r.insert(TriggerMode::CaseSolved, match_case_solved);
+
     // Remaining trigger modes: recognized but not yet matched against events.
     let unimplemented_modes = [
         TriggerMode::DamagePreventedOnce,
@@ -614,7 +739,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::Surveil,
         TriggerMode::Scry,
         TriggerMode::Abandoned,
-        TriggerMode::CaseSolved,
         TriggerMode::ClaimPrize,
         TriggerMode::CollectEvidence,
         TriggerMode::CrankContraption,
@@ -912,6 +1036,12 @@ fn target_filter_matches_object(
                 .and_then(|src| src.attached_to)
                 .is_some_and(|attached| attached == object_id)
         }
+        TargetFilter::LastCreated => state.last_created_token_ids.contains(&object_id),
+        // CR 603.7: Match objects in a tracked set from the originating effect.
+        TargetFilter::TrackedSet(id) => state
+            .tracked_object_sets
+            .get(id)
+            .is_some_and(|set| set.contains(&object_id)),
     }
 }
 
@@ -1386,6 +1516,16 @@ fn match_commit_crime(
     } else {
         false
     }
+}
+
+/// CR 719.2: Match CaseSolved events for the trigger's source object.
+fn match_case_solved(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    matches!(event, GameEvent::CaseSolved { object_id } if *object_id == source_id)
 }
 
 fn match_land_played(

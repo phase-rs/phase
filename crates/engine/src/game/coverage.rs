@@ -192,13 +192,10 @@ pub fn build_parse_details(
 fn build_ability_item(def: &AbilityDefinition) -> ParsedItem {
     let label = effect_type_name(&def.effect);
     let supported = !matches!(&def.effect, Effect::Unimplemented { .. });
-    let source_text = def
-        .description
-        .clone()
-        .or_else(|| match &def.effect {
-            Effect::Unimplemented { description, .. } => description.clone(),
-            _ => None,
-        });
+    let source_text = def.description.clone().or_else(|| match &def.effect {
+        Effect::Unimplemented { description, .. } => description.clone(),
+        _ => None,
+    });
 
     let mut children = Vec::new();
 
@@ -720,6 +717,7 @@ mod tests {
             additional_cost: None,
             casting_restrictions: vec![],
             casting_options: vec![],
+            solve_condition: None,
         }
     }
 

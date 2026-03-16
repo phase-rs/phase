@@ -225,7 +225,9 @@ mod tests {
     };
     use crate::types::card_type::CardType;
     use crate::types::keywords::Keyword;
-    use crate::types::mana::ManaCostShard;
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+
+    use super::super::printed_cards::derive_colors_from_mana_cost;
 
     fn make_creature_face() -> CardFace {
         CardFace {
@@ -265,6 +267,7 @@ mod tests {
             additional_cost: None,
             casting_restrictions: vec![],
             casting_options: vec![],
+            solve_condition: None,
         }
     }
 
@@ -304,6 +307,7 @@ mod tests {
             additional_cost: None,
             casting_restrictions: vec![],
             casting_options: vec![],
+            solve_condition: None,
         }
     }
 

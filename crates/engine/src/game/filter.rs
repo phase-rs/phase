@@ -104,9 +104,9 @@ fn filter_inner(
                 attached_to: source_attached_to,
                 chosen_creature_type: source_chosen_creature_type.as_deref(),
             };
-            properties.iter().all(|p| {
-                matches_filter_prop(p, state, obj, object_id, &source_ctx)
-            })
+            properties
+                .iter()
+                .all(|p| matches_filter_prop(p, state, obj, object_id, &source_ctx))
         }
         TargetFilter::Not { filter: inner } => {
             !filter_inner(state, object_id, inner, source_id, source_controller)
@@ -125,6 +125,12 @@ fn filter_inner(
             .get(&source_id)
             .and_then(|src| src.attached_to)
             .is_some_and(|attached| attached == object_id),
+        TargetFilter::LastCreated => state.last_created_token_ids.contains(&object_id),
+        // CR 603.7: Match objects in a tracked set from the originating effect.
+        TargetFilter::TrackedSet(id) => state
+            .tracked_object_sets
+            .get(id)
+            .is_some_and(|set| set.contains(&object_id)),
     }
 }
 
@@ -281,6 +287,8 @@ fn matches_filter_prop(
                 .any(|s| s.eq_ignore_ascii_case(chosen)),
             None => false,
         },
+        // CR 702.157a: Match creatures with the suspected designation.
+        FilterProp::Suspected => obj.is_suspected,
         FilterProp::Other { .. } => true, // Permissive fallback for unrecognized properties
     }
 }

@@ -1069,7 +1069,11 @@ mod tests {
         // Both mandatory replacements auto-apply without NeedsChoice; each fires exactly once.
         if let ReplacementResult::Execute(event) = result {
             let applied = event.applied_set();
-            assert_eq!(applied.len(), 2, "both replacements should have been applied");
+            assert_eq!(
+                applied.len(),
+                2,
+                "both replacements should have been applied"
+            );
         } else {
             panic!("expected Execute, got {:?}", result);
         }
@@ -1127,7 +1131,11 @@ mod tests {
         let result = replace_event(&mut state, proposed, &mut events);
         // Both mandatory replacements auto-apply; result is Execute with both in the applied set.
         if let ReplacementResult::Execute(event) = result {
-            assert_eq!(event.applied_set().len(), 2, "both replacements should have applied");
+            assert_eq!(
+                event.applied_set().len(),
+                2,
+                "both replacements should have applied"
+            );
         } else {
             panic!("expected Execute, got {:?}", result);
         }

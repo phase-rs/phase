@@ -22,22 +22,22 @@ pub fn resolve(
     };
 
     // SelfRef with no explicit targets means pump the source object itself.
-    let ids: Vec<_> = if matches!(target_filter, TargetFilter::SelfRef) && ability.targets.is_empty()
-    {
-        vec![ability.source_id]
-    } else {
-        ability
-            .targets
-            .iter()
-            .filter_map(|t| {
-                if let TargetRef::Object(id) = t {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .collect()
-    };
+    let ids: Vec<_> =
+        if matches!(target_filter, TargetFilter::SelfRef) && ability.targets.is_empty() {
+            vec![ability.source_id]
+        } else {
+            ability
+                .targets
+                .iter()
+                .filter_map(|t| {
+                    if let TargetRef::Object(id) = t {
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
 
     for obj_id in ids {
         let obj = state

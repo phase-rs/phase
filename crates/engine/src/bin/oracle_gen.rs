@@ -11,12 +11,14 @@ use engine::game::coverage::card_face_has_unimplemented_parts;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, ControllerRef, Effect,
-    ManaProduction, PtValue, TargetFilter, TypedFilter,
+    ManaProduction, PtValue, TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use engine::types::card::{CardFace, CardLayout};
 use engine::types::card_type::{CardType, CoreType, Supertype};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use engine::types::phase::Phase;
+use engine::types::triggers::TriggerMode;
 
 #[derive(Debug, Clone, Serialize)]
 struct CardExportEntry {
@@ -267,11 +269,13 @@ fn build_oracle_face(mtgjson: &AtomicCard, oracle_id: Option<String>) -> CardFac
         additional_cost: parsed.additional_cost,
         casting_restrictions: parsed.casting_restrictions,
         casting_options: parsed.casting_options,
+        solve_condition: parsed.solve_condition,
     };
 
     synthesize_basic_land_mana(&mut face);
     synthesize_equip(&mut face);
     synthesize_kicker(&mut face);
+    synthesize_case_solve(&mut face);
     face
 }
 
@@ -403,6 +407,29 @@ fn synthesize_kicker(face: &mut CardFace) {
     }) {
         face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Mana { cost }));
     }
+}
+
+/// CR 719.2: Synthesize the intrinsic Case auto-solve trigger.
+/// Every Case with a solve condition has: "At the beginning of your end step,
+/// if this Case is not solved and its requirement is met, it becomes solved."
+fn synthesize_case_solve(face: &mut CardFace) {
+    if !face.card_type.subtypes.iter().any(|s| s == "Case") {
+        return;
+    }
+    if face.solve_condition.is_none() {
+        return;
+    }
+
+    face.triggers.push(
+        TriggerDefinition::new(TriggerMode::Phase)
+            .phase(Phase::End)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SolveCase,
+            ))
+            .condition(TriggerCondition::SolveConditionMet)
+            .description("CR 719.2: Case auto-solve at end step".to_string()),
+    );
 }
 
 fn layout_faces(layout: &CardLayout) -> Vec<&CardFace> {

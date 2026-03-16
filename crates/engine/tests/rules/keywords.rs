@@ -27,7 +27,8 @@ fn deathtouch_trample_assigns_one_to_blocker_tramples_rest() {
         "Blocker should die to 1 deathtouch damage"
     );
     assert_eq!(
-        runner.life(P1), 16,
+        runner.life(P1),
+        16,
         "4 trample damage should go to defending player (5 power - 1 lethal)"
     );
 
@@ -52,7 +53,11 @@ fn lifelink_gains_life_on_combat_damage() {
 
     run_combat(&mut runner, vec![attacker_id], vec![]);
 
-    assert_eq!(runner.life(P0), 23, "Lifelink attacker's controller should gain 3 life");
+    assert_eq!(
+        runner.life(P0),
+        23,
+        "Lifelink attacker's controller should gain 3 life"
+    );
     assert_eq!(runner.life(P1), 17, "Defending player should take 3 damage");
 }
 
@@ -79,7 +84,11 @@ fn lifelink_first_strike_gains_life_in_first_step() {
     // 2 damage < 3 toughness, blocker survives first strike step.
     // Regular step: 3/3 blocker deals 3 to 2/2 attacker (lethal). Attacker dies.
     // The 2/2 first_strike already dealt damage so does NOT deal again in regular step.
-    assert_eq!(runner.life(P0), 22, "P0 should gain 2 life from first strike lifelink damage");
+    assert_eq!(
+        runner.life(P0),
+        22,
+        "P0 should gain 2 life from first strike lifelink damage"
+    );
 
     // Attacker (2/2) took 3 damage from blocker in regular step -- should die
     assert!(
@@ -185,8 +194,16 @@ fn trample_lifelink_excess_damage() {
         !runner.state().battlefield.contains(&blocker_id),
         "2/2 blocker should die"
     );
-    assert_eq!(runner.life(P1), 17, "3 trample damage should go to defending player");
-    assert_eq!(runner.life(P0), 25, "P0 should gain 5 life from lifelink (2 to blocker + 3 to player)");
+    assert_eq!(
+        runner.life(P1),
+        17,
+        "3 trample damage should go to defending player"
+    );
+    assert_eq!(
+        runner.life(P0),
+        25,
+        "P0 should gain 5 life from lifelink (2 to blocker + 3 to player)"
+    );
 
     // Snapshot for regression anchoring
     insta::assert_json_snapshot!("keywords_trample_lifelink_excess", runner.snapshot());

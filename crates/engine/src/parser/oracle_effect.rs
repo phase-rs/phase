@@ -7,9 +7,9 @@ use super::oracle_util::{
     starts_with_possessive, strip_reminder_text,
 };
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, ChoiceType, CountValue,
-    DamageAmount, Duration, Effect, FilterProp, GainLifePlayer, LifeAmount, ManaProduction,
-    ManaSpendRestriction, PtValue, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    AbilityCondition, AbilityDefinition, AbilityKind, ChoiceType, CountValue, DamageAmount,
+    Duration, Effect, FilterProp, GainLifePlayer, LifeAmount, ManaProduction, ManaSpendRestriction,
+    PtValue, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -101,10 +101,20 @@ enum PredicateAst {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ContinuationAst {
-    SearchDestination { destination: Zone },
-    RevealHandFilter { card_filter: TargetFilter },
-    ManaRestriction { restriction: ManaSpendRestriction },
-    CounterSourceStatic { source_static: StaticDefinition },
+    SearchDestination {
+        destination: Zone,
+    },
+    RevealHandFilter {
+        card_filter: TargetFilter,
+    },
+    ManaRestriction {
+        restriction: ManaSpendRestriction,
+    },
+    CounterSourceStatic {
+        source_static: StaticDefinition,
+    },
+    /// "create a ... token and suspect it" → chain Suspect { target: LastCreated }
+    SuspectLastCreated,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1053,6 +1063,10 @@ fn parse_followup_continuation_ast(
                 ]),
             })
         }
+        // "create a ... token and suspect it" → chain suspect on last created token
+        Effect::Token { .. } if lower.starts_with("suspect ") => {
+            Some(ContinuationAst::SuspectLastCreated)
+        }
         _ => None,
     }
 }
@@ -1879,6 +1893,14 @@ fn apply_clause_continuation(
                 *existing = Some(source_static);
             }
         }
+        ContinuationAst::SuspectLastCreated => {
+            defs.push(AbilityDefinition::new(
+                kind,
+                Effect::Suspect {
+                    target: TargetFilter::LastCreated,
+                },
+            ));
+        }
     }
 }
 
@@ -1891,6 +1913,7 @@ fn continuation_absorbs_current(continuation: &ContinuationAst, current_effect: 
             true
         }
         ContinuationAst::SearchDestination { .. } => false,
+        ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
     }
 }
 
@@ -2232,7 +2255,7 @@ fn parse_search_destination(lower: &str) -> Zone {
 }
 
 /// Capitalize the first letter of a string (for subtype names).
-fn capitalize(s: &str) -> String {
+pub(crate) fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
         None => String::new(),
@@ -2336,7 +2359,11 @@ where
             affected: application.affected,
             target: application.target,
         },
-        predicate: Box::new(build_predicate(clause.effect, clause.duration, clause.sub_ability)),
+        predicate: Box::new(build_predicate(
+            clause.effect,
+            clause.duration,
+            clause.sub_ability,
+        )),
     }
 }
 

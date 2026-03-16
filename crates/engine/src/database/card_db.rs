@@ -47,7 +47,10 @@ impl CardDatabase {
         for (_name, entry) in entries {
             let key = entry.face.name.to_lowercase();
             if let Some(oracle_id) = entry.face.scryfall_oracle_id.clone() {
-                oracle_id_index.entry(oracle_id).or_default().push(key.clone());
+                oracle_id_index
+                    .entry(oracle_id)
+                    .or_default()
+                    .push(key.clone());
             }
             face_index.insert(key.clone(), entry.face);
 
@@ -160,6 +163,7 @@ mod tests {
             additional_cost: None,
             casting_restrictions: vec![],
             casting_options: vec![],
+            solve_condition: None,
         }
     }
 

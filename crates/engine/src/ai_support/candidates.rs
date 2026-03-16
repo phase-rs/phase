@@ -211,6 +211,29 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        WaitingFor::MultiTargetSelection {
+            player,
+            legal_targets,
+            min_targets,
+            ..
+        } => {
+            let mut actions = Vec::new();
+            actions.push(candidate(
+                GameAction::SelectCards {
+                    cards: legal_targets.clone(),
+                },
+                TacticalClass::Selection,
+                Some(*player),
+            ));
+            if *min_targets == 0 {
+                actions.push(candidate(
+                    GameAction::SelectCards { cards: vec![] },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ));
+            }
+            actions
+        }
         WaitingFor::GameOver { .. } => Vec::new(),
     }
 }
@@ -252,7 +275,8 @@ fn actor(state: &GameState) -> Option<PlayerId> {
         | WaitingFor::ModeChoice { player, .. }
         | WaitingFor::DiscardToHandSize { player, .. }
         | WaitingFor::OptionalCostChoice { player, .. }
-        | WaitingFor::AbilityModeChoice { player, .. } => Some(*player),
+        | WaitingFor::AbilityModeChoice { player, .. }
+        | WaitingFor::MultiTargetSelection { player, .. } => Some(*player),
         WaitingFor::GameOver { .. } => None,
     }
 }

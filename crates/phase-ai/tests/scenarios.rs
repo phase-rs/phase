@@ -118,10 +118,7 @@ fn scenario_multiplayer_attacks_to_finish_exposed_player() {
         state.waiting_for = WaitingFor::DeclareAttackers {
             player: P0,
             valid_attacker_ids: vec![attacker_a, attacker_b],
-            valid_attack_targets: vec![
-                AttackTarget::Player(P1),
-                AttackTarget::Player(PlayerId(2)),
-            ],
+            valid_attack_targets: vec![AttackTarget::Player(P1), AttackTarget::Player(PlayerId(2))],
         };
     }
 

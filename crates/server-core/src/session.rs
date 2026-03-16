@@ -42,7 +42,8 @@ pub fn acting_player(waiting_for: &WaitingFor) -> Option<PlayerId> {
         | WaitingFor::ModeChoice { player, .. }
         | WaitingFor::DiscardToHandSize { player, .. }
         | WaitingFor::OptionalCostChoice { player, .. }
-        | WaitingFor::AbilityModeChoice { player, .. } => Some(*player),
+        | WaitingFor::AbilityModeChoice { player, .. }
+        | WaitingFor::MultiTargetSelection { player, .. } => Some(*player),
         WaitingFor::GameOver { .. } => None,
     }
 }
@@ -402,6 +403,7 @@ mod tests {
                     additional_cost: None,
                     casting_restrictions: vec![],
                     casting_options: vec![],
+                    solve_condition: None,
                 },
                 count: 10,
             }],

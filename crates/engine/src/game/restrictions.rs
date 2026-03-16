@@ -319,6 +319,12 @@ fn activation_restriction_applies(
         ActivationRestriction::RequiresCondition { text } => {
             evaluate_condition_text(state, player, source_id, text)
         }
+        // CR 719.4: Only activatable while the source Case is solved.
+        ActivationRestriction::IsSolved => state
+            .objects
+            .get(&source_id)
+            .and_then(|obj| obj.case_state.as_ref())
+            .is_some_and(|cs| cs.is_solved),
     }
 }
 
@@ -648,7 +654,11 @@ fn evaluate_condition(
         RestrictionCondition::HandSizeOneOf(counts) => {
             counts.contains(&player_hand_size(state, player))
         }
-        RestrictionCondition::QuantityVsEachOpponent { lhs, comparator, rhs } => {
+        RestrictionCondition::QuantityVsEachOpponent {
+            lhs,
+            comparator,
+            rhs,
+        } => {
             let lhs_val = resolve_player_quantity(state, lhs, player);
             state
                 .players

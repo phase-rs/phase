@@ -9,6 +9,12 @@ pub struct CardId(pub u64);
 #[serde(transparent)]
 pub struct ObjectId(pub u64);
 
+/// Unique identifier for a set of objects tracked across delayed trigger boundaries.
+/// CR 603.7: Delayed triggers reference the specific objects from the originating effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct TrackedSetId(pub u64);
+
 #[cfg(test)]
 mod tests {
     use super::*;

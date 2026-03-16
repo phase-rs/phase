@@ -58,6 +58,9 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     // by the trigger condition parser (e.g. NthSpellThisTurn from try_parse_nth_spell_trigger).
     def.constraint = parse_trigger_constraint(&lower).or(def.constraint.take());
 
+    // Preserve the original oracle text for coverage/UI annotation
+    def.description = Some(text.to_string());
+
     def
 }
 

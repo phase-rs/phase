@@ -68,7 +68,11 @@ impl GameScenarioDbExt for GameScenario {
         // Creatures entering the battlefield are not summoning-sick by default
         if zone == Zone::Battlefield {
             let entered_turn = self.state.turn_number.saturating_sub(1);
-            self.state.objects.get_mut(&id).unwrap().entered_battlefield_turn = Some(entered_turn);
+            self.state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .entered_battlefield_turn = Some(entered_turn);
         }
 
         id

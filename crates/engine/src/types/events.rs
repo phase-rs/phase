@@ -157,6 +157,14 @@ pub enum GameEvent {
         player_id: PlayerId,
         object_id: ObjectId,
     },
+    /// CR 702.157a: A creature was suspected.
+    CreatureSuspected {
+        object_id: ObjectId,
+    },
+    /// CR 719.2: A Case enchantment became solved.
+    CaseSolved {
+        object_id: ObjectId,
+    },
 }
 
 #[cfg(test)]

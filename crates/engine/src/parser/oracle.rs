@@ -2,8 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AdditionalCost,
-    CastingRestriction, Effect, ModalChoice, ModalSelectionConstraint, ReplacementDefinition,
-    SpellCastingOption, StaticDefinition, TriggerDefinition, TypedFilter,
+    CastingRestriction, Comparator, Effect, ModalChoice, ModalSelectionConstraint,
+    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
+    TypedFilter,
 };
 use crate::types::keywords::Keyword;
 
@@ -37,6 +38,9 @@ pub struct ParsedAbilities {
     /// Spell-casting options parsed from Oracle text.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub casting_options: Vec<SpellCastingOption>,
+    /// CR 719.1: Solve condition for Case enchantments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solve_condition: Option<SolveCondition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +119,7 @@ pub fn parse_oracle_text(
         additional_cost: None,
         casting_restrictions: Vec::new(),
         casting_options: Vec::new(),
+        solve_condition: None,
     };
 
     let lines: Vec<&str> = oracle_text.split('\n').collect();
@@ -178,6 +183,47 @@ pub fn parse_oracle_text(
             }
         }
 
+        // Priority 3b: Case "To solve — {condition}" line (CR 719.1)
+        if let Some(rest) = lower
+            .strip_prefix("to solve — ")
+            .or_else(|| lower.strip_prefix("to solve -- "))
+        {
+            result.solve_condition = Some(parse_solve_condition(rest));
+            i += 1;
+            continue;
+        }
+
+        // CR 719.4: Case "Solved — {cost}: {effect}" activated ability.
+        if let Some(rest) = line
+            .strip_prefix("Solved — ")
+            .or_else(|| line.strip_prefix("Solved -- "))
+        {
+            if let Some(colon_pos) = find_activated_colon(rest) {
+                let cost_text = rest[..colon_pos].trim();
+                let effect_text = rest[colon_pos + 1..].trim();
+                let (effect_text, constraints) = strip_activated_constraints(effect_text);
+                let cost = parse_oracle_cost(cost_text);
+
+                let mut def = parse_effect_chain(&effect_text, AbilityKind::Activated);
+                def.cost = Some(cost);
+                def.description = Some(line.to_string());
+                // CR 719.4: Solved abilities only activate while Case is solved.
+                def.activation_restrictions
+                    .push(ActivationRestriction::IsSolved);
+                if constraints.sorcery_speed() {
+                    def.sorcery_speed = true;
+                    def.activation_restrictions
+                        .push(ActivationRestriction::AsSorcery);
+                }
+                if !constraints.restrictions.is_empty() {
+                    def.activation_restrictions.extend(constraints.restrictions);
+                }
+                result.abilities.push(def);
+                i += 1;
+                continue;
+            }
+        }
+
         // Priority 4: Activated ability — contains ":" with cost-like prefix
         if let Some(colon_pos) = find_activated_colon(&line) {
             let cost_text = line[..colon_pos].trim();
@@ -187,6 +233,7 @@ pub fn parse_oracle_text(
 
             let mut def = parse_effect_chain(&effect_text, AbilityKind::Activated);
             def.cost = Some(cost);
+            def.description = Some(line.to_string());
             if constraints.sorcery_speed() {
                 def.sorcery_speed = true;
             }
@@ -264,7 +311,8 @@ pub fn parse_oracle_text(
 
         // Priority 9: Imperative verb for instants/sorceries
         if is_spell {
-            let def = parse_effect_chain(&line, AbilityKind::Spell);
+            let mut def = parse_effect_chain(&line, AbilityKind::Spell);
+            def.description = Some(line.to_string());
             result.abilities.push(def);
             i += 1;
             continue;
@@ -1826,6 +1874,47 @@ fn parse_blight_count(text: &str) -> u32 {
         .unwrap_or(1)
 }
 
+/// CR 719.1: Parse a Case's "To solve" condition text into a typed `SolveCondition`.
+/// Handles "you control no {filter}" and falls back to `Text` for others.
+fn parse_solve_condition(text: &str) -> SolveCondition {
+    use crate::types::ability::{ControllerRef, FilterProp, TargetFilter};
+
+    // "you control no suspected skeletons" → ObjectCount { filter, EQ, 0 }
+    if let Some(rest) = text.strip_prefix("you control no ") {
+        let rest = rest.trim_end_matches('.');
+        let mut properties = Vec::new();
+
+        // Check for "suspected" qualifier
+        let rest = if let Some(after) = rest.strip_prefix("suspected ") {
+            properties.push(FilterProp::Suspected);
+            after
+        } else {
+            rest
+        };
+
+        // The remaining text is a subtype (e.g., "skeletons" → "Skeleton")
+        let subtype = rest.trim().trim_end_matches('s');
+        let subtype = super::oracle_effect::capitalize(subtype);
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::creature()
+                .subtype(subtype)
+                .controller(ControllerRef::You)
+                .properties(properties),
+        );
+
+        return SolveCondition::ObjectCount {
+            filter,
+            comparator: Comparator::EQ,
+            threshold: 0,
+        };
+    }
+
+    SolveCondition::Text {
+        description: text.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2128,11 +2217,22 @@ mod tests {
         assert!(r.abilities.is_empty());
         assert_eq!(r.statics.len(), 1);
         let grant = r.statics[0].modifications.iter().find(|m| {
-            matches!(m, crate::types::ability::ContinuousModification::GrantAbility { .. })
+            matches!(
+                m,
+                crate::types::ability::ContinuousModification::GrantAbility { .. }
+            )
         });
-        assert!(grant.is_some(), "should contain a GrantAbility modification");
-        if let crate::types::ability::ContinuousModification::GrantAbility { definition } = grant.unwrap() {
-            assert_eq!(definition.kind, crate::types::ability::AbilityKind::Activated);
+        assert!(
+            grant.is_some(),
+            "should contain a GrantAbility modification"
+        );
+        if let crate::types::ability::ContinuousModification::GrantAbility { definition } =
+            grant.unwrap()
+        {
+            assert_eq!(
+                definition.kind,
+                crate::types::ability::AbilityKind::Activated
+            );
         }
     }
 

@@ -555,6 +555,7 @@ mod tests {
             additional_cost: None,
             casting_restrictions: vec![],
             casting_options: vec![],
+            solve_condition: None,
         };
 
         let obj_id = create_commander_from_card_face(&mut state, &face, PlayerId(0));

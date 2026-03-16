@@ -161,7 +161,11 @@ fn multiple_attackers_mixed_blocking() {
     );
 
     // Unblocked attacker2 (2/2) deals 2 damage to P1
-    assert_eq!(runner.life(P1), 18, "Unblocked 2/2 should deal 2 damage to defending player");
+    assert_eq!(
+        runner.life(P1),
+        18,
+        "Unblocked 2/2 should deal 2 damage to defending player"
+    );
 
     // Blocked exchange: 3/3 vs 2/2 -- blocker dies, attacker takes 2 damage
     let state = runner.state();

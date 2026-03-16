@@ -246,6 +246,7 @@ fn build_oracle_face(mtgjson: &AtomicCard, oracle_id: Option<String>) -> CardFac
         additional_cost: parsed.additional_cost,
         casting_restrictions: parsed.casting_restrictions,
         casting_options: parsed.casting_options,
+        solve_condition: parsed.solve_condition,
     };
 
     synthesize_basic_land_mana(&mut face);

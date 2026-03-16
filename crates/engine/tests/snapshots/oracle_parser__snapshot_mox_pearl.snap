@@ -20,7 +20,7 @@ expression: result
       },
       "sub_ability": null,
       "duration": null,
-      "description": null,
+      "description": "{T}: Add {W}.",
       "target_prompt": null,
       "sorcery_speed": false,
       "condition": null,
