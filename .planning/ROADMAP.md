@@ -284,12 +284,21 @@ Plans:
 - [ ] 29-15-PLAN.md — PlayerId(1-x) migration in remaining game modules + tests (~13 files)
 - [ ] 29-16-PLAN.md — PlayerId(1-x) migration in effects modules N-Z (~15 files)
 
-### Phase 30: implement the required building blocks specified in the summary
+### Phase 30: Implement Building Blocks for Adventure and Event-Context Mechanics
 
-**Goal:** [To be planned]
-**Requirements**: TBD
+**Goal:** Deliver four composable engine building blocks: event-context target resolution, parser possessive references, Adventure casting subsystem (CR 715), and damage prevention disabling via GameRestriction system
+**Requirements**: BB-01, BB-02, BB-03, BB-04, BB-ALL
 **Depends on:** Phase 29
-**Plans:** 0 plans
+**Plans:** 4 plans
+
+**Execution Order:**
+Wave 1: Plan 01 (type definitions + parser patterns for all building blocks)
+Wave 2: Plan 02 (pipeline wiring — trigger event threading, prevention gating, AddRestriction handler)
+Wave 3: Plan 03 (Adventure casting engine + AI support)
+Wave 4: Plan 04 (Adventure frontend + Bonecrusher Giant integration test + human verify)
 
 Plans:
-- [ ] TBD (run /gsd:plan-phase 30 to break down)
+- [ ] 30-01-PLAN.md — Type definitions (TargetFilter event-context variants, GameRestriction, CastingPermission, AddRestriction effect) + parser event-context possessive patterns
+- [ ] 30-02-PLAN.md — Pipeline wiring: trigger event threading, event-context target resolution, prevention gating, restriction cleanup, AddRestriction handler
+- [ ] 30-03-PLAN.md — Adventure casting subsystem: cast choice, exile-on-resolve, cast-from-exile, AI support
+- [ ] 30-04-PLAN.md — Adventure frontend UI, TypeScript types, Bonecrusher Giant integration test, human verification
