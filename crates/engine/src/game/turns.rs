@@ -285,6 +285,10 @@ pub fn should_skip_draw(state: &GameState) -> bool {
 
 pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
     loop {
+        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+            return state.waiting_for.clone();
+        }
+
         match state.phase {
             Phase::Untap => {
                 execute_untap(state, events);
@@ -790,5 +794,60 @@ mod tests {
         start_next_turn(&mut state, &mut events);
 
         assert_eq!(state.spells_cast_this_turn, 0);
+    }
+
+    /// Regression: combat damage that reduces a player to 0-or-less life must end the game even
+    /// when auto_advance drives the CombatDamage phase automatically (i.e. without a separate
+    /// PassPriority action) and triggers were already processed inline before combat resolved.
+    ///
+    /// Previously `auto_advance` ignored the GameOver set by SBA and kept looping through
+    /// EndCombat → PostCombatMain, returning WaitingFor::Priority which overwrote the GameOver.
+    #[test]
+    fn auto_advance_game_over_from_combat_damage_stops_loop() {
+        use crate::game::combat::{AttackerInfo, CombatState};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.phase = Phase::CombatDamage;
+
+        // Create an unblocked attacker with lethal power (20, enough to kill from full life)
+        let attacker_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Big Creature".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&attacker_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(20);
+            obj.toughness = Some(20);
+            obj.entered_battlefield_turn = Some(1);
+        }
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo {
+                object_id: attacker_id,
+                defending_player: PlayerId(1),
+            }],
+            ..Default::default()
+        });
+
+        let mut events = Vec::new();
+        let wf = auto_advance(&mut state, &mut events);
+
+        assert!(
+            matches!(wf, WaitingFor::GameOver { winner: Some(PlayerId(0)) }),
+            "auto_advance should propagate GameOver when combat damage kills opponent, got {:?}",
+            wf
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::GameOver { winner: Some(PlayerId(0)) }),
+            "state.waiting_for should be GameOver, got {:?}",
+            state.waiting_for
+        );
     }
 }

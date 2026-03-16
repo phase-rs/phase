@@ -94,6 +94,61 @@ pub fn resolve_gain(
     Ok(())
 }
 
+/// Apply life gain, running through the replacement pipeline.
+/// Returns the actual amount of life gained (may differ due to replacements like Leyline of Hope).
+pub fn apply_life_gain(
+    state: &mut GameState,
+    player_id: PlayerId,
+    amount: u32,
+    events: &mut Vec<GameEvent>,
+) -> u32 {
+    if amount == 0 {
+        return 0;
+    }
+    let proposed = ProposedEvent::LifeGain {
+        player_id,
+        amount,
+        applied: HashSet::new(),
+    };
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) => {
+            if let ProposedEvent::LifeGain {
+                player_id: pid,
+                amount: gain_amount,
+                ..
+            } = event
+            {
+                if let Some(player) = state.players.iter_mut().find(|p| p.id == pid) {
+                    player.life += gain_amount as i32;
+                    player.life_gained_this_turn += gain_amount;
+                }
+                state.layers_dirty = true;
+                events.push(GameEvent::LifeChanged {
+                    player_id: pid,
+                    amount: gain_amount as i32,
+                });
+                gain_amount
+            } else {
+                0
+            }
+        }
+        ReplacementResult::Prevented => 0,
+        ReplacementResult::NeedsChoice(_) => {
+            // Multiple competing replacements; apply unmodified for now
+            if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
+                player.life += amount as i32;
+                player.life_gained_this_turn += amount;
+            }
+            state.layers_dirty = true;
+            events.push(GameEvent::LifeChanged {
+                player_id,
+                amount: amount as i32,
+            });
+            amount
+        }
+    }
+}
+
 /// Apply life loss from damage, running through the replacement pipeline.
 /// Returns the actual amount of life lost (may differ due to replacements like doubling).
 pub fn apply_damage_life_loss(

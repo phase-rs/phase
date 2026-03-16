@@ -1103,6 +1103,19 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
         }
     }
 
+    // CR 704.3 / CR 800.4: SBAs may have ended the game during phase auto-advance (e.g.,
+    // combat damage step) before we reach this point. state.waiting_for is the authoritative
+    // result — written directly by eliminate_player → check_game_over. Guard against
+    // overwriting it with the computed `waiting_for` from auto_advance.
+    if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+        match_flow::handle_game_over_transition(state);
+        let wf = state.waiting_for.clone();
+        return Ok(ActionResult {
+            events,
+            waiting_for: wf,
+        });
+    }
+
     state.waiting_for = waiting_for.clone();
 
     Ok(ActionResult {

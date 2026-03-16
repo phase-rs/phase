@@ -199,6 +199,45 @@ These patterns must be used on first write, not fixed after clippy complains:
 - **Exhaustive `match`** without wildcard fallbacks when the enum is known — let the compiler catch missing arms
 - **Reuse existing building blocks** before writing one-off string logic. Search the codebase for helpers like `contains_possessive`, `contains_object_pronoun`, `parse_target`, `parse_type_phrase`, `parse_number` in `oracle_util.rs` and `oracle_target.rs`
 - **NEVER match on verbatim Oracle text strings** (e.g. `if lower == "the number of cards in your hand is greater than your life total"`). This is the single most prohibited pattern in the codebase. Every Oracle phrase must be decomposed into typed building blocks (grammar prefix/suffix stripping, composable helpers, typed enum variants). A verbatim string match handles exactly one card and poisons the parser architecture permanently. Instead: identify the grammatical structure, add typed `QuantityRef`/`Comparator`/`FilterProp` variants as needed, and parse with `strip_prefix`/`split_once` + helpers so the pattern covers every card in the class.
+- **Separate abstraction layers in enum design.** An enum variant must belong to exactly one semantic layer — do not conflate different concepts in the same type. Example: `QuantityRef` (a *reference* to a dynamic game value: `HandSize`, `LifeTotal`) must not contain `Fixed { value: i32 }` (a *constant* that requires no game-state lookup). Instead, introduce a wrapping expression type (`QuantityExpr`) that is either a `Ref(QuantityRef)` or a `Fixed(i32)`. Ask: "Does this variant belong to the same abstraction as all the others, or does it belong one level up?" Wrong layer placement creates API confusion, breaks exhaustive match semantics, and forces callers to handle heterogeneous cases that should be uniform.
+
+### MTG Comprehensive Rules Annotations
+
+**Any code that implements, enforces, or directly references an MTG game rule MUST be annotated with the corresponding Comprehensive Rules (CR) number.** This is not optional — it is a required part of every rules-related change, same as `cargo fmt`.
+
+**Format — inline comments:**
+```rust
+// CR 704.5a: A player with 0 or less life loses the game.
+```
+
+**Format — doc comments (public items):**
+```rust
+/// Checks state-based actions (CR 704).
+```
+
+**Format — multiple interacting rules (use `+`):**
+```rust
+// CR 702.2c + CR 702.19b: Deathtouch with trample assigns lethal (1) to each blocker.
+```
+
+**Format — alternative/overlapping rules (use `/`):**
+```rust
+// CR 704.3 / CR 800.4: SBAs may have ended the game during phase auto-advance.
+```
+
+**Rules:**
+- **Prefix:** Always `CR` (the official MTG abbreviation for Comprehensive Rules). Never `Rule`, `MTG Rule`, or bare numbers.
+- **Number format:** `CR XXX` (section), `CR XXX.Y` (sub-rule), or `CR XXX.Ya` (lettered sub-rule). Regex: `CR \d{3}(\.\d+[a-z]?)?`
+- **Description is mandatory.** A bare `CR 704.5a` with no explanation is not acceptable — the description makes grep output self-documenting and serves as a correctness check.
+- **Placement:** Directly above or inline with the code that implements the rule. For functions that implement an entire rule section, use a doc comment on the function.
+
+**When writing or modifying engine code (`crates/engine/`):**
+1. If you are adding new game logic, identify which CR rule(s) it implements and annotate.
+2. If you are modifying existing game logic, verify existing CR annotations are present and still accurate. Add missing annotations.
+3. If existing code near your change uses an old format (`Rule 514.1`, `MTG Rule 727`, `MTG 702.36`), migrate it to the `CR` format as part of your change.
+4. Do not annotate boilerplate, serialization, or plumbing — only code that implements a game rule.
+
+**Lookup:** `grep -r "CR 704" crates/engine/` finds all state-based action implementations. `grep -rn "CR \d" crates/engine/` lists all rule annotations. The `mtg-rules-auditor` agent can produce a full coverage report on demand.
 
 - Rust: `cargo fmt` + `clippy -D warnings` enforced in CI
 - TypeScript: ESLint with `@typescript-eslint/recommended`, unused vars prefixed with `_`

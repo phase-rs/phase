@@ -877,14 +877,36 @@ fn pipeline_loop(
                 Err(ApplyResult::Modified(_)) => unreachable!(),
             }
         } else {
-            let affected = proposed.affected_player(state);
-            state.pending_replacement = Some(PendingReplacement {
-                proposed,
-                candidates,
-                depth,
-                is_optional: false,
+            // Multiple candidates: if any is optional or requires ordering input, ask the player.
+            // If all are mandatory, auto-apply the first (APNAP order) and continue the loop —
+            // the loop will pick up the remaining candidates on the next iteration.
+            let any_optional = candidates.iter().any(|rid| {
+                state
+                    .objects
+                    .get(&rid.source)
+                    .and_then(|obj| obj.replacement_definitions.get(rid.index))
+                    .is_some_and(|repl| matches!(repl.mode, ReplacementMode::Optional { .. }))
             });
-            return ReplacementResult::NeedsChoice(affected);
+
+            if any_optional {
+                let affected = proposed.affected_player(state);
+                state.pending_replacement = Some(PendingReplacement {
+                    proposed,
+                    candidates,
+                    depth,
+                    is_optional: false,
+                });
+                return ReplacementResult::NeedsChoice(affected);
+            }
+
+            // All mandatory: apply the first candidate; remaining will be picked up next iteration.
+            let rid = candidates[0];
+            proposed.mark_applied(rid);
+            match apply_single_replacement(state, proposed, rid, registry, events) {
+                Ok(new_event) => proposed = new_event,
+                Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
+                Err(ApplyResult::Modified(_)) => unreachable!(),
+            }
         }
 
         depth += 1;
@@ -1034,7 +1056,7 @@ mod tests {
 
     #[test]
     fn test_once_per_event_enforcement() {
-        // Two Moved replacements on the same object
+        // Two mandatory Moved replacements on the same object — both auto-apply; neither fires twice.
         let repl1 = make_repl(ReplacementEvent::Moved);
         let repl2 = make_repl(ReplacementEvent::Moved);
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl1, repl2]);
@@ -1043,17 +1065,19 @@ mod tests {
         let proposed =
             ProposedEvent::zone_change(ObjectId(10), Zone::Battlefield, Zone::Graveyard, None);
 
-        // Two replacements on same object -> NeedsChoice (different ReplacementIds)
         let result = replace_event(&mut state, proposed, &mut events);
-        assert!(
-            matches!(result, ReplacementResult::NeedsChoice(_)),
-            "two replacements on same object should trigger NeedsChoice"
-        );
+        // Both mandatory replacements auto-apply without NeedsChoice; each fires exactly once.
+        if let ReplacementResult::Execute(event) = result {
+            let applied = event.applied_set();
+            assert_eq!(applied.len(), 2, "both replacements should have been applied");
+        } else {
+            panic!("expected Execute, got {:?}", result);
+        }
     }
 
     #[test]
-    fn test_multiple_replacements_needs_choice() {
-        // Two different objects each with a Moved replacement
+    fn test_multiple_mandatory_replacements_auto_apply() {
+        // Two different objects each with a mandatory Moved replacement — both auto-apply.
         let repl = make_repl(ReplacementEvent::Moved);
 
         let mut state = GameState::new_two_player(42);
@@ -1081,7 +1105,6 @@ mod tests {
         state.battlefield.push(ObjectId(10));
         state.battlefield.push(ObjectId(20));
 
-        // Also add the target creature
         let target = GameObject::new(
             ObjectId(30),
             CardId(3),
@@ -1102,11 +1125,11 @@ mod tests {
             applied: HashSet::new(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
-        match result {
-            ReplacementResult::NeedsChoice(player) => {
-                assert_eq!(player, PlayerId(0));
-            }
-            other => panic!("expected NeedsChoice, got {:?}", other),
+        // Both mandatory replacements auto-apply; result is Execute with both in the applied set.
+        if let ReplacementResult::Execute(event) = result {
+            assert_eq!(event.applied_set().len(), 2, "both replacements should have applied");
+        } else {
+            panic!("expected Execute, got {:?}", result);
         }
     }
 
@@ -1140,7 +1163,8 @@ mod tests {
 
     #[test]
     fn test_continue_replacement_after_choice() {
-        // Setup: two replacements that trigger NeedsChoice
+        // Two mandatory Moved replacements — both auto-apply without NeedsChoice.
+        // (continue_replacement is exercised by the optional-replacement tests.)
         let repl1 = make_repl(ReplacementEvent::Moved);
         let repl2 = make_repl(ReplacementEvent::Moved);
 
@@ -1150,19 +1174,12 @@ mod tests {
         let proposed =
             ProposedEvent::zone_change(ObjectId(10), Zone::Battlefield, Zone::Graveyard, None);
 
-        // First call should return NeedsChoice
         let result = replace_event(&mut state, proposed, &mut events);
-        assert!(matches!(result, ReplacementResult::NeedsChoice(_)));
-
-        // Choose first replacement (index 0)
-        let result = continue_replacement(&mut state, 0, &mut events);
-        // Should complete since the second replacement will be filtered by once-per-event tracking
+        // Both mandatory replacements auto-apply; result is Execute with both applied.
         assert!(
-            matches!(
-                result,
-                ReplacementResult::Execute(_) | ReplacementResult::NeedsChoice(_)
-            ),
-            "replacement should complete or need another choice"
+            matches!(result, ReplacementResult::Execute(_)),
+            "mandatory replacements should auto-apply, got {:?}",
+            result
         );
     }
 

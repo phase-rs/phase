@@ -1,5 +1,7 @@
 use rand::seq::SliceRandom;
 
+use crate::game::effects::resolve_effect;
+use crate::types::ability::{AbilityKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
@@ -139,8 +141,45 @@ fn advance_mulligan(
     }
 }
 
+/// Execute all BeginGame abilities for cards in each player's opening hand.
+/// Called once after all mulligan decisions are finalized.
+fn execute_begin_game_abilities(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // Collect first to avoid borrow conflict during mutation
+    let begin_game: Vec<(PlayerId, ObjectId, crate::types::ability::Effect)> = state
+        .seat_order
+        .clone()
+        .into_iter()
+        .flat_map(|player_id| {
+            let player = state
+                .players
+                .iter()
+                .find(|p| p.id == player_id)
+                .expect("player exists");
+            player
+                .hand
+                .iter()
+                .filter_map(|&obj_id| {
+                    let obj = state.objects.get(&obj_id)?;
+                    let ability = obj
+                        .abilities
+                        .iter()
+                        .find(|a| a.kind == AbilityKind::BeginGame)?;
+                    Some((player_id, obj_id, ability.effect.clone()))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    for (player_id, obj_id, effect) in begin_game {
+        let ability =
+            ResolvedAbility::new(effect, vec![TargetRef::Object(obj_id)], obj_id, player_id);
+        let _ = resolve_effect(state, &ability, events);
+    }
+}
+
 /// All players have kept. Start the game properly.
 fn finish_mulligans(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
+    execute_begin_game_abilities(state, events);
     turns::auto_advance(state, events)
 }
 

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::game::combat::{CombatState, DamageAssignment, DamageTarget};
+use crate::game::effects::life::apply_life_gain;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::sba;
 use crate::game::triggers;
@@ -507,15 +508,10 @@ fn apply_combat_damage(
             }
         };
 
-        // Lifelink: source's controller gains life equal to damage dealt
+        // Lifelink: source's controller gains life equal to damage dealt.
+        // Route through the replacement pipeline so effects like Leyline of Hope apply.
         if source_has_lifelink && actual_amount > 0 {
-            if let Some(player) = state.players.iter_mut().find(|p| p.id == source_controller) {
-                player.life += actual_amount as i32;
-            }
-            events.push(GameEvent::LifeChanged {
-                player_id: source_controller,
-                amount: actual_amount as i32,
-            });
+            apply_life_gain(state, source_controller, actual_amount, &mut events);
         }
     }
 
