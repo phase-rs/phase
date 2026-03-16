@@ -115,7 +115,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
 pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let active = state.active_player;
 
-    // Prune "until your next turn" transient effects for the active player (Rule 514.2)
+    // CR 514.2: Prune "until your next turn" transient effects for the active player.
     super::layers::prune_until_next_turn_effects(state, active);
     let to_untap: Vec<_> = state
         .battlefield
@@ -139,30 +139,23 @@ pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
         match replacement::replace_event(state, proposed, events) {
             ReplacementResult::Execute(event) => {
                 if let ProposedEvent::Untap { object_id, .. } = event {
-                    // CR 122.1g: If a permanent with a stun counter would become untapped,
-                    // instead remove a stun counter from it.
-                    let stun_count = state
-                        .objects
-                        .get(&object_id)
-                        .and_then(|obj| obj.counters.get(&CounterType::Stun).copied())
-                        .unwrap_or(0);
-                    if stun_count > 0 {
-                        if let Some(obj) = state.objects.get_mut(&object_id) {
-                            if let Some(entry) = obj.counters.get_mut(&CounterType::Stun) {
-                                *entry -= 1;
-                                if *entry == 0 {
-                                    obj.counters.remove(&CounterType::Stun);
-                                }
+                    if let Some(obj) = state.objects.get_mut(&object_id) {
+                        // CR 122.1g: If a permanent with a stun counter would become untapped,
+                        // instead remove a stun counter from it.
+                        if let Some(entry) = obj.counters.get_mut(&CounterType::Stun) {
+                            *entry -= 1;
+                            if *entry == 0 {
+                                obj.counters.remove(&CounterType::Stun);
                             }
+                            events.push(GameEvent::CounterRemoved {
+                                object_id,
+                                counter_type: "stun".to_string(),
+                                count: 1,
+                            });
+                        } else {
+                            obj.tapped = false;
+                            events.push(GameEvent::PermanentUntapped { object_id });
                         }
-                        events.push(GameEvent::CounterRemoved {
-                            object_id,
-                            counter_type: "stun".to_string(),
-                            count: 1,
-                        });
-                    } else if let Some(obj) = state.objects.get_mut(&object_id) {
-                        obj.tapped = false;
-                        events.push(GameEvent::PermanentUntapped { object_id });
                     }
                 }
             }

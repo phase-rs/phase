@@ -12,25 +12,43 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (num_att, num_def) = match &ability.effect {
+    let (num_att, num_def, target_filter) = match &ability.effect {
         Effect::Pump {
-            power, toughness, ..
-        } => (resolve_pt_value(power), resolve_pt_value(toughness)),
-        _ => (0, 0),
+            power,
+            toughness,
+            target,
+        } => (resolve_pt_value(power), resolve_pt_value(toughness), target),
+        _ => return Ok(()),
     };
 
-    for target in &ability.targets {
-        if let TargetRef::Object(obj_id) = target {
-            let obj = state
-                .objects
-                .get_mut(obj_id)
-                .ok_or(EffectError::ObjectNotFound(*obj_id))?;
-            if let Some(ref mut power) = obj.power {
-                *power += num_att;
-            }
-            if let Some(ref mut toughness) = obj.toughness {
-                *toughness += num_def;
-            }
+    // SelfRef with no explicit targets means pump the source object itself.
+    let ids: Vec<_> = if matches!(target_filter, TargetFilter::SelfRef) && ability.targets.is_empty()
+    {
+        vec![ability.source_id]
+    } else {
+        ability
+            .targets
+            .iter()
+            .filter_map(|t| {
+                if let TargetRef::Object(id) = t {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+
+    for obj_id in ids {
+        let obj = state
+            .objects
+            .get_mut(&obj_id)
+            .ok_or(EffectError::ObjectNotFound(obj_id))?;
+        if let Some(ref mut power) = obj.power {
+            *power += num_att;
+        }
+        if let Some(ref mut toughness) = obj.toughness {
+            *toughness += num_def;
         }
     }
 
@@ -255,5 +273,38 @@ mod tests {
         // Opponent unchanged
         assert_eq!(state.objects[&opp].power, Some(3));
         assert_eq!(state.objects[&opp].toughness, Some(3));
+    }
+
+    /// Regression: Prowess-style abilities use `SelfRef` with an empty `targets` list.
+    /// The resolver must fall back to `source_id` rather than iterating zero targets.
+    #[test]
+    fn pump_selfref_with_empty_targets_pumps_source() {
+        let mut state = GameState::new_two_player(42);
+        let swiftspear = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Monastery Swiftspear".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&swiftspear).unwrap().power = Some(1);
+        state.objects.get_mut(&swiftspear).unwrap().toughness = Some(2);
+
+        let ability = ResolvedAbility::new(
+            Effect::Pump {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                target: TargetFilter::SelfRef,
+            },
+            vec![], // empty — SelfRef must resolve via source_id
+            swiftspear,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&swiftspear].power, Some(2));
+        assert_eq!(state.objects[&swiftspear].toughness, Some(3));
     }
 }
