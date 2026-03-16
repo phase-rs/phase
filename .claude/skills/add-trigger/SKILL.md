@@ -276,7 +276,7 @@ After completing work using this skill:
 rg -q "fn process_triggers" crates/engine/src/game/triggers.rs && \
 rg -q "fn collect_matching_triggers" crates/engine/src/game/triggers.rs && \
 rg -q "fn extract_target_filter_from_effect" crates/engine/src/game/triggers.rs && \
-rg -q "fn build_trigger_registry\|fn register_" crates/engine/src/game/triggers.rs && \
+rg -q "fn build_trigger_registry" crates/engine/src/game/triggers.rs && \
 rg -q "struct TriggerDefinition" crates/engine/src/types/ability.rs && \
 rg -q "enum TriggerMode" crates/engine/src/types/triggers.rs && \
 rg -q "enum TriggerConstraint" crates/engine/src/types/ability.rs && \

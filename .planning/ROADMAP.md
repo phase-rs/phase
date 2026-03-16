@@ -283,3 +283,13 @@ Plans:
 - [ ] 29-14-PLAN.md — PlayerId(1-x) migration in effects modules A-M (~13 files)
 - [ ] 29-15-PLAN.md — PlayerId(1-x) migration in remaining game modules + tests (~13 files)
 - [ ] 29-16-PLAN.md — PlayerId(1-x) migration in effects modules N-Z (~15 files)
+
+### Phase 30: implement the required building blocks specified in the summary
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 29
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd:plan-phase 30 to break down)

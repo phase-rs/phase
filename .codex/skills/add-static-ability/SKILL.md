@@ -83,7 +83,8 @@ When a static ability is conditionally active:
 - `DevotionGE { colors, threshold }` — Active when devotion ≥ threshold (gods)
 - `IsPresent { filter }` — Active when a permanent matching filter exists
 - `DuringYourTurn` — Active only during controller's turn
-- `CheckSVar { var, compare }` — Legacy check (being phased out)
+- `ChosenColorIs { color }` — Active when the source's chosen color matches (ETB color-choice cards)
+- `QuantityComparison { lhs, comparator, rhs }` — Active when a quantity expression comparison is satisfied (e.g., "hand size > life total"). Uses `QuantityExpr` which can be `Ref(QuantityRef)` or `Fixed(i32)`
 - `None` — Always active
 
 ### `StaticMode` — `crates/engine/src/types/statics.rs`

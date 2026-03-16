@@ -49,6 +49,8 @@ Violating this rule causes cascading failures across the team. Treat every line 
 
 If the answer to any of these is wrong, **stop and refactor before moving on.** Do not leave architectural debt for later — fix it now, in the same change.
 
+**Rules-correct over convenient.** This is an MTG rules engine — correctness to the Comprehensive Rules is a hard requirement, not a nice-to-have. When a rules-correct implementation is more complex than a shortcut, take the complex path. A simpler implementation that gets the rules wrong is not simpler — it is wrong. If you are unsure whether a behavior is rules-correct, look up the CR section, annotate the code, and implement what the rules say, not what seems reasonable. "It works for most cases" is not acceptable when the CR specifies exact behavior.
+
 **Trace before you build.** Before implementing a new pattern, trace how an existing analogous feature works end-to-end (e.g., trace `enter_tapped` before building `enter_with_counters`; trace `Changeling` before building a new CDA). This prevents reinventing existing infrastructure and ensures consistency.
 
 ## Setup

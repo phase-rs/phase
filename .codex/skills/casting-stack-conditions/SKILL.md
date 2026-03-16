@@ -111,9 +111,9 @@ ActivateAbility action
 6. Push StackEntry(ActivatedAbility) → WaitingFor::Priority
 ```
 
-### Mana Abilities During Priority — `legal_actions.rs`
+### Mana Abilities During Priority — `engine/src/ai_support/candidates.rs`
 
-`priority_actions()` generates both:
+Legal action generation (including priority actions) now lives in the engine crate at `engine::ai_support`. The entry point is `legal_actions(state)` → `validated_candidate_actions()`. It generates both:
 - `ActivateAbility` — for non-mana activated abilities
 - `TapLandForMana` — for untapped lands with mana options (MTG CR 605)
 
@@ -226,7 +226,7 @@ The `apply()` function in `engine.rs` matches `(WaitingFor, GameAction)` pairs t
 
 1. `types/game_state.rs` — `WaitingFor` variant + `GameAction` variant
 2. `engine.rs::apply()` — Match arm for `(WaitingFor::New, GameAction::NewResponse)` pair
-3. `phase-ai/legal_actions.rs` — Generate legal responses for AI
+3. `engine/src/ai_support/candidates.rs` — Generate legal responses for AI
 4. `client/adapter/types.ts` — TypeScript discriminated union variant
 5. Frontend component (if interactive choice needed)
 
@@ -269,7 +269,7 @@ pub struct ModalChoice {
 
 **Mode selection algorithm** (`casting.rs:474`): `build_chained_resolved()` takes an `abilities: &[AbilityDefinition]` slice and `indices: &[usize]`. Builds from last to first, nesting each as `sub_ability` of the previous. The chaining logic itself is reusable — the coupling is in how the abilities slice is sourced (from `card.abilities`).
 
-**AI mode handling** (`legal_actions.rs:197`): Generates all valid combinations of k modes where `k ∈ [min_choices, max_choices]` using `index_combinations()`.
+**AI mode handling** (`ai_support/candidates.rs`): Generates all valid combinations of k modes where `k ∈ [min_choices, max_choices]` using `index_combinations()`.
 
 **Frontend** (`ModeChoiceModal.tsx`): Renders `mode_descriptions` as clickable buttons, tracks selected indices, enforces min/max constraints. Single-choice modals auto-submit on click.
 
@@ -327,7 +327,7 @@ if lower.starts_with("you may ") {
 |---------|-------------|
 | Data on `PendingCast` not propagated to `StackEntry` | Data lost after casting completes |
 | New `WaitingFor` without `GameAction` handler in `engine.rs` | Game hangs — response never processed |
-| New `WaitingFor` without AI `legal_actions` | AI hangs on the choice |
+| New `WaitingFor` without AI candidate generation in `ai_support/` | AI hangs on the choice |
 | New field on `StackEntry` without `#[serde(default)]` | Deserialization breaks for in-progress games |
 | Condition check only at resolution, not at trigger time | Violates MTG intervening-if rules (triggers only) |
 | New interactive state without `pending_continuation` support | Sub_ability chain breaks when player choice interrupts resolution |

@@ -234,6 +234,7 @@ Recent decisions affecting current work:
 - Phase 26 added: Polish and fix multi-player with lobby and embedded server
 - Phase 28 added: Native Ability Data Model — Eliminate all remaining Forge scripting DSL from card data format and engine runtime
 - Phase 29 added: Support N players in engine and on board in React for various formats
+- Phase 30 added: Implement the required building blocks specified in the summary
 
 ### Pending Todos
 

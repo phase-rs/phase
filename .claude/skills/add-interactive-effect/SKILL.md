@@ -166,8 +166,8 @@ When the continuation is created, parent targets propagate down if the sub-abili
 
 ### Phase 4 — AI Legal Actions
 
-- [ ] **`crates/phase-ai/src/legal_actions.rs` — `get_legal_actions()`**
-  Add a match arm generating all legal responses for your `WaitingFor` variant:
+- [ ] **`crates/engine/src/ai_support/candidates.rs` — candidate action generation**
+  Legal action generation now lives in the engine crate (`engine::ai_support`), not in `phase-ai`. The entry point is `engine::ai_support::legal_actions(state)` which calls `validated_candidate_actions()`. Add a match arm generating all legal responses for your `WaitingFor` variant:
 
   ```rust
   WaitingFor::YourChoice { cards, .. } => {
@@ -298,7 +298,7 @@ Note how Scry, Dig, Surveil, RevealHand, and SearchLibrary all reuse `GameAction
 |---------|-------------|-----|
 | **Missing continuation match in `resolve_ability_chain()`** | Sub-abilities after your effect execute immediately, bypassing player choice | Add your `WaitingFor` variant to the match block in `effects/mod.rs` |
 | Missing `acting_player()` arm in `session.rs` | Server rejects all actions for this state in multiplayer | Add the match arm |
-| Missing AI legal actions | AI hangs forever waiting for a response it can't generate | Add match arm in `legal_actions.rs` |
+| Missing AI legal actions | AI hangs forever waiting for a response it can't generate | Add match arm in `engine/src/ai_support/candidates.rs` |
 | Not clearing revealed state after choice | Opponent's hidden cards remain visible permanently | Clear `state.revealed_cards` in the engine handler |
 | Resuming continuation without checking `state.waiting_for` | Continuation might set another interactive state, but you overwrite it with Priority | Check waiting_for after `resolve_ability_chain` returns |
 | Not propagating targets to continuation | Sub-ability can't reference the chosen card | Copy parent targets when `sub_clone.targets.is_empty()` |
@@ -320,7 +320,7 @@ After completing work using this skill:
 rg -q "fn resolve_ability_chain" crates/engine/src/game/effects/mod.rs && \
 rg -q "pending_continuation" crates/engine/src/types/game_state.rs && \
 rg -q "fn resolve_effect" crates/engine/src/game/effects/mod.rs && \
-rg -q "fn get_legal_actions" crates/phase-ai/src/legal_actions.rs && \
+rg -q "fn legal_actions" crates/engine/src/ai_support/mod.rs && \
 rg -q "fn acting_player" crates/server-core/src/session.rs && \
 rg -q "enum WaitingFor" crates/engine/src/types/game_state.rs && \
 rg -q "enum GameAction" crates/engine/src/types/actions.rs && \

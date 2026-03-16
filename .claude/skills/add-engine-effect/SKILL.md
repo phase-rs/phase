@@ -232,8 +232,8 @@ Only needed if the effect reveals or hides information (hands, face-down cards, 
 - [ ] **`crates/phase-ai/src/eval.rs` — effect evaluation**
   If the effect materially changes board evaluation (e.g., exile vs. destroy), ensure the AI's state evaluator accounts for it.
 
-- [ ] **`crates/phase-ai/src/legal_actions.rs` — action generation**
-  If the effect introduces a new `WaitingFor` / `GameAction` pair, the AI needs to generate legal responses.
+- [ ] **`crates/engine/src/ai_support/candidates.rs` — action generation**
+  If the effect introduces a new `WaitingFor` / `GameAction` pair, the AI needs to generate legal responses. Legal action generation lives in `engine::ai_support::legal_actions()` → `validated_candidate_actions()`.
 
 ### Phase 8 — Verification
 
@@ -262,7 +262,7 @@ Only needed if the effect reveals or hides information (hands, face-down cards, 
 | Forgetting `#[serde(default)]` on new fields | Old `card-data.json` files fail to deserialize | Always default new optional fields |
 | Effect reveals info but no `filter.rs` update | Opponent sees hidden cards in multiplayer, or revealed cards stay hidden | Update `filter_state_for_player` in `server-core/src/filter.rs` |
 | Building a multi-step mega-effect | One-off variant that only works for one card template | Decompose into `sub_ability` chain of single-purpose effects |
-| Missing AI legal action generation | AI hangs on `WaitingFor` with no valid response | Add the `WaitingFor` variant to `legal_actions.rs` |
+| Missing AI legal action generation | AI hangs on `WaitingFor` with no valid response | Add the `WaitingFor` variant to `engine/src/ai_support/candidates.rs` |
 
 ---
 
