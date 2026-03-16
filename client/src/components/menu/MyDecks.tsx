@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 
 import type { GameFormat, MatchType } from "../../adapter/types";
@@ -13,14 +14,6 @@ import {
 import { ImportDeckModal } from "./ImportDeckModal";
 import { MenuPanel } from "./MenuShell";
 import { menuButtonClass } from "./buttonStyles";
-
-const DIFFICULTIES = [
-  { id: "VeryEasy", label: "Very Easy" },
-  { id: "Easy", label: "Easy" },
-  { id: "Medium", label: "Medium" },
-  { id: "Hard", label: "Hard" },
-  { id: "VeryHard", label: "Very Hard" },
-] as const;
 
 const BASIC_LANDS = new Set(["Plains", "Island", "Swamp", "Mountain", "Forest"]);
 
@@ -123,9 +116,7 @@ interface MyDecksProps {
   onSelectDeck?: (deckName: string) => void;
   onConfirmSelection?: () => void;
   confirmLabel?: string;
-  showDifficultySelector?: boolean;
-  difficulty?: string;
-  onDifficultyChange?: (difficulty: string) => void;
+  confirmAction?: ReactNode;
   onCreateDeck?: () => void;
   onEditDeck?: (deckName: string) => void;
 }
@@ -138,9 +129,7 @@ export function MyDecks({
   onSelectDeck,
   onConfirmSelection,
   confirmLabel = "Continue",
-  showDifficultySelector = false,
-  difficulty = "Medium",
-  onDifficultyChange,
+  confirmAction,
   onCreateDeck,
   onEditDeck,
 }: MyDecksProps) {
@@ -284,24 +273,6 @@ export function MyDecks({
           </button>
         )}
       </div>
-
-      {mode === "select" && showDifficultySelector && onDifficultyChange && (
-        <div className="flex overflow-hidden rounded-[18px] border border-white/10 bg-black/18">
-          {DIFFICULTIES.map((item) => (
-            <button
-              key={item.id}
-              onClick={() => onDifficultyChange(item.id)}
-              className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                difficulty === item.id
-                  ? "bg-white/10 text-white"
-                  : "text-slate-400 hover:text-white"
-              }`}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-      )}
 
       <div className="flex w-full flex-wrap items-center gap-2">
         <button
@@ -469,6 +440,7 @@ export function MyDecks({
                 {selectedDeckLabel ?? "Choose a deck to continue"}
               </div>
             </div>
+          {confirmAction ?? (
             <button
               onClick={onConfirmSelection}
               disabled={noDeckSelected}
@@ -476,8 +448,9 @@ export function MyDecks({
             >
               {confirmLabel}
             </button>
-          </div>
+          )}
         </div>
+      </div>
       )}
 
       <ImportDeckModal

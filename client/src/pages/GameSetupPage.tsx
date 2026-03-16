@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router";
 
 import type { FormatConfig, GameFormat, MatchType } from "../adapter/types";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
+import { AiDifficultyDropdown } from "../components/menu/AiDifficultyDropdown";
 import { HostSetup } from "../components/lobby/HostSetup";
 import { LobbyView } from "../components/lobby/LobbyView";
 import { WaitingScreen } from "../components/lobby/WaitingScreen";
@@ -12,6 +13,7 @@ import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import { MyDecks } from "../components/menu/MyDecks";
 import { menuButtonClass } from "../components/menu/buttonStyles";
+import { getAiDifficultyLabel } from "../constants/ai";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX, listSavedDeckNames } from "../constants/storage";
 import { STARTER_DECKS } from "../data/starterDecks";
 import { parseRoomCode } from "../network/connection";
@@ -19,6 +21,7 @@ import type { ParsedDeck } from "../services/deckParser";
 import type { GamePreset } from "../services/presets";
 import { savePreset } from "../services/presets";
 import { FORMAT_DEFAULTS, useMultiplayerStore } from "../stores/multiplayerStore";
+import { usePreferencesStore } from "../stores/preferencesStore";
 import { saveActiveGame, useGameStore } from "../stores/gameStore";
 import type { HostSettings } from "../components/lobby/HostSetup";
 
@@ -56,14 +59,6 @@ const STEP_BACK: Record<SetupStep, SetupStep | "exit"> = {
   waiting: "lobby",
 };
 
-const DIFFICULTIES = [
-  { id: "VeryEasy", label: "Very Easy" },
-  { id: "Easy", label: "Easy" },
-  { id: "Medium", label: "Medium" },
-  { id: "Hard", label: "Hard" },
-  { id: "VeryHard", label: "Very Hard" },
-] as const;
-
 interface SetupSummaryButtonProps {
   label: string;
   value: string;
@@ -96,8 +91,9 @@ export function GameSetupPage() {
   const [formatConfig, setFormatConfig] = useState<FormatConfig | null>(null);
   const [playerCount, setPlayerCount] = useState(2);
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
-  const [difficulty, setDifficulty] = useState("Medium");
   const [matchType, setMatchType] = useState<MatchType>("Bo1");
+  const difficulty = usePreferencesStore((s) => s.aiDifficulty);
+  const setDifficulty = usePreferencesStore((s) => s.setAiDifficulty);
 
   // Multiplayer state
   const [hostGameCode, setHostGameCode] = useState<string | null>(null);
@@ -175,7 +171,9 @@ export function GameSetupPage() {
     setSelectedFormat(preset.format);
     setFormatConfig({ ...defaults, ...preset.formatConfig });
     setPlayerCount(preset.playerCount);
-    setDifficulty(preset.aiDifficulty ?? "Medium");
+    if (preset.aiDifficulty) {
+      setDifficulty(preset.aiDifficulty);
+    }
     if (preset.deckId) {
       setActiveDeckName(preset.deckId);
       localStorage.setItem(ACTIVE_DECK_KEY, preset.deckId);
@@ -496,9 +494,6 @@ export function GameSetupPage() {
               confirmLabel="Continue"
               selectedFormat={selectedFormat ?? undefined}
               selectedMatchType={matchType}
-              showDifficultySelector
-              difficulty={difficulty}
-              onDifficultyChange={setDifficulty}
             />
           </div>
         )}
@@ -527,31 +522,25 @@ export function GameSetupPage() {
             <h2 className="menu-display text-[1.9rem] leading-tight text-white">Game Mode</h2>
 
             <div className="flex w-full flex-col gap-3">
-              <div className="flex w-full flex-col gap-2">
-                <h3 className="text-sm font-medium text-gray-400">AI Difficulty</h3>
-                <div className="flex overflow-hidden rounded-lg border border-gray-700">
-                  {DIFFICULTIES.map((d) => (
-                    <button
-                      key={d.id}
-                      onClick={() => setDifficulty(d.id)}
-                      className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
-                        difficulty === d.id
-                          ? "bg-indigo-600 text-white"
-                          : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
-                      }`}
-                    >
-                      {d.label}
-                    </button>
-                  ))}
+              <div className="flex overflow-hidden rounded-[18px] border border-indigo-300/18 shadow-[0_10px_28px_rgba(49,46,129,0.24)]">
+                <button
+                  onClick={handleStartAI}
+                  className="min-h-11 flex-1 bg-indigo-400/10 px-6 py-3 text-base font-medium text-indigo-100 transition-colors hover:bg-indigo-400/14"
+                >
+                  Play vs AI ({playerCount > 2 ? `${playerCount - 1} opponents` : "1 opponent"})
+                </button>
+                <div className="border-l border-indigo-300/18">
+                  <AiDifficultyDropdown
+                    difficulty={difficulty}
+                    onChange={setDifficulty}
+                    compact
+                    className="h-full"
+                  />
                 </div>
               </div>
-
-              <button
-                onClick={handleStartAI}
-                className={menuButtonClass({ tone: "indigo", size: "md" })}
-              >
-                Play vs AI ({playerCount > 2 ? `${playerCount - 1} opponents` : "1 opponent"})
-              </button>
+              <p className="text-center text-xs text-slate-500">
+                Default AI difficulty: {getAiDifficultyLabel(difficulty)}
+              </p>
 
               <button
                 onClick={() => {

@@ -1715,14 +1715,10 @@ fn extract_alternative_cost_with_trailing_condition<'a>(
 
 fn self_spell_phrase(lower: &str, card_name: &str) -> Option<String> {
     let card_name_lower = card_name.to_lowercase();
-    if lower.starts_with("you may cast this spell ")
-        || lower == "you may cast this spell without paying its mana cost"
-    {
+    if lower.starts_with("you may cast this spell ") {
         return Some("this spell".to_string());
     }
-    if lower.starts_with("you may cast it ")
-        || lower == "you may cast it without paying its mana cost"
-    {
+    if lower.starts_with("you may cast it ") {
         return Some("it".to_string());
     }
     if lower.starts_with(&format!("you may cast {card_name_lower} ")) {

@@ -3,6 +3,8 @@ import { persist } from "zustand/middleware";
 
 import type { Phase } from "../adapter/types";
 import type { AnimationSpeed, CombatPacing, VfxQuality } from "../animation/types";
+import type { AIDifficulty } from "../constants/ai";
+import { DEFAULT_AI_DIFFICULTY } from "../constants/ai";
 
 export type CardSizePreference = "small" | "medium" | "large";
 export type HudLayout = "inline" | "floating";
@@ -31,6 +33,7 @@ interface PreferencesState {
   masterMuted: boolean;
   battlefieldCardDisplay: BattlefieldCardDisplay;
   tapRotation: TapRotation;
+  aiDifficulty: AIDifficulty;
 }
 
 interface PreferencesActions {
@@ -51,6 +54,7 @@ interface PreferencesActions {
   setMasterMuted: (muted: boolean) => void;
   setBattlefieldCardDisplay: (display: BattlefieldCardDisplay) => void;
   setTapRotation: (rotation: TapRotation) => void;
+  setAiDifficulty: (difficulty: AIDifficulty) => void;
 }
 
 export const usePreferencesStore = create<PreferencesState & PreferencesActions>()(
@@ -73,6 +77,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       masterMuted: false,
       battlefieldCardDisplay: "art_crop",
       tapRotation: "mtga",
+      aiDifficulty: DEFAULT_AI_DIFFICULTY,
 
       setCardSize: (size) => set({ cardSize: size }),
       setHudLayout: (layout) => set({ hudLayout: layout }),
@@ -91,6 +96,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setMasterMuted: (muted) => set({ masterMuted: muted }),
       setBattlefieldCardDisplay: (display) => set({ battlefieldCardDisplay: display }),
       setTapRotation: (rotation) => set({ tapRotation: rotation }),
+      setAiDifficulty: (difficulty) => set({ aiDifficulty: difficulty }),
     }),
     { name: "phase-preferences" },
   ),

@@ -54,24 +54,33 @@ function sameTypeGrouping(effect: StepEffect, lastStep: AnimationStep): boolean 
 }
 
 /**
- * Group DamageDealt events into per-attacker engagements.
- * Blockers fighting the same attacker share a step via participant overlap;
- * each new attacker starts its own step.
+ * Finds an existing step that this DamageDealt event is the bidirectional pair of
+ * (i.e., source and Object target are swapped), indicating a single attacker↔blocker
+ * engagement. Scans all steps because the engine emits all attacker assignments
+ * before any blocker assignments, so pairs are never adjacent in the event stream.
  */
-function engagementGrouping(effect: StepEffect, lastStep: AnimationStep): boolean {
-  if (effect.event.type !== "DamageDealt") return false;
-  if (!lastStep.effects.some((e) => e.event.type === "DamageDealt")) return false;
-
-  const participants = new Set<number>();
-  for (const e of lastStep.effects) {
-    if (e.event.type !== "DamageDealt") continue;
-    const { source_id, target } = e.event.data;
-    participants.add(source_id);
-    if ("Object" in target) participants.add(target.Object);
-  }
-
+function findCombatPairStep(
+  effect: StepEffect,
+  steps: AnimationStep[],
+): AnimationStep | null {
+  if (effect.event.type !== "DamageDealt") return null;
   const { source_id, target } = effect.event.data;
-  return participants.has(source_id) || ("Object" in target && participants.has(target.Object));
+  if (!("Object" in target)) return null;
+
+  for (const step of steps) {
+    for (const e of step.effects) {
+      if (e.event.type !== "DamageDealt") continue;
+      const prevTarget = e.event.data.target;
+      if (
+        e.event.data.source_id === target.Object &&
+        "Object" in prevTarget &&
+        prevTarget.Object === source_id
+      ) {
+        return step;
+      }
+    }
+  }
+  return null;
 }
 
 /**
@@ -81,7 +90,6 @@ function engagementGrouping(effect: StepEffect, lastStep: AnimationStep): boolea
 const GROUPING_STRATEGIES: Map<string, GroupingStrategy> = new Map([
   ["CreatureDestroyed", sameTypeGrouping],
   ["PermanentSacrificed", sameTypeGrouping],
-  ["DamageDealt", engagementGrouping],
 ]);
 
 // ---------------------------------------------------------------------------
@@ -129,6 +137,15 @@ export function normalizeEvents(
       const lastStep = steps[steps.length - 1];
       lastStep.effects.push(effect);
       lastStep.duration = stepDuration(lastStep.effects);
+      continue;
+    }
+
+    // DamageDealt: pair attacker↔blocker into the same step regardless of position,
+    // since the engine emits all attacker assignments before all blocker assignments.
+    const pairStep = findCombatPairStep(effect, steps);
+    if (pairStep) {
+      pairStep.effects.push(effect);
+      pairStep.duration = stepDuration(pairStep.effects);
       continue;
     }
 

@@ -69,16 +69,35 @@ describe("normalizeEvents", () => {
     expect(steps[1].effects[0].event.type).toBe("DamageDealt");
   });
 
-  it("DamageDealt: attacker hitting multiple blockers groups into one engagement", () => {
-    // Attacker 1 deals damage to blockers 2 and 3 (trample / multi-block)
+  it("DamageDealt: each blocker in a cluster gets its own sequential step", () => {
+    // Attacker 1 deals damage to blockers 2 and 3 — each blocker fight is separate.
+    // Bidirectional pairing only groups A↔B1 and A↔B2; two unidirectional hits from
+    // the same attacker are distinct engagements.
     const events: GameEvent[] = [
       { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 2 } },
       { type: "DamageDealt", data: { source_id: 1, target: { Object: 3 }, amount: 1 } },
     ];
 
     const steps = normalizeEvents(events);
-    expect(steps).toHaveLength(1);
-    expect(steps[0].effects).toHaveLength(2);
+    expect(steps).toHaveLength(2);
+    expect(steps[0].effects).toHaveLength(1);
+    expect(steps[1].effects).toHaveLength(1);
+  });
+
+  it("DamageDealt: engine emission order (attackers then blockers) produces correct pair steps", () => {
+    // Engine emits all attacker assignments before blocker assignments.
+    // Expected: step 1 = {1→2, 2→1}, step 2 = {1→3, 3→1}
+    const events: GameEvent[] = [
+      { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 2 } },
+      { type: "DamageDealt", data: { source_id: 1, target: { Object: 3 }, amount: 1 } },
+      { type: "DamageDealt", data: { source_id: 2, target: { Object: 1 }, amount: 2 } },
+      { type: "DamageDealt", data: { source_id: 3, target: { Object: 1 }, amount: 1 } },
+    ];
+
+    const steps = normalizeEvents(events);
+    expect(steps).toHaveLength(2);
+    expect(steps[0].effects).toHaveLength(2); // 1→2 and 2→1
+    expect(steps[1].effects).toHaveLength(2); // 1→3 and 3→1
   });
 
   it("consecutive CreatureDestroyed events group into one step (board wipe)", () => {
@@ -180,7 +199,7 @@ describe("normalizeEvents", () => {
       { type: "SpellCast", data: { card_id: 1, controller: 0 } },
       { type: "ZoneChanged", data: { object_id: 1, from: "Hand", to: "Stack" } },
       { type: "PriorityPassed", data: { player_id: 1 } },
-      // Attacker 1 hits blockers 2 and 3 (same engagement)
+      // Attacker 1 hits blockers 2 and 3 — each is a separate sequential step
       { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 3 } },
       { type: "DamageDealt", data: { source_id: 1, target: { Object: 3 }, amount: 2 } },
       { type: "LifeChanged", data: { player_id: 1, amount: -5 } },
@@ -190,12 +209,14 @@ describe("normalizeEvents", () => {
 
     const steps = normalizeEvents(events);
     // Step 1: SpellCast + ZoneChanged
-    // Step 2: DamageDealt x2 (same engagement) + LifeChanged
-    // Step 3: CreatureDestroyed x2
-    expect(steps).toHaveLength(3);
+    // Step 2: DamageDealt 1→2
+    // Step 3: DamageDealt 1→3 + LifeChanged (merges into last step)
+    // Step 4: CreatureDestroyed x2
+    expect(steps).toHaveLength(4);
     expect(steps[0].effects).toHaveLength(2);
-    expect(steps[1].effects).toHaveLength(3);
+    expect(steps[1].effects).toHaveLength(1);
     expect(steps[2].effects).toHaveLength(2);
+    expect(steps[3].effects).toHaveLength(2);
   });
 
   it("skips StackPushed, StackResolved, and ReplacementApplied", () => {

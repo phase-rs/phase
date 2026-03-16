@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
+import { AiDifficultyDropdown } from "../components/menu/AiDifficultyDropdown";
 import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuShell } from "../components/menu/MenuShell";
 import { MyDecks } from "../components/menu/MyDecks";
@@ -16,6 +17,7 @@ import {
   useGameStore,
 } from "../stores/gameStore";
 import type { ActiveGameMeta } from "../stores/gameStore";
+import { usePreferencesStore } from "../stores/preferencesStore";
 
 function seedStarterDecks(): void {
   for (const starter of STARTER_DECKS) {
@@ -28,7 +30,8 @@ export function PlayPage() {
   const navigate = useNavigate();
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
   const [activeGame, setActiveGame] = useState<ActiveGameMeta | null>(null);
-  const [difficulty, setDifficulty] = useState("Medium");
+  const difficulty = usePreferencesStore((s) => s.aiDifficulty);
+  const setDifficulty = usePreferencesStore((s) => s.setAiDifficulty);
 
   useEffect(() => {
     const names = listSavedDeckNames();
@@ -69,18 +72,38 @@ export function PlayPage() {
       <MenuShell
         eyebrow="Quick Duel"
         title="Quick duel."
-        description="Choose a deck, set the AI level, and start a one-on-one match."
+        description="Choose a deck and start a one-on-one match."
         layout="stacked"
       >
         <MyDecks
           mode="select"
           onSelectDeck={handleSelectDeck}
           activeDeckName={activeDeckName}
-          onConfirmSelection={handleStartGame}
-          confirmLabel="Start Game"
-          showDifficultySelector
-          difficulty={difficulty}
-          onDifficultyChange={setDifficulty}
+          confirmAction={(
+            <div className="flex overflow-hidden rounded-[14px] border border-indigo-300/18 shadow-[0_10px_28px_rgba(49,46,129,0.24)]">
+              <button
+                type="button"
+                onClick={handleStartGame}
+                disabled={!activeDeckName}
+                className={[
+                  "min-h-11 px-4 py-2 text-sm font-medium transition-colors",
+                  activeDeckName
+                    ? "bg-indigo-400/12 text-indigo-100 hover:bg-indigo-400/16"
+                    : "bg-white/5 text-white/30",
+                ].join(" ")}
+              >
+                Start Game
+              </button>
+              <div className="border-l border-indigo-300/18">
+                <AiDifficultyDropdown
+                  difficulty={difficulty}
+                  onChange={setDifficulty}
+                  compact
+                  className="h-full"
+                />
+              </div>
+            </div>
+          )}
         />
       </MenuShell>
     </div>

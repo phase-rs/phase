@@ -4,9 +4,11 @@ import { useNavigate } from "react-router";
 import { initAudioOnInteraction } from "../audio/AudioManager";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { CardCoverageDashboard } from "../components/controls/CardCoverageDashboard";
+import { AiDifficultyDropdown } from "../components/menu/AiDifficultyDropdown";
 import { MainMenuActionCard } from "../components/menu/MainMenuActionCard";
 import { MenuLogo } from "../components/menu/MenuLogo";
 import { MenuParticles } from "../components/menu/MenuParticles";
+import { getAiDifficultyLabel } from "../constants/ai";
 import {
   ACTIVE_DECK_KEY,
   listSavedDeckNames,
@@ -21,6 +23,7 @@ import {
   useGameStore,
 } from "../stores/gameStore";
 import type { ActiveGameMeta } from "../stores/gameStore";
+import { usePreferencesStore } from "../stores/preferencesStore";
 
 function seedStarterDecks(): void {
   for (const starter of STARTER_DECKS) {
@@ -35,6 +38,8 @@ export function MenuPage() {
   const [activeGame, setActiveGame] = useState<ActiveGameMeta | null>(null);
   const [, setDeckCount] = useState(0);
   const [, setActiveDeckName] = useState<string | null>(null);
+  const aiDifficulty = usePreferencesStore((s) => s.aiDifficulty);
+  const setAiDifficulty = usePreferencesStore((s) => s.setAiDifficulty);
 
   useEffect(() => {
     initAudioOnInteraction();
@@ -99,10 +104,18 @@ export function MenuPage() {
       {
         key: "quick",
         title: "Quick Duel vs AI",
-        description: "Start a one-on-one game with your selected deck and AI difficulty.",
+        description: `Start a one-on-one game with your selected deck. Current AI: ${getAiDifficultyLabel(aiDifficulty)}.`,
         accent: "stone" as const,
         onClick: () => navigate("/play"),
         icon: <SparkIcon />,
+        aside: (
+          <AiDifficultyDropdown
+            difficulty={aiDifficulty}
+            onChange={setAiDifficulty}
+            compact
+            className="h-full"
+          />
+        ),
       },
       {
         key: "online",
@@ -122,7 +135,7 @@ export function MenuPage() {
       },
     );
     return actions;
-  }, [hasSavedGame, navigate, handleResumeGame]);
+  }, [aiDifficulty, hasSavedGame, navigate, handleResumeGame, setAiDifficulty]);
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
@@ -149,6 +162,7 @@ export function MenuPage() {
               accent={action.accent}
               onClick={action.onClick}
               icon={action.icon}
+              aside={action.aside}
             />
           ))}
         </div>

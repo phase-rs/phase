@@ -22,6 +22,7 @@ describe("preferencesStore", () => {
         sfxMuted: false,
         musicMuted: false,
         masterMuted: false,
+        aiDifficulty: "Medium",
       });
     });
     localStorage.clear();
@@ -35,6 +36,15 @@ describe("preferencesStore", () => {
     expect(state.followActiveOpponent).toBe(false);
     expect(state.logDefaultState).toBe("closed");
     expect(state.boardBackground).toBe("auto-wubrg");
+    expect(state.aiDifficulty).toBe("Medium");
+  });
+
+  it("setAiDifficulty updates AI difficulty", () => {
+    act(() => {
+      usePreferencesStore.getState().setAiDifficulty("Hard");
+    });
+
+    expect(usePreferencesStore.getState().aiDifficulty).toBe("Hard");
   });
 
   it("setCardSize updates card size", () => {
@@ -130,6 +140,7 @@ describe("preferencesStore", () => {
     act(() => {
       usePreferencesStore.getState().setCardSize("small");
       usePreferencesStore.getState().setFollowActiveOpponent(true);
+      usePreferencesStore.getState().setAiDifficulty("VeryHard");
     });
 
     // Zustand persist writes to localStorage
@@ -139,6 +150,7 @@ describe("preferencesStore", () => {
     const parsed = JSON.parse(stored!);
     expect(parsed.state.cardSize).toBe("small");
     expect(parsed.state.followActiveOpponent).toBe(true);
+    expect(parsed.state.aiDifficulty).toBe("VeryHard");
   });
 
   // --- Audio preferences ---

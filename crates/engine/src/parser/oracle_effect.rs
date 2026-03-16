@@ -7,7 +7,7 @@ use super::oracle_util::{
     starts_with_possessive, strip_reminder_text,
 };
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, CountValue,
+    AbilityCondition, AbilityDefinition, AbilityKind, ChoiceType, CountValue,
     DamageAmount, Duration, Effect, FilterProp, GainLifePlayer, LifeAmount, ManaProduction,
     ManaSpendRestriction, PtValue, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
@@ -1776,15 +1776,21 @@ fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImperativeAst> {
         return None;
     }
 
-    if lower == "shuffle your library" {
-        return Some(ShuffleImperativeAst::ShuffleLibrary {
-            target: TargetFilter::Controller,
-        });
-    }
-    if lower == "shuffle their library" {
-        return Some(ShuffleImperativeAst::ShuffleLibrary {
-            target: TargetFilter::Player,
-        });
+    // "shuffle {possessive} library" — extract the possessive word to determine the target.
+    // Only matches the exact form "shuffle your library" / "shuffle their library" etc.;
+    // compound forms like "shuffle your graveyard into your library" fall through.
+    if let Some(possessive) = lower
+        .strip_prefix("shuffle ")
+        .and_then(|s| s.strip_suffix(" library"))
+    {
+        let target = match possessive {
+            "your" => Some(TargetFilter::Controller),
+            "their" | "its owner's" | "that player's" => Some(TargetFilter::Player),
+            _ => None,
+        };
+        if let Some(target) = target {
+            return Some(ShuffleImperativeAst::ShuffleLibrary { target });
+        }
     }
     if contains_object_pronoun(lower, "shuffle", "into")
         || contains_object_pronoun(lower, "shuffles", "into")
@@ -2482,11 +2488,18 @@ fn parse_subject_application(subject: &str) -> Option<SubjectApplication> {
             target: None,
         });
     }
-    if lower == "creatures you control" || lower == "other creatures you control" {
-        return Some(SubjectApplication {
-            affected: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-            target: None,
-        });
+    // Bare plural noun phrase subjects ("creatures you control", "other creatures you control")
+    // are implicit "all X" forms — strip any "other " prefix and route through parse_target.
+    let noun_subject = lower.strip_prefix("other ").unwrap_or(&lower);
+    if !noun_subject.starts_with("target ")
+        && !noun_subject.starts_with("all ")
+        && !noun_subject.starts_with("each ")
+    {
+        let normalized = format!("all {noun_subject}");
+        let (filter, rest) = parse_target(&normalized);
+        if rest.trim().is_empty() {
+            return subject_filter_application(filter, false);
+        }
     }
     if lower == "that player" {
         return Some(SubjectApplication {
@@ -3905,7 +3918,9 @@ fn constrain_filter_to_stack(filter: TargetFilter) -> TargetFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{ContinuousModification, ManaProduction, TypeFilter};
+    use crate::types::ability::{
+        ContinuousModification, ControllerRef, ManaProduction, TypeFilter,
+    };
     use crate::types::mana::ManaColor;
 
     #[test]

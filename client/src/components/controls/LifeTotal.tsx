@@ -1,6 +1,7 @@
 import { motion, useMotionValue, useTransform, animate } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 
+import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 
 interface LifeTotalProps {
@@ -13,11 +14,32 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
   const life = useGameStore(
     (s) => s.gameState?.players[playerId]?.life ?? 20,
   );
+  const activeStep = useAnimationStore((s) => s.activeStep);
   const prevLife = useRef(life);
   const motionLife = useMotionValue(life);
   const displayed = useTransform(motionLife, (v) => Math.round(v));
   const [flashColor, setFlashColor] = useState<"red" | "green" | null>(null);
 
+  // Animate life total immediately when the animation step fires, so the counter
+  // updates in sync with the damage/heal visual rather than after all animations.
+  // Pre-updating prevLife suppresses the redundant re-animation from the deferred
+  // gameStore state update that follows once all animations complete.
+  useEffect(() => {
+    if (!activeStep) return;
+    for (const effect of activeStep.effects) {
+      if (effect.event.type !== "LifeChanged") continue;
+      if (effect.event.data.player_id !== playerId) continue;
+      const newLife = prevLife.current + effect.event.data.amount;
+      animate(motionLife, newLife, { duration: 0.3 });
+      setFlashColor(effect.event.data.amount < 0 ? "red" : "green");
+      const timer = setTimeout(() => setFlashColor(null), 400);
+      prevLife.current = newLife;
+      return () => clearTimeout(timer);
+    }
+  }, [activeStep, playerId, motionLife]);
+
+  // Fallback: animate from gameStore update when no animation step handled it
+  // (e.g. instant speed, or life changes that arrive without a preceding step).
   useEffect(() => {
     if (prevLife.current !== life) {
       animate(motionLife, life, { duration: 0.3 });
