@@ -62,6 +62,17 @@ pub fn move_to_zone(
         }
     }
 
+    // CR 715.4: Clear AdventureCreature permission when leaving exile
+    // (prevents re-casting if the card returns to exile via a different effect).
+    if from == crate::types::zones::Zone::Exile {
+        obj_mut.casting_permissions.retain(|p| {
+            !matches!(
+                p,
+                crate::types::ability::CastingPermission::AdventureCreature
+            )
+        });
+    }
+
     // CR 302.6: Track when objects enter the battlefield (for summoning sickness).
     if to == Zone::Battlefield {
         obj_mut.entered_battlefield_turn = Some(state.turn_number);

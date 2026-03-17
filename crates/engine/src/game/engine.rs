@@ -146,6 +146,22 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 )?
             }
         }
+        // CR 715.3a: Player chooses creature or Adventure face.
+        (
+            WaitingFor::AdventureCastChoice {
+                player,
+                object_id,
+                card_id,
+            },
+            GameAction::ChooseAdventureFace { creature },
+        ) => casting::handle_adventure_choice(
+            state,
+            *player,
+            *object_id,
+            *card_id,
+            creature,
+            &mut events,
+        )?,
         (WaitingFor::ModeChoice { player, .. }, GameAction::SelectModes { indices }) => {
             casting::handle_select_modes(state, *player, indices, &mut events)?
         }

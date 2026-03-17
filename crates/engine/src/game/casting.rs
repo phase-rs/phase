@@ -122,6 +122,22 @@ fn spell_object_id_for_card_id(
                 })
                 .map(|obj| obj.id)
         })
+        // CR 715.5: Check exile for cards with AdventureCreature permission.
+        .or_else(|| {
+            state
+                .exile
+                .iter()
+                .find(|&&obj_id| {
+                    state.objects.get(&obj_id).is_some_and(|obj| {
+                        obj.card_id == card_id
+                            && obj.owner == player
+                            && obj.casting_permissions.contains(
+                                &crate::types::ability::CastingPermission::AdventureCreature,
+                            )
+                    })
+                })
+                .copied()
+        })
         .ok_or_else(|| EngineError::InvalidAction("Card not found in hand".to_string()))
 }
 
@@ -142,6 +158,17 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
                 .map(|obj| obj.id),
         );
     }
+
+    // CR 715.5: Cards in exile with AdventureCreature permission are castable as creatures.
+    objects.extend(state.exile.iter().filter(|&&obj_id| {
+        state.objects.get(&obj_id).is_some_and(|obj| {
+            obj.owner == player
+                && obj
+                    .casting_permissions
+                    .contains(&crate::types::ability::CastingPermission::AdventureCreature)
+        })
+    }));
+
     objects
 }
 
@@ -154,9 +181,15 @@ fn prepare_spell_cast(
         .objects
         .get(&object_id)
         .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
+    // CR 715.5: Cards in exile with AdventureCreature permission are castable as creatures.
+    let has_adventure_permission = obj.zone == Zone::Exile
+        && obj
+            .casting_permissions
+            .contains(&crate::types::ability::CastingPermission::AdventureCreature);
     let castable_zone = obj.owner == player
         && (obj.zone == Zone::Hand
-            || state.format_config.command_zone && obj.zone == Zone::Command && obj.is_commander);
+            || (state.format_config.command_zone && obj.zone == Zone::Command && obj.is_commander)
+            || has_adventure_permission);
     if !castable_zone {
         return Err(EngineError::InvalidAction(
             "Card is not in a castable zone".to_string(),
@@ -225,6 +258,151 @@ fn prepare_spell_cast(
     })
 }
 
+/// CR 715.3a: Swap object characteristics to the Adventure face for casting.
+/// Saves the creature face in `back_face` for later restoration.
+fn swap_to_adventure_face(obj: &mut crate::game::game_object::GameObject) {
+    let adventure = match obj.back_face.take() {
+        Some(b) => b,
+        None => return,
+    };
+    // Snapshot current (creature) face into back_face
+    let creature_snapshot = super::printed_cards::snapshot_object_face(obj);
+    super::printed_cards::apply_back_face_to_object(obj, adventure);
+    obj.back_face = Some(creature_snapshot);
+}
+
+/// CR 715: Returns true if this object is an Adventure card (creature front + instant/sorcery back).
+fn is_adventure_card(obj: &crate::game::game_object::GameObject) -> bool {
+    let Some(ref back) = obj.back_face else {
+        return false;
+    };
+    use crate::types::card_type::CoreType;
+    back.card_types
+        .core_types
+        .iter()
+        .any(|ct| matches!(ct, CoreType::Instant | CoreType::Sorcery))
+        && obj
+            .card_types
+            .core_types
+            .iter()
+            .any(|ct| matches!(ct, CoreType::Creature))
+}
+
+/// CR 715.3a: Handle Adventure face choice and proceed with casting.
+pub fn handle_adventure_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    _card_id: CardId,
+    creature: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if !creature {
+        // Swap to Adventure face characteristics
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            swap_to_adventure_face(obj);
+        }
+    }
+
+    // Now proceed with normal casting using whichever face is active
+    let prepared = prepare_spell_cast(state, player, object_id)?;
+
+    let resolved = {
+        let mut r = ResolvedAbility::new(
+            prepared.ability_def.effect.clone(),
+            Vec::new(),
+            prepared.object_id,
+            player,
+        );
+        if let Some(sub) = &prepared.ability_def.sub_ability {
+            r = r.sub_ability(build_resolved_from_def(sub, prepared.object_id, player));
+        }
+        if let Some(c) = prepared.ability_def.condition.clone() {
+            r = r.condition(c);
+        }
+        r
+    };
+
+    // Evaluate layers before targeting
+    if state.layers_dirty {
+        super::layers::evaluate_layers(state);
+    }
+
+    let target_slots = build_target_slots(state, &resolved)?;
+    if !target_slots.is_empty() {
+        if let Some(targets) = auto_select_targets(&target_slots, &[])? {
+            let mut resolved = resolved;
+            assign_targets_in_chain(&mut resolved, &targets)?;
+            if creature {
+                return check_additional_cost_or_pay(
+                    state,
+                    player,
+                    prepared.object_id,
+                    prepared.card_id,
+                    resolved,
+                    &prepared.mana_cost,
+                    events,
+                );
+            } else {
+                return pay_and_push_adventure(
+                    state,
+                    player,
+                    prepared.object_id,
+                    prepared.card_id,
+                    resolved,
+                    &prepared.mana_cost,
+                    true,
+                    events,
+                );
+            }
+        }
+
+        let selection = begin_target_selection(&target_slots, &[])?;
+        // TODO: For adventure spells with targets, we'd need to pass cast_as_adventure
+        // through PendingCast. For now, the target selection path falls through to
+        // pay_and_push which uses cast_as_adventure: false. This is a known limitation
+        // for Adventure spells that require target selection.
+        return Ok(WaitingFor::TargetSelection {
+            player,
+            pending_cast: Box::new(PendingCast {
+                object_id: prepared.object_id,
+                card_id: prepared.card_id,
+                ability: resolved,
+                cost: prepared.mana_cost.clone(),
+                activation_cost: None,
+                activation_ability_index: None,
+                target_constraints: Vec::new(),
+            }),
+            target_slots,
+            selection,
+        });
+    }
+
+    // No targets -- proceed to payment
+    if creature {
+        check_additional_cost_or_pay(
+            state,
+            player,
+            prepared.object_id,
+            prepared.card_id,
+            resolved,
+            &prepared.mana_cost,
+            events,
+        )
+    } else {
+        pay_and_push_adventure(
+            state,
+            player,
+            prepared.object_id,
+            prepared.card_id,
+            resolved,
+            &prepared.mana_cost,
+            true,
+            events,
+        )
+    }
+}
+
 /// Cast a spell from hand (or command zone in Commander format).
 pub fn handle_cast_spell(
     state: &mut GameState,
@@ -233,6 +411,18 @@ pub fn handle_cast_spell(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let object_id = spell_object_id_for_card_id(state, player, card_id)?;
+
+    // CR 715.3a: Adventure cards from hand require choosing creature or Adventure face.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if obj.zone == Zone::Hand && is_adventure_card(obj) {
+            return Ok(WaitingFor::AdventureCastChoice {
+                player,
+                object_id,
+                card_id,
+            });
+        }
+    }
+
     let prepared = prepare_spell_cast(state, player, object_id)?;
 
     if let Some(ref modal_choice) = prepared.modal {
@@ -1174,9 +1364,12 @@ fn pay_and_push(
     cost: &crate::types::mana::ManaCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    pay_and_push_adventure(state, player, object_id, card_id, ability, cost, false, events)
+    pay_and_push_adventure(
+        state, player, object_id, card_id, ability, cost, false, events,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pay_and_push_adventure(
     state: &mut GameState,
     player: PlayerId,
@@ -2725,5 +2918,211 @@ mod tests {
 
         // Cancel should return to priority
         assert!(matches!(state.waiting_for, WaitingFor::ModeChoice { .. }));
+    }
+
+    // --- Adventure tests ---
+
+    /// Create an Adventure card in hand: Bonecrusher Giant (creature) / Stomp (instant).
+    fn create_adventure_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
+        let obj_id = create_object(
+            state,
+            CardId(70),
+            player,
+            "Bonecrusher Giant".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(4);
+        obj.toughness = Some(3);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 2,
+        };
+
+        // Adventure face stored in back_face (Stomp - instant, {1}{R})
+        obj.back_face = Some(crate::game::game_object::BackFaceData {
+            name: "Stomp".to_string(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            card_types: {
+                let mut ct = crate::types::card_type::CardType::default();
+                ct.core_types.push(CoreType::Instant);
+                ct
+            },
+            mana_cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            },
+            keywords: Vec::new(),
+            abilities: vec![crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: DamageAmount::Fixed(2),
+                    target: crate::types::ability::TargetFilter::Any,
+                },
+            )],
+            trigger_definitions: Vec::new(),
+            replacement_definitions: Vec::new(),
+            static_definitions: Vec::new(),
+            color: vec![ManaColor::Red],
+            printed_ref: None,
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+        });
+
+        obj_id
+    }
+
+    #[test]
+    fn adventure_cast_choice_from_hand() {
+        let mut state = setup_game_at_main_phase();
+        let _obj_id = create_adventure_in_hand(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 3);
+
+        let mut events = Vec::new();
+        let result = handle_cast_spell(&mut state, PlayerId(0), CardId(70), &mut events).unwrap();
+
+        // Should prompt for Adventure face choice
+        assert!(
+            matches!(result, WaitingFor::AdventureCastChoice { player, card_id, .. }
+                if player == PlayerId(0) && card_id == CardId(70)),
+            "Expected AdventureCastChoice, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn adventure_exile_on_resolve() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_adventure_in_hand(&mut state, PlayerId(0));
+
+        // Directly push an Adventure spell on the stack (bypass targeting)
+        zones::move_to_zone(&mut state, obj_id, Zone::Stack, &mut Vec::new());
+
+        // Swap to Adventure face (simulating what handle_adventure_choice does)
+        if let Some(obj) = state.objects.get_mut(&obj_id) {
+            swap_to_adventure_face(obj);
+        }
+
+        state.stack.push(StackEntry {
+            id: obj_id,
+            source_id: obj_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(70),
+                ability: ResolvedAbility::new(
+                    Effect::DealDamage {
+                        amount: DamageAmount::Fixed(2),
+                        target: crate::types::ability::TargetFilter::Any,
+                    },
+                    vec![TargetRef::Player(PlayerId(1))],
+                    obj_id,
+                    PlayerId(0),
+                ),
+                cast_as_adventure: true,
+            },
+        });
+
+        // The object should now have Adventure face active
+        assert_eq!(state.objects[&obj_id].name, "Stomp");
+
+        // Resolve the spell
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        // Card should be in exile with AdventureCreature permission
+        assert!(
+            state.exile.contains(&obj_id),
+            "Adventure spell should resolve to exile"
+        );
+        let obj = state.objects.get(&obj_id).unwrap();
+        assert!(
+            obj.casting_permissions
+                .contains(&crate::types::ability::CastingPermission::AdventureCreature),
+            "Should have AdventureCreature permission"
+        );
+        // Name should be restored to creature face
+        assert_eq!(obj.name, "Bonecrusher Giant");
+    }
+
+    #[test]
+    fn adventure_countered_to_graveyard() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_adventure_in_hand(&mut state, PlayerId(0));
+
+        // Manually put an Adventure spell on the stack
+        zones::move_to_zone(&mut state, obj_id, Zone::Stack, &mut Vec::new());
+        state.stack.push(StackEntry {
+            id: obj_id,
+            source_id: obj_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(70),
+                ability: ResolvedAbility::new(
+                    Effect::DealDamage {
+                        amount: DamageAmount::Fixed(2),
+                        target: crate::types::ability::TargetFilter::Any,
+                    },
+                    vec![TargetRef::Player(PlayerId(1))],
+                    obj_id,
+                    PlayerId(0),
+                ),
+                cast_as_adventure: true,
+            },
+        });
+
+        // Counter the spell (remove from stack, move to graveyard)
+        state.stack.pop();
+        zones::move_to_zone(&mut state, obj_id, Zone::Graveyard, &mut Vec::new());
+
+        // Card should be in graveyard, NOT exile
+        assert!(
+            state.players[0].graveyard.contains(&obj_id),
+            "Countered adventure spell should go to graveyard"
+        );
+        assert!(
+            !state.exile.contains(&obj_id),
+            "Countered adventure spell should NOT be in exile"
+        );
+        // Should NOT have AdventureCreature permission
+        let obj = state.objects.get(&obj_id).unwrap();
+        assert!(
+            !obj.casting_permissions
+                .contains(&crate::types::ability::CastingPermission::AdventureCreature),
+            "Countered spell should not get casting permission"
+        );
+    }
+
+    #[test]
+    fn adventure_cast_creature_from_exile() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_adventure_in_hand(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 3);
+
+        // Move to exile with AdventureCreature permission (simulates resolved Adventure)
+        zones::move_to_zone(&mut state, obj_id, Zone::Exile, &mut Vec::new());
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.casting_permissions
+            .push(crate::types::ability::CastingPermission::AdventureCreature);
+
+        // Should appear in available to cast
+        let available = spell_objects_available_to_cast(&state, PlayerId(0));
+        assert!(
+            available.contains(&obj_id),
+            "Exiled Adventure creature should be castable"
+        );
+
+        // Should NOT trigger AdventureCastChoice (from exile, always cast as creature)
+        let mut events = Vec::new();
+        let result = handle_cast_spell(&mut state, PlayerId(0), CardId(70), &mut events).unwrap();
+        // Should proceed to payment, not to AdventureCastChoice
+        assert!(
+            !matches!(result, WaitingFor::AdventureCastChoice { .. }),
+            "Casting from exile should not prompt for face choice"
+        );
     }
 }

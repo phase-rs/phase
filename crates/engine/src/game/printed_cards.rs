@@ -1,6 +1,6 @@
 use crate::database::CardDatabase;
 use crate::types::ability::PtValue;
-use crate::types::card::{CardFace, PrintedCardRef};
+use crate::types::card::{CardFace, CardLayout, PrintedCardRef};
 use crate::types::game_state::GameState;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 
@@ -177,6 +177,36 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
                 if let Some(back_ref) = back_face.printed_ref.clone() {
                     if let Some(back_card_face) = db.get_face_by_printed_ref(&back_ref) {
                         apply_card_face_to_back_face(back_face, back_card_face);
+                    }
+                }
+            }
+
+            // CR 715: Populate back_face for Adventure cards so the Adventure
+            // half's characteristics are available at cast time.
+            if obj.back_face.is_none() {
+                if let Some(card_rules) = db.get_by_name(&card_face.name) {
+                    if let CardLayout::Adventure(_, ref adventure_face) = card_rules.layout {
+                        let mut back = BackFaceData {
+                            name: String::new(),
+                            power: None,
+                            toughness: None,
+                            loyalty: None,
+                            card_types: Default::default(),
+                            mana_cost: Default::default(),
+                            keywords: Vec::new(),
+                            abilities: Vec::new(),
+                            trigger_definitions: Vec::new(),
+                            replacement_definitions: Vec::new(),
+                            static_definitions: Vec::new(),
+                            color: Vec::new(),
+                            printed_ref: None,
+                            modal: None,
+                            additional_cost: None,
+                            casting_restrictions: Vec::new(),
+                            casting_options: Vec::new(),
+                        };
+                        apply_card_face_to_back_face(&mut back, adventure_face);
+                        obj.back_face = Some(back);
                     }
                 }
             }

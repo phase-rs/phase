@@ -54,10 +54,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     }
 
     // Extract the resolved ability from the stack entry
-    let (ability, is_spell) = match &entry.kind {
-        StackEntryKind::Spell { ability, .. } => (ability.clone(), true),
-        StackEntryKind::ActivatedAbility { ability, .. } => (ability.clone(), false),
-        StackEntryKind::TriggeredAbility { ability, .. } => (ability.clone(), false),
+    let (ability, is_spell, cast_as_adventure) = match &entry.kind {
+        StackEntryKind::Spell {
+            ability,
+            cast_as_adventure,
+            ..
+        } => (ability.clone(), true, *cast_as_adventure),
+        StackEntryKind::ActivatedAbility { ability, .. } => (ability.clone(), false, false),
+        StackEntryKind::TriggeredAbility { ability, .. } => (ability.clone(), false, false),
     };
 
     // Capture targets for Aura attachment after resolution
@@ -84,7 +88,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // CR 608.3: Determine destination zone for spells.
     if is_spell {
-        let dest = if is_permanent_type(state, entry.id) {
+        let dest = if cast_as_adventure {
+            // CR 715.4: Adventure spell resolves → exile with casting permission.
+            Zone::Exile
+        } else if is_permanent_type(state, entry.id) {
             // CR 608.3: Permanent spells enter the battlefield.
             Zone::Battlefield
         } else {
@@ -92,6 +99,21 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             Zone::Graveyard
         };
         zones::move_to_zone(state, entry.id, dest, events);
+
+        // CR 715.4: When an Adventure spell resolves to exile, restore the creature face
+        // and grant AdventureCreature permission so it can be cast from exile.
+        if cast_as_adventure {
+            if let Some(obj) = state.objects.get_mut(&entry.id) {
+                // Restore creature face characteristics (swap back from Adventure face)
+                if let Some(creature_face) = obj.back_face.take() {
+                    let adventure_snapshot = super::printed_cards::snapshot_object_face(obj);
+                    super::printed_cards::apply_back_face_to_object(obj, creature_face);
+                    obj.back_face = Some(adventure_snapshot);
+                }
+                obj.casting_permissions
+                    .push(crate::types::ability::CastingPermission::AdventureCreature);
+            }
+        }
 
         // Aura attachment: if the permanent is an Aura with targets, attach to the first target
         if dest == Zone::Battlefield {
