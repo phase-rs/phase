@@ -302,12 +302,21 @@ Plans:
 - [ ] 30-03-PLAN.md — Adventure casting subsystem: cast choice, exile-on-resolve, cast-from-exile, AI support
 - [ ] 30-04-PLAN.md — Adventure frontend UI, TypeScript types, Bonecrusher Giant integration test, human verification
 
-### Phase 31: add mechanics to support Kaito, Bane of Nightmares (docs/plan-kaito-bane-of-nightmares.md)
+### Phase 31: Kaito, Bane of Nightmares Mechanics
 
-**Goal:** [To be planned]
-**Requirements**: TBD
+**Goal:** Deliver five composable engine building blocks motivated by Kaito, Bane of Nightmares: Ninjutsu runtime (~30 cards), Emblem infrastructure (dozens of planeswalkers), compound static conditions, planeswalker-to-creature conditional animation, and a scalable "for each" dynamic quantity system. Full parser coverage for all new patterns. Kaito fully playable when complete.
+**Requirements**: K31-NINJA, K31-EMBLEM, K31-COND, K31-ANIM, K31-QTY, K31-PARSE, K31-INT
 **Depends on:** Phase 30
-**Plans:** 0 plans
+**Plans:** 5 plans
+
+**Execution Order:**
+Wave 1: Plans 01 + 02 + 04 (parallel — compound conditions + animation, dynamic quantities, Ninjutsu runtime)
+Wave 2: Plan 03 (emblem infrastructure — depends on Plan 01 for compound conditions)
+Wave 3: Plan 05 (integration test + emblem UI + human verification — depends on all prior plans)
 
 Plans:
-- [ ] TBD (run /gsd:plan-phase 31 to break down)
+- [ ] 31-01-PLAN.md — Compound static conditions (And/Or/HasCounters) + layer evaluation + parser for planeswalker animation pattern
+- [ ] 31-02-PLAN.md — Dynamic quantity system: QuantityExpr on Draw/LoseLife/Mill, PlayerFilter, resolve_quantity, "for each" parser
+- [ ] 31-03-PLAN.md — Emblem infrastructure: Effect::CreateEmblem, is_emblem on GameObject, immunity, layer extension, parser
+- [ ] 31-04-PLAN.md — Ninjutsu runtime: GameAction::ActivateNinjutsu, combat integration, handler, AI support, frontend types
+- [ ] 31-05-PLAN.md — Kaito integration test, card data regeneration, emblem command zone UI, human gameplay verification
