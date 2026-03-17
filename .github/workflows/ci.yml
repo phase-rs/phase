@@ -27,8 +27,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Install cargo-nextest
+        run: cargo install cargo-nextest --locked
+
       - name: Run tests
-        run: cargo test --all
+        run: cargo nextest run --all
 
       - name: Standard coverage gate
         run: cargo run --bin coverage-report -- data/ --ci

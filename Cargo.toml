@@ -9,6 +9,9 @@ license = "MIT OR Apache-2.0"
 serde = { version = "1", features = ["derive"] }
 rpds = { version = "1.2" }
 
+[profile.dev]
+opt-level = 1
+
 [profile.release]
 opt-level = 'z'
 lto = true

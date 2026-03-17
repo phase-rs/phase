@@ -5,6 +5,7 @@
 //! pipeline for spell casting and combat.
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
@@ -18,14 +19,13 @@ use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-fn data_dir() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data")
-}
-
-fn load_test_db() -> CardDatabase {
-    let data = data_dir();
-    CardDatabase::from_mtgjson(&data.join("mtgjson/test_fixture.json"))
-        .expect("CardDatabase::from_mtgjson should succeed")
+fn load_test_db() -> &'static CardDatabase {
+    static DB: OnceLock<CardDatabase> = OnceLock::new();
+    DB.get_or_init(|| {
+        let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
+        CardDatabase::from_mtgjson(&data.join("mtgjson/test_fixture.json"))
+            .expect("CardDatabase::from_mtgjson should succeed")
+    })
 }
 
 // ---------------------------------------------------------------------------

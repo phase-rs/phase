@@ -2,9 +2,16 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    environment: "jsdom",
+    environment: "happy-dom",
     include: ["src/**/*.test.{ts,tsx}"],
+    exclude: ["src/**/*.integration.test.{ts,tsx}"],
     setupFiles: ["src/test-setup.ts"],
+    pool: "threads",
+    poolOptions: {
+      threads: {
+        singleThread: false,
+      },
+    },
     coverage: {
       provider: "v8",
       reporter: ["text", "lcov"],

@@ -10,6 +10,7 @@
     "type-check": "tsc --noEmit",
     "preview": "vite preview",
     "test": "vitest",
+    "test:integration": "vitest run --include 'src/**/*.integration.test.{ts,tsx}'",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"
@@ -44,6 +45,7 @@
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.19",
     "globals": "^16.0.0",
+    "happy-dom": "^18.0.1",
     "jsdom": "^26.0.0",
     "typescript": "~5.7.0",
     "typescript-eslint": "^8.24.1",
