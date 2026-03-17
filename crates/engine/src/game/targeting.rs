@@ -29,6 +29,12 @@ pub fn find_legal_targets(
         return targets;
     }
 
+    // ParentTarget inherits targets from the parent ability at resolution time.
+    // No new targeting needed — the sub_ability chain copies parent targets automatically.
+    if matches!(filter, TargetFilter::ParentTarget) {
+        return targets;
+    }
+
     // Check if filter could match players
     if matches!(filter, TargetFilter::Any | TargetFilter::Player) {
         add_players(state, &mut targets);

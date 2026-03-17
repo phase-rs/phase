@@ -202,6 +202,9 @@ enum TargetedImperativeAst {
     GainControl {
         target: TargetFilter,
     },
+    /// Proxy for zone-counter family (destroy/exile/put counter) used during
+    /// compound splitting to unify targeted and zone-counter parsing.
+    ZoneCounterProxy(ZoneCounterImperativeAst),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -530,12 +533,164 @@ fn lower_imperative_clause(text: &str) -> ParsedEffectClause {
         return clause;
     }
 
+    // Compound targeted actions: "tap target creature and put a stun counter on it"
+    // Split on " and " when the primary clause is a targeted verb.
+    if let Some(clause) = try_split_targeted_compound(text) {
+        return clause;
+    }
+
     let (stripped, duration) = strip_trailing_duration(text);
     let mut clause = parsed_clause(parse_imperative_effect(stripped));
     if clause.duration.is_none() {
         clause.duration = duration;
     }
     clause
+}
+
+/// Split compound targeted actions like "tap target creature and put a stun counter on it"
+/// into a primary effect (Tap) with a sub_ability chain (PutCounter with ParentTarget).
+///
+/// Handles two connector patterns:
+///   - " and " (most common): "destroy target creature and draw a card"
+///   - ", then " (sequential): "exile target creature, then gain 3 life"
+///
+/// When the remainder references "it"/"that creature"/"them" (via `contains_object_pronoun`),
+/// the sub_ability's target is set to `TargetFilter::ParentTarget` so it inherits the
+/// parent's resolved targets at resolution time.
+fn try_split_targeted_compound(text: &str) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+
+    // Find the connector: " and " or ", then "
+    let (connector_pos, connector_len) = find_compound_connector(&lower)?;
+
+    let primary_text = text[..connector_pos].trim();
+    let remainder_text = text[connector_pos + connector_len..].trim();
+
+    if primary_text.is_empty() || remainder_text.is_empty() {
+        return None;
+    }
+
+    // The primary must be a targeted action (tap/untap/destroy/exile/sacrifice/etc.)
+    let primary_lower = primary_text.to_lowercase();
+    let primary_ast = parse_targeted_action_ast(primary_text, &primary_lower).or_else(|| {
+        // Also try zone-counter family (destroy/exile/put counter)
+        parse_zone_counter_ast(primary_text, &primary_lower)
+            .map(|ast| TargetedImperativeAst::ZoneCounterProxy(ast))
+    })?;
+
+    // Lower the primary to an Effect
+    let primary_effect = match primary_ast {
+        TargetedImperativeAst::ZoneCounterProxy(ast) => lower_zone_counter_ast(ast),
+        other => lower_targeted_action_ast(other),
+    };
+
+    // Parse the remainder as an effect
+    let remainder_lower = remainder_text.to_lowercase();
+    let mut sub_effect = parse_imperative_effect(remainder_text);
+
+    // If the remainder contains anaphoric references ("it", "that creature", "them"),
+    // replace the sub_effect's target with ParentTarget so it inherits the parent's targets.
+    if has_anaphoric_reference(&remainder_lower) {
+        replace_target_with_parent(&mut sub_effect);
+    }
+
+    let sub_ability = AbilityDefinition::new(AbilityKind::Spell, sub_effect);
+
+    Some(ParsedEffectClause {
+        effect: primary_effect,
+        duration: None,
+        sub_ability: Some(Box::new(sub_ability)),
+    })
+}
+
+/// Find the position and length of a compound connector in the text.
+/// Returns None if no connector is found.
+fn find_compound_connector(lower: &str) -> Option<(usize, usize)> {
+    // Try ", then " first (more specific)
+    if let Some(pos) = lower.find(", then ") {
+        return Some((pos, ", then ".len()));
+    }
+    // Try " and " — but avoid splitting inside "target X and Y" type combinations
+    // by requiring the part before " and " to contain a recognized verb
+    if let Some(pos) = lower.find(" and ") {
+        let before = &lower[..pos];
+        // Only split if the text before " and " starts with a targeted verb
+        let is_targeted_verb = before.starts_with("tap ")
+            || before.starts_with("untap ")
+            || before.starts_with("destroy ")
+            || before.starts_with("exile ")
+            || before.starts_with("sacrifice ")
+            || before.starts_with("return ")
+            || before.starts_with("fight ")
+            || before.starts_with("gain control of ")
+            || before.starts_with("put ");
+        if is_targeted_verb {
+            return Some((pos, " and ".len()));
+        }
+    }
+    None
+}
+
+/// Check if text contains anaphoric pronouns referencing a previously mentioned object.
+/// Unlike `contains_object_pronoun`, this handles word boundaries at end-of-string
+/// (e.g., "counter on it" where "it" is the last word).
+fn has_anaphoric_reference(lower: &str) -> bool {
+    for pronoun in [
+        "it",
+        "them",
+        "that creature",
+        "that card",
+        "those cards",
+        "that permanent",
+    ] {
+        // Check whole-word boundary: pronoun preceded by space/start and followed by space/end/punctuation
+        if let Some(pos) = lower.find(pronoun) {
+            let before_ok = pos == 0 || lower.as_bytes()[pos - 1] == b' ';
+            let after_pos = pos + pronoun.len();
+            let after_ok = after_pos >= lower.len()
+                || matches!(
+                    lower.as_bytes()[after_pos],
+                    b' ' | b',' | b'.' | b'\'' | b's'
+                );
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Replace the target filter on an effect with ParentTarget.
+/// Used for anaphoric "it"/"that creature" references in compound sub-effects.
+fn replace_target_with_parent(effect: &mut Effect) {
+    match effect {
+        Effect::Tap { target }
+        | Effect::Untap { target }
+        | Effect::Destroy { target }
+        | Effect::Sacrifice { target }
+        | Effect::GainControl { target }
+        | Effect::Fight { target }
+        | Effect::Bounce { target, .. }
+        | Effect::DealDamage { target, .. }
+        | Effect::Pump { target, .. }
+        | Effect::Attach { target, .. }
+        | Effect::Counter { target, .. }
+        | Effect::Transform { target, .. } => {
+            *target = TargetFilter::ParentTarget;
+        }
+        Effect::PutCounter { target, .. }
+        | Effect::AddCounter { target, .. }
+        | Effect::RemoveCounter { target, .. } => {
+            *target = TargetFilter::ParentTarget;
+        }
+        Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => {
+            *target = TargetFilter::ParentTarget;
+        }
+        _ => {
+            // Effects without a target field (Draw, GainLife, etc.) stay as-is.
+            // ParentTarget is handled by the sub_ability chain's target propagation.
+        }
+    }
 }
 
 fn lower_subject_predicate_ast(
@@ -1838,6 +1993,7 @@ fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         },
         TargetedImperativeAst::Fight { target } => Effect::Fight { target },
         TargetedImperativeAst::GainControl { target } => Effect::GainControl { target },
+        TargetedImperativeAst::ZoneCounterProxy(ast) => lower_zone_counter_ast(ast),
     }
 }
 
@@ -6763,6 +6919,116 @@ mod tests {
                     .any(|m| matches!(m, ContinuousModification::AddToughness { value: 1 })));
             }
             other => panic!("expected CreateEmblem, got {:?}", other),
+        }
+    }
+
+    // --- Compound targeted action splitting tests ---
+
+    #[test]
+    fn compound_tap_and_put_counter() {
+        let clause = parse_effect_clause(
+            "tap target creature an opponent controls and put a stun counter on it",
+        );
+        assert!(
+            matches!(clause.effect, Effect::Tap { .. }),
+            "primary should be Tap, got {:?}",
+            clause.effect
+        );
+        let sub = clause.sub_ability.expect("should have sub_ability");
+        assert!(
+            matches!(
+                sub.effect,
+                Effect::PutCounter {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "sub should be PutCounter with ParentTarget, got {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
+    fn compound_destroy_and_draw() {
+        let clause = parse_effect_clause("destroy target creature and draw a card");
+        assert!(
+            matches!(clause.effect, Effect::Destroy { .. }),
+            "primary should be Destroy, got {:?}",
+            clause.effect
+        );
+        let sub = clause.sub_ability.expect("should have sub_ability");
+        assert!(
+            matches!(sub.effect, Effect::Draw { .. }),
+            "sub should be Draw, got {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
+    fn compound_exile_and_gain_life() {
+        let clause = parse_effect_clause("exile target creature and gain 3 life");
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            ),
+            "primary should be ChangeZone to Exile, got {:?}",
+            clause.effect
+        );
+        let sub = clause.sub_ability.expect("should have sub_ability");
+        assert!(
+            matches!(sub.effect, Effect::GainLife { .. }),
+            "sub should be GainLife, got {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
+    fn non_compound_tap_no_sub_ability() {
+        let clause = parse_effect_clause("tap target creature");
+        assert!(matches!(clause.effect, Effect::Tap { .. }));
+        assert!(
+            clause.sub_ability.is_none(),
+            "non-compound should have no sub_ability"
+        );
+    }
+
+    #[test]
+    fn compound_with_anaphoric_it_uses_parent_target() {
+        // "exile target artifact and return it to the battlefield" => ChangeZone + ChangeZone(ParentTarget)
+        let clause = parse_effect_clause("exile target artifact and return it to the battlefield");
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            ),
+            "primary should be exile, got {:?}",
+            clause.effect
+        );
+        let sub = clause.sub_ability.expect("should have sub_ability");
+        // The "return it" should reference the parent's target
+        match &sub.effect {
+            Effect::ChangeZone { target, .. } | Effect::Bounce { target, .. } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::ParentTarget,
+                    "anaphoric 'it' should produce ParentTarget"
+                );
+            }
+            other => {
+                // May parse as Bounce or ChangeZone depending on "to the battlefield"
+                // Either way, it should have ParentTarget
+                panic!(
+                    "expected ChangeZone or Bounce with ParentTarget, got {:?}",
+                    other
+                );
+            }
         }
     }
 }
