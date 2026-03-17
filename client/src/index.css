@@ -4,19 +4,19 @@
   --card-size-scale: 1;
   --card-viewport-scale: 1;
   --art-crop-viewport-scale: 1;
-  --card-base: clamp(4rem, min(7vw, 11vh), 6.75rem);
+  --card-base: clamp(4rem, calc((7vw + 11vh) / 2), 6.75rem);
   --card-w: calc(var(--card-base) * var(--card-size-scale) * var(--card-viewport-scale));
   --card-h: calc(var(--card-w) * 1.4);
   --card-radius: 6px;
-  --art-crop-base: clamp(6rem, min(10vw, 14vh), 9.5rem);
+  --art-crop-base: clamp(6rem, calc((10vw + 14vh) / 2), 9.5rem);
   --art-crop-w: calc(var(--art-crop-base) * var(--card-size-scale) * var(--art-crop-viewport-scale));
   --art-crop-h: calc(var(--art-crop-w) * 0.75);
 }
 
 @media (min-width: 768px) {
   :root {
-    --card-base: clamp(4.25rem, min(6.4vw, 11.5vh), 7rem);
-    --art-crop-base: clamp(6.25rem, min(8.8vw, 15vh), 9.75rem);
+    --card-base: clamp(4.25rem, calc((6.4vw + 11.5vh) / 2), 7rem);
+    --art-crop-base: clamp(6.25rem, calc((8.8vw + 15vh) / 2), 9.75rem);
   }
 }
 
@@ -176,9 +176,9 @@ body {
 
 @media (min-width: 1200px) {
   :root {
-    --card-base: clamp(4.5rem, min(5.9vw, 12vh), 7.25rem);
+    --card-base: clamp(4.5rem, calc((5.9vw + 12vh) / 2), 7.25rem);
     --card-radius: 8px;
-    --art-crop-base: clamp(6.5rem, min(8.2vw, 15.5vh), 10rem);
+    --art-crop-base: clamp(6.5rem, calc((8.2vw + 15.5vh) / 2), 10rem);
   }
 }
 
