@@ -25,11 +25,11 @@ See: .planning/PROJECT.md (updated 2026-03-11)
 
 ## Current Position
 
-Phase: 31 — Plan 4 of 4+ complete
+Phase: 32 — Plan 1 of 1+ complete
 Status: Executing
-Last activity: 2026-03-17 — Phase 31 Plan 02 complete (Dynamic Quantity Resolution)
+Last activity: 2026-03-17 — Phase 32 Plan 01 complete (Compound Parsing + ParentTarget)
 
-Progress: [████████████████████] 51/51+ plans (98%)
+Progress: [████████████████████] 52/52+ plans (98%)
 
 ## Performance Metrics
 
@@ -82,6 +82,7 @@ Progress: [████████████████████] 51/51+ 
 | Phase 31 P04 | 31min | 2 tasks | 11 files |
 | Phase 31 P02 | 49min | 2 tasks | 30 files |
 | Phase 31 P03 | 20min | 2 tasks | 13 files |
+| Phase 32 P01 | 42min | 2 tasks | 19 files |
 
 ## Accumulated Context
 
@@ -263,6 +264,9 @@ Recent decisions affecting current work:
 - [31-01]: Animation parser decomposes Oracle text grammatically via composable helpers (parse_counter_minimum, parse_animation_modifications)
 - [31-01]: StaticCondition::And/Or/HasCounters added by concurrent agent; parser builds on existing infrastructure
 - Phase 32 added: Add compound targeted-action parsing and multi-object shuffle-to-library support (Floodpits Drowner class)
+- [32-01]: Used existing CountersGE instead of new HasCounter to avoid types->game cross-dependency
+- [32-01]: ParentTarget no-op in find_legal_targets; sub_ability chain propagates parent targets automatically
+- [32-01]: has_anaphoric_reference uses word-boundary matching for end-of-string pronoun detection
 
 ### Pending Todos
 
@@ -274,6 +278,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-17T16:06:50.106Z
-Stopped at: Phase 32 context gathered
-Resume file: .planning/phases/32-add-compound-targeted-action-parsing-and-multi-object-shuffle-to-library-support-floodpits-drowner-class/32-CONTEXT.md
+Last session: 2026-03-17T17:09:24Z
+Stopped at: Completed 32-01-PLAN.md
+Resume file: .planning/phases/32-add-compound-targeted-action-parsing-and-multi-object-shuffle-to-library-support-floodpits-drowner-class/32-01-SUMMARY.md
