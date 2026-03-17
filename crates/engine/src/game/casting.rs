@@ -608,9 +608,11 @@ pub fn spell_has_legal_targets(
         return true;
     }
 
-    let ability_def = match obj.abilities.first() {
+    // Only Spell-kind abilities contribute targets when casting.
+    // Activated/Database abilities are irrelevant to spell castability.
+    let ability_def = match obj.abilities.iter().find(|a| a.kind == AbilityKind::Spell) {
         Some(a) => a,
-        None => return true, // Vanilla permanent needs no targets
+        None => return true, // Permanent with no spell abilities needs no targets
     };
 
     let resolved = build_resolved_from_def(ability_def, obj.id, player);

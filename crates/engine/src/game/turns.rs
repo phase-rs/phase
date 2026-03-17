@@ -107,12 +107,10 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
-    // Clear UntilEndOfTurn flag ONLY for the player whose turn is starting.
-    // Other players' flags persist (in multiplayer, an opponent's UntilEndOfTurn
-    // clears when THEIR turn starts, not yours).
-    if let Some(&AutoPassMode::UntilEndOfTurn) = state.auto_pass.get(&state.active_player) {
-        state.auto_pass.remove(&state.active_player);
-    }
+    // Clear all UntilEndOfTurn flags — no auto-pass survives a turn boundary.
+    state
+        .auto_pass
+        .retain(|_, mode| !matches!(mode, AutoPassMode::UntilEndOfTurn));
 
     events.push(GameEvent::TurnStarted {
         player_id: state.active_player,
