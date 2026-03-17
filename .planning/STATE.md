@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
-status: completed
-stopped_at: Completed 30-04-PLAN.md (Phase 30 complete)
-last_updated: "2026-03-17T02:38:19.008Z"
-last_activity: 2026-03-16 — Phase 30 Plan 04 complete (Adventure Frontend + Integration Test)
+status: executing
+stopped_at: Completed 31-01-PLAN.md
+last_updated: "2026-03-17T02:42:23.000Z"
+last_activity: 2026-03-17 — Phase 31 Plan 01 complete (Compound Static Conditions + Animation Parser)
 progress:
   total_phases: 11
   completed_phases: 8
@@ -25,11 +25,11 @@ See: .planning/PROJECT.md (updated 2026-03-11)
 
 ## Current Position
 
-Phase: 30 — Plan 4 of 4 complete
+Phase: 31 — Plan 1 of 1 complete
 Status: Complete
-Last activity: 2026-03-16 — Phase 30 Plan 04 complete (Adventure Frontend + Integration Test)
+Last activity: 2026-03-17 — Phase 31 Plan 01 complete (Compound Static Conditions + Animation Parser)
 
-Progress: [███████████████████░] 49/51 plans (96%)
+Progress: [████████████████████] 50/51 plans (98%)
 
 ## Performance Metrics
 
@@ -253,6 +253,8 @@ Recent decisions affecting current work:
 - Phase 29 added: Support N players in engine and on board in React for various formats
 - Phase 30 added: Implement the required building blocks specified in the summary
 - Phase 31 added: Add mechanics to support Kaito, Bane of Nightmares (docs/plan-kaito-bane-of-nightmares.md)
+- [31-01]: Animation parser decomposes Oracle text grammatically via composable helpers (parse_counter_minimum, parse_animation_modifications)
+- [31-01]: StaticCondition::And/Or/HasCounters added by concurrent agent; parser builds on existing infrastructure
 
 ### Pending Todos
 
@@ -264,6 +266,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-17T01:53:16Z
-Stopped at: Completed 30-04-PLAN.md (Phase 30 complete)
-Resume file: .planning/phases/31-add-mechanics-to-support-kaito-bane-of-nightmares/31-01-PLAN.md
+Last session: 2026-03-17T02:42:23Z
+Stopped at: Completed 31-01-PLAN.md
+Resume file: N/A (phase 31 plan 01 complete)
