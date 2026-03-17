@@ -42,11 +42,11 @@
 
 ### 🚧 v1.2 Migrate Data Source & Add Tests (In Progress)
 
-**Milestone Goal:** Replace Forge's GPL card data with MTGJSON (MIT) + custom ability JSON format, add comprehensive test coverage, and relicense the project as MIT/Apache-2.0.
+**Milestone Goal:** Replace Forge's GPL card data with MTGJSON (MIT) + Oracle text parser for typed ability definitions, add comprehensive test coverage, relicense as MIT/Apache-2.0, and extend to N-player/Commander.
 
-- [x] **Phase 21: Schema & MTGJSON Foundation** - Define the typed ability JSON schema and MTGJSON card metadata loader that everything else builds on
+- [x] **Phase 21: Schema & MTGJSON Foundation** - Define typed ability enums and MTGJSON card metadata loader that everything else builds on
 - [x] **Phase 22: Test Infrastructure** - Build the GameScenario test harness and rules correctness test suite before any cards are migrated (completed 2026-03-10)
-- [x] **Phase 23: Unified Card Loader** - Wire MTGJSON metadata + ability JSON into CardDatabase and prove it end-to-end with sample cards (completed 2026-03-10)
+- [x] **Phase 23: Unified Card Loader** - Wire MTGJSON metadata + typed ability definitions into CardDatabase and prove it end-to-end with sample cards (completed 2026-03-10)
 - [x] **Phase 24: Card Migration** - Convert all engine-supported cards via automated migration tool with behavioral parity validation (completed 2026-03-10)
 - [x] **Phase 25: Forge Removal & Relicensing** - Remove all GPL data, feature-gate Forge parser, and relicense as MIT/Apache-2.0 (completed 2026-03-11)
 - [x] **Phase 26: Polish & Fix Multiplayer** - Lobby, P2P, Tauri sidecar, concede/emotes/timers, connection UX (completed 2026-03-11)
@@ -55,20 +55,20 @@
 ## Phase Details
 
 ### Phase 21: Schema & MTGJSON Foundation
-**Goal**: The engine has a validated, schema-documented ability format and can load card metadata from MTGJSON
+**Goal**: The engine has typed ability definitions and can load card metadata from MTGJSON
 **Depends on**: Nothing (first phase of v1.2)
 **Requirements**: DATA-01, DATA-02, DATA-04
 **Success Criteria** (what must be TRUE):
-  1. `cargo test` includes a passing test that loads card metadata (name, mana cost, types, P/T, colors, keywords, oracle text, layout) from MTGJSON StandardAtomic.json for a known card
-  2. A hand-authored ability JSON file for a test card deserializes into the engine's AbilityDefinition/TriggerDefinition/StaticDefinition/ReplacementDefinition types without error
-  3. Running `cargo test` produces (or validates against) a JSON Schema file that documents every field in the ability format, usable for editor autocompletion
-  4. Round-trip test: an ability JSON file serialized from Rust types and deserialized back produces identical typed structures
+  1. `cargo test` includes a passing test that loads card metadata (name, mana cost, types, P/T, colors, keywords, oracle text, layout) from MTGJSON
+  2. Typed Rust enums (Effect, TriggerMode, StaticMode, ReplacementEvent) represent all ability definitions
+  3. JSON Schema generated from Rust types documents the ability format
+  4. Round-trip test: typed ability definitions serialized and deserialized produce identical structures
 **Plans**: 5 plans
 
 Plans:
 - [x] 21-01-PLAN.md — Define typed enums (Effect, StaticMode, ReplacementEvent) and add schemars/insta deps — completed 2026-03-10
 - [x] 21-02-PLAN.md — Refactor all ~13 consumer files to use typed ability structs — completed 2026-03-10
-- [x] 21-03-PLAN.md — MTGJSON loader, ability JSON file, schema generation, and snapshot tests — completed 2026-03-10
+- [x] 21-03-PLAN.md — MTGJSON loader, typed ability definitions, schema generation, and snapshot tests — completed 2026-03-10
 - [x] 21-04-PLAN.md — Gap closure: thread typed Effect through ResolvedAbility and replace string dispatch — completed 2026-03-10
 
 ### Phase 22: Test Infrastructure
@@ -88,17 +88,17 @@ Plans:
 - [ ] 22-03-PLAN.md — Rules tests: combat damage, keyword interactions, layer system, and snapshot golden masters
 
 ### Phase 23: Unified Card Loader
-**Goal**: The engine can load cards from MTGJSON metadata + ability JSON as its primary path, proven end-to-end with sample cards
+**Goal**: The engine can load cards from MTGJSON metadata + typed ability definitions as its primary path, proven end-to-end with sample cards
 **Depends on**: Phase 21
 **Requirements**: DATA-03, MIGR-04
 **Success Criteria** (what must be TRUE):
-  1. `CardDatabase::load_json()` loads a card by merging MTGJSON metadata with an ability JSON file and produces a valid CardFace that the engine can use to play a game
+  1. `CardDatabase::load_json()` loads a card by merging MTGJSON metadata with typed ability definitions and produces a valid CardFace that the engine can use to play a game
   2. Multi-face cards (Adventure, Transform, Modal DFC) load correctly with both faces populated
   3. Loaded cards include MTGJSON scryfallOracleId and the frontend can use it for image lookups via Scryfall API
   4. A smoke test game using 5-10 JSON-loaded cards completes without errors (cards can be cast, abilities resolve, combat works)
 **Known Concerns** (from Phase 21 review):
   - Implicit abilities must be made explicit during loading: basic lands need synthesized mana abilities (e.g., Forest → `{T}: Add {G}`), equipment needs Equip activated ability from `K:Equip:N` keyword, planeswalkers need loyalty costs wired through `AbilityCost::Loyalty` instead of `remaining_params["PW_Cost"]`
-  - Cross-validation needed: test that ability JSON files match MTGJSON card data for completeness (catch missing/incomplete card definitions at test time, not runtime)
+  - Cross-validation needed: test that parsed ability definitions match MTGJSON card data for completeness (catch missing/incomplete definitions at test time, not runtime)
   - Vanilla creatures with empty ability vectors are already handled (`casting.rs` synthesizes a Spell marker) — no action needed
 **Plans**: 2 plans
 
@@ -111,13 +111,12 @@ Plans:
 **Depends on**: Phase 22, Phase 23
 **Requirements**: MIGR-01, MIGR-03, MIGR-05, TEST-04
 **Success Criteria** (what must be TRUE):
-  1. An automated migration tool converts Forge .txt card definitions to ability JSON files, and it has processed all 32,300+ Forge cards (producing ability files for every card whose mechanics have registered engine handlers)
+  1. The card data pipeline generates typed ability definitions for all 32,300+ cards whose mechanics have registered engine handlers
   2. All previously supported cards (every card that passed the old CI coverage gate) still pass when loaded via the JSON path
   3. Per-card behavioral parity tests confirm that sampled migrated cards produce identical game outcomes as the original Forge format (sampling across mechanic categories, not exhaustive per-card)
   4. CI coverage gate passes against JSON card data with 100% Standard-legal coverage preserved
 **Known Concerns** (from Phase 21 review):
-  - Migration tool must generate explicit ability JSON for implicit abilities: basic lands (mana production), equipment (Equip activated ability from keyword), planeswalkers (loyalty cost in `AbilityCost::Loyalty` not string params)
-  - Migration tool should validate generated ability JSON against MTGJSON oracle text to catch omissions
+  - Card data pipeline must generate explicit definitions for implicit abilities: basic lands (mana production), equipment (Equip activated ability from keyword), planeswalkers (loyalty cost in `AbilityCost::Loyalty` not string params)
 **Plans**: 3 plans
 
 Plans:
@@ -194,7 +193,7 @@ Phases 21 and 22 can execute in parallel. Phase 23 requires 21. Phase 24 require
   3. `remaining_params` field removed from `AbilityDefinition` — all parameters mapped to typed fields
   4. `TargetSpec` replaced with typed `TargetFilter` enum — no Forge filter strings at runtime
   5. `parser::ability::parse_ability()` gated behind `forge-compat` — zero Forge string parsing at runtime
-  6. All 32K `data/abilities/*.json` files migrated to native typed JSON schema
+  6. All card ability data uses native typed JSON schema (generated from Oracle text parser)
   7. `cargo test --all` passes and `card-data.json` uses the new format
 **Plans**: 6 plans
 
@@ -289,7 +288,7 @@ Plans:
 **Goal:** Deliver four composable engine building blocks: event-context target resolution, parser possessive references, Adventure casting subsystem (CR 715), and damage prevention disabling via GameRestriction system
 **Requirements**: BB-01, BB-02, BB-03, BB-04, BB-ALL
 **Depends on:** Phase 29
-**Plans:** 1/4 plans executed
+**Plans:** 2/4 plans executed
 
 **Execution Order:**
 Wave 1: Plan 01 (type definitions + parser patterns for all building blocks)

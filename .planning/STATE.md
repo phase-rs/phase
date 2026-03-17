@@ -10,8 +10,8 @@ progress:
   total_phases: 11
   completed_phases: 7
   total_plans: 51
-  completed_plans: 46
-  percent: 90
+  completed_plans: 47
+  percent: 92
 ---
 
 # Project State
@@ -25,11 +25,11 @@ See: .planning/PROJECT.md (updated 2026-03-11)
 
 ## Current Position
 
-Phase: 30 — Plan 1 of 4 complete
+Phase: 30 — Plan 2 of 4 complete
 Status: In Progress
-Last activity: 2026-03-16 — Phase 30 Plan 01 complete (Building Block Type Definitions)
+Last activity: 2026-03-17 — Phase 30 Plan 02 complete (Pipeline Plumbing)
 
-Progress: [████████████████░░░░] 46/51 plans (90%)
+Progress: [████████████████░░░░] 47/51 plans (92%)
 
 ## Performance Metrics
 
@@ -76,6 +76,7 @@ Progress: [████████████████░░░░] 46/51 p
 | Phase 29 P11 | 7min | 2 tasks | 12 files |
 | Phase 29 P12 | 15min | 3 tasks | 6 files |
 | Phase 30 P01 | 21min | 2 tasks | 13 files |
+| Phase 30 P02 | 32min | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -233,6 +234,10 @@ Recent decisions affecting current work:
 - [30-01]: Event-context TargetFilter variants excluded from extract_target_filter_from_effect (auto-resolve, no targeting)
 - [30-01]: TriggeringSource used for both "that source" and "that permanent" in trigger context
 - [30-01]: Effect::AddRestriction handler is no-op stub pending Plan 02 wiring
+- [30-02]: PendingTrigger carries trigger_event to preserve matched event through APNAP ordering and stack push
+- [30-02]: Prevention gating uses description-based classification rather than new field on ReplacementDefinition
+- [30-02]: "damage can't be prevented" rerouted from replacement to effect parser as Effect::AddRestriction
+- [30-02]: fill_source() pattern fills placeholder ObjectId(0) from parser with actual source at resolution time
 
 ### Roadmap Evolution
 
@@ -252,6 +257,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-17T00:26:55.495Z
-Stopped at: Phase 31 context gathered
+Last session: 2026-03-17T00:39:57Z
+Stopped at: Completed 30-02-PLAN.md
 Resume file: .planning/phases/31-add-mechanics-to-support-kaito-bane-of-nightmares-docs-plan-kaito-bane-of-nightmares-md/31-CONTEXT.md
