@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Completed 31-02-PLAN.md
-last_updated: "2026-03-17T03:11:48.279Z"
+stopped_at: Completed 31-03-PLAN.md
+last_updated: "2026-03-17T03:34:14.223Z"
 last_activity: 2026-03-17 — Phase 31 Plan 02 complete (Dynamic Quantity Resolution)
 progress:
   total_phases: 11
   completed_phases: 8
   total_plans: 56
-  completed_plans: 52
+  completed_plans: 53
   percent: 98
 ---
 
@@ -81,6 +81,7 @@ Progress: [████████████████████] 51/51+ 
 | Phase 30 P04 | 23min | 3 tasks | 6 files |
 | Phase 31 P04 | 31min | 2 tasks | 11 files |
 | Phase 31 P02 | 49min | 2 tasks | 30 files |
+| Phase 31 P03 | 20min | 2 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -250,6 +251,7 @@ Recent decisions affecting current work:
 - [Phase 31]: Ninjutsu activation flows through Priority WaitingFor with combat phase check; NinjutsuActivation WaitingFor as secondary UI path
 - [Phase 31]: [31-02]: QuantityRef extended with Variable(String) and TargetPower to subsume DamageAmount::Variable and LifeAmount::TargetPower
 - [Phase 31]: [31-02]: DamageAll retains DamageAmount type; bridge functions for DamageAmount<->QuantityExpr interop
+- [Phase 31]: [31-03]: Emblem immunity via is_emblem guard in each removal handler; command zone tracked as Vec<ObjectId>; emblem statics enter standard layer pipeline
 
 ### Roadmap Evolution
 
@@ -271,6 +273,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-17T03:11:43.409Z
-Stopped at: Completed 31-02-PLAN.md
+Last session: 2026-03-17T03:34:14.219Z
+Stopped at: Completed 31-03-PLAN.md
 Resume file: None
