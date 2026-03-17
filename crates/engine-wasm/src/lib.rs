@@ -362,7 +362,7 @@ mod tests {
     use super::*;
     use engine::game::deck_loading::create_object_from_card_face;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ContinuousModification, DamageAmount, Duration, Effect,
+        AbilityDefinition, AbilityKind, ContinuousModification, Duration, Effect, QuantityExpr,
         TargetFilter,
     };
     use engine::types::card::CardFace;
@@ -397,7 +397,7 @@ mod tests {
             abilities: vec![AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::DealDamage {
-                    amount: DamageAmount::Fixed(3),
+                    amount: QuantityExpr::Fixed { value: 3 },
                     target: TargetFilter::Any,
                 },
             )],
@@ -473,7 +473,7 @@ mod tests {
             object_id,
             PlayerId(0),
             Duration::UntilEndOfTurn,
-            TargetFilter::SpecificObject(object_id),
+            TargetFilter::SpecificObject { id: object_id },
             vec![ContinuousModification::AddKeyword {
                 keyword: Keyword::Flying,
             }],

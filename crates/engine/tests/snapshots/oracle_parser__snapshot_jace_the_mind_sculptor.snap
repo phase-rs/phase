@@ -45,7 +45,10 @@ expression: result
       "kind": "Activated",
       "effect": {
         "type": "Draw",
-        "count": 3
+        "count": {
+          "type": "Fixed",
+          "value": 3
+        }
       },
       "cost": {
         "type": "Loyalty",
@@ -58,7 +61,16 @@ expression: result
           "origin": "Hand",
           "destination": "Library",
           "target": {
-            "type": "Any"
+            "type": "Typed",
+            "card_type": null,
+            "subtype": null,
+            "controller": "You",
+            "properties": [
+              {
+                "type": "InZone",
+                "zone": "Hand"
+              }
+            ]
           }
         },
         "cost": null,

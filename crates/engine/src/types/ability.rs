@@ -692,7 +692,7 @@ pub enum TargetFilter {
     /// Matches a specific permanent by ObjectId.
     /// Used for duration-based statics that target a specific object
     /// (e.g., "that permanent loses all abilities for as long as ~").
-    SpecificObject(ObjectId),
+    SpecificObject { id: ObjectId },
     /// Matches the permanent that the trigger source (Equipment/Aura) is attached to.
     /// Used for "equipped creature" / "enchanted creature" trigger subjects.
     AttachedTo,
@@ -737,7 +737,7 @@ pub enum QuantityRef {
     /// Used for "for each [counter type] counter on ~" patterns.
     CountersOnSelf { counter_type: String },
     /// A variable reference (e.g. "X") resolved from spell payment or "that much" from prior effect.
-    Variable(String),
+    Variable { name: String },
     /// The power of the targeted permanent. Used for "equal to target's power".
     TargetPower,
 }

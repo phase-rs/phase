@@ -267,7 +267,9 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(500),
                 ability: ResolvedAbility::new(
-                    Effect::Draw { count: 1 },
+                    Effect::Draw {
+                        count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                    },
                     Vec::new(),
                     ObjectId(998),
                     PlayerId(1),

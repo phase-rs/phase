@@ -23,7 +23,7 @@ fn damage_amount_to_quantity(da: &DamageAmount) -> QuantityExpr {
     match da {
         DamageAmount::Fixed(n) => QuantityExpr::Fixed { value: *n },
         DamageAmount::Variable(s) => QuantityExpr::Ref {
-            qty: QuantityRef::Variable(s.clone()),
+            qty: QuantityRef::Variable { name: s.clone() },
         },
     }
 }
@@ -33,7 +33,7 @@ fn quantity_to_damage_amount(q: &QuantityExpr) -> DamageAmount {
     match q {
         QuantityExpr::Fixed { value } => DamageAmount::Fixed(*value),
         QuantityExpr::Ref {
-            qty: QuantityRef::Variable(s),
+            qty: QuantityRef::Variable { name: ref s },
         } => DamageAmount::Variable(s.clone()),
         _ => DamageAmount::Variable(format!("{q:?}")),
     }
@@ -577,10 +577,18 @@ fn lower_subject_predicate_ast(
 /// CR 114.1: Parse emblem creation from Oracle text.
 /// Handles both full form "you get an emblem with \"[text]\"" and
 /// subject-stripped form "get an emblem with \"[text]\"".
-fn try_parse_emblem_creation(lower: &str) -> Option<Effect> {
-    let rest = lower
-        .strip_prefix("you get an emblem with ")
-        .or_else(|| lower.strip_prefix("get an emblem with "))?;
+fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
+    // Find the prefix offset using the lowered text
+    let prefix_len = if lower.starts_with("you get an emblem with ") {
+        "you get an emblem with ".len()
+    } else if lower.starts_with("get an emblem with ") {
+        "get an emblem with ".len()
+    } else {
+        return None;
+    };
+
+    // Use original-case text for the inner content (preserves subtype capitalization)
+    let rest = &original[prefix_len..];
 
     // Extract the quoted emblem text (handles both "..." and '...' quoting)
     let inner = rest
@@ -618,7 +626,7 @@ fn parse_imperative_effect(text: &str) -> Effect {
     }
 
     // CR 114.1: "you get an emblem with "[static text]""
-    if let Some(effect) = try_parse_emblem_creation(&lower) {
+    if let Some(effect) = try_parse_emblem_creation(&lower, text) {
         return effect;
     }
 
@@ -5738,7 +5746,7 @@ mod tests {
             e,
             Effect::DealDamage {
                 amount: QuantityExpr::Ref {
-                    qty: QuantityRef::Variable(ref value)
+                    qty: QuantityRef::Variable { name: ref value }
                 },
                 ..
             } if value == "that much"
@@ -5752,7 +5760,7 @@ mod tests {
             e,
             Effect::DealDamage {
                 amount: QuantityExpr::Ref {
-                    qty: QuantityRef::Variable(ref value)
+                    qty: QuantityRef::Variable { name: ref value }
                 },
                 ..
             } if value == "its power"

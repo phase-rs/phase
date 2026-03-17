@@ -57,7 +57,7 @@ fn register_transient_effect(
                     ability.source_id,
                     ability.controller,
                     duration.clone(),
-                    TargetFilter::SpecificObject(*obj_id),
+                    TargetFilter::SpecificObject { id: *obj_id },
                     static_def.modifications.clone(),
                     static_def.condition.clone(),
                 );
@@ -73,7 +73,7 @@ fn register_transient_effect(
                 ability.source_id,
                 ability.controller,
                 duration.clone(),
-                TargetFilter::SpecificObject(ability.source_id),
+                TargetFilter::SpecificObject { id: ability.source_id },
                 static_def.modifications.clone(),
                 static_def.condition.clone(),
             );
@@ -100,7 +100,7 @@ fn register_transient_effect(
                     ability.source_id,
                     ability.controller,
                     duration.clone(),
-                    TargetFilter::SpecificObject(obj_id),
+                    TargetFilter::SpecificObject { id: obj_id },
                     static_def.modifications.clone(),
                     static_def.condition.clone(),
                 );
@@ -157,7 +157,7 @@ mod tests {
         assert_eq!(state.transient_continuous_effects.len(), 1);
         let tce = &state.transient_continuous_effects[0];
         assert_eq!(tce.source_id, source);
-        assert_eq!(tce.affected, TargetFilter::SpecificObject(source));
+        assert_eq!(tce.affected, TargetFilter::SpecificObject { id: source });
         assert_eq!(tce.duration, Duration::UntilEndOfTurn);
         assert_eq!(
             tce.modifications,
@@ -234,7 +234,7 @@ mod tests {
         assert_eq!(state.transient_continuous_effects.len(), 1);
         assert_eq!(
             state.transient_continuous_effects[0].affected,
-            TargetFilter::SpecificObject(your_creature)
+            TargetFilter::SpecificObject { id: your_creature }
         );
     }
 
@@ -302,7 +302,7 @@ mod tests {
         assert_eq!(state.transient_continuous_effects.len(), 1);
         assert_eq!(
             state.transient_continuous_effects[0].affected,
-            TargetFilter::SpecificObject(target_creature)
+            TargetFilter::SpecificObject { id: target_creature }
         );
     }
 }

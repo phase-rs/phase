@@ -154,6 +154,9 @@ pub fn parse_oracle_text(
 
         let lower = line.to_lowercase();
 
+        // Normalize card self-references for static parsing (replace card name with ~)
+        let static_line = normalize_self_refs_for_static(&line, card_name);
+
         // Priority 2: "Enchant {filter}" — skip (handled externally)
         if lower.starts_with("enchant ") && !lower.starts_with("enchanted ") {
             i += 1;
@@ -176,7 +179,7 @@ pub fn parse_oracle_text(
         }
 
         if is_granted_static_line(&lower) {
-            if let Some(static_def) = parse_static_line(&line) {
+            if let Some(static_def) = parse_static_line(&static_line) {
                 result.statics.push(static_def);
                 i += 1;
                 continue;
@@ -256,7 +259,7 @@ pub fn parse_oracle_text(
 
         // Priority 7: Static/continuous patterns
         if is_static_pattern(&lower) {
-            if let Some(static_def) = parse_static_line(&line) {
+            if let Some(static_def) = parse_static_line(&static_line) {
                 result.statics.push(static_def);
                 i += 1;
                 continue;
@@ -357,7 +360,8 @@ pub fn parse_oracle_text(
             }
             // Try as static
             if is_static_pattern(&effect_lower) {
-                if let Some(static_def) = parse_static_line(&effect_text) {
+                let effect_static = normalize_self_refs_for_static(&effect_text, card_name);
+                if let Some(static_def) = parse_static_line(&effect_static) {
                     result.statics.push(static_def);
                     i += 1;
                     continue;
@@ -1924,6 +1928,37 @@ fn parse_solve_condition(text: &str) -> SolveCondition {
     SolveCondition::Text {
         description: text.to_string(),
     }
+}
+
+/// Normalize self-references in a line for static ability parsing.
+///
+/// Replaces the card name (and legendary short name before comma) with `~`
+/// so that `parse_static_line` can match patterns like "~ has".
+fn normalize_self_refs_for_static(text: &str, card_name: &str) -> String {
+    let mut result = text.to_string();
+    // Replace full card name (case-insensitive)
+    let lower_text = result.to_lowercase();
+    let lower_name = card_name.to_lowercase();
+    if let Some(pos) = lower_text.find(&lower_name) {
+        result.replace_range(pos..pos + card_name.len(), "~");
+    }
+    // Legendary short name: "Kaito, Bane of Nightmares" → also match "Kaito"
+    if let Some(comma_pos) = card_name.find(", ") {
+        let short_name = &card_name[..comma_pos];
+        let lower_result = result.to_lowercase();
+        let lower_short = short_name.to_lowercase();
+        if let Some(pos) = lower_result.find(&lower_short) {
+            // Only replace if it wasn't already replaced by the full name
+            if result[pos..].starts_with(short_name) || result[pos..].starts_with(&lower_short) {
+                result.replace_range(pos..pos + short_name.len(), "~");
+            }
+        }
+    }
+    // Also replace "this creature", "this permanent", etc.
+    for phrase in &["this creature", "this land", "this permanent", "this enchantment"] {
+        result = result.replace(phrase, "~");
+    }
+    result
 }
 
 #[cfg(test)]

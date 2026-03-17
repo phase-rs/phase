@@ -2,7 +2,7 @@
 use super::*;
 
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, DamageAmount, Effect,
+    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, Effect, QuantityExpr,
     TargetFilter, TargetRef,
 };
 use engine::types::game_state::StackEntryKind;
@@ -46,7 +46,7 @@ fn optional_cost_paid_sets_flag() {
         .add_creature_to_hand(P0, "Blight Bolt", 0, 0)
         .as_instant()
         .with_ability(Effect::DealDamage {
-            amount: DamageAmount::Fixed(3),
+            amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
         })
         .with_additional_cost(AdditionalCost::Optional(AbilityCost::Blight { count: 1 }))
@@ -103,7 +103,7 @@ fn optional_cost_skipped_clears_flag() {
         .add_creature_to_hand(P0, "Blight Bolt", 0, 0)
         .as_instant()
         .with_ability(Effect::DealDamage {
-            amount: DamageAmount::Fixed(3),
+            amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
         })
         .with_additional_cost(AdditionalCost::Optional(AbilityCost::Blight { count: 1 }))
@@ -175,7 +175,7 @@ fn cancel_cast_at_optional_cost_choice() {
         .add_creature_to_hand(P0, "Blight Bolt", 0, 0)
         .as_instant()
         .with_ability(Effect::DealDamage {
-            amount: DamageAmount::Fixed(3),
+            amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
         })
         .with_additional_cost(AdditionalCost::Optional(AbilityCost::Blight { count: 1 }))

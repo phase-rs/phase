@@ -109,7 +109,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::TriggeringSpellOwner => "triggering spell's owner".into(),
         TargetFilter::TriggeringPlayer => "triggering player".into(),
         TargetFilter::TriggeringSource => "triggering source".into(),
-        TargetFilter::SpecificObject(id) => format!("object #{}", id.0),
+        TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
         TargetFilter::TrackedSet { id } => format!("tracked set #{}", id.0),
         TargetFilter::Not { filter } => format!("not {}", fmt_target(filter)),
         TargetFilter::Or { filters } => filters

@@ -67,7 +67,7 @@ mod tests {
     use engine::game::deck_loading::DeckEntry;
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, DamageAmount, Effect, TargetFilter,
+        AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter,
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::CardType;
@@ -89,7 +89,7 @@ mod tests {
         state.objects.get_mut(&id0).unwrap().abilities = vec![AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::DealDamage {
-                amount: DamageAmount::Fixed(3),
+                amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
             },
         )];

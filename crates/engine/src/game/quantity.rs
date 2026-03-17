@@ -78,7 +78,7 @@ fn resolve_ref(
                 obj.counters.get(&ct).copied().unwrap_or(0) as i32
             })
             .unwrap_or(0),
-        QuantityRef::Variable(_) => {
+        QuantityRef::Variable { .. } => {
             // Variable amounts (X) are resolved during mana payment, not here.
             // Default to 0 for unresolved variables.
             0

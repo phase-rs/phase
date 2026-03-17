@@ -25,7 +25,7 @@ pub fn find_legal_targets(
     }
 
     // SpecificObject is runtime-bound (not used for target selection)
-    if matches!(filter, TargetFilter::SpecificObject(_)) {
+    if matches!(filter, TargetFilter::SpecificObject { .. }) {
         return targets;
     }
 

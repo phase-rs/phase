@@ -11,14 +11,14 @@ use engine::game::game_object::BackFaceData;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, CastingPermission, DamageAmount, Effect, GameRestriction,
+    AbilityDefinition, AbilityKind, CastingPermission, Effect, GameRestriction, QuantityExpr,
     RestrictionExpiry, TargetFilter, TargetRef, TriggerDefinition,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaCostShard, ManaColor, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::triggers::TriggerMode;
@@ -75,7 +75,7 @@ fn stomp_back_face() -> BackFaceData {
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::DealDamage {
-                    amount: DamageAmount::Fixed(2),
+                    amount: QuantityExpr::Fixed { value: 2 },
                     target: TargetFilter::Any,
                 },
             ),
@@ -97,7 +97,7 @@ fn bonecrusher_trigger() -> TriggerDefinition {
     TriggerDefinition::new(TriggerMode::BecomesTarget).execute(AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::DealDamage {
-            amount: DamageAmount::Fixed(2),
+            amount: QuantityExpr::Fixed { value: 2 },
             target: TargetFilter::TriggeringSpellController,
         },
     ))
@@ -354,9 +354,7 @@ fn bonecrusher_becomes_target_trigger() {
     scenario.at_phase(Phase::PreCombatMain);
 
     // Put Bonecrusher Giant on P0's battlefield
-    let giant_id = scenario
-        .add_creature(P0, "Bonecrusher Giant", 4, 3)
-        .id();
+    let giant_id = scenario.add_creature(P0, "Bonecrusher Giant", 4, 3).id();
 
     // P1 has a Lightning Bolt targeting the Giant
     let bolt_id = scenario.add_bolt_to_hand(P1);
@@ -544,7 +542,11 @@ fn bonecrusher_full_flow() {
 
     // Verify: card in exile with AdventureCreature permission
     let obj = runner.state().objects.get(&obj_id).unwrap();
-    assert_eq!(obj.zone, Zone::Exile, "After Stomp resolves: should be in exile");
+    assert_eq!(
+        obj.zone,
+        Zone::Exile,
+        "After Stomp resolves: should be in exile"
+    );
     assert!(
         obj.casting_permissions
             .contains(&CastingPermission::AdventureCreature),

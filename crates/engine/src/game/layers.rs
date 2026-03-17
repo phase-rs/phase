@@ -1164,7 +1164,7 @@ mod tests {
             let mut card = scenario.add_creature(PlayerId(0), "Suppressor", 1, 1);
             card.with_static_definition(
                 StaticDefinition::continuous()
-                    .affected(TargetFilter::SpecificObject(target))
+                    .affected(TargetFilter::SpecificObject { id: target })
                     .modifications(vec![ContinuousModification::RemoveAllAbilities]),
             );
         }
@@ -1202,7 +1202,7 @@ mod tests {
             let mut card = scenario.add_creature(PlayerId(0), "Suppressor", 1, 1);
             card.with_static_definition(
                 StaticDefinition::continuous()
-                    .affected(TargetFilter::SpecificObject(target))
+                    .affected(TargetFilter::SpecificObject { id: target })
                     .modifications(vec![ContinuousModification::RemoveAllAbilities]),
             );
             card.id()
@@ -1286,7 +1286,7 @@ mod tests {
             .static_definitions
             .push(
                 StaticDefinition::continuous()
-                    .affected(TargetFilter::SpecificObject(bear))
+                    .affected(TargetFilter::SpecificObject { id: bear })
                     .modifications(vec![ContinuousModification::SetColor {
                         colors: vec![ManaColor::Blue],
                     }]),

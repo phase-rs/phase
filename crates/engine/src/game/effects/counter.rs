@@ -120,7 +120,7 @@ fn apply_source_static(
         counter_source_id,
         controller,
         Duration::UntilHostLeavesPlay,
-        TargetFilter::SpecificObject(source_permanent_id),
+        TargetFilter::SpecificObject { id: source_permanent_id },
         static_def.modifications.clone(),
         static_def.condition.clone(),
     );
@@ -308,7 +308,7 @@ mod tests {
         assert_eq!(tce.source_id, tidebinder, "source should be Tidebinder");
         assert_eq!(
             tce.affected,
-            TargetFilter::SpecificObject(source_permanent),
+            TargetFilter::SpecificObject { id: source_permanent },
             "should target the source permanent"
         );
         assert_eq!(
