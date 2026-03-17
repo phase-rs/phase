@@ -1,3 +1,5 @@
+cargo-features = ["codegen-backend"]
+
 [workspace]
 resolver = "2"
 members = ["crates/*", "client/src-tauri"]
@@ -10,7 +12,18 @@ serde = { version = "1", features = ["derive"] }
 rpds = { version = "1.2" }
 
 [profile.dev]
+opt-level = 0
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+codegen-backend = "cranelift"
+
+[profile.dev.build-override]
+codegen-backend = "llvm"
+
+[profile.wasm-dev]
+inherits = "dev"
 opt-level = 1
+codegen-backend = "llvm"
 
 [profile.release]
 opt-level = 'z'

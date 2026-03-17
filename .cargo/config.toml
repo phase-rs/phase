@@ -1,7 +1,7 @@
 [alias]
-wasm = "build --package engine-wasm --target wasm32-unknown-unknown"
+wasm = "build --package engine-wasm --target wasm32-unknown-unknown --profile wasm-dev"
 wasm-release = "build --package engine-wasm --target wasm32-unknown-unknown --release"
-test-all = "nextest run --all"
+test-all = "nextest run --workspace --exclude phase-tauri"
 clippy-strict = "clippy --all-targets -- -D warnings"
 export-cards = "run --release --bin card-data-export --"
 export-json = "run --release --bin json-export --"

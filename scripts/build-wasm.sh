@@ -2,7 +2,7 @@
 set -euo pipefail
 
 WASM_OUT="client/src/wasm"
-PROFILE="${1:-release}"
+PROFILE="${1:-wasm-dev}"
 
 echo "Building WASM (profile: $PROFILE)..."
 
@@ -10,7 +10,7 @@ echo "Building WASM (profile: $PROFILE)..."
 if [ "$PROFILE" = "release" ]; then
   cargo build --package engine-wasm --target wasm32-unknown-unknown --release
 else
-  cargo build --package engine-wasm --target wasm32-unknown-unknown
+  cargo build --package engine-wasm --target wasm32-unknown-unknown --profile "$PROFILE"
 fi
 
 # Step 2: Generate JS/TS bindings
