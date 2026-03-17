@@ -1094,4 +1094,28 @@ mod tests {
             )
         }));
     }
+
+    #[test]
+    fn ai_adventure_generates_face_choice() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::AdventureCastChoice {
+            player: PlayerId(0),
+            object_id: crate::types::identifiers::ObjectId(1),
+            card_id: CardId(70),
+        };
+
+        let actions = candidate_actions(&state);
+        assert_eq!(
+            actions.len(),
+            2,
+            "Should generate creature and adventure face options"
+        );
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a.action, GameAction::ChooseAdventureFace { creature: true })));
+        assert!(actions.iter().any(|a| matches!(
+            a.action,
+            GameAction::ChooseAdventureFace { creature: false }
+        )));
+    }
 }
