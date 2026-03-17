@@ -343,7 +343,8 @@ export type WaitingFor =
   | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown } }
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
   | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; pending_cast: PendingCast } }
-  | { type: "AdventureCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } };
+  | { type: "AdventureCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
+  | { type: "NinjutsuActivation"; data: { player: PlayerId; ninjutsu_cards: CardId[]; unblocked_attackers: ObjectId[] } };
 
 // ── Action Result ────────────────────────────────────────────────────────
 
@@ -377,7 +378,8 @@ export type GameAction =
   | { type: "ChooseOption"; data: { choice: string } }
   | { type: "SelectModes"; data: { indices: number[] } }
   | { type: "DecideOptionalCost"; data: { pay: boolean } }
-  | { type: "ChooseAdventureFace"; data: { creature: boolean } };
+  | { type: "ChooseAdventureFace"; data: { creature: boolean } }
+  | { type: "ActivateNinjutsu"; data: { ninjutsu_card_id: CardId; attacker_to_return: ObjectId } };
 
 // ── Game Events (discriminated union, tag="type", content="data") ────────
 
