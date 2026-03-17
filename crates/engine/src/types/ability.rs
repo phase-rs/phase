@@ -727,6 +727,39 @@ pub enum QuantityRef {
     /// Controller's life total minus the format's starting life total.
     /// Used for "N or more life more than your starting life total" conditions.
     LifeAboveStarting,
+    /// Count of objects on the battlefield matching a filter.
+    /// Used for "for each creature you control" and similar patterns.
+    ObjectCount {
+        filter: TargetFilter,
+    },
+    /// Count of players matching a player-level filter.
+    /// Used for "for each opponent who lost life this turn" and similar patterns.
+    PlayerCount {
+        filter: PlayerFilter,
+    },
+    /// Count of counters of a given type on the source object.
+    /// Used for "for each [counter type] counter on ~" patterns.
+    CountersOnSelf {
+        counter_type: String,
+    },
+    /// A variable reference (e.g. "X") resolved from spell payment or "that much" from prior effect.
+    Variable(String),
+    /// The power of the targeted permanent. Used for "equal to target's power".
+    TargetPower,
+}
+
+/// A filter matching players by game-state conditions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum PlayerFilter {
+    /// All opponents of the controller.
+    Opponent,
+    /// Each opponent who lost life this turn (life_lost_this_turn > 0).
+    OpponentLostLife,
+    /// Each opponent who gained life this turn (life_gained_this_turn > 0).
+    OpponentGainedLife,
+    /// All players.
+    All,
 }
 
 /// An expression that produces an integer for quantity comparisons.
@@ -801,6 +834,19 @@ pub enum StaticCondition {
         lhs: QuantityExpr,
         comparator: Comparator,
         rhs: QuantityExpr,
+    },
+    /// True when ALL sub-conditions are satisfied.
+    And {
+        conditions: Vec<StaticCondition>,
+    },
+    /// True when ANY sub-condition is satisfied.
+    Or {
+        conditions: Vec<StaticCondition>,
+    },
+    /// CR 122.1: True when the source object has at least `minimum` counters of the given type.
+    HasCounters {
+        counter_type: String,
+        minimum: u32,
     },
     /// Condition text that the parser could not yet decompose into a typed variant.
     /// Evaluated permissively (always true) so the static effect still applies.
@@ -879,6 +925,11 @@ pub enum AbilityCost {
     },
     Composite {
         costs: Vec<AbilityCost>,
+    },
+    /// CR 702.49a: Ninjutsu compound cost — pay mana and return an unblocked attacker.
+    /// The return-attacker part is implicit in the ActivateNinjutsu action (player selects which).
+    Ninjutsu {
+        mana_cost: ManaCost,
     },
     Unimplemented {
         description: String,

@@ -26,6 +26,7 @@ pub mod planeswalker;
 pub mod players;
 pub mod printed_cards;
 pub mod priority;
+pub mod quantity;
 pub mod replacement;
 pub mod restrictions;
 pub mod sba;

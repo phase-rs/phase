@@ -5,8 +5,8 @@ use crate::game::devotion::count_devotion;
 use crate::game::filter::matches_target_filter;
 use crate::game::game_object::CounterType;
 use crate::types::ability::{
-    ContinuousModification, Duration, DynamicPTValue, QuantityExpr, QuantityRef, StaticCondition,
-    TargetFilter, TypedFilter,
+    ContinuousModification, Duration, DynamicPTValue, QuantityExpr, StaticCondition, TargetFilter,
+    TypedFilter,
 };
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -89,23 +89,42 @@ fn evaluate_condition(
             rhs,
         } => {
             let resolve = |expr: &QuantityExpr| -> i32 {
-                let player = state.players.iter().find(|p| p.id == controller);
-                match expr {
-                    QuantityExpr::Fixed { value: n } => *n,
-                    QuantityExpr::Ref { qty } => match qty {
-                        QuantityRef::HandSize => player.map_or(0, |p| p.hand.len() as i32),
-                        QuantityRef::LifeTotal => player.map_or(0, |p| p.life),
-                        QuantityRef::GraveyardSize => {
-                            player.map_or(0, |p| p.graveyard.len() as i32)
-                        }
-                        QuantityRef::LifeAboveStarting => {
-                            player.map_or(0, |p| p.life - state.format_config.starting_life)
-                        }
-                    },
-                }
+                crate::game::quantity::resolve_quantity(state, expr, controller, source_id)
             };
             comparator.clone().evaluate(resolve(lhs), resolve(rhs))
         }
+        StaticCondition::And { conditions } => conditions
+            .iter()
+            .all(|c| evaluate_condition(state, c, controller, source_id)),
+        StaticCondition::Or { conditions } => conditions
+            .iter()
+            .any(|c| evaluate_condition(state, c, controller, source_id)),
+        // CR 122.1: Check counters on the source object
+        StaticCondition::HasCounters {
+            counter_type,
+            minimum,
+        } => state
+            .objects
+            .get(&source_id)
+            .map(|obj| {
+                let count = match counter_type.as_str() {
+                    "+1/+1" | "plus1plus1" => {
+                        obj.counters.get(&CounterType::Plus1Plus1).copied().unwrap_or(0)
+                    }
+                    "-1/-1" | "minus1minus1" => {
+                        obj.counters.get(&CounterType::Minus1Minus1).copied().unwrap_or(0)
+                    }
+                    "loyalty" => obj.counters.get(&CounterType::Loyalty).copied().unwrap_or(0),
+                    "stun" => obj.counters.get(&CounterType::Stun).copied().unwrap_or(0),
+                    other => obj
+                        .counters
+                        .get(&CounterType::Generic(other.to_string()))
+                        .copied()
+                        .unwrap_or(0),
+                };
+                count >= *minimum
+            })
+            .unwrap_or(false),
         StaticCondition::Unrecognized { .. } => true,
         StaticCondition::DuringYourTurn => state.active_player == controller,
         StaticCondition::None => true,
@@ -577,7 +596,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-        Effect, FilterProp, GainLifePlayer, LifeAmount, StaticDefinition, TargetFilter, TypeFilter,
+        Effect, FilterProp, GainLifePlayer, LifeAmount, QuantityRef, StaticDefinition,
+        TargetFilter, TypeFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
@@ -1614,6 +1634,281 @@ mod tests {
             obj.toughness,
             Some(4),
             "Creature + Instant + Artifact → toughness 4"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // StaticCondition::And / Or / HasCounters tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn has_counters_true_when_loyalty_present() {
+        let mut state = setup();
+        let id = make_creature(&mut state, "Kaito", 0, 0, PlayerId(0));
+        {
+            use crate::game::game_object::CounterType;
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.counters.insert(CounterType::Loyalty, 3);
+        }
+        let cond = StaticCondition::HasCounters {
+            counter_type: "loyalty".to_string(),
+            minimum: 1,
+        };
+        assert!(evaluate_condition(&state, &cond, PlayerId(0), id));
+    }
+
+    #[test]
+    fn has_counters_false_when_zero_loyalty() {
+        let mut state = setup();
+        let id = make_creature(&mut state, "Kaito", 0, 0, PlayerId(0));
+        let cond = StaticCondition::HasCounters {
+            counter_type: "loyalty".to_string(),
+            minimum: 1,
+        };
+        assert!(!evaluate_condition(&state, &cond, PlayerId(0), id));
+    }
+
+    #[test]
+    fn compound_and_true_when_both_conditions_met() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        let id = make_creature(&mut state, "Kaito", 0, 0, PlayerId(0));
+        {
+            use crate::game::game_object::CounterType;
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .counters
+                .insert(CounterType::Loyalty, 3);
+        }
+        let cond = StaticCondition::And {
+            conditions: vec![
+                StaticCondition::DuringYourTurn,
+                StaticCondition::HasCounters {
+                    counter_type: "loyalty".to_string(),
+                    minimum: 1,
+                },
+            ],
+        };
+        assert!(evaluate_condition(&state, &cond, PlayerId(0), id));
+    }
+
+    #[test]
+    fn compound_and_false_when_not_your_turn() {
+        let mut state = setup();
+        state.active_player = PlayerId(1); // opponent's turn
+        let id = make_creature(&mut state, "Kaito", 0, 0, PlayerId(0));
+        {
+            use crate::game::game_object::CounterType;
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .counters
+                .insert(CounterType::Loyalty, 3);
+        }
+        let cond = StaticCondition::And {
+            conditions: vec![
+                StaticCondition::DuringYourTurn,
+                StaticCondition::HasCounters {
+                    counter_type: "loyalty".to_string(),
+                    minimum: 1,
+                },
+            ],
+        };
+        assert!(!evaluate_condition(&state, &cond, PlayerId(0), id));
+    }
+
+    #[test]
+    fn compound_and_false_when_no_counters() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        let id = make_creature(&mut state, "Kaito", 0, 0, PlayerId(0));
+        // No loyalty counters added
+        let cond = StaticCondition::And {
+            conditions: vec![
+                StaticCondition::DuringYourTurn,
+                StaticCondition::HasCounters {
+                    counter_type: "loyalty".to_string(),
+                    minimum: 1,
+                },
+            ],
+        };
+        assert!(!evaluate_condition(&state, &cond, PlayerId(0), id));
+    }
+
+    #[test]
+    fn compound_or_true_when_only_one_condition_met() {
+        let mut state = setup();
+        state.active_player = PlayerId(1); // opponent's turn
+        let id = make_creature(&mut state, "Kaito", 0, 0, PlayerId(0));
+        {
+            use crate::game::game_object::CounterType;
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .counters
+                .insert(CounterType::Loyalty, 3);
+        }
+        // Not your turn, but has loyalty counters → Or should be true
+        let cond = StaticCondition::Or {
+            conditions: vec![
+                StaticCondition::DuringYourTurn,
+                StaticCondition::HasCounters {
+                    counter_type: "loyalty".to_string(),
+                    minimum: 1,
+                },
+            ],
+        };
+        assert!(evaluate_condition(&state, &cond, PlayerId(0), id));
+    }
+
+    #[test]
+    fn compound_condition_animates_planeswalker_as_creature() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // Create a planeswalker-like object
+        let id = make_creature(&mut state, "Kaito", 0, 0, PlayerId(0));
+        {
+            use crate::game::game_object::CounterType;
+            let obj = state.objects.get_mut(&id).unwrap();
+            // Start as planeswalker, not creature
+            obj.card_types.core_types.clear();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = None;
+            obj.toughness = None;
+            obj.base_power = None;
+            obj.base_toughness = None;
+            obj.counters.insert(CounterType::Loyalty, 3);
+        }
+
+        // Add compound static: during your turn + has loyalty counters → animate as 3/4 Ninja creature with hexproof
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .condition(StaticCondition::And {
+                conditions: vec![
+                    StaticCondition::DuringYourTurn,
+                    StaticCondition::HasCounters {
+                        counter_type: "loyalty".to_string(),
+                        minimum: 1,
+                    },
+                ],
+            })
+            .modifications(vec![
+                ContinuousModification::SetPower { value: 3 },
+                ContinuousModification::SetToughness { value: 4 },
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature,
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Ninja".to_string(),
+                },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Hexproof,
+                },
+            ]);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&id).unwrap();
+        assert_eq!(obj.power, Some(3), "animated power should be 3");
+        assert_eq!(obj.toughness, Some(4), "animated toughness should be 4");
+        assert!(
+            obj.card_types.core_types.contains(&CoreType::Creature),
+            "should have Creature type"
+        );
+        assert!(
+            obj.card_types.core_types.contains(&CoreType::Planeswalker),
+            "should still be Planeswalker"
+        );
+        assert!(
+            obj.card_types.subtypes.contains(&"Ninja".to_string()),
+            "should have Ninja subtype"
+        );
+        assert!(
+            obj.keywords.contains(&Keyword::Hexproof),
+            "should have hexproof"
+        );
+    }
+
+    #[test]
+    fn compound_condition_does_not_animate_on_opponents_turn() {
+        let mut state = setup();
+        state.active_player = PlayerId(1); // opponent's turn
+
+        let id = make_creature(&mut state, "Kaito", 0, 0, PlayerId(0));
+        {
+            use crate::game::game_object::CounterType;
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.clear();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = None;
+            obj.toughness = None;
+            obj.base_power = None;
+            obj.base_toughness = None;
+            obj.counters.insert(CounterType::Loyalty, 3);
+        }
+
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .condition(StaticCondition::And {
+                conditions: vec![
+                    StaticCondition::DuringYourTurn,
+                    StaticCondition::HasCounters {
+                        counter_type: "loyalty".to_string(),
+                        minimum: 1,
+                    },
+                ],
+            })
+            .modifications(vec![
+                ContinuousModification::SetPower { value: 3 },
+                ContinuousModification::SetToughness { value: 4 },
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature,
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Ninja".to_string(),
+                },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Hexproof,
+                },
+            ]);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&id).unwrap();
+        // Should NOT be animated on opponent's turn
+        assert_eq!(obj.power, None, "should not have power on opponent's turn");
+        assert_eq!(
+            obj.toughness, None,
+            "should not have toughness on opponent's turn"
+        );
+        assert!(
+            !obj.card_types.core_types.contains(&CoreType::Creature),
+            "should not have Creature type on opponent's turn"
+        );
+        assert!(
+            !obj.keywords.contains(&Keyword::Hexproof),
+            "should not have hexproof on opponent's turn"
         );
     }
 }
