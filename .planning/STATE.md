@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Completed 30-01-PLAN.md
-last_updated: "2026-03-17T00:06:30.013Z"
+stopped_at: Phase 31 context gathered
+last_updated: "2026-03-17T00:26:55.499Z"
 last_activity: 2026-03-16 — Phase 30 Plan 01 complete (Building Block Type Definitions)
 progress:
   total_phases: 11
@@ -252,6 +252,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-17T00:06:30.009Z
-Stopped at: Completed 30-01-PLAN.md
-Resume file: None
+Last session: 2026-03-17T00:26:55.495Z
+Stopped at: Phase 31 context gathered
+Resume file: .planning/phases/31-add-mechanics-to-support-kaito-bane-of-nightmares-docs-plan-kaito-bane-of-nightmares-md/31-CONTEXT.md
