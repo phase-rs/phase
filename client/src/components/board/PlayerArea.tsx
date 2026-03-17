@@ -9,6 +9,7 @@ import { GroupedPermanentDisplay } from "./GroupedPermanent.tsx";
 import { CompactStrip } from "./CompactStrip.tsx";
 import { CommanderDisplay } from "./CommanderDisplay.tsx";
 import { CommanderDamage } from "./CommanderDamage.tsx";
+import { CommandZone } from "../zone/CommandZone.tsx";
 
 /** Scale for land column (left) */
 const LAND_SCALE = 0.9;
@@ -165,6 +166,10 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
           <CommanderDamage playerId={playerId} />
         </div>
       )}
+      {/* Emblem display (shown in any format when emblems exist) */}
+      <div className="absolute left-2 bottom-2 z-20">
+        <CommandZone playerId={playerId} />
+      </div>
       {/* Eliminated badge */}
       {isEliminated && (
         <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">

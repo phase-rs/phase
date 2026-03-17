@@ -200,6 +200,8 @@ export interface GameObject {
   devotion?: number;
   available_mana_colors?: ManaColor[];
   casting_permissions?: CastingPermission[];
+  is_emblem?: boolean;
+  is_commander?: boolean;
   back_face?: {
     name: string;
     power: number | null;
@@ -467,6 +469,7 @@ export interface GameState {
   sideboard_submitted?: PlayerId[];
   revealed_cards?: ObjectId[];
   restrictions?: GameRestriction[];
+  command_zone?: ObjectId[];
 }
 
 // ── Adapter Interface ────────────────────────────────────────────────────
