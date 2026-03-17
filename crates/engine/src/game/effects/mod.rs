@@ -1,7 +1,9 @@
 use crate::types::ability::{AbilityCondition, AbilityKind, Effect, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::identifiers::{ObjectId, TrackedSetId};
 
+pub mod add_restriction;
 pub mod animate;
 pub mod attach;
 pub mod bounce;
@@ -93,10 +95,7 @@ pub fn resolve_effect(
         Effect::Suspect { .. } => suspect::resolve(state, ability, events),
         Effect::SolveCase => solve_case::resolve(state, ability, events),
         Effect::CreateDelayedTrigger { .. } => delayed_trigger::resolve(state, ability, events),
-        Effect::AddRestriction { .. } => {
-            // TODO(Plan 02): wire restriction application to GameState.restrictions
-            Ok(())
-        }
+        Effect::AddRestriction { .. } => add_restriction::resolve(state, ability, events),
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);
@@ -109,6 +108,19 @@ pub fn resolve_effect(
 /// `Unimplemented` effects are the only ones without handlers.
 pub fn is_known_effect(effect: &Effect) -> bool {
     !matches!(effect, Effect::Unimplemented { .. })
+}
+
+/// CR 603.7: Check if the next sub_ability is a delayed trigger that needs tracked set recording.
+fn next_sub_needs_tracked_set(ability: &ResolvedAbility) -> bool {
+    ability.sub_ability.as_ref().is_some_and(|sub| {
+        matches!(
+            &sub.effect,
+            Effect::CreateDelayedTrigger {
+                uses_tracked_set: true,
+                ..
+            }
+        )
+    })
 }
 
 /// Resolve an ability and follow its sub_ability chain using typed nested structs.
@@ -129,9 +141,42 @@ pub fn resolve_ability_chain(
         return Ok(());
     }
 
+    // CR 603.7: Snapshot event count so we can detect objects moved by this effect.
+    let events_before = events.len();
+
     // Skip no-op unimplemented effects
     if !matches!(ability.effect, Effect::Unimplemented { .. }) {
         let _ = resolve_effect(state, ability, events);
+    }
+
+    // CR 603.7: Record moved objects as a tracked set for delayed trigger pronouns.
+    // Scans ZoneChanged events emitted by the just-resolved effect and stores the
+    // affected object IDs so the downstream CreateDelayedTrigger can bind them.
+    // Filters by the effect's destination zone to exclude commander redirections
+    // (CR 903.9a: commanders redirected to command zone should not be tracked).
+    if next_sub_needs_tracked_set(ability) {
+        let dest_zone = match &ability.effect {
+            Effect::ChangeZone { destination, .. } | Effect::ChangeZoneAll { destination, .. } => {
+                Some(*destination)
+            }
+            _ => None,
+        };
+        let moved_ids: Vec<ObjectId> = events[events_before..]
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::ZoneChanged { object_id, to, .. }
+                    if dest_zone.is_none_or(|d| *to == d) =>
+                {
+                    Some(*object_id)
+                }
+                _ => None,
+            })
+            .collect();
+        if !moved_ids.is_empty() {
+            let set_id = TrackedSetId(state.next_tracked_set_id);
+            state.next_tracked_set_id += 1;
+            state.tracked_object_sets.insert(set_id, moved_ids);
+        }
     }
 
     // Follow typed sub_ability chain, propagating parent targets when sub has none.
@@ -186,8 +231,12 @@ pub fn resolve_ability_chain(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{DamageAmount, TargetFilter, TargetRef};
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, DamageAmount, DelayedTriggerCondition, TargetFilter,
+        TargetRef,
+    };
+    use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
+    use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -296,5 +345,166 @@ mod tests {
 
         let result = resolve_ability_chain(&mut state, &ability, &mut events, 21);
         assert_eq!(result, Err(EffectError::ChainTooDeep));
+    }
+
+    #[test]
+    fn tracked_set_recorded_for_delayed_trigger() {
+        let mut state = GameState::new_two_player(42);
+
+        // Create 2 objects on the battlefield to be exiled
+        let obj1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature A".to_string(),
+            Zone::Battlefield,
+        );
+        let obj2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Creature B".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Build chain: ChangeZone(exile) -> CreateDelayedTrigger(uses_tracked_set: true)
+        let delayed = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        origin: None,
+                        destination: Zone::Battlefield,
+                        target: TargetFilter::TrackedSet {
+                            id: TrackedSetId(0),
+                        },
+                    },
+                )),
+                uses_tracked_set: true,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(obj1), TargetRef::Object(obj2)],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(delayed);
+
+        let mut events = Vec::new();
+        let result = resolve_ability_chain(&mut state, &ability, &mut events, 0);
+        assert!(result.is_ok());
+
+        // Tracked set should contain both exiled objects
+        assert_eq!(state.tracked_object_sets.len(), 1);
+        let set = state.tracked_object_sets.values().next().unwrap();
+        assert!(set.contains(&obj1));
+        assert!(set.contains(&obj2));
+
+        // Delayed trigger should have been created
+        assert_eq!(state.delayed_triggers.len(), 1);
+    }
+
+    #[test]
+    fn no_tracked_set_without_flag() {
+        let mut state = GameState::new_two_player(42);
+        let obj = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Same chain but uses_tracked_set: false
+        let delayed = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        origin: None,
+                        destination: Zone::Battlefield,
+                        target: TargetFilter::Any,
+                    },
+                )),
+                uses_tracked_set: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(obj)],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(delayed);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            state.tracked_object_sets.is_empty(),
+            "Should NOT record tracked set when uses_tracked_set is false"
+        );
+    }
+
+    #[test]
+    fn empty_targets_no_tracked_set() {
+        let mut state = GameState::new_two_player(42);
+
+        // Chain with uses_tracked_set: true but no targets — nothing to exile
+        let delayed = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        origin: None,
+                        destination: Zone::Battlefield,
+                        target: TargetFilter::TrackedSet {
+                            id: TrackedSetId(0),
+                        },
+                    },
+                )),
+                uses_tracked_set: true,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+            },
+            vec![], // no targets
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(delayed);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            state.tracked_object_sets.is_empty(),
+            "Should NOT record tracked set when no objects were moved"
+        );
     }
 }

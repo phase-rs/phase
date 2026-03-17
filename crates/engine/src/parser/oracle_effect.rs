@@ -298,6 +298,53 @@ pub fn parse_effect(text: &str) -> Effect {
     parse_effect_clause(text).effect
 }
 
+/// CR 614.16: Parse "Damage can't be prevented [this turn]" into Effect::AddRestriction.
+/// Handles variants:
+///   - "Damage can't be prevented this turn"
+///   - "Combat damage that would be dealt by creatures you control can't be prevented"
+fn try_parse_damage_prevention_disabled(text: &str) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    if !lower.contains("can't be prevented") && !lower.contains("cannot be prevented") {
+        return None;
+    }
+    if !lower.contains("damage") {
+        return None;
+    }
+
+    // Determine expiry: "this turn" → EndOfTurn, otherwise EndOfTurn as default
+    let expiry = if lower.contains("this turn") {
+        crate::types::ability::RestrictionExpiry::EndOfTurn
+    } else {
+        // Default to EndOfTurn for damage prevention restrictions
+        crate::types::ability::RestrictionExpiry::EndOfTurn
+    };
+
+    // Determine scope from the subject phrase
+    let scope = if lower.contains("creatures you control") || lower.contains("sources you control")
+    {
+        Some(
+            crate::types::ability::RestrictionScope::SourcesControlledBy(
+                crate::types::player::PlayerId(0), // Placeholder — resolved at runtime from ability controller
+            ),
+        )
+    } else {
+        // Global: all damage prevention disabled
+        None
+    };
+
+    let restriction = crate::types::ability::GameRestriction::DamagePreventionDisabled {
+        source: crate::types::identifiers::ObjectId(0), // Filled in at resolution time
+        expiry,
+        scope,
+    };
+
+    Some(ParsedEffectClause {
+        effect: Effect::AddRestriction { restriction },
+        duration: None,
+        sub_ability: None,
+    })
+}
+
 fn parse_effect_clause(text: &str) -> ParsedEffectClause {
     let text = strip_leading_sequence_connector(text)
         .trim()
@@ -307,6 +354,11 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
             name: "empty".to_string(),
             description: None,
         });
+    }
+
+    // CR 614.16: "Damage can't be prevented [this turn]" → Effect::AddRestriction
+    if let Some(clause) = try_parse_damage_prevention_disabled(text) {
+        return clause;
     }
 
     if let Some((duration, rest)) = strip_leading_duration(text) {
@@ -6348,5 +6400,58 @@ mod tests {
             }
             other => panic!("Expected DealDamage, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parse_damage_cant_be_prevented_this_turn() {
+        let clause = parse_effect_clause("Damage can't be prevented this turn");
+        match clause.effect {
+            Effect::AddRestriction { restriction } => {
+                assert!(matches!(
+                    restriction,
+                    crate::types::ability::GameRestriction::DamagePreventionDisabled {
+                        expiry: crate::types::ability::RestrictionExpiry::EndOfTurn,
+                        scope: None,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("Expected AddRestriction, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_damage_cant_be_prevented_creatures_you_control() {
+        let clause = parse_effect_clause(
+            "Combat damage that would be dealt by creatures you control can't be prevented",
+        );
+        match clause.effect {
+            Effect::AddRestriction { restriction } => {
+                assert!(matches!(
+                    restriction,
+                    crate::types::ability::GameRestriction::DamagePreventionDisabled {
+                        scope: Some(
+                            crate::types::ability::RestrictionScope::SourcesControlledBy(_)
+                        ),
+                        ..
+                    }
+                ));
+            }
+            other => panic!("Expected AddRestriction, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_stomp_effect_chain() {
+        // Bonecrusher Giant's Stomp: two effects chained
+        let def = parse_effect_chain(
+            "Damage can't be prevented this turn. Stomp deals 2 damage to any target.",
+            AbilityKind::Spell,
+        );
+        // First effect should be AddRestriction
+        assert!(matches!(def.effect, Effect::AddRestriction { .. }));
+        // Second effect (sub_ability) should be DealDamage
+        let sub = def.sub_ability.as_ref().expect("should have sub_ability");
+        assert!(matches!(sub.effect, Effect::DealDamage { .. }));
     }
 }

@@ -631,6 +631,76 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
     registry
 }
 
+// --- Prevention gating ---
+
+/// CR 614.16: Check if damage prevention is disabled by a GameRestriction.
+/// When active, prevention-type replacement effects are skipped in the pipeline.
+fn is_prevention_disabled(state: &GameState, proposed: &ProposedEvent) -> bool {
+    use crate::types::ability::{GameRestriction, RestrictionScope};
+
+    state.restrictions.iter().any(|r| match r {
+        GameRestriction::DamagePreventionDisabled { scope, .. } => match scope {
+            None => {
+                // Global — all damage prevention disabled
+                matches!(proposed, ProposedEvent::Damage { .. })
+            }
+            Some(RestrictionScope::SpecificSource(id)) => {
+                matches!(proposed, ProposedEvent::Damage { source_id, .. } if *source_id == *id)
+            }
+            Some(RestrictionScope::SourcesControlledBy(pid)) => {
+                if let ProposedEvent::Damage { source_id, .. } = proposed {
+                    state
+                        .objects
+                        .get(source_id)
+                        .map(|obj| obj.controller == *pid)
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
+            }
+            Some(RestrictionScope::DamageToTarget(tid)) => {
+                matches!(proposed, ProposedEvent::Damage { target, .. }
+                    if matches!(target, crate::types::ability::TargetRef::Object(oid) if *oid == *tid)
+                    || matches!(target, crate::types::ability::TargetRef::Player(pid) if {
+                        // For player targets, check if the player's "id object" matches
+                        // This is a player target, not an object target, so tid doesn't apply
+                        let _ = pid;
+                        false
+                    })
+                )
+            }
+        },
+    })
+}
+
+/// Check if a replacement definition is a damage prevention replacement.
+/// Prevention replacements have a `Prevented` result (the event is fully stopped)
+/// or are recognized prevention-type patterns from the parser.
+fn is_damage_prevention_replacement(
+    state: &GameState,
+    rid: &ReplacementId,
+    event: &ReplacementEvent,
+) -> bool {
+    // Only applies to DamageDone handlers
+    let is_damage_event = matches!(event, ReplacementEvent::DamageDone)
+        || matches!(event, ReplacementEvent::Other(s) if s == "DealtDamage");
+    if !is_damage_event {
+        return false;
+    }
+
+    // Check the replacement definition description for prevention keywords
+    state
+        .objects
+        .get(&rid.source)
+        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .is_some_and(|repl| {
+            repl.description.as_ref().is_some_and(|d| {
+                let lower = d.to_lowercase();
+                lower.contains("prevent") && lower.contains("damage")
+            })
+        })
+}
+
 // --- Pipeline functions ---
 
 /// Evaluate a replacement condition against the current game state.
@@ -727,6 +797,12 @@ pub fn find_applicable_replacements(
                         if !evaluate_replacement_condition(cond, obj.controller, obj.id, state) {
                             continue;
                         }
+                    }
+                    // CR 614.16: Skip damage prevention replacements when prevention is disabled
+                    if is_damage_prevention_replacement(state, &rid, &repl_def.event)
+                        && is_prevention_disabled(state, event)
+                    {
+                        continue;
                     }
                     candidates.push(rid);
                 }
@@ -1363,5 +1439,78 @@ mod tests {
         for key in &expected {
             assert!(registry.contains_key(key), "registry missing key: {}", key);
         }
+    }
+
+    #[test]
+    fn restriction_prevents_damage_prevention() {
+        use crate::types::ability::{GameRestriction, ReplacementDefinition, RestrictionExpiry};
+
+        // Create a state with a damage prevention replacement on an object
+        let obj_id = ObjectId(1);
+        let prevent_repl = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .description("Prevent all damage that would be dealt to you.".to_string());
+        let mut state = test_state_with_object(obj_id, Zone::Battlefield, vec![prevent_repl]);
+
+        // Add a DamagePreventionDisabled restriction
+        state
+            .restrictions
+            .push(GameRestriction::DamagePreventionDisabled {
+                source: ObjectId(99),
+                expiry: RestrictionExpiry::EndOfTurn,
+                scope: None, // Global
+            });
+
+        // Create a damage proposed event
+        let proposed = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+
+        // The prevention replacement should be skipped
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(
+            candidates.is_empty(),
+            "Prevention replacement should be skipped when DamagePreventionDisabled is active"
+        );
+    }
+
+    #[test]
+    fn restriction_does_not_block_non_prevention_replacements() {
+        use crate::types::ability::{GameRestriction, ReplacementDefinition, RestrictionExpiry};
+
+        // Create a state with a non-prevention damage replacement
+        let obj_id = ObjectId(1);
+        let non_prevent_repl = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .description("If a source would deal damage, it deals double instead.".to_string());
+        let mut state = test_state_with_object(obj_id, Zone::Battlefield, vec![non_prevent_repl]);
+
+        // Add a DamagePreventionDisabled restriction
+        state
+            .restrictions
+            .push(GameRestriction::DamagePreventionDisabled {
+                source: ObjectId(99),
+                expiry: RestrictionExpiry::EndOfTurn,
+                scope: None,
+            });
+
+        let proposed = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+
+        // Non-prevention replacements should still apply
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(
+            !candidates.is_empty(),
+            "Non-prevention damage replacements should not be blocked"
+        );
     }
 }

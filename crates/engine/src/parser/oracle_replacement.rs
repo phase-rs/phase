@@ -70,11 +70,8 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
             ReplacementDefinition::new(ReplacementEvent::DamageDone).description(text.to_string()),
         );
     }
-    if lower.contains("damage") && lower.contains("can't be prevented") {
-        return Some(
-            ReplacementDefinition::new(ReplacementEvent::DamageDone).description(text.to_string()),
-        );
-    }
+    // "damage can't be prevented" is handled by effect parsing (Effect::AddRestriction),
+    // not replacement parsing. See oracle_effect.rs damage prevention disabled handler.
 
     // --- "If you would draw a card, {effect}" ---
     if lower.contains("you would draw") {
@@ -415,13 +412,19 @@ mod tests {
     }
 
     #[test]
-    fn replacement_damage_cant_be_prevented() {
+    fn damage_cant_be_prevented_no_longer_parses_as_replacement() {
+        // "can't be prevented" is now routed to effect parsing (Effect::AddRestriction),
+        // not replacement parsing. This line should return None from the replacement parser.
         let def = parse_replacement_line(
             "Combat damage that would be dealt by creatures you control can't be prevented.",
             "Questing Beast",
-        )
-        .unwrap();
-        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        );
+        // Note: This still matches because the line contains "would" which triggers
+        // is_replacement_pattern. But parse_replacement_line doesn't have a handler
+        // for "can't be prevented" anymore, so it falls through.
+        // The line contains "would" so is_replacement_pattern returns true,
+        // but the "would die/destroyed" check doesn't match. Result is None.
+        assert!(def.is_none());
     }
 
     #[test]

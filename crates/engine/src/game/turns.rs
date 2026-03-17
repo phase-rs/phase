@@ -204,6 +204,16 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // CR 514.2: Prune "until end of turn" transient continuous effects.
     super::layers::prune_end_of_turn_effects(state);
 
+    // CR 514.2: Remove end-of-turn game restrictions (e.g., "this turn" damage prevention disabled).
+    state.restrictions.retain(|r| {
+        use crate::types::ability::{GameRestriction, RestrictionExpiry};
+        match r {
+            GameRestriction::DamagePreventionDisabled { expiry, .. } => {
+                !matches!(expiry, RestrictionExpiry::EndOfTurn)
+            }
+        }
+    });
+
     // CR 727.2: Check day/night transition at cleanup.
     day_night::check_day_night_transition(state, events);
 
@@ -984,5 +994,46 @@ mod tests {
             ),
             "PermanentUntapped event should be emitted"
         );
+    }
+
+    #[test]
+    fn restriction_cleanup_end_of_turn() {
+        use crate::types::ability::{GameRestriction, RestrictionExpiry};
+        use crate::types::identifiers::ObjectId;
+
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::End;
+
+        // Add an EndOfTurn restriction
+        state
+            .restrictions
+            .push(GameRestriction::DamagePreventionDisabled {
+                source: ObjectId(1),
+                expiry: RestrictionExpiry::EndOfTurn,
+                scope: None,
+            });
+        // Add an EndOfCombat restriction (should survive cleanup)
+        state
+            .restrictions
+            .push(GameRestriction::DamagePreventionDisabled {
+                source: ObjectId(2),
+                expiry: RestrictionExpiry::EndOfCombat,
+                scope: None,
+            });
+
+        assert_eq!(state.restrictions.len(), 2);
+
+        let mut events = Vec::new();
+        execute_cleanup(&mut state, &mut events);
+
+        // EndOfTurn restriction should be removed, EndOfCombat should remain
+        assert_eq!(state.restrictions.len(), 1);
+        assert!(matches!(
+            &state.restrictions[0],
+            GameRestriction::DamagePreventionDisabled {
+                expiry: RestrictionExpiry::EndOfCombat,
+                ..
+            }
+        ));
     }
 }

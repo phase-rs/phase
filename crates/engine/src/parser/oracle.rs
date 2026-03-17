@@ -372,6 +372,16 @@ pub fn parse_oracle_text(
             }
         }
 
+        // Priority 14a: "damage can't be prevented" → AddRestriction effect
+        if lower.contains("damage") && lower.contains("can't be prevented") {
+            let def = parse_effect_chain(&line, AbilityKind::Spell);
+            if !has_unimplemented(&def) {
+                result.abilities.push(def);
+                i += 1;
+                continue;
+            }
+        }
+
         // Priority 14b: Try parsing as effect even for non-spells
         if is_effect_sentence_candidate(&lower) {
             let def = parse_effect_chain(&line, AbilityKind::Spell);
@@ -1138,7 +1148,8 @@ fn is_granted_static_line(lower: &str) -> bool {
 fn is_replacement_pattern(lower: &str) -> bool {
     lower.contains("would ")
         || lower.contains("prevent all")
-        || lower.contains("can't be prevented")
+        // "can't be prevented" is routed to effect parsing (Effect::AddRestriction),
+        // not replacement parsing. It disables prevention rather than replacing events.
         || lower.contains("enters the battlefield tapped")
         || lower.contains("enters tapped")
         || (lower.contains("as ") && lower.contains("enters") && lower.contains("choose a"))
@@ -2524,9 +2535,15 @@ mod tests {
             &["Creature"],
             &["Beast"],
         );
-        assert_eq!(r.abilities.len(), 0); // keyword line skipped
-                                          // Should have static, replacement, and trigger
-        assert!(r.statics.len() + r.replacements.len() + r.triggers.len() >= 2);
+        // "can't be prevented" now parses as an ability (Effect::AddRestriction) rather than replacement
+        assert_eq!(r.abilities.len(), 1);
+        assert!(matches!(
+            r.abilities[0].effect,
+            Effect::AddRestriction { .. }
+        ));
+        // Should have static and trigger
+        assert!(!r.statics.is_empty());
+        assert!(!r.triggers.is_empty());
     }
 
     #[test]
