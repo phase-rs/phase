@@ -437,8 +437,6 @@ function GamePageContent({
     "--game-top-overlay-offset": `${topOverlayOffsetPx}px`,
   } as CSSProperties;
   const playerZoneRailStyle: ZoneRailStyle = {
-    bottom: "calc(env(safe-area-inset-bottom) + 1rem)",
-    left: "calc(env(safe-area-inset-left) + 1rem)",
     "--card-w": "clamp(82px, 10vw, 126px)",
     "--card-h": "clamp(115px, 14vw, 176px)",
   };
@@ -478,9 +476,31 @@ function GamePageContent({
         className={`relative z-10 flex h-full flex-col${isReconnecting ? " pointer-events-none" : ""}`}
         style={{ paddingTop: "var(--game-top-overlay-offset, 0px)" }}
       >
-        {/* Opponent hand at top */}
-        <div className="relative z-20 shrink-0" data-debug-label="Opp Hand">
-          <OpponentHand showCards={showAiHand} />
+        {/* Opponent hand + zones at top (mirrors player bottom) */}
+        <div className="relative z-20 flex shrink-0 items-start" data-debug-label="Opp Top">
+          <div className="min-w-0 flex-1 self-stretch" data-debug-label="Opp Hand">
+            <OpponentHand showCards={showAiHand} />
+          </div>
+          <div
+            className="z-30 flex shrink-0 items-start gap-2 px-2 py-1"
+            style={playerZoneRailStyle}
+            data-debug-label="Opp Zones"
+          >
+            <ZoneIndicator
+              zone="exile"
+              playerId={activeOpponentId}
+              onClick={() =>
+                setViewingZone({ zone: "exile", playerId: activeOpponentId })
+              }
+            />
+            <LibraryPile playerId={activeOpponentId} />
+            <GraveyardPile
+              playerId={activeOpponentId}
+              onClick={() =>
+                setViewingZone({ zone: "graveyard", playerId: activeOpponentId })
+              }
+            />
+          </div>
         </div>
 
         {/* Opponent avatar centered below their hand */}
@@ -500,53 +520,31 @@ function GamePageContent({
           <PlayerHud />
         </div>
 
-        {/* Player hand at bottom */}
-        <div data-debug-label="Player Hand">
-          <PlayerHand />
+        {/* Player hand + zones at bottom */}
+        <div className="flex shrink-0 items-end" data-debug-label="Player Bottom">
+          <div
+            className="z-30 flex shrink-0 items-end gap-2 px-2 py-1"
+            style={playerZoneRailStyle}
+            data-debug-label="Player Zones"
+          >
+            <GraveyardPile
+              playerId={playerId}
+              onClick={() => setViewingZone({ zone: "graveyard", playerId })}
+            />
+            <LibraryPile playerId={playerId} />
+            <ZoneIndicator
+              zone="exile"
+              playerId={playerId}
+              onClick={() => setViewingZone({ zone: "exile", playerId })}
+            />
+          </div>
+          <div className="min-w-0 flex-1 self-stretch" data-debug-label="Player Hand">
+            <PlayerHand />
+          </div>
         </div>
       </div>
 
-      {/* Player zones — bottom-left: graveyard pile, library pile, exile badge */}
-      <div
-        className="fixed z-30 flex items-end gap-3 px-1 py-1"
-        style={playerZoneRailStyle}
-        data-debug-label="Player Zones"
-      >
-        <GraveyardPile
-          playerId={playerId}
-          onClick={() => setViewingZone({ zone: "graveyard", playerId })}
-        />
-        <LibraryPile playerId={playerId} />
-        <ZoneIndicator
-          zone="exile"
-          playerId={playerId}
-          onClick={() => setViewingZone({ zone: "exile", playerId })}
-        />
-      </div>
-
-      {/* Opponent zones — upper-right */}
-      <div
-        className="fixed z-30 flex items-start gap-2"
-        style={{
-          right: "calc(env(safe-area-inset-right) + 0.5rem)",
-          top: "calc(env(safe-area-inset-top) + var(--game-top-overlay-offset, 0px) + 0.5rem)",
-        }}
-      >
-        <ZoneIndicator
-          zone="exile"
-          playerId={activeOpponentId}
-          onClick={() =>
-            setViewingZone({ zone: "exile", playerId: activeOpponentId })
-          }
-        />
-        <LibraryPile playerId={activeOpponentId} />
-        <GraveyardPile
-          playerId={activeOpponentId}
-          onClick={() =>
-            setViewingZone({ zone: "graveyard", playerId: activeOpponentId })
-          }
-        />
-      </div>
+      {/* Opponent zones are now inline in the Opp Top row above */}
 
       {/* Combat phase indicator — above action buttons to avoid overlap */}
       <div

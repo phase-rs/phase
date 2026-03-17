@@ -136,6 +136,9 @@ fn filter_inner(
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource => false,
+        // ParentTarget resolves to parent ability's targets at resolution time,
+        // not via object matching.
+        TargetFilter::ParentTarget => false,
     }
 }
 

@@ -29,12 +29,12 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
   const cardCount = opponent.hand.length;
   const center = cardCount > 0 ? (cardCount - 1) / 2 : 0;
 
-  // Keep the opponent hand visible within the top chrome area.
-  const BASE_Y = 8;
+  // Cards extend above the container so they peek from the top edge.
+  const BASE_Y = -15;
 
   return (
     <div
-      className="flex min-h-[calc(var(--card-h)*0.42)] items-start justify-center overflow-hidden px-4 pt-5 pb-1"
+      className="flex min-h-[calc(var(--card-h)*0.78)] items-start justify-center overflow-visible px-4 pb-1"
       style={{ perspective: "800px" }}
     >
       <AnimatePresence>

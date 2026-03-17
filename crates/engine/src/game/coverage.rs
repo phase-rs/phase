@@ -109,6 +109,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::TriggeringSpellOwner => "triggering spell's owner".into(),
         TargetFilter::TriggeringPlayer => "triggering player".into(),
         TargetFilter::TriggeringSource => "triggering source".into(),
+        TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
         TargetFilter::TrackedSet { id } => format!("tracked set #{}", id.0),
         TargetFilter::Not { filter } => format!("not {}", fmt_target(filter)),
@@ -404,6 +405,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             origin,
             destination,
             target,
+            ..
         }
         | Effect::ChangeZoneAll {
             origin,
@@ -534,10 +536,13 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
         d.push(("targeting".into(), "optional (up to)".into()));
     }
     if let Some(mt) = &def.multi_target {
-        d.push(("targets".into(), match mt.max {
-            Some(max) => format!("{}-{}", mt.min, max),
-            None => format!("{}+", mt.min),
-        }));
+        d.push((
+            "targets".into(),
+            match mt.max {
+                Some(max) => format!("{}-{}", mt.min, max),
+                None => format!("{}+", mt.min),
+            },
+        ));
     }
     if def.condition.is_some() {
         d.push(("conditional".into(), "yes".into()));

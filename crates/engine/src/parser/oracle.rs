@@ -284,6 +284,7 @@ pub fn parse_oracle_text(
                         destination: crate::types::zones::Zone::Battlefield,
                         target: crate::types::ability::TargetFilter::SelfRef,
                         origin: Some(crate::types::zones::Zone::Hand),
+                        owner_library: false,
                     },
                 )
                 .description(line.to_string()),
@@ -1955,7 +1956,12 @@ fn normalize_self_refs_for_static(text: &str, card_name: &str) -> String {
         }
     }
     // Also replace "this creature", "this permanent", etc.
-    for phrase in &["this creature", "this land", "this permanent", "this enchantment"] {
+    for phrase in &[
+        "this creature",
+        "this land",
+        "this permanent",
+        "this enchantment",
+    ] {
         result = result.replace(phrase, "~");
     }
     result
@@ -3177,5 +3183,4 @@ mod tests {
         // Mandatory without "or" currently falls through (no choice to present)
         assert!(result.is_none());
     }
-
 }

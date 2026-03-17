@@ -611,10 +611,10 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
     } else {
         // Fallback: create an emblem with an unimplemented static
         Some(Effect::CreateEmblem {
-            statics: vec![StaticDefinition::new(StaticMode::Other(
-                "EmblemStatic".to_string(),
-            ))
-            .description(inner.to_string())],
+            statics: vec![
+                StaticDefinition::new(StaticMode::Other("EmblemStatic".to_string()))
+                    .description(inner.to_string()),
+            ],
         })
     }
 }
@@ -1661,6 +1661,7 @@ fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     origin,
                     destination: Zone::Exile,
                     target,
+                    owner_library: false,
                 }
             }
         }
@@ -1833,6 +1834,7 @@ fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             origin: None,
             destination: Zone::Battlefield,
             target,
+            owner_library: false,
         },
         TargetedImperativeAst::Fight { target } => Effect::Fight { target },
         TargetedImperativeAst::GainControl { target } => Effect::GainControl { target },
@@ -2089,6 +2091,7 @@ fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst> {
         origin,
         destination,
         target,
+        ..
     }) = try_parse_put_zone_change(lower, text)
     {
         return Some(PutImperativeAst::ZoneChange {
@@ -2121,11 +2124,13 @@ fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             origin,
             destination,
             target,
+            owner_library: false,
         },
         PutImperativeAst::TopOfLibrary => Effect::ChangeZone {
             origin: None,
             destination: Zone::Library,
             target: TargetFilter::Any,
+            owner_library: false,
         },
     }
 }
@@ -2187,6 +2192,7 @@ fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> Effect {
             origin: None,
             destination: Zone::Library,
             target: TargetFilter::Any,
+            owner_library: false,
         },
         ShuffleImperativeAst::ChangeZoneAllToLibrary { origin } => Effect::ChangeZoneAll {
             origin: Some(origin),
@@ -2213,6 +2219,7 @@ fn apply_clause_continuation(
                     origin: Some(Zone::Library),
                     destination,
                     target: TargetFilter::Any,
+                    owner_library: false,
                 },
             ));
         }
@@ -2872,13 +2879,7 @@ fn strip_any_number_quantifier(text: &str) -> (String, Option<MultiTargetSpec>) 
     if after_verb.starts_with("any number of ") {
         let skip = verb_end + "any number of ".len();
         let rebuilt = format!("{}{}", &text[..verb_end], &text[skip..]);
-        return (
-            rebuilt,
-            Some(MultiTargetSpec {
-                min: 0,
-                max: None,
-            }),
-        );
+        return (rebuilt, Some(MultiTargetSpec { min: 0, max: None }));
     }
     if let Some(rest) = after_verb.strip_prefix("up to ") {
         if let Some((n, remainder)) = parse_number(rest) {
@@ -3605,6 +3606,7 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
                 origin: infer_origin_zone(after_put_lower),
                 destination,
                 target,
+                owner_library: false,
             });
         }
     }
@@ -6742,9 +6744,7 @@ mod tests {
 
     #[test]
     fn effect_emblem_ninjas_get_plus_one() {
-        let e = parse_effect(
-            "You get an emblem with \"Ninjas you control get +1/+1.\"",
-        );
+        let e = parse_effect("You get an emblem with \"Ninjas you control get +1/+1.\"");
         match e {
             Effect::CreateEmblem { statics } => {
                 assert_eq!(statics.len(), 1);
@@ -6753,14 +6753,14 @@ mod tests {
                 // Should target Ninja creatures you control
                 assert!(def.affected.is_some());
                 // Should have AddPower and AddToughness modifications
-                assert!(def.modifications.iter().any(|m| matches!(
-                    m,
-                    ContinuousModification::AddPower { value: 1 }
-                )));
-                assert!(def.modifications.iter().any(|m| matches!(
-                    m,
-                    ContinuousModification::AddToughness { value: 1 }
-                )));
+                assert!(def
+                    .modifications
+                    .iter()
+                    .any(|m| matches!(m, ContinuousModification::AddPower { value: 1 })));
+                assert!(def
+                    .modifications
+                    .iter()
+                    .any(|m| matches!(m, ContinuousModification::AddToughness { value: 1 })));
             }
             other => panic!("expected CreateEmblem, got {:?}", other),
         }

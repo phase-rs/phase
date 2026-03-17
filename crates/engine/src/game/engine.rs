@@ -2,8 +2,8 @@ use rand::Rng;
 use thiserror::Error;
 
 use crate::types::ability::{
-    AbilityDefinition, ChoiceType, ChoiceValue, ChosenAttribute, EffectKind,
-    ResolvedAbility, TargetRef,
+    AbilityDefinition, ChoiceType, ChoiceValue, ChosenAttribute, EffectKind, ResolvedAbility,
+    TargetRef,
 };
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
@@ -3592,6 +3592,7 @@ mod trigger_target_tests {
                 target: TargetFilter::Typed(
                     TypedFilter::creature().controller(ControllerRef::Opponent),
                 ),
+                owner_library: false,
             },
             Vec::new(),
             trigger_creature,
@@ -3676,6 +3677,7 @@ mod trigger_target_tests {
                     origin: Some(Zone::Battlefield),
                     destination: Zone::Exile,
                     target: TargetFilter::Any,
+                    owner_library: false,
                 },
                 vec![],
                 ObjectId(1),

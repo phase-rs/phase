@@ -23,7 +23,8 @@ expression: result
           "destination": "Library",
           "target": {
             "type": "Any"
-          }
+          },
+          "owner_library": false
         },
         "cost": null,
         "sub_ability": null,
@@ -71,7 +72,8 @@ expression: result
                 "zone": "Hand"
               }
             ]
-          }
+          },
+          "owner_library": false
         },
         "cost": null,
         "sub_ability": null,

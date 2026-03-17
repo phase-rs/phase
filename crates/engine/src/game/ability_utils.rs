@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    AbilityDefinition, Effect, ModalChoice, ModalSelectionConstraint,
-    ResolvedAbility, TargetFilter, TargetRef,
+    AbilityDefinition, Effect, ModalChoice, ModalSelectionConstraint, ResolvedAbility,
+    TargetFilter, TargetRef,
 };
 use crate::types::game_state::{
     GameState, TargetSelectionConstraint, TargetSelectionProgress, TargetSelectionSlot,
@@ -930,6 +930,7 @@ mod tests {
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
+                owner_library: false,
             },
             vec![],
             ObjectId(10),

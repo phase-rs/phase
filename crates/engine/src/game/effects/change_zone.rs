@@ -22,11 +22,7 @@ pub fn resolve(
     for target in &ability.targets {
         if let TargetRef::Object(obj_id) = target {
             // CR 114.4: Emblems cannot be moved between zones
-            if state
-                .objects
-                .get(obj_id)
-                .is_some_and(|o| o.is_emblem)
-            {
+            if state.objects.get(obj_id).is_some_and(|o| o.is_emblem) {
                 continue;
             }
 
@@ -170,6 +166,7 @@ mod tests {
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
+                owner_library: false,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -198,6 +195,7 @@ mod tests {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
+                owner_library: false,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -226,6 +224,7 @@ mod tests {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
+                owner_library: false,
             },
             vec![TargetRef::Object(target_id)],
             source_id,
@@ -259,6 +258,7 @@ mod tests {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
+                owner_library: false,
             },
             vec![TargetRef::Object(target_id)],
             ObjectId(100),

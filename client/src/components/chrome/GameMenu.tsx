@@ -85,8 +85,8 @@ export function GameMenu({
             />
           </svg>
         </button>
-        <BuildBadge inline className="z-0" />
       </div>
+      <BuildBadge inline className="z-0 mt-1" />
 
       {open && (
         <div className="absolute left-0 top-full mt-1 w-44 rounded-lg border border-gray-700 bg-gray-900/95 py-1 shadow-xl backdrop-blur-sm">

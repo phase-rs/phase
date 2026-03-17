@@ -92,9 +92,14 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
   const isMirrored = mode === "focused";
 
   const creatures = creatureOverride ?? partitioned?.creatures ?? [];
-  const planeswalkerLane = (partitioned?.planeswalkers.length ?? 0) > 0 ? (
+  const hasPlaneswalkers = (partitioned?.planeswalkers.length ?? 0) > 0;
+  const hasEmblems = (gameState.command_zone ?? []).some((id) => {
+    const obj = gameState.objects[id];
+    return obj?.is_emblem && obj.controller === playerId;
+  });
+  const planeswalkerLane = (hasPlaneswalkers || hasEmblems) ? (
     <div
-      className={`z-10 flex h-full flex-shrink-0 flex-col flex-wrap-reverse gap-2 px-1 py-2 ${
+      className={`absolute right-0 top-0 bottom-0 z-20 flex flex-col flex-wrap-reverse items-end gap-2 px-1 py-2 ${
         isCommander ? (mode === "focused" ? "pb-16" : "pb-24") : ""
       }`}
       style={OTHER_COL_STYLE}
@@ -102,6 +107,7 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
       {partitioned?.planeswalkers.map((g) => (
         <GroupedPermanentDisplay key={g.ids[0]} group={g} />
       ))}
+      <CommandZone playerId={playerId} />
     </div>
   ) : null;
   const middleRow = (
@@ -111,7 +117,6 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
         style={LAND_COL_STYLE}
         data-debug-label="Lands"
       >
-        <CommandZone playerId={playerId} />
         {partitioned?.lands.map((g) => (
           <GroupedPermanentDisplay key={g.ids[0]} group={g} />
         ))}
@@ -149,8 +154,8 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
             <div className="shrink-0">
               {middleRow}
             </div>
-            <div className="min-h-0 flex-1" data-debug-label="Opp Creatures">
-              <BattlefieldRow groups={creatures} rowType="creatures" />
+            <div className="flex min-h-0 flex-1 items-end" data-debug-label="Opp Creatures">
+              <BattlefieldRow groups={creatures} rowType="creatures" className="w-full" />
             </div>
           </>
         ) : (
@@ -173,7 +178,6 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
           <CommanderDamage playerId={playerId} />
         </div>
       )}
-      {/* Emblem display — inline in the land column, see middleRow */}
       {/* Eliminated badge */}
       {isEliminated && (
         <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">

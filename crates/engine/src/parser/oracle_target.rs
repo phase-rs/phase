@@ -1163,4 +1163,60 @@ mod tests {
         assert_eq!(parse_event_context_ref("target creature"), None);
         assert_eq!(parse_event_context_ref("any target"), None);
     }
+
+    #[test]
+    fn parse_counter_suffix_stun_counter() {
+        let result = parse_counter_suffix(" with a stun counter on it");
+        assert!(result.is_some());
+        let (prop, _consumed) = result.unwrap();
+        assert!(matches!(
+            prop,
+            FilterProp::CountersGE {
+                ref counter_type,
+                count: 1,
+            } if counter_type == "stun"
+        ));
+    }
+
+    #[test]
+    fn parse_counter_suffix_oil_counter() {
+        let result = parse_counter_suffix(" with an oil counter on it");
+        assert!(result.is_some());
+        let (prop, _consumed) = result.unwrap();
+        assert!(matches!(
+            prop,
+            FilterProp::CountersGE {
+                ref counter_type,
+                count: 1,
+            } if counter_type == "oil"
+        ));
+    }
+
+    #[test]
+    fn parse_counter_suffix_not_counter_phrase() {
+        let result = parse_counter_suffix(" with power 3 or greater");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_type_phrase_creature_with_stun_counter() {
+        let (filter, _rest) = parse_type_phrase("creature with a stun counter on it");
+        match filter {
+            TargetFilter::Typed(TypedFilter {
+                card_type,
+                properties,
+                ..
+            }) => {
+                assert_eq!(card_type, Some(TypeFilter::Creature));
+                assert!(properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::CountersGE {
+                        ref counter_type,
+                        count: 1,
+                    } if counter_type == "stun"
+                )));
+            }
+            other => panic!("Expected Typed, got {:?}", other),
+        }
+    }
 }

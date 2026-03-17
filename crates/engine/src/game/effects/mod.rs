@@ -1,6 +1,4 @@
-use crate::types::ability::{
-    AbilityCondition, AbilityKind, Effect, EffectError, ResolvedAbility,
-};
+use crate::types::ability::{AbilityCondition, AbilityKind, Effect, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
@@ -15,8 +13,8 @@ pub mod choose_card;
 pub mod cleanup;
 pub mod copy_spell;
 pub mod counter;
-pub mod create_emblem;
 pub mod counters;
+pub mod create_emblem;
 pub mod deal_damage;
 pub mod delayed_trigger;
 pub mod destroy;
@@ -457,6 +455,7 @@ mod tests {
                         target: TargetFilter::TrackedSet {
                             id: TrackedSetId(0),
                         },
+                        owner_library: false,
                     },
                 )),
                 uses_tracked_set: true,
@@ -470,6 +469,7 @@ mod tests {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
+                owner_library: false,
             },
             vec![TargetRef::Object(obj1), TargetRef::Object(obj2)],
             ObjectId(100),
@@ -512,6 +512,7 @@ mod tests {
                         origin: None,
                         destination: Zone::Battlefield,
                         target: TargetFilter::Any,
+                        owner_library: false,
                     },
                 )),
                 uses_tracked_set: false,
@@ -525,6 +526,7 @@ mod tests {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
+                owner_library: false,
             },
             vec![TargetRef::Object(obj)],
             ObjectId(100),
@@ -557,6 +559,7 @@ mod tests {
                         target: TargetFilter::TrackedSet {
                             id: TrackedSetId(0),
                         },
+                        owner_library: false,
                     },
                 )),
                 uses_tracked_set: true,
@@ -570,6 +573,7 @@ mod tests {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
+                owner_library: false,
             },
             vec![], // no targets
             ObjectId(100),

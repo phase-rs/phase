@@ -566,6 +566,7 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
                     | TargetFilter::TriggeringSpellOwner
                     | TargetFilter::TriggeringPlayer
                     | TargetFilter::TriggeringSource
+                    | TargetFilter::ParentTarget
             ) {
                 None
             } else {
@@ -585,6 +586,7 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
                     | TargetFilter::TriggeringSpellOwner
                     | TargetFilter::TriggeringPlayer
                     | TargetFilter::TriggeringSource
+                    | TargetFilter::ParentTarget
             ) {
                 None
             } else {
@@ -1070,6 +1072,8 @@ fn target_filter_matches_object(
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource => false,
+        // ParentTarget resolves to parent ability's targets at resolution time.
+        TargetFilter::ParentTarget => false,
     }
 }
 
@@ -3216,6 +3220,7 @@ pub mod tests {
                                 target: TargetFilter::Typed(
                                     TypedFilter::creature().controller(ControllerRef::Opponent),
                                 ),
+                                owner_library: false,
                             },
                         )
                         .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -3291,6 +3296,7 @@ pub mod tests {
                                 target: TargetFilter::Typed(
                                     TypedFilter::creature().controller(ControllerRef::Opponent),
                                 ),
+                                owner_library: false,
                             },
                         )
                         .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -3356,6 +3362,7 @@ pub mod tests {
                             target: TargetFilter::Typed(
                                 TypedFilter::creature().controller(ControllerRef::Opponent),
                             ),
+                            owner_library: false,
                         },
                     ))
                     .valid_card(TargetFilter::SelfRef)
@@ -3409,6 +3416,7 @@ pub mod tests {
                                         value: "land".to_string(),
                                     }]),
                             ),
+                            owner_library: false,
                         },
                     ))
                     .valid_card(TargetFilter::SelfRef)
@@ -3582,6 +3590,7 @@ pub mod tests {
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,
                     target: TargetFilter::SelfRef,
+                    owner_library: false,
                 },
             )));
             obj.trigger_definitions.push(trigger);
@@ -3666,6 +3675,7 @@ pub mod tests {
                                     origin: None,
                                     destination: Zone::Exile,
                                     target: TargetFilter::Any,
+                                    owner_library: false,
                                 },
                             )
                             .duration(crate::types::ability::Duration::UntilHostLeavesPlay),

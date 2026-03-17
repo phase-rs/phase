@@ -160,6 +160,7 @@ mod tests {
                 origin: Some(Zone::Command),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
+                owner_library: false,
             },
             vec![crate::types::ability::TargetRef::Object(emblem_id)],
             ObjectId(200),

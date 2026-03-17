@@ -693,7 +693,9 @@ pub enum TargetFilter {
     /// Matches a specific permanent by ObjectId.
     /// Used for duration-based statics that target a specific object
     /// (e.g., "that permanent loses all abilities for as long as ~").
-    SpecificObject { id: ObjectId },
+    SpecificObject {
+        id: ObjectId,
+    },
     /// Matches the permanent that the trigger source (Equipment/Aura) is attached to.
     /// Used for "equipped creature" / "enchanted creature" trigger subjects.
     AttachedTo,
@@ -713,6 +715,11 @@ pub enum TargetFilter {
     TriggeringPlayer,
     /// CR 603.7c: Resolves to the source object of the triggering event.
     TriggeringSource,
+    /// Resolves to the same target(s) as the parent ability.
+    /// Used for anaphoric "it"/"that creature"/"that player" in compound effects
+    /// (e.g., "tap target creature and put a stun counter on it").
+    /// At resolution time, the sub_ability chain inherits parent targets automatically.
+    ParentTarget,
 }
 
 /// A dynamic game quantity — a runtime lookup into the game state.
@@ -1140,6 +1147,10 @@ pub enum Effect {
         destination: Zone,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        /// CR 400.7: When true, route the object to its owner's library
+        /// (not controller's). Used for "shuffle into its owner's library".
+        #[serde(default)]
+        owner_library: bool,
     },
     ChangeZoneAll {
         #[serde(default)]
@@ -2859,6 +2870,7 @@ mod tests {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
+                owner_library: false,
             },
             vec![TargetRef::Object(ObjectId(10))],
             ObjectId(1),
@@ -2869,6 +2881,41 @@ mod tests {
         let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
         assert_eq!(ability, deserialized);
         assert_eq!(deserialized.duration, Some(Duration::UntilHostLeavesPlay));
+    }
+
+    #[test]
+    fn parent_target_serde_roundtrip() {
+        let filter = TargetFilter::ParentTarget;
+        let json = serde_json::to_string(&filter).unwrap();
+        let deserialized: TargetFilter = serde_json::from_str(&json).unwrap();
+        assert_eq!(filter, deserialized);
+    }
+
+    #[test]
+    fn change_zone_owner_library_serde_roundtrip() {
+        let effect = Effect::ChangeZone {
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Library,
+            target: TargetFilter::Any,
+            owner_library: true,
+        };
+        let json = serde_json::to_string(&effect).unwrap();
+        let deserialized: Effect = serde_json::from_str(&json).unwrap();
+        assert_eq!(effect, deserialized);
+    }
+
+    #[test]
+    fn change_zone_owner_library_defaults_false() {
+        // Backward compat: JSON without owner_library field should default to false
+        let json = r#"{"type":"ChangeZone","destination":"Battlefield","target":{"type":"Any"}}"#;
+        let effect: Effect = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            effect,
+            Effect::ChangeZone {
+                owner_library: false,
+                ..
+            }
+        ));
     }
 }
 
