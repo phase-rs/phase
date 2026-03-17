@@ -345,6 +345,10 @@ pub struct GameState {
     pub stack: Vec<StackEntry>,
     pub exile: Vec<ObjectId>,
 
+    /// Objects in the command zone (commanders, emblems).
+    #[serde(default)]
+    pub command_zone: Vec<ObjectId>,
+
     // RNG
     pub rng_seed: u64,
     #[serde(skip, default = "default_rng")]
@@ -569,6 +573,7 @@ impl GameState {
             battlefield: Vec::new(),
             stack: Vec::new(),
             exile: Vec::new(),
+            command_zone: Vec::new(),
             rng_seed: seed,
             rng: ChaCha20Rng::seed_from_u64(seed),
             combat: None,
@@ -695,6 +700,7 @@ impl PartialEq for GameState {
             && self.battlefield == other.battlefield
             && self.stack == other.stack
             && self.exile == other.exile
+            && self.command_zone == other.command_zone
             && self.rng_seed == other.rng_seed
             && self.combat == other.combat
             && self.waiting_for == other.waiting_for

@@ -21,6 +21,15 @@ pub fn resolve(
 
     for target in &ability.targets {
         if let TargetRef::Object(obj_id) = target {
+            // CR 114.4: Emblems cannot be moved between zones
+            if state
+                .objects
+                .get(obj_id)
+                .is_some_and(|o| o.is_emblem)
+            {
+                continue;
+            }
+
             let from_zone = state
                 .objects
                 .get(obj_id)

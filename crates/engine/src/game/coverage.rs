@@ -515,7 +515,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Proliferate
         | Effect::SolveCase
         | Effect::Cleanup { .. }
-        | Effect::AddRestriction { .. } => {}
+        | Effect::AddRestriction { .. }
+        | Effect::CreateEmblem { .. } => {}
     }
     d
 }

@@ -35,6 +35,15 @@ pub fn resolve(
     };
 
     for obj_id in targets {
+        // CR 114.4: Emblems cannot be bounced
+        if state
+            .objects
+            .get(&obj_id)
+            .is_some_and(|o| o.is_emblem)
+        {
+            continue;
+        }
+
         // Only bounce permanents on the battlefield
         let is_on_battlefield = state
             .objects

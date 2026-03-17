@@ -1314,6 +1314,12 @@ pub enum Effect {
     AddRestriction {
         restriction: GameRestriction,
     },
+    /// CR 114.1: Create an emblem with the specified static abilities in the command zone.
+    /// Emblems persist for the rest of the game and cannot be removed.
+    CreateEmblem {
+        #[serde(default)]
+        statics: Vec<StaticDefinition>,
+    },
     /// Semantic marker for effects the engine has not yet implemented a handler for.
     /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.
     Unimplemented {
@@ -1429,6 +1435,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::SolveCase => "SolveCase",
         Effect::CreateDelayedTrigger { .. } => "CreateDelayedTrigger",
         Effect::AddRestriction { .. } => "AddRestriction",
+        Effect::CreateEmblem { .. } => "CreateEmblem",
         Effect::Unimplemented { name, .. } => name,
     }
 }
@@ -1490,6 +1497,7 @@ pub enum EffectKind {
     SolveCase,
     CreateDelayedTrigger,
     AddRestriction,
+    CreateEmblem,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
     Equip,
@@ -1551,6 +1559,7 @@ impl From<&Effect> for EffectKind {
             Effect::SolveCase => EffectKind::SolveCase,
             Effect::CreateDelayedTrigger { .. } => EffectKind::CreateDelayedTrigger,
             Effect::AddRestriction { .. } => EffectKind::AddRestriction,
+            Effect::CreateEmblem { .. } => EffectKind::CreateEmblem,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,
         }
     }

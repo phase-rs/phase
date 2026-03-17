@@ -22,6 +22,11 @@ pub fn resolve(
                 .get(obj_id)
                 .ok_or(EffectError::ObjectNotFound(*obj_id))?;
 
+            // CR 114.4: Emblems cannot be sacrificed
+            if obj.is_emblem {
+                continue;
+            }
+
             // Only sacrifice things on the battlefield
             if obj.zone != Zone::Battlefield {
                 continue;

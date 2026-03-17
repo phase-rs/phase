@@ -25,6 +25,11 @@ pub fn resolve(
                 .get(obj_id)
                 .ok_or(EffectError::ObjectNotFound(*obj_id))?;
 
+            // CR 114.4: Emblems cannot be destroyed
+            if obj.is_emblem {
+                continue;
+            }
+
             // Skip if not on battlefield
             if obj.zone != Zone::Battlefield {
                 continue;

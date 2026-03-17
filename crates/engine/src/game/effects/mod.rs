@@ -15,6 +15,7 @@ pub mod choose_card;
 pub mod cleanup;
 pub mod copy_spell;
 pub mod counter;
+pub mod create_emblem;
 pub mod counters;
 pub mod deal_damage;
 pub mod delayed_trigger;
@@ -98,6 +99,7 @@ pub fn resolve_effect(
         Effect::SolveCase => solve_case::resolve(state, ability, events),
         Effect::CreateDelayedTrigger { .. } => delayed_trigger::resolve(state, ability, events),
         Effect::AddRestriction { .. } => add_restriction::resolve(state, ability, events),
+        Effect::CreateEmblem { .. } => create_emblem::resolve(state, ability, events),
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);

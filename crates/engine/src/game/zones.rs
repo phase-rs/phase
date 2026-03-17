@@ -172,7 +172,7 @@ pub fn remove_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, 
         Zone::Battlefield => state.battlefield.retain(|id| *id != object_id),
         Zone::Stack => state.stack.retain(|e| e.id != object_id),
         Zone::Exile => state.exile.retain(|id| *id != object_id),
-        Zone::Command => {} // Command zone not tracked as a collection in Phase 3
+        Zone::Command => state.command_zone.retain(|id| *id != object_id),
     }
 }
 
@@ -195,7 +195,7 @@ pub fn add_to_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, owner
         Zone::Battlefield => state.battlefield.push(object_id),
         Zone::Stack => {} // Stack entries are managed separately via StackEntry
         Zone::Exile => state.exile.push(object_id),
-        Zone::Command => {} // Command zone not tracked as a collection in Phase 3
+        Zone::Command => state.command_zone.push(object_id),
     }
 }
 

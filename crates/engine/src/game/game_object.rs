@@ -155,6 +155,10 @@ pub struct GameObject {
     #[serde(default)]
     pub is_commander: bool,
 
+    /// CR 114: Whether this object is an emblem (immune to removal, persists in command zone)
+    #[serde(default)]
+    pub is_emblem: bool,
+
     /// Modal spell metadata ("Choose one —", etc.). Copied from CardFace at load time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modal: Option<ModalChoice>,
@@ -239,6 +243,7 @@ impl GameObject {
             available_mana_colors: Vec::new(),
             loyalty_activated_this_turn: false,
             is_commander: false,
+            is_emblem: false,
             modal: None,
             additional_cost: None,
             casting_restrictions: Vec::new(),
