@@ -153,6 +153,12 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         );
     }
 
+    // --- "During your turn, as long as ~ has [counters], [pronoun]'s a [P/T] [types] and has [keyword]" ---
+    // Compound condition: DuringYourTurn + HasCounters → animation pattern (Kaito, Gideon, etc.)
+    if let Some(def) = parse_compound_turn_counter_animation(&lower, &text) {
+        return Some(def);
+    }
+
     // --- "During your turn, [subject] has/gets ..." ---
     if let Some(rest) = lower.strip_prefix("during your turn, ") {
         let original_rest = &text["during your turn, ".len()..];
@@ -524,6 +530,148 @@ fn parse_subject_continuous_static(text: &str) -> Option<StaticDefinition> {
     }
 
     None
+}
+
+/// Parse compound condition + animation pattern:
+/// "During your turn, as long as ~ has one or more [counter] counters on [pronoun],
+///  [pronoun]'s a [P/T] [types] and has [keyword]"
+///
+/// Produces `StaticCondition::And { DuringYourTurn, HasCounters { .. } }` with
+/// `ContinuousModification` list for type/subtype/P-T/keyword changes.
+fn parse_compound_turn_counter_animation(lower: &str, text: &str) -> Option<StaticDefinition> {
+    // Strip "during your turn, " prefix
+    let rest = lower.strip_prefix("during your turn, ")?;
+
+    // Strip "as long as " prefix from the remainder
+    let rest = rest.strip_prefix("as long as ")?;
+
+    // Parse "~ has one or more [type] counters on [pronoun], "
+    let rest = rest.strip_prefix("~ has ")?;
+
+    // Parse the counter count requirement: "one or more" / "N or more" / "a"
+    let (minimum, rest) = parse_counter_minimum(rest)?;
+
+    // Parse "[type] counters on [pronoun], "
+    let rest = rest.trim_start();
+    let counters_pos = rest.find(" counter")?;
+    let counter_type = rest[..counters_pos].trim().to_string();
+
+    // Skip past "counters on [pronoun], " to get the modification text
+    let rest = &rest[counters_pos..];
+    let comma_pos = rest.find(", ")?;
+    let modification_text = rest[comma_pos + 2..].trim();
+
+    let modifications = parse_animation_modifications(modification_text.trim_end_matches('.'));
+    if modifications.is_empty() {
+        return None;
+    }
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .condition(StaticCondition::And {
+                conditions: vec![
+                    StaticCondition::DuringYourTurn,
+                    StaticCondition::HasCounters {
+                        counter_type,
+                        minimum,
+                    },
+                ],
+            })
+            .modifications(modifications)
+            .description(text.to_string()),
+    )
+}
+
+/// Parse "one or more" / "N or more" / "a" into a counter minimum count.
+/// Returns (minimum, remaining text).
+fn parse_counter_minimum(text: &str) -> Option<(u32, &str)> {
+    if let Some(rest) = text.strip_prefix("one or more ") {
+        return Some((1, rest));
+    }
+    if let Some(rest) = text.strip_prefix("a ") {
+        return Some((1, rest));
+    }
+    // "N or more" pattern
+    if let Some((n, rest)) = parse_number(text) {
+        let rest = rest.trim_start();
+        if let Some(rest) = rest.strip_prefix("or more ") {
+            return Some((n as u32, rest));
+        }
+    }
+    None
+}
+
+/// Parse "[pronoun]'s a [P/T] [types] and has [keyword]" into modifications.
+///
+/// Handles patterns like:
+/// - "he's a 3/4 ninja creature and has hexproof"
+/// - "it's a 3/4 ninja creature with hexproof"
+fn parse_animation_modifications(text: &str) -> Vec<ContinuousModification> {
+    let lower = text.to_lowercase();
+    let mut modifications = Vec::new();
+
+    // Strip pronoun prefix: "he's a", "she's a", "it's a", "~'s a"
+    let body = lower
+        .strip_prefix("he's a ")
+        .or_else(|| lower.strip_prefix("she's a "))
+        .or_else(|| lower.strip_prefix("it's a "))
+        .or_else(|| lower.strip_prefix("~'s a "));
+
+    let body = match body {
+        Some(b) => b.trim(),
+        None => return modifications,
+    };
+
+    // Split on " and has " or " with " to separate type/PT from keywords
+    let (type_pt_part, keyword_part) = if let Some(pos) = body.find(" and has ") {
+        (&body[..pos], Some(&body[pos + 9..]))
+    } else if let Some(pos) = body.find(" with ") {
+        (&body[..pos], Some(&body[pos + 6..]))
+    } else {
+        (body, None)
+    };
+
+    // Parse P/T from the beginning: "3/4 ninja creature"
+    let remaining = if let Some((p, t)) = parse_pt_mod(type_pt_part) {
+        modifications.push(ContinuousModification::SetPower { value: p });
+        modifications.push(ContinuousModification::SetToughness { value: t });
+        // Skip past the P/T value
+        let slash = type_pt_part.find('/').unwrap();
+        let rest = &type_pt_part[slash + 1..];
+        let pt_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+        rest[pt_end..].trim()
+    } else {
+        type_pt_part
+    };
+
+    // Parse types and subtypes from remaining: "ninja creature", "human ninja creature"
+    for word in remaining.split_whitespace() {
+        let word = word.trim_end_matches('.').trim_end_matches(',');
+        if word.is_empty() {
+            continue;
+        }
+        use std::str::FromStr;
+        let capitalized = format!("{}{}", word[..1].to_uppercase(), &word[1..]);
+        if let Ok(core_type) = crate::types::card_type::CoreType::from_str(&capitalized) {
+            modifications.push(ContinuousModification::AddType { core_type });
+        } else {
+            modifications.push(ContinuousModification::AddSubtype {
+                subtype: capitalized,
+            });
+        }
+    }
+
+    // Parse keywords from keyword part
+    if let Some(kw_text) = keyword_part {
+        for part in split_keyword_list(kw_text.trim().trim_end_matches('.')) {
+            if let Some(kw) = map_keyword(part.trim().trim_end_matches('.')) {
+                modifications.push(ContinuousModification::AddKeyword { keyword: kw });
+            }
+        }
+    }
+
+    modifications
 }
 
 fn parse_conditional_static(text: &str) -> Option<StaticDefinition> {
@@ -2314,5 +2462,71 @@ mod tests {
             .contains(&ContinuousModification::AddKeyword {
                 keyword: Keyword::Haste,
             }));
+    }
+
+    #[test]
+    fn parse_compound_static_kaito_animation() {
+        let text = "During your turn, as long as ~ has one or more loyalty counters on him, he's a 3/4 Ninja creature and has hexproof.";
+        let def = parse_static_line(text).unwrap();
+
+        // Verify compound condition
+        assert!(matches!(
+            def.condition,
+            Some(StaticCondition::And { ref conditions })
+            if conditions.len() == 2
+        ));
+        if let Some(StaticCondition::And { ref conditions }) = def.condition {
+            assert!(matches!(conditions[0], StaticCondition::DuringYourTurn));
+            assert!(matches!(
+                conditions[1],
+                StaticCondition::HasCounters {
+                    ref counter_type,
+                    minimum: 1,
+                } if counter_type == "loyalty"
+            ));
+        }
+
+        // Verify self-referencing
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+
+        // Verify modifications
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::SetPower { value: 3 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::SetToughness { value: 4 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddType {
+                core_type: crate::types::card_type::CoreType::Creature,
+            }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddSubtype {
+                subtype: "Ninja".to_string(),
+            }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Hexproof,
+            }));
+    }
+
+    #[test]
+    fn parse_compound_static_counter_minimum_variants() {
+        // "a" counter variant
+        let text =
+            "During your turn, as long as ~ has a loyalty counter on it, it's a 2/2 Ninja creature and has hexproof.";
+        let def = parse_static_line(text).unwrap();
+        if let Some(StaticCondition::And { ref conditions }) = def.condition {
+            assert!(matches!(
+                conditions[1],
+                StaticCondition::HasCounters { minimum: 1, .. }
+            ));
+        }
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::SetPower { value: 2 }));
     }
 }

@@ -108,13 +108,21 @@ fn evaluate_condition(
             .get(&source_id)
             .map(|obj| {
                 let count = match counter_type.as_str() {
-                    "+1/+1" | "plus1plus1" => {
-                        obj.counters.get(&CounterType::Plus1Plus1).copied().unwrap_or(0)
-                    }
-                    "-1/-1" | "minus1minus1" => {
-                        obj.counters.get(&CounterType::Minus1Minus1).copied().unwrap_or(0)
-                    }
-                    "loyalty" => obj.counters.get(&CounterType::Loyalty).copied().unwrap_or(0),
+                    "+1/+1" | "plus1plus1" => obj
+                        .counters
+                        .get(&CounterType::Plus1Plus1)
+                        .copied()
+                        .unwrap_or(0),
+                    "-1/-1" | "minus1minus1" => obj
+                        .counters
+                        .get(&CounterType::Minus1Minus1)
+                        .copied()
+                        .unwrap_or(0),
+                    "loyalty" => obj
+                        .counters
+                        .get(&CounterType::Loyalty)
+                        .copied()
+                        .unwrap_or(0),
                     "stun" => obj.counters.get(&CounterType::Stun).copied().unwrap_or(0),
                     other => obj
                         .counters

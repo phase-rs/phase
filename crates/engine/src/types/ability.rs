@@ -729,19 +729,13 @@ pub enum QuantityRef {
     LifeAboveStarting,
     /// Count of objects on the battlefield matching a filter.
     /// Used for "for each creature you control" and similar patterns.
-    ObjectCount {
-        filter: TargetFilter,
-    },
+    ObjectCount { filter: TargetFilter },
     /// Count of players matching a player-level filter.
     /// Used for "for each opponent who lost life this turn" and similar patterns.
-    PlayerCount {
-        filter: PlayerFilter,
-    },
+    PlayerCount { filter: PlayerFilter },
     /// Count of counters of a given type on the source object.
     /// Used for "for each [counter type] counter on ~" patterns.
-    CountersOnSelf {
-        counter_type: String,
-    },
+    CountersOnSelf { counter_type: String },
     /// A variable reference (e.g. "X") resolved from spell payment or "that much" from prior effect.
     Variable(String),
     /// The power of the targeted permanent. Used for "equal to target's power".
@@ -1022,13 +1016,14 @@ pub enum SpellCastingOptionKind {
 #[serde(tag = "type")]
 pub enum Effect {
     DealDamage {
-        amount: DamageAmount,
+        #[serde(default = "default_quantity_one")]
+        amount: QuantityExpr,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
     Draw {
-        #[serde(default = "default_one")]
-        count: u32,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
     },
     Pump {
         #[serde(default = "default_pt_value_zero")]
@@ -1069,13 +1064,15 @@ pub enum Effect {
         count: CountValue,
     },
     GainLife {
-        amount: LifeAmount,
+        #[serde(default = "default_quantity_one")]
+        amount: QuantityExpr,
         /// Who gains the life.
         #[serde(default)]
         player: GainLifePlayer,
     },
     LoseLife {
-        amount: i32,
+        #[serde(default = "default_quantity_one")]
+        amount: QuantityExpr,
     },
     Tap {
         #[serde(default = "default_target_filter_any")]
@@ -1110,8 +1107,8 @@ pub enum Effect {
         target: TargetFilter,
     },
     Mill {
-        #[serde(default = "default_one")]
-        count: u32,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
@@ -1332,6 +1329,10 @@ fn default_one() -> u32 {
 
 fn default_one_i32() -> i32 {
     1
+}
+
+fn default_quantity_one() -> QuantityExpr {
+    QuantityExpr::Fixed { value: 1 }
 }
 
 fn default_pt_value_zero() -> PtValue {
