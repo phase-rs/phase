@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Completed 31-01-PLAN.md
-last_updated: "2026-03-17T02:42:23.000Z"
-last_activity: 2026-03-17 — Phase 31 Plan 01 complete (Compound Static Conditions + Animation Parser)
+stopped_at: Completed 31-04-PLAN.md
+last_updated: "2026-03-17T02:53:39.061Z"
+last_activity: 2026-03-17 — Phase 31 Plan 04 complete (Ninjutsu Keyword Runtime)
 progress:
   total_phases: 11
   completed_phases: 8
   total_plans: 56
-  completed_plans: 49
-  percent: 96
+  completed_plans: 51
+  percent: 98
 ---
 
 # Project State
@@ -25,11 +25,11 @@ See: .planning/PROJECT.md (updated 2026-03-11)
 
 ## Current Position
 
-Phase: 31 — Plan 1 of 1 complete
-Status: Complete
-Last activity: 2026-03-17 — Phase 31 Plan 01 complete (Compound Static Conditions + Animation Parser)
+Phase: 31 — Plan 4 of 4+ complete
+Status: Executing
+Last activity: 2026-03-17 — Phase 31 Plan 04 complete (Ninjutsu Keyword Runtime)
 
-Progress: [████████████████████] 50/51 plans (98%)
+Progress: [████████████████████] 51/51+ plans (98%)
 
 ## Performance Metrics
 
@@ -79,6 +79,7 @@ Progress: [████████████████████] 50/51 p
 | Phase 30 P02 | 32min | 2 tasks | 11 files |
 | Phase 30 P03 | 40min | 2 tasks | 6 files |
 | Phase 30 P04 | 23min | 3 tasks | 6 files |
+| Phase 31 P04 | 31min | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -245,6 +246,7 @@ Recent decisions affecting current work:
 - [30-03]: AI Adventure face selection delegated to minimax search (both options generated as candidates)
 - [30-03]: CastingPermission::AdventureCreature cleared on zone change from exile (prevents stale permissions)
 - [30-04]: RestrictionScope serde changed from internally-tagged to adjacently-tagged (tag+content) for TypeScript discriminated union compat
+- [Phase 31]: Ninjutsu activation flows through Priority WaitingFor with combat phase check; NinjutsuActivation WaitingFor as secondary UI path
 
 ### Roadmap Evolution
 
@@ -266,6 +268,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-17T02:42:23Z
-Stopped at: Completed 31-01-PLAN.md
-Resume file: N/A (phase 31 plan 01 complete)
+Last session: 2026-03-17T02:53:28.891Z
+Stopped at: Completed 31-04-PLAN.md
+Resume file: None

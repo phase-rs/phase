@@ -307,7 +307,7 @@ Plans:
 **Goal:** Deliver five composable engine building blocks motivated by Kaito, Bane of Nightmares: Ninjutsu runtime (~30 cards), Emblem infrastructure (dozens of planeswalkers), compound static conditions, planeswalker-to-creature conditional animation, and a scalable "for each" dynamic quantity system. Full parser coverage for all new patterns. Kaito fully playable when complete.
 **Requirements**: K31-NINJA, K31-EMBLEM, K31-COND, K31-ANIM, K31-QTY, K31-PARSE, K31-INT
 **Depends on:** Phase 30
-**Plans:** 1/5 plans executed
+**Plans:** 2/5 plans executed
 
 **Execution Order:**
 Wave 1: Plans 01 + 02 + 04 (parallel — compound conditions + animation, dynamic quantities, Ninjutsu runtime)
