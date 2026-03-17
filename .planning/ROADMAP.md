@@ -320,3 +320,18 @@ Plans:
 - [ ] 31-03-PLAN.md — Emblem infrastructure: Effect::CreateEmblem, is_emblem on GameObject, immunity, layer extension, parser
 - [ ] 31-04-PLAN.md — Ninjutsu runtime: GameAction::ActivateNinjutsu, combat integration, handler, AI support, frontend types
 - [ ] 31-05-PLAN.md — Kaito integration test, card data regeneration, emblem command zone UI, human gameplay verification
+
+### Phase 32: Add compound targeted-action parsing and multi-object shuffle-to-library support (Floodpits Drowner class)
+
+**Goal:** Deliver four composable engine building blocks: counter-based target filtering (FilterProp::HasCounter), generic compound effect splitting (try_split_compound + ParentTarget), generic compound subject splitting (try_split_compound_subject), and multi-object shuffle-to-library with auto-shuffle per CR 401.3. Full Floodpits Drowner integration test and pipeline regeneration with coverage audit.
+**Requirements**: BB-COUNTER, BB-COMPOUND, BB-SUBJECT, BB-SHUFFLE, BB-INTEGRATE
+**Depends on:** Phase 31
+**Plans:** 2 plans
+
+**Execution Order:**
+Wave 1: Plan 01 (type definitions + counter filter + compound effect splitter + ParentTarget)
+Wave 2: Plan 02 (compound subject splitter + ChangeZone auto-shuffle + integration test + pipeline regen)
+
+Plans:
+- [ ] 32-01-PLAN.md — Type definitions (FilterProp::HasCounter, TargetFilter::ParentTarget, ChangeZone owner_library), counter filter parser, compound effect splitter
+- [ ] 32-02-PLAN.md — Compound subject splitter, ChangeZone auto-shuffle per CR 401.3, Floodpits Drowner integration test, pipeline regeneration
