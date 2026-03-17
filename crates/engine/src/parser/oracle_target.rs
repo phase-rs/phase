@@ -1,10 +1,37 @@
 use std::str::FromStr;
 
 use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter};
+use crate::types::identifiers::TrackedSetId;
 use crate::types::keywords::Keyword;
 use crate::types::zones::Zone;
 
 use super::oracle_util::contains_possessive;
+
+/// Parse an event-context possessive reference from Oracle text.
+/// These resolve from the triggering event, not from player targeting.
+/// Must be checked BEFORE standard `parse_target` for trigger-based effects.
+pub fn parse_event_context_ref(text: &str) -> Option<TargetFilter> {
+    let lower = text.to_lowercase();
+    let lower = lower.trim();
+
+    if lower == "that spell's controller" || lower.starts_with("that spell's controller") {
+        return Some(TargetFilter::TriggeringSpellController);
+    }
+    if lower == "that spell's owner" || lower.starts_with("that spell's owner") {
+        return Some(TargetFilter::TriggeringSpellOwner);
+    }
+    if lower == "that player" || lower.starts_with("that player") {
+        return Some(TargetFilter::TriggeringPlayer);
+    }
+    if lower == "that source" || lower.starts_with("that source") {
+        return Some(TargetFilter::TriggeringSource);
+    }
+    if lower == "that permanent" || lower.starts_with("that permanent") {
+        return Some(TargetFilter::TriggeringSource);
+    }
+
+    None
+}
 
 /// Parse a target description from Oracle text, returning (filter, remaining_text).
 /// Consumes the longest matching target phrase.
@@ -88,7 +115,42 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         );
     }
 
-    (TargetFilter::Any, text)
+    // CR 603.7: Anaphoric pronouns referencing previously affected objects.
+    // Parallel to LastCreated — a parse-time marker resolved at runtime.
+    // TrackedSetId(0) is a safe sentinel (next_tracked_set_id starts at 1).
+    for prefix in [
+        "those cards",
+        "those permanents",
+        "those creatures",
+        "the exiled cards",
+        "the exiled card",
+        "the exiled permanents",
+        "the exiled permanent",
+        "the exiled creature",
+    ] {
+        if lower.starts_with(prefix) {
+            return (
+                TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                &text[prefix.len()..],
+            );
+        }
+    }
+
+    // Bare type phrase fallback: try parse_type_phrase before giving up.
+    // Handles "other nonland permanents you own and control" after quantifier stripping.
+    let (filter, rest) = parse_type_phrase(text);
+    match &filter {
+        // parse_type_phrase recognized a card type, subtype, or meaningful properties
+        TargetFilter::Typed(tf)
+            if tf.card_type.is_some() || tf.subtype.is_some() || !tf.properties.is_empty() =>
+        {
+            (filter, rest)
+        }
+        // No meaningful content parsed — preserve original fallback behavior
+        _ => (TargetFilter::Any, text),
+    }
 }
 
 /// Parse a type phrase like "creature", "nonland permanent", "artifact or enchantment",
@@ -1004,5 +1066,101 @@ mod tests {
                     .properties(vec![FilterProp::Another])
             )
         );
+    }
+
+    // ── Anaphoric pronouns (Building Block C) ──
+
+    #[test]
+    fn those_cards_produces_tracked_set() {
+        let (f, rest) = parse_target("those cards");
+        assert_eq!(
+            f,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn the_exiled_card_produces_tracked_set() {
+        let (f, _) = parse_target("the exiled card");
+        assert_eq!(
+            f,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
+    }
+
+    #[test]
+    fn the_exiled_permanents_produces_tracked_set() {
+        let (f, _) = parse_target("the exiled permanents");
+        assert_eq!(
+            f,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
+    }
+
+    // ── Bare type phrase fallback ──
+
+    #[test]
+    fn bare_type_phrase_fallback() {
+        let (f, _) = parse_target("other nonland permanents you own and control");
+        // Should be Typed (not Any) — parse_type_phrase picks up the permanent type + properties
+        match f {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.card_type.is_some() || !tf.properties.is_empty(),
+                    "Expected meaningful type info, got {:?}",
+                    tf
+                );
+            }
+            other => panic!("Expected Typed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn unrecognized_bare_text_stays_any() {
+        let (f, _) = parse_target("foobar");
+        assert_eq!(f, TargetFilter::Any);
+    }
+
+    #[test]
+    fn parse_event_context_that_spells_controller() {
+        let filter = parse_event_context_ref("that spell's controller");
+        assert_eq!(filter, Some(TargetFilter::TriggeringSpellController));
+    }
+
+    #[test]
+    fn parse_event_context_that_spells_owner() {
+        let filter = parse_event_context_ref("that spell's owner");
+        assert_eq!(filter, Some(TargetFilter::TriggeringSpellOwner));
+    }
+
+    #[test]
+    fn parse_event_context_that_player() {
+        let filter = parse_event_context_ref("that player");
+        assert_eq!(filter, Some(TargetFilter::TriggeringPlayer));
+    }
+
+    #[test]
+    fn parse_event_context_that_source() {
+        let filter = parse_event_context_ref("that source");
+        assert_eq!(filter, Some(TargetFilter::TriggeringSource));
+    }
+
+    #[test]
+    fn parse_event_context_that_permanent() {
+        let filter = parse_event_context_ref("that permanent");
+        assert_eq!(filter, Some(TargetFilter::TriggeringSource));
+    }
+
+    #[test]
+    fn parse_event_context_returns_none_for_non_event() {
+        assert_eq!(parse_event_context_ref("target creature"), None);
+        assert_eq!(parse_event_context_ref("any target"), None);
     }
 }

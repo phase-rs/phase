@@ -1,18 +1,20 @@
 use std::str::FromStr;
 
 use super::oracle_static::parse_continuous_modifications;
-use super::oracle_target::{parse_target, parse_type_phrase};
+use super::oracle_target::{parse_event_context_ref, parse_target, parse_type_phrase};
 use super::oracle_util::{
     contains_object_pronoun, contains_possessive, parse_mana_production, parse_number,
     starts_with_possessive, strip_reminder_text,
 };
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, ChoiceType, CountValue, DamageAmount,
-    Duration, Effect, FilterProp, GainLifePlayer, LifeAmount, ManaProduction, ManaSpendRestriction,
-    PtValue, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer, LifeAmount,
+    ManaProduction, ManaSpendRestriction, MultiTargetSpec, PtValue, StaticDefinition, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
+use crate::types::phase::Phase;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
@@ -152,13 +154,32 @@ enum NumericImperativeAst {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TargetedImperativeAst {
-    Tap { target: TargetFilter },
-    Untap { target: TargetFilter },
-    Sacrifice { target: TargetFilter },
-    Discard { count: u32 },
-    Return { target: TargetFilter },
-    Fight { target: TargetFilter },
-    GainControl { target: TargetFilter },
+    Tap {
+        target: TargetFilter,
+    },
+    Untap {
+        target: TargetFilter,
+    },
+    Sacrifice {
+        target: TargetFilter,
+    },
+    Discard {
+        count: u32,
+    },
+    /// CR 701.3: Return to hand (bounce).
+    Return {
+        target: TargetFilter,
+    },
+    /// CR 400.7: Return to the battlefield (zone change, not bounce).
+    ReturnToBattlefield {
+        target: TargetFilter,
+    },
+    Fight {
+        target: TargetFilter,
+    },
+    GainControl {
+        target: TargetFilter,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -949,6 +970,53 @@ struct ClauseChunk {
     boundary_after: Option<ClauseBoundary>,
 }
 
+/// Check if an effect exiles objects (candidate for tracked set recording).
+/// Also looks inside `CreateDelayedTrigger` wrappers, since a previous clause's
+/// exile may have already been wrapped by `strip_temporal_suffix`.
+fn is_exile_effect(effect: &Effect) -> bool {
+    match effect {
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        }
+        | Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            ..
+        } => true,
+        Effect::CreateDelayedTrigger { effect: inner, .. } => is_exile_effect(&inner.effect),
+        _ => false,
+    }
+}
+
+/// CR 603.7: Detect explicit cross-clause pronouns ("those cards", "the exiled card").
+fn contains_explicit_tracked_set_pronoun(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("those cards")
+        || lower.contains("those permanents")
+        || lower.contains("those creatures")
+        || lower.contains("the exiled card")
+        || lower.contains("the exiled permanent")
+        || lower.contains("the exiled creature")
+}
+
+/// CR 603.7: Detect implicit anaphora ("return it/them to the battlefield")
+/// when preceded by an exile effect. Context-sensitive — only matches when
+/// the pronoun is in a return-to-battlefield construction.
+fn contains_implicit_tracked_set_pronoun(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    (lower.starts_with("return it ") || lower.starts_with("return them "))
+        && lower.contains("battlefield")
+}
+
+fn mark_uses_tracked_set(def: &mut AbilityDefinition) {
+    if let Effect::CreateDelayedTrigger {
+        uses_tracked_set, ..
+    } = &mut def.effect
+    {
+        *uses_tracked_set = true;
+    }
+}
+
 /// Parse a compound effect chain into an `AbilityDefinition` sub-ability chain.
 ///
 /// Phase 1 keeps the existing clause/effect semantics but replaces the fragile
@@ -966,7 +1034,9 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
         }
 
         let (condition, text) = strip_additional_cost_conditional(normalized_text);
-        let clause = parse_effect_clause(&text);
+        let (text_no_temporal, delayed_condition) = strip_temporal_suffix(&text);
+        let (text_no_qty, multi_target) = strip_any_number_quantifier(text_no_temporal);
+        let clause = parse_effect_clause(&text_no_qty);
         let mut def = AbilityDefinition::new(kind, clause.effect);
         if let Some(duration) = clause.duration {
             def = def.duration(duration);
@@ -974,10 +1044,50 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
         if let Some(condition) = condition {
             def = def.condition(condition);
         }
+        if let Some(spec) = multi_target {
+            def = def.multi_target(spec);
+        }
 
         let mut current_defs = vec![def];
         if let Some(sub) = clause.sub_ability {
             current_defs.push(*sub);
+        }
+
+        // CR 603.7: Wrap in CreateDelayedTrigger if temporal suffix was found
+        if let Some(delayed_cond) = delayed_condition {
+            for current in &mut current_defs {
+                let inner = std::mem::replace(
+                    current,
+                    AbilityDefinition::new(
+                        kind,
+                        Effect::Unimplemented {
+                            name: "placeholder".to_string(),
+                            description: None,
+                        },
+                    ),
+                );
+                *current = AbilityDefinition::new(
+                    kind,
+                    Effect::CreateDelayedTrigger {
+                        condition: delayed_cond.clone(),
+                        effect: Box::new(inner),
+                        uses_tracked_set: false,
+                    },
+                );
+            }
+        }
+
+        // CR 603.7: Cross-clause pronoun → mark uses_tracked_set on delayed trigger
+        if let Some(previous) = defs.last() {
+            if is_exile_effect(&previous.effect) {
+                let has_tracked_ref = contains_explicit_tracked_set_pronoun(normalized_text)
+                    || contains_implicit_tracked_set_pronoun(normalized_text);
+                if has_tracked_ref {
+                    for current in &mut current_defs {
+                        mark_uses_tracked_set(current);
+                    }
+                }
+            }
         }
 
         let followup_continuation = defs.last().and_then(|previous| {
@@ -1432,8 +1542,13 @@ fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<TargetedImperati
         return Some(TargetedImperativeAst::Discard { count });
     }
     if lower.starts_with("return ") {
-        let (target, _) = parse_target(&text[7..]);
-        return Some(TargetedImperativeAst::Return { target });
+        let rest = &text[7..];
+        let (target_text, destination) = strip_return_destination(rest);
+        let (target, _) = parse_target(target_text);
+        return match destination {
+            Some(Zone::Battlefield) => Some(TargetedImperativeAst::ReturnToBattlefield { target }),
+            _ => Some(TargetedImperativeAst::Return { target }),
+        };
     }
     if lower.starts_with("fight ") {
         let (target, _) = parse_target(&text[6..]);
@@ -1480,6 +1595,12 @@ fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         TargetedImperativeAst::Return { target } => Effect::Bounce {
             target,
             destination: None,
+        },
+        // CR 400.7: Return to battlefield is a zone change, not a bounce.
+        TargetedImperativeAst::ReturnToBattlefield { target } => Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Battlefield,
+            target,
         },
         TargetedImperativeAst::Fight { target } => Effect::Fight { target },
         TargetedImperativeAst::GainControl { target } => Effect::GainControl { target },
@@ -2458,6 +2579,119 @@ fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
     (text, None)
 }
 
+/// CR 603.7a: Strip temporal suffix indicating a delayed trigger condition.
+/// Parallel to `strip_trailing_duration()` but for one-shot deferred effects.
+/// Duration = "effect is active during this period"; DelayedTriggerCondition = "fire once at this
+/// future point".
+fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerCondition>) {
+    let lower = text.to_lowercase();
+    for (suffix, condition) in [
+        (
+            " at the beginning of the next end step",
+            DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+        ),
+        (
+            " at the beginning of the next upkeep",
+            DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::Upkeep,
+            },
+        ),
+        (
+            " at end of combat",
+            DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::EndCombat,
+            },
+        ),
+    ] {
+        if lower.ends_with(suffix) {
+            let end = text.len() - suffix.len();
+            return (text[..end].trim_end_matches(',').trim(), Some(condition));
+        }
+    }
+    (text, None)
+}
+
+/// Verbs where "any number of" / "up to N" modifies the target set (CR 115.1d),
+/// not a resource count (counters, life, etc.).
+const MULTI_TARGET_VERBS: &[&str] = &[
+    "exile",
+    "tap",
+    "untap",
+    "sacrifice",
+    "return",
+    "destroy",
+    "choose",
+];
+
+/// CR 115.1d: Strip "any number of" or "up to N" quantifier from imperative text.
+/// Only applies to verbs where the quantifier modifies target selection.
+fn strip_any_number_quantifier(text: &str) -> (String, Option<MultiTargetSpec>) {
+    let lower = text.to_lowercase();
+    let verb = lower.split_whitespace().next().unwrap_or("");
+    if !MULTI_TARGET_VERBS.contains(&verb) {
+        return (text.to_string(), None);
+    }
+
+    let verb_end = lower.find(' ').map(|i| i + 1).unwrap_or(0);
+    let after_verb = &lower[verb_end..];
+
+    if after_verb.starts_with("any number of ") {
+        let skip = verb_end + "any number of ".len();
+        let rebuilt = format!("{}{}", &text[..verb_end], &text[skip..]);
+        return (
+            rebuilt,
+            Some(MultiTargetSpec {
+                min: 0,
+                max: usize::MAX,
+            }),
+        );
+    }
+    if let Some(rest) = after_verb.strip_prefix("up to ") {
+        if let Some((n, remainder)) = parse_number(rest) {
+            // Compute skip offset: verb + "up to " + (consumed portion of rest)
+            let consumed_len = rest.len() - remainder.len();
+            let skip = verb_end + "up to ".len() + consumed_len;
+            let rebuilt = format!("{}{}", &text[..verb_end], text[skip..].trim_start());
+            return (
+                rebuilt,
+                Some(MultiTargetSpec {
+                    min: 0,
+                    max: n as usize,
+                }),
+            );
+        }
+    }
+    (text.to_string(), None)
+}
+
+/// Strip "to the battlefield [under X's control]" and similar destination phrases.
+/// Returns the remaining target text and the destination zone (if battlefield).
+fn strip_return_destination(text: &str) -> (&str, Option<Zone>) {
+    let lower = text.to_lowercase();
+    // Ordered longest-first to avoid partial matches
+    for (phrase, zone) in [
+        (
+            " to the battlefield under their owners' control",
+            Zone::Battlefield,
+        ),
+        (
+            " to the battlefield under its owner's control",
+            Zone::Battlefield,
+        ),
+        (" to the battlefield under your control", Zone::Battlefield),
+        (" to the battlefield tapped", Zone::Battlefield),
+        (" to the battlefield", Zone::Battlefield),
+        (" onto the battlefield", Zone::Battlefield),
+    ] {
+        // Use rfind to match the rightmost occurrence — the destination phrase
+        // is always at the end, and the target text may contain "battlefield".
+        if let Some(pos) = lower.rfind(phrase) {
+            return (text[..pos].trim(), Some(zone));
+        }
+    }
+    (text, None)
+}
+
 fn try_parse_subject_continuous_clause(text: &str) -> Option<ParsedEffectClause> {
     let verb_start = find_predicate_start(text)?;
     let subject = text[..verb_start].trim();
@@ -2848,6 +3082,11 @@ fn try_parse_damage(lower: &str, _text: &str) -> Option<Effect> {
     if after_to.starts_with("each ") {
         let (target, _) = parse_target(after_to);
         return Some(Effect::DamageAll { amount, target });
+    }
+
+    // CR 603.7c: Check for event-context references before standard target parsing.
+    if let Some(target) = parse_event_context_ref(after_to) {
+        return Some(Effect::DealDamage { amount, target });
     }
 
     let (target, _) = parse_target(after_to);
@@ -5865,5 +6104,249 @@ mod tests {
                 ref restrictions, ..
             } if restrictions == &[ManaSpendRestriction::SpellType("Creature".to_string())]
         ));
+    }
+
+    // ── Building Block A: strip_temporal_suffix ──
+
+    #[test]
+    fn strip_temporal_suffix_end_step() {
+        let (text, cond) = strip_temporal_suffix("return it at the beginning of the next end step");
+        assert_eq!(text, "return it");
+        assert_eq!(
+            cond,
+            Some(DelayedTriggerCondition::AtNextPhase { phase: Phase::End })
+        );
+    }
+
+    #[test]
+    fn strip_temporal_suffix_upkeep() {
+        let (text, cond) =
+            strip_temporal_suffix("do something at the beginning of the next upkeep");
+        assert_eq!(text, "do something");
+        assert_eq!(
+            cond,
+            Some(DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::Upkeep
+            })
+        );
+    }
+
+    #[test]
+    fn strip_temporal_suffix_no_match() {
+        let (text, cond) = strip_temporal_suffix("exile target creature");
+        assert_eq!(text, "exile target creature");
+        assert_eq!(cond, None);
+    }
+
+    // ── Building Block B: strip_any_number_quantifier ──
+
+    #[test]
+    fn strip_any_number_exile() {
+        let (text, spec) = strip_any_number_quantifier("exile any number of creatures");
+        assert_eq!(text, "exile creatures");
+        let spec = spec.unwrap();
+        assert_eq!(spec.min, 0);
+        assert_eq!(spec.max, usize::MAX);
+    }
+
+    #[test]
+    fn strip_up_to_n() {
+        let (text, spec) = strip_any_number_quantifier("exile up to three creatures");
+        assert_eq!(text, "exile creatures");
+        let spec = spec.unwrap();
+        assert_eq!(spec.min, 0);
+        assert_eq!(spec.max, 3);
+    }
+
+    #[test]
+    fn strip_any_number_no_match_for_non_verb() {
+        let (text, spec) = strip_any_number_quantifier("put any number of +1/+1 counters");
+        assert_eq!(text, "put any number of +1/+1 counters");
+        assert!(spec.is_none());
+    }
+
+    #[test]
+    fn strip_any_number_no_match_for_single_target() {
+        let (text, spec) = strip_any_number_quantifier("exile target creature");
+        assert_eq!(text, "exile target creature");
+        assert!(spec.is_none());
+    }
+
+    // ── Return to battlefield vs bounce ──
+
+    #[test]
+    fn return_to_battlefield_produces_change_zone() {
+        let e = parse_effect("return those cards to the battlefield under their owners' control");
+        assert!(matches!(
+            e,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn return_to_battlefield_owners_control() {
+        let e = parse_effect("return those cards to the battlefield under its owner's control");
+        assert!(matches!(
+            e,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn return_to_battlefield_tapped() {
+        let e = parse_effect("return target creature to the battlefield tapped");
+        assert!(matches!(
+            e,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn return_to_hand_produces_bounce() {
+        let e = parse_effect("return target creature to its owner's hand");
+        assert!(matches!(e, Effect::Bounce { .. }));
+    }
+
+    // ── Compound: delayed trigger in effect chain ──
+
+    #[test]
+    fn delayed_trigger_in_effect_chain() {
+        let def = parse_effect_chain(
+            "Exile target creature. Return it to the battlefield at the beginning of the next end step",
+            AbilityKind::Spell,
+        );
+        // First effect: exile
+        assert!(matches!(
+            def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ));
+        // Sub-ability: CreateDelayedTrigger
+        let sub = def.sub_ability.as_ref().expect("should have sub_ability");
+        assert!(matches!(
+            sub.effect,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn explicit_pronoun_marks_tracked_set() {
+        let def = parse_effect_chain(
+            "Exile target creature. Return those cards to the battlefield at the beginning of the next end step",
+            AbilityKind::Spell,
+        );
+        let sub = def.sub_ability.as_ref().expect("should have sub_ability");
+        match &sub.effect {
+            Effect::CreateDelayedTrigger {
+                uses_tracked_set, ..
+            } => assert!(*uses_tracked_set, "uses_tracked_set should be true"),
+            other => panic!("Expected CreateDelayedTrigger, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn implicit_pronoun_marks_tracked_set() {
+        let def = parse_effect_chain(
+            "Exile target creature. Return it to the battlefield at the beginning of the next end step",
+            AbilityKind::Spell,
+        );
+        let sub = def.sub_ability.as_ref().expect("should have sub_ability");
+        match &sub.effect {
+            Effect::CreateDelayedTrigger {
+                uses_tracked_set, ..
+            } => assert!(*uses_tracked_set, "uses_tracked_set should be true"),
+            other => panic!("Expected CreateDelayedTrigger, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn multi_target_on_ability_def() {
+        let def = parse_effect_chain("exile any number of creatures", AbilityKind::Spell);
+        assert!(def.multi_target.is_some());
+        let spec = def.multi_target.unwrap();
+        assert_eq!(spec.min, 0);
+        assert_eq!(spec.max, usize::MAX);
+    }
+
+    #[test]
+    fn quantifier_not_stripped_for_counters() {
+        // "put" is not in MULTI_TARGET_VERBS, so no stripping occurs
+        let def = parse_effect_chain(
+            "put any number of +1/+1 counters on target creature",
+            AbilityKind::Spell,
+        );
+        assert!(def.multi_target.is_none());
+    }
+
+    #[test]
+    fn flickerwisp_parse() {
+        // Flickerwisp: single target, implicit pronoun
+        let def = parse_effect_chain(
+            "Exile target permanent. Return it to the battlefield under its owner's control at the beginning of the next end step",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ));
+        let sub = def.sub_ability.as_ref().expect("should have sub_ability");
+        match &sub.effect {
+            Effect::CreateDelayedTrigger {
+                uses_tracked_set,
+                condition,
+                ..
+            } => {
+                assert!(*uses_tracked_set);
+                assert_eq!(
+                    *condition,
+                    DelayedTriggerCondition::AtNextPhase { phase: Phase::End }
+                );
+            }
+            other => panic!("Expected CreateDelayedTrigger, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn effect_deals_damage_to_that_spells_controller() {
+        let e = parse_effect("~ deals 2 damage to that spell's controller");
+        match e {
+            Effect::DealDamage { amount, target } => {
+                assert_eq!(amount, DamageAmount::Fixed(2));
+                assert_eq!(target, TargetFilter::TriggeringSpellController);
+            }
+            other => panic!("Expected DealDamage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn effect_deals_damage_to_that_player() {
+        let e = parse_effect("~ deals 3 damage to that player");
+        match e {
+            Effect::DealDamage { amount, target } => {
+                assert_eq!(amount, DamageAmount::Fixed(3));
+                assert_eq!(target, TargetFilter::TriggeringPlayer);
+            }
+            other => panic!("Expected DealDamage, got {:?}", other),
+        }
     }
 }
