@@ -2,8 +2,8 @@ use super::oracle_effect::parse_effect_chain;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{parse_number, parse_ordinal, strip_reminder_text};
 use crate::types::ability::{
-    AbilityKind, ControllerRef, FilterProp, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    AbilityKind, ControllerRef, FilterProp, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::phase::Phase;
 use crate::types::triggers::TriggerMode;

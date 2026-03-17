@@ -73,7 +73,9 @@ fn register_transient_effect(
                 ability.source_id,
                 ability.controller,
                 duration.clone(),
-                TargetFilter::SpecificObject { id: ability.source_id },
+                TargetFilter::SpecificObject {
+                    id: ability.source_id,
+                },
                 static_def.modifications.clone(),
                 static_def.condition.clone(),
             );
@@ -302,7 +304,9 @@ mod tests {
         assert_eq!(state.transient_continuous_effects.len(), 1);
         assert_eq!(
             state.transient_continuous_effects[0].affected,
-            TargetFilter::SpecificObject { id: target_creature }
+            TargetFilter::SpecificObject {
+                id: target_creature
+            }
         );
     }
 }

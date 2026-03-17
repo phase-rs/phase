@@ -60,7 +60,7 @@ function createGameState(overrides: Partial<GameState> = {}): GameState {
 describe("useKeyboardShortcuts", () => {
   beforeEach(() => {
     act(() => {
-      useUiStore.setState({ selectedCardIds: [10, 20], endTurnMode: false });
+      useUiStore.setState({ selectedCardIds: [10, 20] });
     });
   });
 

@@ -3,7 +3,8 @@ use std::str::FromStr;
 use crate::game::game_object::{parse_counter_type, CounterType, GameObject};
 use crate::parser::oracle_util::parse_number;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, ActivationRestriction, CastingRestriction, Comparator, SpellCastingOptionKind,
+    AbilityCost, AbilityDefinition, ActivationRestriction, CastingRestriction, Comparator,
+    SpellCastingOptionKind,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::keywords::Keyword;

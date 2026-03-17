@@ -450,7 +450,7 @@ pub fn unblocked_attackers(state: &GameState) -> Vec<ObjectId> {
             combat
                 .blocker_assignments
                 .get(&a.object_id)
-                .map_or(true, |blockers| blockers.is_empty())
+                .is_none_or(|blockers| blockers.is_empty())
         })
         .map(|a| a.object_id)
         .collect()

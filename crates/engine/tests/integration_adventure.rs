@@ -414,7 +414,7 @@ fn bonecrusher_becomes_target_trigger() {
 
     // BecomesTarget trigger should be on the stack above the bolt
     assert!(
-        stack_desc.iter().any(|s| *s == "Triggered"),
+        stack_desc.contains(&"Triggered"),
         "BecomesTarget trigger should be on stack. Stack: {:?}",
         stack_desc
     );

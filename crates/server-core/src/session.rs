@@ -20,34 +20,7 @@ type ActionResult = (Vec<(PlayerId, GameState)>, Vec<GameEvent>, Vec<GameAction>
 
 /// Returns the player who must act for the given WaitingFor, or None if the game is over.
 pub fn acting_player(waiting_for: &WaitingFor) -> Option<PlayerId> {
-    match waiting_for {
-        WaitingFor::Priority { player }
-        | WaitingFor::MulliganDecision { player, .. }
-        | WaitingFor::MulliganBottomCards { player, .. }
-        | WaitingFor::ManaPayment { player }
-        | WaitingFor::TargetSelection { player, .. }
-        | WaitingFor::DeclareAttackers { player, .. }
-        | WaitingFor::DeclareBlockers { player, .. }
-        | WaitingFor::ReplacementChoice { player, .. }
-        | WaitingFor::EquipTarget { player, .. }
-        | WaitingFor::ScryChoice { player, .. }
-        | WaitingFor::DigChoice { player, .. }
-        | WaitingFor::SurveilChoice { player, .. }
-        | WaitingFor::RevealChoice { player, .. }
-        | WaitingFor::SearchChoice { player, .. }
-        | WaitingFor::TriggerTargetSelection { player, .. }
-        | WaitingFor::BetweenGamesSideboard { player, .. }
-        | WaitingFor::BetweenGamesChoosePlayDraw { player, .. }
-        | WaitingFor::NamedChoice { player, .. }
-        | WaitingFor::ModeChoice { player, .. }
-        | WaitingFor::DiscardToHandSize { player, .. }
-        | WaitingFor::OptionalCostChoice { player, .. }
-        | WaitingFor::AbilityModeChoice { player, .. }
-        | WaitingFor::MultiTargetSelection { player, .. }
-        | WaitingFor::AdventureCastChoice { player, .. }
-        | WaitingFor::NinjutsuActivation { player, .. } => Some(*player),
-        WaitingFor::GameOver { .. } => None,
-    }
+    waiting_for.acting_player()
 }
 
 pub struct GameSession {
@@ -261,6 +234,20 @@ impl SessionManager {
             .player_for_token(player_token)
             .ok_or_else(|| "Invalid player token".to_string())?;
 
+        // CancelAutoPass: any valid player can cancel their own flag regardless of whose turn it is.
+        // This allows canceling UntilEndOfTurn while the opponent has priority.
+        if matches!(action, GameAction::CancelAutoPass) {
+            session.state.auto_pass.remove(&player);
+            let filtered_states: Vec<(PlayerId, GameState)> = (0..session.player_count)
+                .map(|i| {
+                    let pid = PlayerId(i);
+                    (pid, filter_state_for_player(&session.state, pid))
+                })
+                .collect();
+            let new_legal_actions = engine_legal_actions(&session.state);
+            return Ok((filtered_states, vec![], new_legal_actions));
+        }
+
         // Validate it's this player's turn to act
         let current_actor = acting_player(&session.state.waiting_for);
         match current_actor {
@@ -269,10 +256,14 @@ impl SessionManager {
             _ => {}
         }
 
-        // Validate action is legal
-        let legal_actions = engine_legal_actions(&session.state);
-        if !legal_actions.contains(&action) {
-            return Err(format!("Illegal action: {:?}", action));
+        // SetAutoPass: skip legality check (always legal when you have priority)
+        let is_set_auto_pass = matches!(action, GameAction::SetAutoPass { .. });
+        if !is_set_auto_pass {
+            // Validate action is legal
+            let legal_actions = engine_legal_actions(&session.state);
+            if !legal_actions.contains(&action) {
+                return Err(format!("Illegal action: {:?}", action));
+            }
         }
 
         // Apply action

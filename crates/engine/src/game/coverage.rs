@@ -342,7 +342,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 desc.push_str(&format!(" ({})", types.join(" ")));
             }
             if !keywords.is_empty() {
-                let kws: Vec<_> = keywords.iter().map(|k| keyword_label(k)).collect();
+                let kws: Vec<_> = keywords.iter().map(keyword_label).collect();
                 desc.push_str(&format!(" with {}", kws.join(", ")));
             }
             if *tapped {

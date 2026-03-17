@@ -1,8 +1,7 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, Effect,
-    ResolvedAbility, TargetRef,
+    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, Effect, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor};

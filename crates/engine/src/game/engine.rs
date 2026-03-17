@@ -7,7 +7,9 @@ use crate::types::ability::{
 };
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{ActionResult, GameState, WaitingFor};
+use crate::types::game_state::{
+    ActionResult, AutoPassMode, AutoPassRequest, GameState, WaitingFor,
+};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
 use crate::types::phase::Phase;
@@ -49,12 +51,11 @@ pub enum EngineError {
 }
 
 pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, EngineError> {
-    let result = apply_action(state, action);
-    if let Ok(action_result) = &result {
-        sync_waiting_for(state, &action_result.waiting_for);
-    }
+    let mut result = apply_action(state, action)?;
+    sync_waiting_for(state, &result.waiting_for);
+    run_auto_pass_loop(state, &mut result);
     derive_display_state(state);
-    result
+    Ok(result)
 }
 
 fn sync_waiting_for(state: &mut GameState, waiting_for: &WaitingFor) {
@@ -64,9 +65,129 @@ fn sync_waiting_for(state: &mut GameState, waiting_for: &WaitingFor) {
     }
 }
 
+/// Auto-pass loop: when a player has an auto-pass flag and receives priority,
+/// automatically pass for them until the goal condition is met or interrupted.
+fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
+    const MAX_ITERATIONS: usize = 500;
+
+    for _ in 0..MAX_ITERATIONS {
+        match &result.waiting_for {
+            WaitingFor::Priority { player } => {
+                let player = *player;
+                let Some(&mode) = state.auto_pass.get(&player) else {
+                    break;
+                };
+
+                match mode {
+                    AutoPassMode::UntilStackEmpty { initial_stack_len } => {
+                        // Goal achieved: stack is empty
+                        if state.stack.is_empty() {
+                            state.auto_pass.remove(&player);
+                            break;
+                        }
+                        // Interrupt: stack grew beyond the baseline (trigger or opponent spell)
+                        if state.stack.len() > initial_stack_len {
+                            state.auto_pass.remove(&player);
+                            break;
+                        }
+                    }
+                    AutoPassMode::UntilEndOfTurn => {
+                        // UntilEndOfTurn passes through everything at priority
+                    }
+                }
+
+                // Pass priority internally
+                let mut events = Vec::new();
+                let wf = priority::handle_priority_pass(state, &mut events);
+                sync_waiting_for(state, &wf);
+
+                // Run post-action pipeline (SBAs, triggers, layers)
+                match run_post_action_pipeline(state, &mut events, &wf) {
+                    Ok(wf) => {
+                        sync_waiting_for(state, &wf);
+
+                        // Check for stack growth after pipeline (triggers may have fired)
+                        if let Some(&AutoPassMode::UntilStackEmpty { initial_stack_len }) =
+                            state.auto_pass.get(&player)
+                        {
+                            if state.stack.len() > initial_stack_len {
+                                state.auto_pass.remove(&player);
+                            }
+                        }
+
+                        result.events.extend(events);
+                        result.waiting_for = wf;
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            // UntilEndOfTurn: auto-submit empty attackers
+            WaitingFor::DeclareAttackers { player, .. }
+                if state
+                    .auto_pass
+                    .get(player)
+                    .is_some_and(|m| matches!(m, AutoPassMode::UntilEndOfTurn)) =>
+            {
+                let mut events = Vec::new();
+                match handle_empty_attackers(state, &mut events) {
+                    Ok(wf) => {
+                        sync_waiting_for(state, &wf);
+                        result.events.extend(events);
+                        result.waiting_for = wf;
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            // UntilEndOfTurn: auto-submit empty blockers
+            WaitingFor::DeclareBlockers { player, .. }
+                if state
+                    .auto_pass
+                    .get(player)
+                    .is_some_and(|m| matches!(m, AutoPassMode::UntilEndOfTurn)) =>
+            {
+                let mut events = Vec::new();
+                match handle_empty_blockers(state, &mut events) {
+                    Ok(wf) => {
+                        sync_waiting_for(state, &wf);
+                        result.events.extend(events);
+                        result.waiting_for = wf;
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            // Non-auto-passable WaitingFor (interactive choice, game over, etc.)
+            _ => break,
+        }
+    }
+}
+
 fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResult, EngineError> {
     let mut events = Vec::new();
     let mut triggers_processed_inline = false;
+
+    // CancelAutoPass works from any WaitingFor state (player may cancel during interactive choices)
+    if matches!(action, GameAction::CancelAutoPass) {
+        if let Some(player) = state.waiting_for.acting_player() {
+            state.auto_pass.remove(&player);
+        }
+        return Ok(ActionResult {
+            events: vec![],
+            waiting_for: state.waiting_for.clone(),
+        });
+    }
+
+    // Any deliberate player action (not auto-pass-related or a simple pass) cancels their auto-pass
+    if let Some(player) = state.waiting_for.acting_player() {
+        match &action {
+            GameAction::SetAutoPass { .. } | GameAction::PassPriority => {}
+            _ => {
+                state.auto_pass.remove(&player);
+            }
+        }
+    }
 
     // Validate and process action against current WaitingFor
     let waiting_for = match (&state.waiting_for.clone(), action) {
@@ -1154,6 +1275,18 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
 
             state.waiting_for.clone()
         }
+        (WaitingFor::Priority { player }, GameAction::SetAutoPass { mode }) => {
+            // Convert request to stored mode, capturing engine state as needed
+            let stored_mode = match mode {
+                AutoPassRequest::UntilStackEmpty => AutoPassMode::UntilStackEmpty {
+                    initial_stack_len: state.stack.len(),
+                },
+                AutoPassRequest::UntilEndOfTurn => AutoPassMode::UntilEndOfTurn,
+            };
+            state.auto_pass.insert(*player, stored_mode);
+            // Immediately pass priority — the auto-pass loop in apply() continues from here
+            priority::handle_priority_pass(state, &mut events)
+        }
         (waiting, action) => {
             return Err(EngineError::ActionNotAllowed(format!(
                 "Cannot perform {:?} while waiting for {:?}",
@@ -1162,72 +1295,14 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
         }
     };
 
-    // Run state-based actions after every action (except during mulligan/game over)
+    // Run post-action pipeline (SBAs, triggers, layers) and check for terminal states
     if matches!(waiting_for, WaitingFor::Priority { .. }) && !triggers_processed_inline {
-        sba::check_state_based_actions(state, &mut events);
-
-        // Check exile returns -- must happen after SBAs (which may move sources off battlefield)
-        // and before triggers (so returned permanents get ETB triggers)
-        check_exile_returns(state, &mut events);
-
-        // CR 603.7: Check delayed triggers before processing regular triggers.
-        let delayed_events = triggers::check_delayed_triggers(state, &events);
-        events.extend(delayed_events);
-
-        // SBA might have set game over
-        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-            match_flow::handle_game_over_transition(state);
-            let wf = state.waiting_for.clone();
-            return Ok(ActionResult {
-                events,
-                waiting_for: wf,
-            });
-        }
-
-        // Process triggers after action + SBA + exile return events.
-        // Filter out PhaseChanged events for phases that were auto-advanced past.
-        // Without this filter, triggers like "at the beginning of combat" fire
-        // even when combat was skipped, causing phantom stack entries.
-        let current_phase = state.phase;
-        let filtered_events: Vec<_> = events
-            .iter()
-            .filter(|e| {
-                if let GameEvent::PhaseChanged { phase } = e {
-                    *phase == current_phase
-                } else {
-                    true
-                }
-            })
-            .cloned()
-            .collect();
-        let stack_before = state.stack.len();
-        triggers::process_triggers(state, &filtered_events);
-
-        if let Some(wf) = begin_pending_trigger_target_selection(state)? {
-            state.waiting_for = wf.clone();
-            derive_display_state(state);
-            return Ok(ActionResult {
-                events,
-                waiting_for: wf,
-            });
-        }
-
-        // If triggers were placed on stack, grant priority to active player
-        if state.stack.len() > stack_before {
-            let wf = WaitingFor::Priority {
-                player: state.active_player,
-            };
-            state.waiting_for = wf.clone();
-            return Ok(ActionResult {
-                events,
-                waiting_for: wf,
-            });
-        }
-
-        // Re-evaluate layers if dirty after SBA/trigger processing
-        if state.layers_dirty {
-            super::layers::evaluate_layers(state);
-        }
+        let wf = run_post_action_pipeline(state, &mut events, &waiting_for)?;
+        state.waiting_for = wf.clone();
+        return Ok(ActionResult {
+            events,
+            waiting_for: wf,
+        });
     }
 
     // CR 704.3 / CR 800.4: SBAs may have ended the game during phase auto-advance (e.g.,
@@ -1249,6 +1324,114 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
         events,
         waiting_for,
     })
+}
+
+/// Run state-based actions, exile returns, delayed triggers, and trigger processing
+/// after an action that produced `WaitingFor::Priority`. Returns the resulting
+/// `WaitingFor` state — may be terminal (GameOver, interactive choice) or
+/// a continuation (Priority for next player/active player).
+///
+/// `default_wf` is the WaitingFor computed by the action handler, used as fallback
+/// when no terminal/trigger/SBA outcome overrides it.
+fn run_post_action_pipeline(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    default_wf: &WaitingFor,
+) -> Result<WaitingFor, EngineError> {
+    sba::check_state_based_actions(state, events);
+
+    // Check exile returns -- must happen after SBAs (which may move sources off battlefield)
+    // and before triggers (so returned permanents get ETB triggers)
+    check_exile_returns(state, events);
+
+    // CR 603.7: Check delayed triggers before processing regular triggers.
+    let delayed_events = triggers::check_delayed_triggers(state, events);
+    events.extend(delayed_events);
+
+    // SBA might have set game over
+    if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+        match_flow::handle_game_over_transition(state);
+        return Ok(state.waiting_for.clone());
+    }
+
+    // Process triggers after action + SBA + exile return events.
+    // Filter out PhaseChanged events for phases that were auto-advanced past.
+    let current_phase = state.phase;
+    let filtered_events: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            if let GameEvent::PhaseChanged { phase } = e {
+                *phase == current_phase
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect();
+    let stack_before = state.stack.len();
+    triggers::process_triggers(state, &filtered_events);
+
+    if let Some(wf) = begin_pending_trigger_target_selection(state)? {
+        state.waiting_for = wf.clone();
+        derive_display_state(state);
+        return Ok(wf);
+    }
+
+    // If triggers were placed on stack, grant priority to active player
+    if state.stack.len() > stack_before {
+        return Ok(WaitingFor::Priority {
+            player: state.active_player,
+        });
+    }
+
+    // Re-evaluate layers if dirty after SBA/trigger processing
+    if state.layers_dirty {
+        super::layers::evaluate_layers(state);
+    }
+
+    // Normal continuation: use the waiting_for computed by the action handler
+    Ok(default_wf.clone())
+}
+
+/// Handle declaring no attackers — skips to EndCombat with trigger processing.
+fn handle_empty_attackers(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    super::combat::declare_attackers(state, &[], events)
+        .map_err(EngineError::InvalidAction)?;
+
+    // Process triggers for AttackersDeclared (even with no attackers)
+    triggers::process_triggers(state, events);
+    if let Some(wf) = begin_pending_trigger_target_selection(state)? {
+        return Ok(wf);
+    }
+
+    // No attackers → skip to EndCombat
+    state.phase = Phase::EndCombat;
+    events.push(GameEvent::PhaseChanged {
+        phase: Phase::EndCombat,
+    });
+    state.combat = None;
+    turns::advance_phase(state, events);
+    Ok(turns::auto_advance(state, events))
+}
+
+/// Handle declaring no blockers with trigger processing.
+fn handle_empty_blockers(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    super::combat::declare_blockers(state, &[], events)
+        .map_err(EngineError::InvalidAction)?;
+
+    triggers::process_triggers(state, events);
+    if let Some(wf) = begin_pending_trigger_target_selection(state)? {
+        return Ok(wf);
+    }
+
+    turns::advance_phase(state, events);
+    Ok(turns::auto_advance(state, events))
 }
 
 fn begin_pending_trigger_target_selection(

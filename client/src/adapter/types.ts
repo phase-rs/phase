@@ -381,7 +381,9 @@ export type GameAction =
   | { type: "SelectModes"; data: { indices: number[] } }
   | { type: "DecideOptionalCost"; data: { pay: boolean } }
   | { type: "ChooseAdventureFace"; data: { creature: boolean } }
-  | { type: "ActivateNinjutsu"; data: { ninjutsu_card_id: CardId; attacker_to_return: ObjectId } };
+  | { type: "ActivateNinjutsu"; data: { ninjutsu_card_id: CardId; attacker_to_return: ObjectId } }
+  | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn" } } }
+  | { type: "CancelAutoPass" };
 
 // ── Game Events (discriminated union, tag="type", content="data") ────────
 
@@ -470,7 +472,12 @@ export interface GameState {
   revealed_cards?: ObjectId[];
   restrictions?: GameRestriction[];
   command_zone?: ObjectId[];
+  auto_pass?: Record<number, AutoPassMode>;
 }
+
+export type AutoPassMode =
+  | { type: "UntilStackEmpty"; initial_stack_len: number }
+  | { type: "UntilEndOfTurn" };
 
 // ── Adapter Interface ────────────────────────────────────────────────────
 

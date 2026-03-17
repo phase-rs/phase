@@ -30,6 +30,9 @@ pub fn filter_state_for_player(state: &GameState, viewer: PlayerId) -> GameState
         hide_card(&mut filtered, obj_id);
     }
 
+    // Only show the viewer's own auto-pass flag
+    filtered.auto_pass.retain(|pid, _| *pid == viewer);
+
     for pool in &mut filtered.deck_pools {
         if pool.player != viewer {
             pool.registered_main.clear();

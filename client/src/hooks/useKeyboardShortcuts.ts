@@ -2,6 +2,7 @@ import { useEffect } from "react";
 
 import { useGameStore } from "../stores/gameStore";
 import { useUiStore } from "../stores/uiStore";
+import { dispatchAction } from "../game/dispatch";
 
 /**
  * Registers global keyboard shortcuts for the game.
@@ -41,8 +42,14 @@ export function useKeyboardShortcuts(): void {
 
         case "Enter": {
           e.preventDefault();
-          const turnNumber = gameState?.turn_number ?? 0;
-          uiState.toggleEndTurnMode(turnNumber);
+          // Toggle auto-pass: if any auto-pass is active, cancel it; otherwise set UntilEndOfTurn
+          const playerId = gameState?.active_player ?? 0;
+          const currentAutoPass = gameState?.auto_pass?.[playerId];
+          if (currentAutoPass) {
+            dispatchAction({ type: "CancelAutoPass" });
+          } else {
+            dispatchAction({ type: "SetAutoPass", data: { mode: { type: "UntilEndOfTurn" } } });
+          }
           break;
         }
 
@@ -77,10 +84,11 @@ export function useKeyboardShortcuts(): void {
           }
           break;
 
-        case "Escape":
+        case "Escape": {
           e.preventDefault();
-          if (uiState.endTurnMode) {
-            uiState.clearEndTurnMode();
+          const escPlayerId = gameState?.active_player ?? 0;
+          if (gameState?.auto_pass?.[escPlayerId]) {
+            dispatchAction({ type: "CancelAutoPass" });
           } else if (waitingFor?.type === "TargetSelection") {
             dispatch({ type: "CancelCast" });
           } else if (waitingFor?.type === "TriggerTargetSelection") {
@@ -93,6 +101,7 @@ export function useKeyboardShortcuts(): void {
             uiState.clearSelectedCards();
           }
           break;
+        }
 
         case "d":
         case "D":

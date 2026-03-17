@@ -161,12 +161,10 @@ fn setup_kaito_on_battlefield(phase: Phase) -> (GameRunner, ObjectId) {
                 },
             },
         );
-        let surveil_ability = AbilityDefinition::new(
-            AbilityKind::Activated,
-            Effect::Surveil { count: 2 },
-        )
-        .cost(AbilityCost::Loyalty { amount: 0 })
-        .sub_ability(draw_sub);
+        let surveil_ability =
+            AbilityDefinition::new(AbilityKind::Activated, Effect::Surveil { count: 2 })
+                .cost(AbilityCost::Loyalty { amount: 0 })
+                .sub_ability(draw_sub);
         obj.abilities.push(surveil_ability.clone());
         obj.base_abilities.push(surveil_ability);
 
@@ -191,7 +189,9 @@ fn kaito_ninjutsu_activation() {
     scenario.at_phase(Phase::DeclareBlockers);
 
     // P0 has an unblocked 1/1 attacker
-    let attacker_id = scenario.add_creature(P0, "Ninja of the Deep Hours", 1, 1).id();
+    let attacker_id = scenario
+        .add_creature(P0, "Ninja of the Deep Hours", 1, 1)
+        .id();
 
     // Add Kaito to P0's hand
     let kaito_id = scenario
@@ -264,11 +264,18 @@ fn kaito_ninjutsu_activation() {
 
     // Kaito should be on battlefield and tapped
     let kaito = &state.objects[&kaito_id];
-    assert_eq!(kaito.zone, Zone::Battlefield, "Kaito should be on battlefield");
+    assert_eq!(
+        kaito.zone,
+        Zone::Battlefield,
+        "Kaito should be on battlefield"
+    );
     assert!(kaito.tapped, "Kaito should enter tapped");
 
     // Kaito should be in the attackers list
-    let combat = state.combat.as_ref().expect("Combat should still be active");
+    let combat = state
+        .combat
+        .as_ref()
+        .expect("Combat should still be active");
     assert!(
         combat.attackers.iter().any(|a| a.object_id == kaito_id),
         "Kaito should be in the attackers list"
@@ -293,7 +300,13 @@ fn kaito_emblem_creation() {
     let ninja_id = {
         let state = runner.state_mut();
         let card_id = CardId(state.next_object_id);
-        let id = zones::create_object(state, card_id, P0, "Ninja Token".to_string(), Zone::Battlefield);
+        let id = zones::create_object(
+            state,
+            card_id,
+            P0,
+            "Ninja Token".to_string(),
+            Zone::Battlefield,
+        );
         let obj = state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Creature);
         obj.card_types.subtypes.push("Ninja".to_string());
@@ -348,11 +361,19 @@ fn kaito_emblem_creation() {
     let emblem_id = state.command_zone[0];
     let emblem = &state.objects[&emblem_id];
     assert!(emblem.is_emblem, "Object should be an emblem");
-    assert_eq!(emblem.zone, Zone::Command, "Emblem should be in command zone");
+    assert_eq!(
+        emblem.zone,
+        Zone::Command,
+        "Emblem should be in command zone"
+    );
 
     // Kaito's loyalty should have increased by 1 (from 4 to 5)
     let kaito = &state.objects[&kaito_id];
-    assert_eq!(kaito.loyalty, Some(5), "Kaito loyalty should be 5 after +1 ability");
+    assert_eq!(
+        kaito.loyalty,
+        Some(5),
+        "Kaito loyalty should be 5 after +1 ability"
+    );
 
     // After layer evaluation, Ninja should get +1/+1 from emblem
     let ninja = &state.objects[&ninja_id];
@@ -392,7 +413,11 @@ fn kaito_animation_during_your_turn_with_loyalty() {
     let kaito = &state.objects[&kaito_id];
 
     // During your turn with loyalty counters: should be a 3/4 Ninja creature with hexproof
-    assert_eq!(kaito.power, Some(3), "Kaito should be 3 power during your turn");
+    assert_eq!(
+        kaito.power,
+        Some(3),
+        "Kaito should be 3 power during your turn"
+    );
     assert_eq!(
         kaito.toughness,
         Some(4),
@@ -431,7 +456,10 @@ fn kaito_not_animated_on_opponents_turn() {
     );
     // Should still be a planeswalker
     assert!(
-        kaito.card_types.core_types.contains(&CoreType::Planeswalker),
+        kaito
+            .card_types
+            .core_types
+            .contains(&CoreType::Planeswalker),
         "Kaito should still be a planeswalker"
     );
 }
@@ -521,7 +549,7 @@ fn kaito_surveil_and_draw() {
     // Resolve the ability fully
     for _ in 0..30 {
         match &runner.state().waiting_for {
-            WaitingFor::SurveilChoice { cards, .. } => {
+            WaitingFor::SurveilChoice { cards: _, .. } => {
                 // Put all cards on top (select none to go to bottom)
                 let _ = runner.act(GameAction::SelectCards { cards: vec![] });
             }

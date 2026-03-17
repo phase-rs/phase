@@ -1,5 +1,5 @@
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{AutoPassMode, GameState, WaitingFor};
 use crate::types::player::PlayerId;
 
 use super::players;
@@ -34,6 +34,14 @@ pub fn handle_priority_pass(state: &mut GameState, events: &mut Vec<GameEvent>) 
         } else {
             // CR 117.4: Non-empty stack — resolve top object.
             super::stack::resolve_top(state, events);
+
+            // After resolve_top: the stack should have shrunk by 1.
+            // Update auto-pass baselines so trigger-growth detection works across apply() calls.
+            for mode in state.auto_pass.values_mut() {
+                if let AutoPassMode::UntilStackEmpty { initial_stack_len } = mode {
+                    *initial_stack_len = initial_stack_len.saturating_sub(1);
+                }
+            }
 
             // If resolve_top set an interactive WaitingFor (e.g. RevealChoice,
             // ScryChoice, SearchChoice), preserve it instead of overwriting

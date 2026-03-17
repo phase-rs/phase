@@ -74,6 +74,8 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
         super::zones::move_to_zone(state, id, Zone::Exile, events);
     }
 
+    state.auto_pass.remove(&player);
+
     events.push(GameEvent::PlayerEliminated { player_id: player });
 }
 

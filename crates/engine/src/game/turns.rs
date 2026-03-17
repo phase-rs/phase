@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::game::game_object::CounterType;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{AutoPassMode, GameState, WaitingFor};
 use crate::types::phase::Phase;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
@@ -105,6 +105,13 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         if obj.controller == active && obj.loyalty_activated_this_turn {
             obj.loyalty_activated_this_turn = false;
         }
+    }
+
+    // Clear UntilEndOfTurn flag ONLY for the player whose turn is starting.
+    // Other players' flags persist (in multiplayer, an opponent's UntilEndOfTurn
+    // clears when THEIR turn starts, not yours).
+    if let Some(&AutoPassMode::UntilEndOfTurn) = state.auto_pass.get(&state.active_player) {
+        state.auto_pass.remove(&state.active_player);
     }
 
     events.push(GameEvent::TurnStarted {

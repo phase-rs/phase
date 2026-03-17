@@ -68,7 +68,10 @@ pub fn resolve(
                                 let current = obj.loyalty.unwrap_or(0);
                                 let new_loyalty = current.saturating_sub(amount);
                                 obj.loyalty = Some(new_loyalty);
-                                obj.counters.insert(crate::game::game_object::CounterType::Loyalty, new_loyalty);
+                                obj.counters.insert(
+                                    crate::game::game_object::CounterType::Loyalty,
+                                    new_loyalty,
+                                );
                             } else {
                                 obj.damage_marked += amount;
                             }

@@ -17,8 +17,6 @@ interface UiStoreState {
   blockerAssignments: Map<ObjectId, ObjectId>;
   combatClickHandler: ((id: ObjectId) => void) | null;
   isDragging: boolean;
-  endTurnMode: boolean;
-  endTurnSinceTurn: number | null;
   showTurnBanner: boolean;
   turnBannerText: string;
   focusedOpponent: number | null;
@@ -41,8 +39,6 @@ interface UiStoreActions {
   clearCombatSelection: () => void;
   setCombatClickHandler: (handler: ((id: ObjectId) => void) | null) => void;
   setDragging: (dragging: boolean) => void;
-  toggleEndTurnMode: (turnNumber: number) => void;
-  clearEndTurnMode: () => void;
   flashTurnBanner: (text: string) => void;
   setFocusedOpponent: (id: number | null) => void;
   setPendingAbilityChoice: (choice: { objectId: ObjectId; actions: GameAction[] } | null) => void;
@@ -63,8 +59,6 @@ export const useUiStore = create<UiStore>()((set) => ({
   blockerAssignments: new Map(),
   combatClickHandler: null,
   isDragging: false,
-  endTurnMode: false,
-  endTurnSinceTurn: null,
   showTurnBanner: false,
   turnBannerText: "",
   focusedOpponent: null,
@@ -125,12 +119,6 @@ export const useUiStore = create<UiStore>()((set) => ({
 
   setCombatClickHandler: (handler) => set({ combatClickHandler: handler }),
   setDragging: (dragging) => set({ isDragging: dragging }),
-  toggleEndTurnMode: (turnNumber) =>
-    set((state) => ({
-      endTurnMode: !state.endTurnMode,
-      endTurnSinceTurn: !state.endTurnMode ? turnNumber : null,
-    })),
-  clearEndTurnMode: () => set({ endTurnMode: false, endTurnSinceTurn: null }),
   flashTurnBanner: (text) => {
     set({ showTurnBanner: true, turnBannerText: text });
     setTimeout(() => set({ showTurnBanner: false }), 1500);

@@ -291,6 +291,59 @@ pub enum WaitingFor {
     },
 }
 
+impl WaitingFor {
+    /// Extract the player who must act, if any.
+    pub fn acting_player(&self) -> Option<PlayerId> {
+        match self {
+            WaitingFor::Priority { player }
+            | WaitingFor::MulliganDecision { player, .. }
+            | WaitingFor::MulliganBottomCards { player, .. }
+            | WaitingFor::ManaPayment { player }
+            | WaitingFor::TargetSelection { player, .. }
+            | WaitingFor::DeclareAttackers { player, .. }
+            | WaitingFor::DeclareBlockers { player, .. }
+            | WaitingFor::ReplacementChoice { player, .. }
+            | WaitingFor::EquipTarget { player, .. }
+            | WaitingFor::ScryChoice { player, .. }
+            | WaitingFor::DigChoice { player, .. }
+            | WaitingFor::SurveilChoice { player, .. }
+            | WaitingFor::RevealChoice { player, .. }
+            | WaitingFor::SearchChoice { player, .. }
+            | WaitingFor::TriggerTargetSelection { player, .. }
+            | WaitingFor::BetweenGamesSideboard { player, .. }
+            | WaitingFor::BetweenGamesChoosePlayDraw { player, .. }
+            | WaitingFor::NamedChoice { player, .. }
+            | WaitingFor::ModeChoice { player, .. }
+            | WaitingFor::DiscardToHandSize { player, .. }
+            | WaitingFor::OptionalCostChoice { player, .. }
+            | WaitingFor::AbilityModeChoice { player, .. }
+            | WaitingFor::MultiTargetSelection { player, .. }
+            | WaitingFor::AdventureCastChoice { player, .. }
+            | WaitingFor::NinjutsuActivation { player, .. } => Some(*player),
+            WaitingFor::GameOver { .. } => None,
+        }
+    }
+}
+
+/// What the frontend requests for auto-pass (no internal state).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AutoPassRequest {
+    UntilStackEmpty,
+    UntilEndOfTurn,
+}
+
+/// What the engine stores for auto-pass (includes captured state).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AutoPassMode {
+    /// Auto-pass while stack is non-empty. Clears when stack empties or grows
+    /// beyond `initial_stack_len` (the stack size when the flag was set).
+    UntilStackEmpty { initial_stack_len: usize },
+    /// Auto-pass through all priority/combat stops until the flagged player's turn starts.
+    UntilEndOfTurn,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActionResult {
     pub events: Vec<GameEvent>,
@@ -423,6 +476,9 @@ pub struct GameState {
     pub commander_damage: Vec<CommanderDamageEntry>,
     #[serde(default)]
     pub priority_passes: BTreeSet<PlayerId>,
+    /// Per-player auto-pass flags. When set, the engine auto-passes for this player.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub auto_pass: HashMap<PlayerId, AutoPassMode>,
 
     #[serde(default)]
     pub match_config: MatchConfig,
@@ -605,6 +661,7 @@ impl GameState {
             eliminated_players: Vec::new(),
             commander_damage: Vec::new(),
             priority_passes: BTreeSet::new(),
+            auto_pass: HashMap::new(),
             match_config: MatchConfig::default(),
             match_phase: MatchPhase::InGame,
             match_score: MatchScore::default(),
@@ -726,6 +783,7 @@ impl PartialEq for GameState {
             && self.eliminated_players == other.eliminated_players
             && self.commander_damage == other.commander_damage
             && self.priority_passes == other.priority_passes
+            && self.auto_pass == other.auto_pass
             && self.match_config == other.match_config
             && self.match_phase == other.match_phase
             && self.match_score == other.match_score

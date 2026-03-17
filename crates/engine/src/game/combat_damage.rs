@@ -429,7 +429,10 @@ fn apply_combat_damage(
                                     let current = target_obj.loyalty.unwrap_or(0);
                                     let new_loyalty = current.saturating_sub(amount);
                                     target_obj.loyalty = Some(new_loyalty);
-                                    target_obj.counters.insert(crate::game::game_object::CounterType::Loyalty, new_loyalty);
+                                    target_obj.counters.insert(
+                                        crate::game::game_object::CounterType::Loyalty,
+                                        new_loyalty,
+                                    );
                                 } else {
                                     target_obj.damage_marked += amount;
                                     if source_has_deathtouch {

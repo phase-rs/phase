@@ -85,9 +85,6 @@ export function ActionButton() {
   const isMultiTarget = hasMultipleAttackTargets(gameState);
   const validAttackTargets = getValidAttackTargets(gameState);
 
-  // Resolve All ref
-  const resolveAllRef = useRef(false);
-
   // Reset skip-confirm when mode changes
   useEffect(() => {
     setSkipArmed(null);
@@ -235,51 +232,12 @@ export function ActionButton() {
     setCombatMode("blockers");
   }
 
-  const endTurnMode = useUiStore((s) => s.endTurnMode);
-  const endTurnSinceTurn = useUiStore((s) => s.endTurnSinceTurn);
-  const toggleEndTurnMode = useUiStore((s) => s.toggleEndTurnMode);
-  const clearEndTurnMode = useUiStore((s) => s.clearEndTurnMode);
-  const turnNumber = useGameStore((s) => s.gameState?.turn_number ?? 0);
+  // Read auto-pass state from engine
+  const autoPass = gameState?.auto_pass?.[playerId];
+  const isEndingTurn = autoPass?.type === "UntilEndOfTurn";
+  const isResolvingAll = autoPass?.type === "UntilStackEmpty";
 
-  // Reactive auto-pass when end-turn mode is active (with turn-change detection)
-  useEffect(() => {
-    if (!endTurnMode) return;
-
-    // Clear immediately when a new turn starts — before any auto-passing
-    if (endTurnSinceTurn !== null && turnNumber !== endTurnSinceTurn) {
-      clearEndTurnMode();
-      return;
-    }
-
-    if (!waitingFor || waitingFor.type === "GameOver" || !("player" in waitingFor.data) || waitingFor.data.player !== playerId) return;
-
-    if (waitingFor.type === "Priority") {
-      dispatchAction({ type: "PassPriority" });
-    } else if (waitingFor.type === "DeclareAttackers") {
-      dispatchAction({ type: "DeclareAttackers", data: { attacks: [] } });
-    } else if (waitingFor.type === "DeclareBlockers") {
-      dispatchAction({ type: "DeclareBlockers", data: { assignments: [] } });
-    }
-  }, [endTurnMode, waitingFor, turnNumber, endTurnSinceTurn, clearEndTurnMode, playerId]);
-
-  async function resolveAll() {
-    resolveAllRef.current = true;
-    const initialStackLength =
-      useGameStore.getState().gameState?.stack.length ?? 0;
-    for (let i = 0; i < initialStackLength; i++) {
-      if (!resolveAllRef.current) break;
-      const current = useGameStore.getState();
-      const currentStack = current.gameState?.stack.length ?? 0;
-      if (currentStack === 0) break;
-      if (currentStack > initialStackLength - i) break;
-      if (current.waitingFor?.type !== "Priority") break;
-      if (current.waitingFor.data.player !== playerId) break;
-      await dispatchAction({ type: "PassPriority" });
-    }
-    resolveAllRef.current = false;
-  }
-
-  const visible = mode !== "hidden" || endTurnMode;
+  const visible = mode !== "hidden" || isEndingTurn;
   const panelClassName =
     "fixed z-30 flex max-w-[min(25rem,calc(100vw-1.25rem))] flex-col items-stretch gap-1.5 rounded-[14px] border border-white/10 bg-[#0b1020]/88 p-1.5 shadow-[0_20px_48px_rgba(0,0,0,0.44)] backdrop-blur-md sm:max-w-none sm:flex-row sm:items-center";
   const primaryButtonClass = "w-full sm:w-auto sm:min-w-[10rem]";
@@ -300,7 +258,7 @@ export function ActionButton() {
             right: "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
           }}
         >
-          {mode === "combat-attackers" && !endTurnMode && (
+          {mode === "combat-attackers" && !isEndingTurn && (
             <>
               <button
                 onClick={() => {
@@ -334,7 +292,7 @@ export function ActionButton() {
             </>
           )}
 
-          {mode === "combat-blockers" && !endTurnMode && (
+          {mode === "combat-blockers" && !isEndingTurn && (
             <>
               {blockerAssignments.size > 0 ? (
                 <>
@@ -369,7 +327,7 @@ export function ActionButton() {
             </>
           )}
 
-          {mode === "priority-stack" && !endTurnMode && (
+          {mode === "priority-stack" && !isEndingTurn && (
             <>
               <button
                 onClick={() => dispatchAction({ type: "PassPriority" })}
@@ -378,7 +336,7 @@ export function ActionButton() {
                 Resolve
               </button>
               <button
-                onClick={resolveAll}
+                onClick={() => dispatchAction({ type: "SetAutoPass", data: { mode: { type: "UntilStackEmpty" } } })}
                 className={gameButtonClass({ tone: "slate", size: "md", className: secondaryButtonClass })}
               >
                 Resolve All
@@ -386,7 +344,7 @@ export function ActionButton() {
             </>
           )}
 
-          {mode === "priority-empty" && !endTurnMode && (
+          {mode === "priority-empty" && !isEndingTurn && (
             <>
               <button
                 onClick={() => dispatchAction({ type: "PassPriority" })}
@@ -399,7 +357,7 @@ export function ActionButton() {
                 {advanceLabel}
               </button>
               <button
-                onClick={() => toggleEndTurnMode(turnNumber)}
+                onClick={() => dispatchAction({ type: "SetAutoPass", data: { mode: { type: "UntilEndOfTurn" } } })}
                 className={gameButtonClass({ tone: "slate", size: "md", className: secondaryButtonClass })}
               >
                 <span className="flex items-center gap-1">
@@ -412,9 +370,9 @@ export function ActionButton() {
             </>
           )}
 
-          {endTurnMode && (
+          {isEndingTurn && (
             <button
-              onClick={clearEndTurnMode}
+              onClick={() => dispatchAction({ type: "CancelAutoPass" })}
               className={gameButtonClass({ tone: "amber", size: "md", className: `${primaryButtonClass} animate-pulse` })}
             >
               <span className="flex items-center gap-1.5">

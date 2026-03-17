@@ -2012,17 +2012,37 @@ mod tests {
 
         // Player 0's Ninja should get +1/+1
         let ninja = state.objects.get(&ninja_id).unwrap();
-        assert_eq!(ninja.power, Some(3), "Ninja should have 3 power (+1/+1 from emblem)");
-        assert_eq!(ninja.toughness, Some(3), "Ninja should have 3 toughness (+1/+1 from emblem)");
+        assert_eq!(
+            ninja.power,
+            Some(3),
+            "Ninja should have 3 power (+1/+1 from emblem)"
+        );
+        assert_eq!(
+            ninja.toughness,
+            Some(3),
+            "Ninja should have 3 toughness (+1/+1 from emblem)"
+        );
 
         // Player 0's Bear should NOT get the bonus
         let bear = state.objects.get(&bear_id).unwrap();
         assert_eq!(bear.power, Some(2), "Bear should still have 2 power");
-        assert_eq!(bear.toughness, Some(2), "Bear should still have 2 toughness");
+        assert_eq!(
+            bear.toughness,
+            Some(2),
+            "Bear should still have 2 toughness"
+        );
 
         // Player 1's Ninja should NOT get the bonus (not "you control")
         let opp_ninja = state.objects.get(&opp_ninja_id).unwrap();
-        assert_eq!(opp_ninja.power, Some(2), "Opponent's Ninja should still have 2 power");
-        assert_eq!(opp_ninja.toughness, Some(2), "Opponent's Ninja should still have 2 toughness");
+        assert_eq!(
+            opp_ninja.power,
+            Some(2),
+            "Opponent's Ninja should still have 2 power"
+        );
+        assert_eq!(
+            opp_ninja.toughness,
+            Some(2),
+            "Opponent's Ninja should still have 2 toughness"
+        );
     }
 }

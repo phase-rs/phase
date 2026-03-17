@@ -204,7 +204,7 @@ enum TargetedImperativeAst {
     },
     /// Proxy for zone-counter family (destroy/exile/put counter) used during
     /// compound splitting to unify targeted and zone-counter parsing.
-    ZoneCounterProxy(ZoneCounterImperativeAst),
+    ZoneCounterProxy(Box<ZoneCounterImperativeAst>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,7 +299,7 @@ enum ZoneCounterImperativeAst {
     },
     Counter {
         target: TargetFilter,
-        source_static: Option<StaticDefinition>,
+        source_static: Option<Box<StaticDefinition>>,
     },
     PutCounter {
         counter_type: String,
@@ -581,12 +581,12 @@ fn try_split_targeted_compound(text: &str) -> Option<ParsedEffectClause> {
     let primary_ast = parse_targeted_action_ast(primary_text, &primary_lower).or_else(|| {
         // Also try zone-counter family (destroy/exile/put counter)
         parse_zone_counter_ast(primary_text, &primary_lower)
-            .map(|ast| TargetedImperativeAst::ZoneCounterProxy(ast))
+            .map(|ast| TargetedImperativeAst::ZoneCounterProxy(Box::new(ast)))
     })?;
 
     // Lower the primary to an Effect
     let primary_effect = match primary_ast {
-        TargetedImperativeAst::ZoneCounterProxy(ast) => lower_zone_counter_ast(ast),
+        TargetedImperativeAst::ZoneCounterProxy(ast) => lower_zone_counter_ast(*ast),
         other => lower_targeted_action_ast(other),
     };
 
@@ -1942,7 +1942,7 @@ fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             source_static,
         } => Effect::Counter {
             target,
-            source_static,
+            source_static: source_static.map(|s| *s),
         },
         ZoneCounterImperativeAst::PutCounter {
             counter_type,
@@ -2110,7 +2110,7 @@ fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         },
         TargetedImperativeAst::Fight { target } => Effect::Fight { target },
         TargetedImperativeAst::GainControl { target } => Effect::GainControl { target },
-        TargetedImperativeAst::ZoneCounterProxy(ast) => lower_zone_counter_ast(ast),
+        TargetedImperativeAst::ZoneCounterProxy(ast) => lower_zone_counter_ast(*ast),
     }
 }
 
@@ -7179,10 +7179,7 @@ mod tests {
     #[test]
     fn compound_subject_returns_none_for_single_target() {
         let result = try_split_compound_subject("target creature");
-        assert!(
-            result.is_none(),
-            "single target should not be compound"
-        );
+        assert!(result.is_none(), "single target should not be compound");
     }
 
     #[test]

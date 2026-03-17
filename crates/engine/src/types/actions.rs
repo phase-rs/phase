@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::ability::TargetRef;
+use super::game_state::AutoPassRequest;
 use super::identifiers::{CardId, ObjectId};
 use super::match_config::DeckCardCount;
 use crate::game::combat::AttackTarget;
@@ -83,6 +84,10 @@ pub enum GameAction {
         ninjutsu_card_id: CardId,
         attacker_to_return: ObjectId,
     },
+    /// Set auto-pass mode for the acting player (CR 117.4).
+    SetAutoPass { mode: AutoPassRequest },
+    /// Cancel any active auto-pass for the acting player.
+    CancelAutoPass,
 }
 
 #[cfg(test)]

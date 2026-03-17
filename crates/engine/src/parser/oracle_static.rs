@@ -596,7 +596,7 @@ fn parse_counter_minimum(text: &str) -> Option<(u32, &str)> {
     if let Some((n, rest)) = parse_number(text) {
         let rest = rest.trim_start();
         if let Some(rest) = rest.strip_prefix("or more ") {
-            return Some((n as u32, rest));
+            return Some((n, rest));
         }
     }
     None
