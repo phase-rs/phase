@@ -326,7 +326,7 @@ Plans:
 **Goal:** Deliver four composable engine building blocks: counter-based target filtering (FilterProp::HasCounter), generic compound effect splitting (try_split_compound + ParentTarget), generic compound subject splitting (try_split_compound_subject), and multi-object shuffle-to-library with auto-shuffle per CR 401.3. Full Floodpits Drowner integration test and pipeline regeneration with coverage audit.
 **Requirements**: BB-COUNTER, BB-COMPOUND, BB-SUBJECT, BB-SHUFFLE, BB-INTEGRATE
 **Depends on:** Phase 31
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 
 **Execution Order:**
 Wave 1: Plan 01 (type definitions + counter filter + compound effect splitter + ParentTarget)

@@ -25,11 +25,11 @@ See: .planning/PROJECT.md (updated 2026-03-11)
 
 ## Current Position
 
-Phase: 32 — Plan 1 of 1+ complete
+Phase: 32 — Plan 2 of 2 complete
 Status: Executing
-Last activity: 2026-03-17 — Phase 32 Plan 01 complete (Compound Parsing + ParentTarget)
+Last activity: 2026-03-17 — Phase 32 Plan 02 complete (Compound Subject + Auto-Shuffle + Integration)
 
-Progress: [████████████████████] 52/52+ plans (98%)
+Progress: [████████████████████] 53/53+ plans (98%)
 
 ## Performance Metrics
 
@@ -83,6 +83,7 @@ Progress: [████████████████████] 52/52+ 
 | Phase 31 P02 | 49min | 2 tasks | 30 files |
 | Phase 31 P03 | 20min | 2 tasks | 13 files |
 | Phase 32 P01 | 42min | 2 tasks | 19 files |
+| Phase 32 P02 | 39min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -267,6 +268,9 @@ Recent decisions affecting current work:
 - [32-01]: Used existing CountersGE instead of new HasCounter to avoid types->game cross-dependency
 - [32-01]: ParentTarget no-op in find_legal_targets; sub_ability chain propagates parent targets automatically
 - [32-01]: has_anaphoric_reference uses word-boundary matching for end-of-string pronoun detection
+- [32-02]: Compound shuffle intercepted in lower_imperative_clause via try_parse_compound_shuffle (not in ShuffleImperativeAst)
+- [32-02]: Auto-shuffle fires at ChangeZone resolve level after replacement check, covering all Library-destination effects
+- [32-02]: SelfRef pre-loop guard creates synthetic TargetRef from source_id (matches counters.rs/pump.rs pattern)
 
 ### Pending Todos
 
@@ -278,6 +282,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-17T17:09:24Z
-Stopped at: Completed 32-01-PLAN.md
-Resume file: .planning/phases/32-add-compound-targeted-action-parsing-and-multi-object-shuffle-to-library-support-floodpits-drowner-class/32-01-SUMMARY.md
+Last session: 2026-03-17T17:52:37Z
+Stopped at: Completed 32-02-PLAN.md
+Resume file: .planning/phases/32-add-compound-targeted-action-parsing-and-multi-object-shuffle-to-library-support-floodpits-drowner-class/32-02-SUMMARY.md
