@@ -63,8 +63,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityKind, CountValue, DamageAmount, Effect, ManaProduction, QuantityExpr,
-        TargetFilter,
+        AbilityCost, AbilityKind, CountValue, Effect, ManaProduction, QuantityExpr, TargetFilter,
     };
     use crate::types::identifiers::CardId;
     use crate::types::mana::{ManaColor, ManaType};

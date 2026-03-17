@@ -1583,8 +1583,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        BasicLandType, ChosenAttribute, ChosenSubtypeKind, ContinuousModification, DamageAmount,
-        QuantityExpr, StaticDefinition,
+        BasicLandType, ChosenAttribute, ChosenSubtypeKind, ContinuousModification, QuantityExpr,
+        StaticDefinition,
     };
     use crate::types::card_type::CoreType;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};

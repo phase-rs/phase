@@ -190,7 +190,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        DamageAmount, Effect, QuantityExpr, ResolvedAbility, TargetRef, TypedFilter,
+        Effect, QuantityExpr, ResolvedAbility, TargetRef, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;

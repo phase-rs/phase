@@ -2027,8 +2027,8 @@ pub mod tests {
     use crate::game::filter::matches_target_filter;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, FilterProp, GainLifePlayer, LifeAmount,
-        QuantityExpr, TargetFilter, TriggerDefinition, TypeFilter,
+        AbilityDefinition, AbilityKind, ControllerRef, FilterProp, GainLifePlayer, QuantityExpr,
+        TargetFilter, TriggerDefinition, TypeFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;

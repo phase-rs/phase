@@ -639,8 +639,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-        Effect, FilterProp, GainLifePlayer, LifeAmount, QuantityRef, StaticDefinition,
-        TargetFilter, TypeFilter,
+        Effect, FilterProp, GainLifePlayer, QuantityRef, StaticDefinition, TargetFilter,
+        TypeFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;

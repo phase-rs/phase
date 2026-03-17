@@ -220,8 +220,8 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ContinuousModification, DamageAmount, Effect, PtValue,
-        QuantityExpr, StaticDefinition, TargetFilter,
+        AbilityDefinition, AbilityKind, ContinuousModification, Effect, PtValue, QuantityExpr,
+        StaticDefinition, TargetFilter,
     };
     use crate::types::card_type::CardType;
     use crate::types::keywords::Keyword;

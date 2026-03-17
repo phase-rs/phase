@@ -44,7 +44,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{DamageAmount, Effect, QuantityExpr, TargetFilter};
+    use crate::types::ability::{Effect, QuantityExpr, TargetFilter};
     use crate::types::game_state::{StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;

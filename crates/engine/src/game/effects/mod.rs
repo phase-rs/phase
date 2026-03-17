@@ -298,8 +298,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, DamageAmount, DelayedTriggerCondition, QuantityExpr,
-        TargetFilter, TargetRef,
+        AbilityDefinition, AbilityKind, DelayedTriggerCondition, QuantityExpr, TargetFilter,
+        TargetRef,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::phase::Phase;

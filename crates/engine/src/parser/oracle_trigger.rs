@@ -1326,7 +1326,7 @@ fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinit
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{Duration, Effect, LifeAmount, PtValue, QuantityExpr};
+    use crate::types::ability::{Duration, Effect, PtValue, QuantityExpr};
 
     #[test]
     fn trigger_etb_self() {
@@ -1517,7 +1517,7 @@ mod tests {
 
     #[test]
     fn trigger_self_or_another_creature_or_artifact_you_control() {
-        use crate::types::ability::{ControllerRef, QuantityExpr, TypeFilter};
+        use crate::types::ability::{ControllerRef, TypeFilter};
         let def = parse_trigger_line(
             "Whenever Haliya or another creature or artifact you control enters, you gain 1 life.",
             "Haliya, Guided by Light",

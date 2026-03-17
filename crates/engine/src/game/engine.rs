@@ -1972,8 +1972,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, DamageAmount, Effect, QuantityExpr,
-        ResolvedAbility, TargetFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility,
+        TargetFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -3705,7 +3705,7 @@ mod trigger_target_tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, DamageAmount, Effect, ModalChoice,
+        AbilityDefinition, AbilityKind, ControllerRef, Effect, ModalChoice,
         ModalSelectionConstraint, QuantityExpr, TargetFilter, TargetRef, TypedFilter,
     };
     use crate::types::card_type::CoreType;
@@ -4411,7 +4411,7 @@ mod phase_trigger_regression_tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ControllerRef, Effect, FilterProp, GainLifePlayer,
-        LifeAmount, QuantityExpr, TargetFilter, TriggerDefinition, TypedFilter,
+        QuantityExpr, TargetFilter, TriggerDefinition, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
