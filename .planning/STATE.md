@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Completed 31-04-PLAN.md
-last_updated: "2026-03-17T02:53:39.061Z"
-last_activity: 2026-03-17 — Phase 31 Plan 04 complete (Ninjutsu Keyword Runtime)
+stopped_at: Completed 31-02-PLAN.md
+last_updated: "2026-03-17T03:11:48.279Z"
+last_activity: 2026-03-17 — Phase 31 Plan 02 complete (Dynamic Quantity Resolution)
 progress:
   total_phases: 11
   completed_phases: 8
   total_plans: 56
-  completed_plans: 51
+  completed_plans: 52
   percent: 98
 ---
 
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-03-11)
 
 Phase: 31 — Plan 4 of 4+ complete
 Status: Executing
-Last activity: 2026-03-17 — Phase 31 Plan 04 complete (Ninjutsu Keyword Runtime)
+Last activity: 2026-03-17 — Phase 31 Plan 02 complete (Dynamic Quantity Resolution)
 
 Progress: [████████████████████] 51/51+ plans (98%)
 
@@ -80,6 +80,7 @@ Progress: [████████████████████] 51/51+ 
 | Phase 30 P03 | 40min | 2 tasks | 6 files |
 | Phase 30 P04 | 23min | 3 tasks | 6 files |
 | Phase 31 P04 | 31min | 2 tasks | 11 files |
+| Phase 31 P02 | 49min | 2 tasks | 30 files |
 
 ## Accumulated Context
 
@@ -247,6 +248,8 @@ Recent decisions affecting current work:
 - [30-03]: CastingPermission::AdventureCreature cleared on zone change from exile (prevents stale permissions)
 - [30-04]: RestrictionScope serde changed from internally-tagged to adjacently-tagged (tag+content) for TypeScript discriminated union compat
 - [Phase 31]: Ninjutsu activation flows through Priority WaitingFor with combat phase check; NinjutsuActivation WaitingFor as secondary UI path
+- [Phase 31]: [31-02]: QuantityRef extended with Variable(String) and TargetPower to subsume DamageAmount::Variable and LifeAmount::TargetPower
+- [Phase 31]: [31-02]: DamageAll retains DamageAmount type; bridge functions for DamageAmount<->QuantityExpr interop
 
 ### Roadmap Evolution
 
@@ -268,6 +271,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-17T02:53:28.891Z
-Stopped at: Completed 31-04-PLAN.md
+Last session: 2026-03-17T03:11:43.409Z
+Stopped at: Completed 31-02-PLAN.md
 Resume file: None
