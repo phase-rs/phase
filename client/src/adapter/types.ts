@@ -138,6 +138,26 @@ export type CounterType =
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type Keyword = string | Record<string, any>;
 
+// ── Casting Permission ───────────────────────────────────────────────────
+
+export type CastingPermission = { type: "AdventureCreature" };
+
+// ── Game Restriction ────────────────────────────────────────────────────
+
+export type RestrictionExpiry = { type: "EndOfTurn" } | { type: "EndOfCombat" };
+
+export type RestrictionScope =
+  | { type: "SourcesControlledBy"; data: PlayerId }
+  | { type: "SpecificSource"; data: ObjectId }
+  | { type: "DamageToTarget"; data: ObjectId };
+
+export type GameRestriction = {
+  type: "DamagePreventionDisabled";
+  source: ObjectId;
+  expiry: RestrictionExpiry;
+  scope?: RestrictionScope | null;
+};
+
 // ── Game Object ──────────────────────────────────────────────────────────
 
 export interface GameObject {
@@ -179,11 +199,13 @@ export interface GameObject {
   case_state?: { is_solved: boolean; solve_condition: unknown } | null;
   devotion?: number;
   available_mana_colors?: ManaColor[];
+  casting_permissions?: CastingPermission[];
   back_face?: {
     name: string;
     power: number | null;
     toughness: number | null;
     card_types: CardType;
+    mana_cost: ManaCost;
     keywords: Keyword[];
     abilities: unknown[];
     color: ManaColor[];
@@ -320,7 +342,8 @@ export type WaitingFor =
   | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast } }
   | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown } }
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
-  | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; pending_cast: PendingCast } };
+  | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; pending_cast: PendingCast } }
+  | { type: "AdventureCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } };
 
 // ── Action Result ────────────────────────────────────────────────────────
 
@@ -353,7 +376,8 @@ export type GameAction =
   | { type: "ChoosePlayDraw"; data: { play_first: boolean } }
   | { type: "ChooseOption"; data: { choice: string } }
   | { type: "SelectModes"; data: { indices: number[] } }
-  | { type: "DecideOptionalCost"; data: { pay: boolean } };
+  | { type: "DecideOptionalCost"; data: { pay: boolean } }
+  | { type: "ChooseAdventureFace"; data: { creature: boolean } };
 
 // ── Game Events (discriminated union, tag="type", content="data") ────────
 
@@ -440,6 +464,7 @@ export interface GameState {
   }>;
   sideboard_submitted?: PlayerId[];
   revealed_cards?: ObjectId[];
+  restrictions?: GameRestriction[];
 }
 
 // ── Adapter Interface ────────────────────────────────────────────────────
