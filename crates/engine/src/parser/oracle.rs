@@ -66,6 +66,8 @@ struct ModeAst {
     raw: String,
     label: Option<String>,
     body: String,
+    /// Per-mode additional cost (Spree). None for standard `•` modes.
+    mode_cost: Option<crate::types::mana::ManaCost>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,16 +141,19 @@ pub fn parse_oracle_text(
             continue;
         }
 
-        // Priority 1: keyword-only line — extract any keywords for the union set
-        if let Some(extracted) = extract_keyword_line(&line, mtgjson_keyword_names) {
-            result.extracted_keywords.extend(extracted);
-            i += 1;
-            continue;
-        }
-
+        // Priority 1: Modal block (standard "Choose one —" + modes, or Spree + modes).
+        // Must run before keyword extraction so "Spree" header + follow-on `+` lines
+        // are consumed as a modal block, not swallowed as a keyword-only line.
         if let Some((block, next_i)) = parse_oracle_block(&lines, i) {
             lower_oracle_block(block, card_name, &mut result);
             i = next_i;
+            continue;
+        }
+
+        // Priority 1b: keyword-only line — extract any keywords for the union set
+        if let Some(extracted) = extract_keyword_line(&line, mtgjson_keyword_names) {
+            result.extracted_keywords.extend(extracted);
+            i += 1;
             continue;
         }
 
@@ -571,6 +576,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Totem => "totem".to_string(),
         Keyword::Warp => "warp".to_string(),
         Keyword::Gift => "gift".to_string(),
+        Keyword::Spree => "spree".to_string(),
         Keyword::Ravenous => "ravenous".to_string(),
         Keyword::Daybound => "daybound".to_string(),
         Keyword::Nightbound => "nightbound".to_string(),
@@ -1306,6 +1312,21 @@ fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(OracleBlockAst, u
         }
     }
 
+    // CR 702.172: Spree keyword line + all modes have per-mode costs
+    if line.eq_ignore_ascii_case("spree")
+        && !modes.is_empty()
+        && modes.iter().all(|m| m.mode_cost.is_some())
+    {
+        let header = ModalHeaderAst {
+            raw: line.to_string(),
+            min_choices: 1,
+            max_choices: modes.len(),
+            allow_repeat_modes: false,
+            constraints: vec![],
+        };
+        return Some((OracleBlockAst::Modal { header, modes }, next));
+    }
+
     None
 }
 
@@ -1314,10 +1335,31 @@ fn collect_mode_asts(lines: &[&str], start: usize) -> Vec<ModeAst> {
 
     for raw in lines.iter().skip(start) {
         let line = strip_reminder_text(raw.trim());
-        let Some(stripped) = line.strip_prefix('•') else {
+        if let Some(stripped) = line.strip_prefix('•') {
+            modes.push(parse_mode_ast(stripped.trim()));
+        } else if let Some(stripped) = line.strip_prefix('+') {
+            // CR 702.172: Spree mode lines use `+ {cost} — effect` format
+            let stripped = stripped.trim();
+            if let Some((cost, rest)) = parse_mana_symbols(stripped) {
+                // Strip " — " or " – " separator between cost and effect text
+                let body = rest
+                    .trim()
+                    .strip_prefix('—')
+                    .or_else(|| rest.trim().strip_prefix('–'))
+                    .unwrap_or(rest)
+                    .trim();
+                modes.push(ModeAst {
+                    raw: body.to_string(),
+                    label: None,
+                    body: body.to_string(),
+                    mode_cost: Some(cost),
+                });
+            } else {
+                break; // Cost parse failure → stop collecting modes
+            }
+        } else {
             break;
-        };
-        modes.push(parse_mode_ast(stripped.trim()));
+        }
     }
 
     modes
@@ -1329,6 +1371,7 @@ fn parse_mode_ast(text: &str) -> ModeAst {
             raw: text.to_string(),
             label: Some(label.to_string()),
             body: body.to_string(),
+            mode_cost: None,
         };
     }
 
@@ -1336,6 +1379,7 @@ fn parse_mode_ast(text: &str) -> ModeAst {
         raw: text.to_string(),
         label: None,
         body: text.to_string(),
+        mode_cost: None,
     }
 }
 
@@ -1472,6 +1516,7 @@ fn build_modal_choice(header: &ModalHeaderAst, modes: &[ModeAst]) -> ModalChoice
         mode_descriptions: modes.iter().map(|mode| mode.raw.clone()).collect(),
         allow_repeat_modes: header.allow_repeat_modes,
         constraints: header.constraints.clone(),
+        mode_costs: modes.iter().filter_map(|m| m.mode_cost.clone()).collect(),
     }
 }
 
@@ -3244,5 +3289,97 @@ mod tests {
         let result = parse_additional_cost_line(lower, raw);
         // Should return None — "creature" alone is Unimplemented, rejecting the split
         assert!(result.is_none());
+    }
+
+    // ── Spree (CR 702.172) ──────────────────────────────────────────────
+
+    #[test]
+    fn spree_phantom_interference_parses_modal_with_mode_costs() {
+        let text = "Spree (Choose one or more additional costs.)\n\
+                     + {3} — Create a 2/2 white Spirit creature token with flying.\n\
+                     + {1} — Counter target spell unless its controller pays {2}.";
+        let result = parse(text, "Phantom Interference", &[Keyword::Spree], &["Instant"], &[]);
+        let modal = result.modal.expect("should have modal");
+        assert_eq!(modal.min_choices, 1);
+        assert_eq!(modal.max_choices, 2);
+        assert_eq!(modal.mode_count, 2);
+        assert_eq!(modal.mode_costs.len(), 2);
+        // Mode 0: {3}
+        assert_eq!(modal.mode_costs[0], ManaCost::Cost { shards: vec![], generic: 3 });
+        // Mode 1: {1}
+        assert_eq!(modal.mode_costs[1], ManaCost::Cost { shards: vec![], generic: 1 });
+        // Mode descriptions are effect-text only (post-separator)
+        assert!(modal.mode_descriptions[0].contains("Create a 2/2"));
+        assert!(modal.mode_descriptions[1].contains("Counter target spell"));
+        // Two mode abilities parsed (not Unimplemented)
+        assert_eq!(result.abilities.len(), 2);
+        assert!(!matches!(result.abilities[0].effect, Effect::Unimplemented { .. }));
+    }
+
+    #[test]
+    fn spree_colored_mode_costs_parsed_correctly() {
+        // Final Showdown has colored mode costs
+        let text = "Spree (Choose one or more additional costs.)\n\
+                     + {1} — All creatures lose all abilities until end of turn.\n\
+                     + {1} — Choose a creature you control. It gains indestructible until end of turn.\n\
+                     + {3}{W}{W} — Destroy all creatures.";
+        let result = parse(text, "Final Showdown", &[Keyword::Spree], &["Instant"], &[]);
+        let modal = result.modal.expect("should have modal");
+        assert_eq!(modal.mode_count, 3);
+        assert_eq!(modal.max_choices, 3);
+        assert_eq!(modal.mode_costs.len(), 3);
+        // Third mode: {3}{W}{W}
+        if let ManaCost::Cost { shards, generic } = &modal.mode_costs[2] {
+            assert_eq!(*generic, 3);
+            assert_eq!(shards.len(), 2); // WW
+        } else {
+            panic!("Expected ManaCost::Cost for mode 2");
+        }
+    }
+
+    #[test]
+    fn collect_mode_asts_plus_prefix_extracts_cost_and_body() {
+        let lines = vec![
+            "Spree",
+            "+ {2} — Draw a card.",
+            "+ {R} — Deal 3 damage to target creature.",
+        ];
+        let modes = collect_mode_asts(&lines, 1);
+        assert_eq!(modes.len(), 2);
+        assert!(modes[0].mode_cost.is_some());
+        assert_eq!(modes[0].body, "Draw a card.");
+        assert!(modes[1].mode_cost.is_some());
+    }
+
+    #[test]
+    fn collect_mode_asts_standard_bullet_has_no_mode_cost() {
+        let lines = vec![
+            "Choose one —",
+            "• Draw a card.",
+            "• Gain 3 life.",
+        ];
+        let modes = collect_mode_asts(&lines, 1);
+        assert_eq!(modes.len(), 2);
+        assert!(modes[0].mode_cost.is_none());
+        assert!(modes[1].mode_cost.is_none());
+    }
+
+    #[test]
+    fn standard_modal_spell_has_empty_mode_costs() {
+        let text = "Choose one —\n• Draw a card.\n• Gain 3 life.";
+        let result = parse(text, "Test Modal", &[], &["Instant"], &[]);
+        let modal = result.modal.expect("should have modal");
+        assert!(modal.mode_costs.is_empty());
+    }
+
+    #[test]
+    fn collect_mode_asts_malformed_plus_line_stops_collection() {
+        // A `+` line without valid mana cost should break mode collection
+        let lines = vec![
+            "Spree",
+            "+ Draw a card.", // no mana cost after +
+        ];
+        let modes = collect_mode_asts(&lines, 1);
+        assert!(modes.is_empty());
     }
 }

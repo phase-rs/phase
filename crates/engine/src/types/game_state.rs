@@ -999,9 +999,7 @@ mod tests {
                     min_choices: 1,
                     max_choices: 1,
                     mode_count: 3,
-                    mode_descriptions: vec![],
-                    allow_repeat_modes: false,
-                    constraints: vec![],
+                    ..Default::default()
                 },
                 pending_cast: Box::new(PendingCast {
                     object_id: ObjectId(1),
@@ -1055,9 +1053,7 @@ mod tests {
                     min_choices: 1,
                     max_choices: 1,
                     mode_count: 2,
-                    mode_descriptions: vec![],
-                    allow_repeat_modes: false,
-                    constraints: vec![],
+                    ..Default::default()
                 },
                 source_id: ObjectId(1),
                 mode_abilities: vec![],

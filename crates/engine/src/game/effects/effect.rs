@@ -23,6 +23,8 @@ pub fn resolve(
         target,
     } = &ability.effect
     {
+        // CR 611.2b: Default UntilEndOfTurn applies to non-"becomes" GenericEffects
+        // (pump spells, etc.). "Becomes" effects inject Duration::Permanent at parse time.
         let dur = ability
             .duration
             .clone()

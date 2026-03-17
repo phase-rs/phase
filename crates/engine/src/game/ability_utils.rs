@@ -696,9 +696,9 @@ mod tests {
             min_choices: 2,
             max_choices: 2,
             mode_count: 3,
-            mode_descriptions: vec![],
             allow_repeat_modes: true,
             constraints: vec![ModalSelectionConstraint::DifferentTargetPlayers],
+            ..Default::default()
         };
 
         assert!(validate_modal_indices(&modal, &[1, 1]).is_ok());
@@ -710,9 +710,8 @@ mod tests {
             min_choices: 2,
             max_choices: 2,
             mode_count: 2,
-            mode_descriptions: vec![],
             allow_repeat_modes: true,
-            constraints: vec![],
+            ..Default::default()
         };
 
         let sequences = generate_modal_index_sequences(&modal);

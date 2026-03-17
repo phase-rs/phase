@@ -1616,7 +1616,7 @@ pub enum AbilityKind {
 /// modes the player must choose. The `mode_count` field records the total
 /// number of modes available; each mode corresponds to one `AbilityDefinition`
 /// in the card's abilities array.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ModalChoice {
     /// Minimum number of modes the player must choose.
     pub min_choices: usize,
@@ -1633,6 +1633,10 @@ pub struct ModalChoice {
     /// Additional selection constraints parsed from modal reminder text.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub constraints: Vec<ModalSelectionConstraint>,
+    /// Per-mode additional mana costs (Spree). Empty for standard modal spells.
+    /// CR 702.172b: Chosen mode costs are additional costs, not part of the base mana cost.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mode_costs: Vec<ManaCost>,
 }
 
 /// Selection constraints attached to a modal choice header.
@@ -2957,8 +2961,7 @@ mod modal_ability_tests {
             max_choices: 1,
             mode_count: 2,
             mode_descriptions: vec!["Draw a card.".to_string(), "Gain 3 life.".to_string()],
-            allow_repeat_modes: false,
-            constraints: vec![],
+            ..Default::default()
         };
         let def = AbilityDefinition::new(
             AbilityKind::Activated,

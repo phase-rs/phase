@@ -390,6 +390,12 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
         return with_clause_duration(parse_effect_clause(rest), duration);
     }
 
+    // "it's still a/an [type]" / "that's still a/an [type]" — type-retention clause
+    // CR 205.1a: Retains the original type in addition to new types from animation effects
+    if let Some(clause) = try_parse_still_a_type(text) {
+        return clause;
+    }
+
     // "for each" patterns: "draw a card for each [filter]", etc.
     if let Some(clause) = try_parse_for_each_effect(text) {
         return clause;
@@ -397,6 +403,39 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
 
     let ast = parse_clause_ast(text);
     lower_clause_ast(ast)
+}
+
+/// Parse "it's still a/an [type]" and "that's still a/an [type]" type-retention clauses.
+///
+/// These appear as separate sentences after animation effects (e.g., "This land becomes
+/// a 3/3 creature with vigilance. It's still a land."). The clause ensures the original
+/// type is retained as a permanent continuous effect.
+///
+/// CR 205.1a: An object retains types explicitly stated by the effect.
+fn try_parse_still_a_type(text: &str) -> Option<ParsedEffectClause> {
+    use crate::types::ability::ContinuousModification;
+    use crate::types::card_type::CoreType;
+
+    let lower = text.to_lowercase();
+    // Match "it's still a/an [type]" or "that's still a/an [type]"
+    let rest = lower
+        .strip_prefix("it's still ")
+        .or_else(|| lower.strip_prefix("that's still "))?;
+    let type_name = rest.strip_prefix("a ").or_else(|| rest.strip_prefix("an "))?;
+    let core_type = CoreType::from_str(&capitalize(type_name)).ok()?;
+
+    Some(ParsedEffectClause {
+        effect: Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddType { core_type }])
+                .description(text.to_string())],
+            duration: Some(Duration::Permanent),
+            target: None,
+        },
+        duration: Some(Duration::Permanent),
+        sub_ability: None,
+    })
 }
 
 /// Parse "for each" quantity patterns on draw/life/damage/mill effects.
@@ -3457,6 +3496,8 @@ fn build_become_clause(
 ) -> Option<ParsedEffectClause> {
     let normalized = deconjugate_verb(predicate);
     let (predicate, duration) = strip_trailing_duration(&normalized);
+    // CR 611.2b: "Becomes" effects without explicit duration are permanent
+    let duration = duration.or(Some(Duration::Permanent));
     let become_text = predicate.strip_prefix("become ")?.trim();
     let animation = parse_animation_spec(become_text)?;
     let modifications = animation_modifications(&animation);
@@ -7264,6 +7305,123 @@ mod tests {
                 "expected ChangeZone sub_ability for second subject, got {:?}",
                 other
             ),
+        }
+    }
+
+    #[test]
+    fn becomes_clause_without_duration_is_permanent() {
+        // CR 611.2b: "becomes" without explicit duration → Duration::Permanent
+        let clause =
+            parse_effect_clause("this land becomes a 3/3 creature with vigilance and all creature types");
+        assert_eq!(
+            clause.duration,
+            Some(Duration::Permanent),
+            "becomes clause without trailing duration must be Permanent"
+        );
+    }
+
+    #[test]
+    fn becomes_clause_with_explicit_duration_preserves_it() {
+        let clause =
+            parse_effect_clause("target creature becomes a 0/1 blue Frog creature until end of turn");
+        assert_eq!(
+            clause.duration,
+            Some(Duration::UntilEndOfTurn),
+            "becomes clause with explicit 'until end of turn' must preserve it"
+        );
+    }
+
+    #[test]
+    fn still_a_type_parses_land() {
+        use crate::types::card_type::CoreType;
+
+        let clause = parse_effect_clause("It's still a land");
+        assert_eq!(clause.duration, Some(Duration::Permanent));
+        match &clause.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert_eq!(*duration, Some(Duration::Permanent));
+                let mods = &static_abilities[0].modifications;
+                assert!(
+                    mods.contains(&ContinuousModification::AddType {
+                        core_type: CoreType::Land
+                    }),
+                    "expected AddType Land, got {:?}",
+                    mods
+                );
+            }
+            other => panic!("expected GenericEffect, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn still_a_type_parses_artifact_with_an() {
+        use crate::types::card_type::CoreType;
+
+        let clause = parse_effect_clause("It's still an artifact");
+        assert_eq!(clause.duration, Some(Duration::Permanent));
+        match &clause.effect {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                let mods = &static_abilities[0].modifications;
+                assert!(
+                    mods.contains(&ContinuousModification::AddType {
+                        core_type: CoreType::Artifact
+                    }),
+                    "expected AddType Artifact, got {:?}",
+                    mods
+                );
+            }
+            other => panic!("expected GenericEffect, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn still_a_type_parses_creature() {
+        use crate::types::card_type::CoreType;
+
+        let clause = parse_effect_clause("It's still a creature");
+        match &clause.effect {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                let mods = &static_abilities[0].modifications;
+                assert!(
+                    mods.contains(&ContinuousModification::AddType {
+                        core_type: CoreType::Creature
+                    }),
+                    "expected AddType Creature, got {:?}",
+                    mods
+                );
+            }
+            other => panic!("expected GenericEffect, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn still_a_type_handles_that_contraction() {
+        use crate::types::card_type::CoreType;
+
+        let clause = parse_effect_clause("That's still a land");
+        assert_eq!(clause.duration, Some(Duration::Permanent));
+        match &clause.effect {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                let mods = &static_abilities[0].modifications;
+                assert!(
+                    mods.contains(&ContinuousModification::AddType {
+                        core_type: CoreType::Land
+                    }),
+                    "expected AddType Land from 'that's still', got {:?}",
+                    mods
+                );
+            }
+            other => panic!("expected GenericEffect, got {:?}", other),
         }
     }
 }

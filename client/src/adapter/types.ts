@@ -316,6 +316,8 @@ export interface ModalChoice {
   mode_count: number;
   mode_descriptions: string[];
   allow_repeat_modes: boolean;
+  /** Per-mode additional mana costs (Spree). Empty/absent for standard modal spells. */
+  mode_costs?: ManaCost[];
   constraints?: Array<{ type: string }>;
 }
 

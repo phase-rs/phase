@@ -3933,6 +3933,7 @@ mod trigger_target_tests {
                 mode_descriptions: vec!["Deal 1 damage to target player.".to_string()],
                 allow_repeat_modes: true,
                 constraints: vec![ModalSelectionConstraint::DifferentTargetPlayers],
+                ..Default::default()
             },
             source_id: ObjectId(20),
             mode_abilities: vec![AbilityDefinition::new(
@@ -4170,6 +4171,7 @@ mod trigger_target_tests {
                 mode_descriptions: vec!["Target opponent reveals their hand.".to_string()],
                 allow_repeat_modes: true,
                 constraints: vec![ModalSelectionConstraint::DifferentTargetPlayers],
+                ..Default::default()
             },
             source_id: ObjectId(40),
             mode_abilities: vec![AbilityDefinition::new(

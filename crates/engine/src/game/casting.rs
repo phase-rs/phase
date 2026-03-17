@@ -639,6 +639,16 @@ pub fn can_cast_object_now(state: &GameState, player: PlayerId, object_id: Objec
         return false;
     };
 
+    // CR 702.172: Spree spells must afford at least one mode to be castable
+    if let Some(ref modal) = prepared.modal {
+        if !modal.mode_costs.is_empty() {
+            return modal.mode_costs.iter().any(|mode_cost| {
+                let total = restrictions::add_mana_cost(&prepared.mana_cost, mode_cost);
+                can_pay_cost_after_auto_tap(state, player, prepared.object_id, &total)
+            });
+        }
+    }
+
     (prepared.modal.is_some() || spell_has_legal_targets(state, obj, player))
         && can_pay_cost_after_auto_tap(state, player, prepared.object_id, &prepared.mana_cost)
 }
@@ -668,7 +678,7 @@ pub fn can_pay_cost_after_auto_tap(
         subtypes: obj.card_types.subtypes.clone(),
     });
 
-    auto_tap_lands(&mut simulated, player, cost, &mut Vec::new());
+    auto_tap_lands(&mut simulated, player, cost, &mut Vec::new(), Some(source_id));
 
     simulated
         .players
@@ -704,6 +714,19 @@ pub fn handle_select_modes(
 
     validate_modal_indices(&modal, &indices)?;
 
+    // CR 702.172b: Spree mode costs are additional costs — sum chosen modes and add to base cost.
+    // TODO CR 702.172b: When "cast without paying mana cost" is implemented, Spree mode costs
+    // must be paid separately (additional costs are not waived). Refactor to separate cost tracking.
+    let total_cost = if modal.mode_costs.is_empty() {
+        pending.cost.clone()
+    } else {
+        let spree_total = indices.iter().fold(
+            crate::types::mana::ManaCost::zero(),
+            |acc, &idx| restrictions::add_mana_cost(&acc, &modal.mode_costs[idx]),
+        );
+        restrictions::add_mana_cost(&pending.cost, &spree_total)
+    };
+
     // Get the card's abilities to build combined resolved ability from chosen modes
     let obj = state
         .objects
@@ -730,7 +753,7 @@ pub fn handle_select_modes(
                 pending.object_id,
                 pending.card_id,
                 resolved,
-                &pending.cost,
+                &total_cost,
                 events,
             );
         }
@@ -742,7 +765,7 @@ pub fn handle_select_modes(
                 object_id: pending.object_id,
                 card_id: pending.card_id,
                 ability: resolved,
-                cost: pending.cost,
+                cost: total_cost,
                 activation_cost: None,
                 activation_ability_index: None,
                 target_constraints: pending.target_constraints,
@@ -759,7 +782,7 @@ pub fn handle_select_modes(
         pending.object_id,
         pending.card_id,
         resolved,
-        &pending.cost,
+        &total_cost,
         events,
     )
 }
@@ -957,7 +980,7 @@ fn pay_mana_cost(
         subtypes: obj.card_types.subtypes.clone(),
     });
 
-    auto_tap_lands(state, player, cost, events);
+    auto_tap_lands(state, player, cost, events, Some(source_id));
 
     {
         let player_data = state
@@ -1619,12 +1642,18 @@ fn tap_matching_land(
 ///
 /// Strategy: tap lands producing colors required by the cost first (colored shards),
 /// then tap any remaining untapped lands for generic requirements.
+///
+/// `deprioritize_source` — if set, this land is tapped last (it's the permanent whose
+/// activated ability we're paying for, so tapping other lands first is preferable UX).
+/// Land-creatures are also deprioritized behind pure lands since they may block.
 fn auto_tap_lands(
     state: &mut GameState,
     player: PlayerId,
     cost: &crate::types::mana::ManaCost,
     events: &mut Vec<GameEvent>,
+    deprioritize_source: Option<ObjectId>,
 ) {
+    use crate::types::card_type::CoreType;
     use crate::types::mana::ManaCost;
 
     let (shards, generic) = match cost {
@@ -1633,8 +1662,9 @@ fn auto_tap_lands(
         ManaCost::Cost { shards, generic } => (shards, *generic),
     };
 
-    // Build list of activatable mana options for untapped lands this player controls.
-    let available: Vec<ManaSourceOption> = state
+    // Build list of activatable mana options for untapped lands this player controls,
+    // sorted into tiers: pure lands first, then land-creatures, then the source permanent.
+    let mut available: Vec<ManaSourceOption> = state
         .battlefield
         .iter()
         .filter_map(|&oid| {
@@ -1642,11 +1672,7 @@ fn auto_tap_lands(
             if obj.controller != player || obj.tapped {
                 return None;
             }
-            if !obj
-                .card_types
-                .core_types
-                .contains(&crate::types::card_type::CoreType::Land)
-            {
+            if !obj.card_types.core_types.contains(&CoreType::Land) {
                 return None;
             }
             Some(mana_sources::activatable_land_mana_options(
@@ -1655,6 +1681,18 @@ fn auto_tap_lands(
         })
         .flatten()
         .collect();
+
+    // Tier sort: 0 = pure land, 1 = land-creature, 2 = deprioritized source
+    available.sort_by_key(|option| {
+        if deprioritize_source == Some(option.object_id) {
+            return 2;
+        }
+        let is_creature = state
+            .objects
+            .get(&option.object_id)
+            .is_some_and(|obj| obj.card_types.core_types.contains(&CoreType::Creature));
+        if is_creature { 1 } else { 0 }
+    });
 
     let mut to_tap: Vec<ManaSourceOption> = Vec::new();
     let mut used_sources: HashSet<ObjectId> = HashSet::new();
@@ -2867,8 +2905,7 @@ mod tests {
                     "Draw a card".to_string(),
                     "Gain 3 life".to_string(),
                 ],
-                allow_repeat_modes: false,
-                constraints: vec![],
+                ..Default::default()
             });
         }
         obj_id
