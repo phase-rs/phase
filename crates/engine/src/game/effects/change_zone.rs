@@ -41,11 +41,12 @@ pub fn resolve(
 
     // SelfRef with no explicit targets: process the source object through the zone-change pipeline
     // (e.g., "shuffle ~ into its owner's library")
-    let self_ref_targets = if matches!(target_filter, TargetFilter::SelfRef) && ability.targets.is_empty() {
-        vec![TargetRef::Object(ability.source_id)]
-    } else {
-        vec![]
-    };
+    let self_ref_targets =
+        if matches!(target_filter, TargetFilter::SelfRef) && ability.targets.is_empty() {
+            vec![TargetRef::Object(ability.source_id)]
+        } else {
+            vec![]
+        };
 
     let effective_targets = if self_ref_targets.is_empty() {
         &ability.targets
