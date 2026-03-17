@@ -139,6 +139,104 @@ pub fn check_fizzle(original_targets: &[TargetRef], legal_targets: &[TargetRef])
     legal_targets.is_empty()
 }
 
+/// Resolve event-context TargetFilter variants using the current trigger event.
+/// These variants auto-resolve at effect resolution time from `state.current_trigger_event`
+/// without requiring player selection (CR 603.7c).
+///
+/// Returns `Some(TargetRef)` if the event context can provide a target,
+/// `None` if the filter is not an event-context variant or no event is available.
+pub fn resolve_event_context_target(
+    state: &GameState,
+    filter: &TargetFilter,
+    _source_id: ObjectId,
+) -> Option<TargetRef> {
+    match filter {
+        TargetFilter::TriggeringSpellController => {
+            let event = state.current_trigger_event.as_ref()?;
+            let source_obj_id = extract_source_from_event(event)?;
+            let controller = state.objects.get(&source_obj_id)?.controller;
+            Some(TargetRef::Player(controller))
+        }
+        TargetFilter::TriggeringSpellOwner => {
+            let event = state.current_trigger_event.as_ref()?;
+            let source_obj_id = extract_source_from_event(event)?;
+            let owner = state.objects.get(&source_obj_id)?.owner;
+            Some(TargetRef::Player(owner))
+        }
+        TargetFilter::TriggeringPlayer => {
+            let event = state.current_trigger_event.as_ref()?;
+            let player = extract_player_from_event(event, state)?;
+            Some(TargetRef::Player(player))
+        }
+        TargetFilter::TriggeringSource => {
+            let event = state.current_trigger_event.as_ref()?;
+            let obj_id = extract_source_from_event(event)?;
+            Some(TargetRef::Object(obj_id))
+        }
+        _ => None,
+    }
+}
+
+/// Extract the source object ID from a trigger event.
+fn extract_source_from_event(event: &crate::types::events::GameEvent) -> Option<ObjectId> {
+    use crate::types::events::GameEvent;
+    match event {
+        GameEvent::BecomesTarget { source_id, .. } => Some(*source_id),
+        GameEvent::SpellCast { card_id, .. } => {
+            // card_id is a CardId, not an ObjectId — we need the stack entry's object
+            // For SpellCast, the source is the spell on the stack, but we have card_id.
+            // This requires looking up the object by card_id, which is imprecise.
+            // For now, return None — SpellCast triggers should use different resolution.
+            let _ = card_id;
+            None
+        }
+        GameEvent::DamageDealt { source_id, .. } => Some(*source_id),
+        GameEvent::AbilityActivated { source_id } => Some(*source_id),
+        GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+        GameEvent::PermanentTapped { object_id } => Some(*object_id),
+        GameEvent::PermanentUntapped { object_id } => Some(*object_id),
+        GameEvent::CounterAdded { object_id, .. } => Some(*object_id),
+        GameEvent::CounterRemoved { object_id, .. } => Some(*object_id),
+        GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+        GameEvent::CreatureDestroyed { object_id } => Some(*object_id),
+        GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
+        GameEvent::Transformed { object_id } => Some(*object_id),
+        GameEvent::TurnedFaceUp { object_id } => Some(*object_id),
+        GameEvent::Cycled { object_id, .. } => Some(*object_id),
+        GameEvent::CreatureSuspected { object_id } => Some(*object_id),
+        GameEvent::CaseSolved { object_id } => Some(*object_id),
+        _ => None,
+    }
+}
+
+/// Extract the relevant player from a trigger event.
+fn extract_player_from_event(
+    event: &crate::types::events::GameEvent,
+    state: &GameState,
+) -> Option<PlayerId> {
+    use crate::types::events::GameEvent;
+    match event {
+        GameEvent::LifeChanged { player_id, .. } => Some(*player_id),
+        GameEvent::CardsDrawn { player_id, .. } => Some(*player_id),
+        GameEvent::CardDrawn { player_id, .. } => Some(*player_id),
+        GameEvent::Discarded { player_id, .. } => Some(*player_id),
+        GameEvent::LandPlayed { player_id, .. } => Some(*player_id),
+        GameEvent::SpellCast { controller, .. } => Some(*controller),
+        GameEvent::PermanentSacrificed { player_id, .. } => Some(*player_id),
+        GameEvent::Cycled { player_id, .. } => Some(*player_id),
+        GameEvent::CrimeCommitted { player_id, .. } => Some(*player_id),
+        GameEvent::PlayerEliminated { player_id, .. } => Some(*player_id),
+        // For object-centric events, extract the controller
+        GameEvent::BecomesTarget { source_id, .. } => {
+            state.objects.get(source_id).map(|obj| obj.controller)
+        }
+        GameEvent::DamageDealt { source_id, .. } => {
+            state.objects.get(source_id).map(|obj| obj.controller)
+        }
+        _ => None,
+    }
+}
+
 // --- Internal helpers ---
 
 /// Find activated/triggered (non-mana) abilities on the stack as legal targets.

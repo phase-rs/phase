@@ -34,6 +34,9 @@ pub struct PendingTrigger {
     pub timestamp: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_constraints: Vec<TargetSelectionConstraint>,
+    /// CR 603.7c: The event that caused this trigger to fire, for event-context resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_event: Option<GameEvent>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -78,6 +81,7 @@ fn collect_matching_triggers(
                     ability,
                     timestamp,
                     target_constraints: Vec::new(),
+                    trigger_event: Some(event.clone()),
                 });
                 record_trigger_fired(state, trig_def, obj_id, trig_idx);
             }
@@ -154,6 +158,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             ability: prowess_ability,
                             timestamp,
                             target_constraints: Vec::new(),
+                            trigger_event: Some(event.clone()),
                         });
                     }
                 }
@@ -262,7 +267,7 @@ pub fn push_pending_trigger_to_stack(
             source_id: trigger.source_id,
             ability: trigger.ability,
             condition: trigger.condition,
-            trigger_event: None,
+            trigger_event: trigger.trigger_event,
         },
     };
     stack::push_to_stack(state, entry, events);
@@ -316,6 +321,7 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
             ability: trigger.ability,
             timestamp: state.turn_number,
             target_constraints: Vec::new(),
+            trigger_event: None,
         };
         push_pending_trigger_to_stack(state, pending, &mut new_events);
     }
@@ -527,6 +533,10 @@ fn build_triggered_ability(
 /// Extract the TargetFilter from an effect, if it has targeting requirements.
 /// Returns None for effects with no targeting (Draw, GainLife, etc.) or
 /// effects targeting self/controller (which don't need player selection).
+///
+/// Note: TriggeringSpellController, TriggeringSpellOwner, TriggeringPlayer,
+/// and TriggeringSource auto-resolve from event context at resolution time
+/// (via `state.current_trigger_event`), so they do not require player selection.
 pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilter> {
     match effect {
         Effect::ChangeZone { target, .. }

@@ -997,6 +997,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                                 ability: resolved,
                                 timestamp: state.turn_number,
                                 target_constraints,
+                                trigger_event: None,
                             },
                             &mut events,
                         );
@@ -1008,6 +1009,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                             ability: resolved,
                             timestamp: state.turn_number,
                             target_constraints: target_constraints.clone(),
+                            trigger_event: None,
                         });
                         let selection = begin_target_selection(&target_slots, &target_constraints)?;
                         return Ok(ActionResult {
@@ -1030,6 +1032,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                             ability: resolved,
                             timestamp: state.turn_number,
                             target_constraints,
+                            trigger_event: None,
                         },
                         &mut events,
                     );
@@ -3529,6 +3532,7 @@ mod trigger_target_tests {
             ability,
             timestamp: 1,
             target_constraints: Vec::new(),
+            trigger_event: None,
         });
 
         let legal_targets = vec![TargetRef::Object(target1), TargetRef::Object(target2)];
@@ -3605,6 +3609,7 @@ mod trigger_target_tests {
             ),
             timestamp: 1,
             target_constraints: Vec::new(),
+            trigger_event: None,
         });
 
         state.waiting_for = WaitingFor::TriggerTargetSelection {
@@ -3712,6 +3717,7 @@ mod trigger_target_tests {
             )),
             timestamp: 1,
             target_constraints: vec![TargetSelectionConstraint::DifferentTargetPlayers],
+            trigger_event: None,
         });
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
@@ -3820,6 +3826,7 @@ mod trigger_target_tests {
             )),
             timestamp: 1,
             target_constraints: target_constraints.clone(),
+            trigger_event: None,
         });
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),

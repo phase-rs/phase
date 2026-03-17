@@ -1092,6 +1092,7 @@ mod tests {
             ),
             timestamp: 42,
             target_constraints: Vec::new(),
+            trigger_event: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: PendingTrigger = serde_json::from_str(&json).unwrap();
@@ -1120,6 +1121,7 @@ mod tests {
             ),
             timestamp: 1,
             target_constraints: Vec::new(),
+            trigger_event: None,
         });
 
         let json = serde_json::to_string(&state).unwrap();

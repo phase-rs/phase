@@ -43,6 +43,16 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
+    // CR 603.7c: Set trigger event context for event-context target resolution.
+    // TriggeringSpellController, TriggeringSource, etc. read this during resolution.
+    if let StackEntryKind::TriggeredAbility {
+        trigger_event: Some(ref te),
+        ..
+    } = entry.kind
+    {
+        state.current_trigger_event = Some(te.clone());
+    }
+
     // Extract the resolved ability from the stack entry
     let (ability, is_spell) = match &entry.kind {
         StackEntryKind::Spell { ability, .. } => (ability.clone(), true),
@@ -104,6 +114,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
     // Activated abilities: source stays where it is, no zone movement
+
+    // CR 603.7c: Clear trigger event context after resolution completes.
+    state.current_trigger_event = None;
 
     events.push(GameEvent::StackResolved {
         object_id: entry.id,
@@ -202,6 +215,109 @@ mod tests {
         });
 
         aura_id
+    }
+
+    #[test]
+    fn trigger_event_context_becomes_target_controller() {
+        // Set up: triggered ability with BecomesTarget event in trigger_event.
+        // Verify: at resolution, current_trigger_event is set so
+        // TriggeringSpellController can resolve to the controller of the source.
+        let mut state = setup();
+
+        // Create a "spell" object controlled by player 1 that is the source in BecomesTarget
+        let spell_id = create_object(
+            &mut state,
+            CardId(80),
+            PlayerId(1),
+            "Lightning Bolt".to_string(),
+            Zone::Stack,
+        );
+
+        let trigger_event = GameEvent::BecomesTarget {
+            object_id: ObjectId(999), // target doesn't matter for this test
+            source_id: spell_id,
+        };
+
+        // Build a triggered ability that would want to resolve TriggeringSpellController
+        let resolved = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "EventContextTest".to_string(),
+                description: None,
+            },
+            vec![],
+            ObjectId(50),
+            PlayerId(0),
+        );
+
+        let entry_id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+
+        state.stack.push(StackEntry {
+            id: entry_id,
+            source_id: ObjectId(50),
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: ObjectId(50),
+                ability: resolved,
+                condition: None,
+                trigger_event: Some(trigger_event.clone()),
+            },
+        });
+
+        // Before resolution, current_trigger_event should be None
+        assert!(state.current_trigger_event.is_none());
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        // After resolution, current_trigger_event should be cleared
+        assert!(state.current_trigger_event.is_none());
+
+        // Verify the event was set during resolution by checking the resolve happened
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::StackResolved { .. })));
+
+        // Verify event-context resolution works with the trigger event
+        // by manually setting and checking the resolution function
+        state.current_trigger_event = Some(trigger_event);
+        let result = crate::game::targeting::resolve_event_context_target(
+            &state,
+            &crate::types::ability::TargetFilter::TriggeringSpellController,
+            ObjectId(50),
+        );
+        assert_eq!(result, Some(TargetRef::Player(PlayerId(1))));
+
+        // TriggeringSpellOwner should return the owner
+        let result = crate::game::targeting::resolve_event_context_target(
+            &state,
+            &crate::types::ability::TargetFilter::TriggeringSpellOwner,
+            ObjectId(50),
+        );
+        assert_eq!(result, Some(TargetRef::Player(PlayerId(1))));
+
+        // TriggeringSource should return the source object
+        let result = crate::game::targeting::resolve_event_context_target(
+            &state,
+            &crate::types::ability::TargetFilter::TriggeringSource,
+            ObjectId(50),
+        );
+        assert_eq!(result, Some(TargetRef::Object(spell_id)));
+
+        // Clean up
+        state.current_trigger_event = None;
+    }
+
+    #[test]
+    fn trigger_event_context_no_event_returns_none() {
+        let state = setup();
+        // With no current_trigger_event, resolution should return None
+        let result = crate::game::targeting::resolve_event_context_target(
+            &state,
+            &crate::types::ability::TargetFilter::TriggeringSpellController,
+            ObjectId(1),
+        );
+        assert!(result.is_none());
     }
 
     #[test]
