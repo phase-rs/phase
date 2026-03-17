@@ -533,6 +533,12 @@ fn lower_imperative_clause(text: &str) -> ParsedEffectClause {
         return clause;
     }
 
+    // Compound shuffle subjects: "shuffle ~ and target creature ... into their owners' libraries"
+    // Must come before try_split_targeted_compound because "shuffle" is the verb, not the subject.
+    if let Some(clause) = try_parse_compound_shuffle(text) {
+        return clause;
+    }
+
     // Compound targeted actions: "tap target creature and put a stun counter on it"
     // Split on " and " when the primary clause is a targeted verb.
     if let Some(clause) = try_split_targeted_compound(text) {
@@ -629,6 +635,117 @@ fn find_compound_connector(lower: &str) -> Option<(usize, usize)> {
         }
     }
     None
+}
+
+/// Verb-agnostic compound subject splitter.
+/// Splits "X and Y [remainder]" into two subjects + the verb phrase.
+/// X and Y are each parsed via `parse_target` or SelfRef detection.
+/// Returns None if no compound subject detected.
+///
+/// Examples:
+///   "~ and target creature with a stun counter on it into their owners' libraries"
+///   → (SelfRef, Typed(Creature+CountersGE(Stun,1)), "into their owners' libraries")
+fn try_split_compound_subject(text: &str) -> Option<(TargetFilter, TargetFilter, &str)> {
+    let lower = text.to_lowercase();
+
+    // Find " and " that separates subjects
+    let and_pos = lower.find(" and ")?;
+    let first_text = text[..and_pos].trim();
+    let after_and = text[and_pos + 5..].trim(); // skip " and "
+
+    // Parse first subject
+    let first_filter = if first_text == "~"
+        || first_text.eq_ignore_ascii_case("this creature")
+        || first_text.eq_ignore_ascii_case("this permanent")
+    {
+        TargetFilter::SelfRef
+    } else {
+        let (filter, _rest) = parse_target(first_text);
+        if matches!(filter, TargetFilter::None) {
+            return None;
+        }
+        filter
+    };
+
+    // Parse second subject — consume until we hit a preposition that starts the verb phrase
+    // Look for "into " or "from " as the boundary between the second subject and remainder
+    let after_and_lower = after_and.to_lowercase();
+    let remainder_start = after_and_lower
+        .find(" into ")
+        .or_else(|| after_and_lower.find(" from "))
+        .or_else(|| after_and_lower.find(" onto "));
+
+    let (second_text, remainder) = if let Some(pos) = remainder_start {
+        (after_and[..pos].trim(), after_and[pos..].trim())
+    } else {
+        // No remainder phrase found — entire after_and is the second subject
+        (after_and, "")
+    };
+
+    let (second_filter, extra_rest) = parse_target(second_text);
+    if matches!(second_filter, TargetFilter::None) {
+        return None;
+    }
+
+    // If parse_target consumed less than the full second_text, combine leftovers with remainder
+    let extra_rest = extra_rest.trim();
+    let final_remainder = if !extra_rest.is_empty() && !remainder.is_empty() {
+        // extra_rest comes before the remainder preposition — just use remainder
+        remainder
+    } else if !extra_rest.is_empty() {
+        extra_rest
+    } else {
+        remainder
+    };
+
+    Some((first_filter, second_filter, final_remainder))
+}
+
+/// Parse "shuffle X and Y into their owners' libraries" as a compound ChangeZone chain.
+/// Returns a ParsedEffectClause with a ChangeZone for the first subject and a sub_ability
+/// for the second subject, both with owner_library: true.
+fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    lower.strip_prefix("shuffle ")?;
+
+    // Try to split compound subject from the text after "shuffle "
+    let text_after = &text["shuffle ".len()..];
+    let (first, second, remainder) = try_split_compound_subject(text_after)?;
+
+    // The remainder must indicate library destination
+    let remainder_lower = remainder.to_lowercase();
+    let is_owner_library = remainder_lower.contains("owner")
+        || remainder_lower.contains("their")
+        || remainder_lower.contains("its");
+
+    if !remainder_lower.contains("librar") {
+        return None;
+    }
+
+    let owner_library = is_owner_library;
+
+    // Build ChangeZone for the second subject as a sub_ability
+    let sub_effect = Effect::ChangeZone {
+        origin: None,
+        destination: Zone::Library,
+        target: second,
+        owner_library,
+    };
+    let sub_def = AbilityDefinition::new(AbilityKind::Spell, sub_effect);
+
+    // Build ChangeZone for the first subject as the primary effect
+    let primary_effect = Effect::ChangeZone {
+        origin: None,
+        destination: Zone::Library,
+        target: first,
+        owner_library,
+    };
+
+    Some(ParsedEffectClause {
+        effect: primary_effect,
+        duration: None,
+        sub_ability: Some(Box::new(sub_def)),
+    })
 }
 
 /// Check if text contains anaphoric pronouns referencing a previously mentioned object.
@@ -7029,6 +7146,88 @@ mod tests {
                     other
                 );
             }
+        }
+    }
+
+    #[test]
+    fn compound_subject_self_and_target_creature_shuffle() {
+        // "shuffle ~ and target creature with a stun counter on it into their owners' libraries"
+        // Should produce a chained pair of ChangeZone effects with owner_library: true
+        let result = try_split_compound_subject(
+            "~ and target creature with a stun counter on it into their owners' libraries",
+        );
+        assert!(result.is_some(), "should split compound subject");
+        let (first, second, remainder) = result.unwrap();
+        assert!(
+            matches!(first, TargetFilter::SelfRef),
+            "first subject should be SelfRef, got {:?}",
+            first
+        );
+        // Second should be a typed creature filter with counter property
+        assert!(
+            matches!(second, TargetFilter::Typed(ref tf) if tf.card_type == Some(TypeFilter::Creature)),
+            "second subject should be typed creature, got {:?}",
+            second
+        );
+        assert!(
+            remainder.contains("into their owners' libraries"),
+            "remainder should contain destination phrase, got: {}",
+            remainder
+        );
+    }
+
+    #[test]
+    fn compound_subject_returns_none_for_single_target() {
+        let result = try_split_compound_subject("target creature");
+        assert!(
+            result.is_none(),
+            "single target should not be compound"
+        );
+    }
+
+    #[test]
+    fn shuffle_compound_subject_into_owners_libraries() {
+        // Full parse through parse_effect_clause which intercepts compound shuffle
+        let clause = parse_effect_clause(
+            "shuffle ~ and target creature with a stun counter on it into their owners' libraries",
+        );
+        match &clause.effect {
+            Effect::ChangeZone {
+                destination: Zone::Library,
+                target: TargetFilter::SelfRef,
+                owner_library: true,
+                ..
+            } => {
+                // Good — first effect is SelfRef → Library with owner_library
+            }
+            other => panic!(
+                "expected ChangeZone {{ SelfRef, Library, owner_library: true }}, got {:?}",
+                other
+            ),
+        }
+        // Should have a sub_ability for the second subject
+        assert!(
+            clause.sub_ability.is_some(),
+            "should have sub_ability for second subject"
+        );
+        let sub = clause.sub_ability.as_ref().unwrap();
+        match &sub.effect {
+            Effect::ChangeZone {
+                destination: Zone::Library,
+                owner_library: true,
+                target,
+                ..
+            } => {
+                assert!(
+                    matches!(target, TargetFilter::Typed(ref tf) if tf.card_type == Some(TypeFilter::Creature)),
+                    "sub target should be typed creature, got {:?}",
+                    target
+                );
+            }
+            other => panic!(
+                "expected ChangeZone sub_ability for second subject, got {:?}",
+                other
+            ),
         }
     }
 }
