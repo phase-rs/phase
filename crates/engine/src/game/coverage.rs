@@ -1165,7 +1165,7 @@ pub fn is_fully_covered(summary: &CoverageSummary) -> bool {
 mod tests {
     use super::*;
     use crate::database::legality::{legalities_to_export_map, LegalityStatus};
-    use crate::types::ability::{AbilityKind, DamageAmount, Effect, TargetFilter};
+    use crate::types::ability::{AbilityKind, Effect, TargetFilter};
     use crate::types::card_type::CardType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
