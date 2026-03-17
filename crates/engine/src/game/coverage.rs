@@ -933,7 +933,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
     };
 
     let mut missing_handler_frequency: Vec<(String, usize)> = freq.into_iter().collect();
-    missing_handler_frequency.sort_by(|a, b| b.1.cmp(&a.1));
+    missing_handler_frequency.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     let coverage_by_format = coverage_by_format_accumulators
         .into_iter()

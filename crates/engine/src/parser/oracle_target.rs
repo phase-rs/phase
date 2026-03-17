@@ -517,11 +517,7 @@ fn parse_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     let mut consumed = leading_ws + "with ".len();
     let mut properties = Vec::new();
 
-    loop {
-        let Some((keyword, keyword_len)) = parse_leading_keyword(remaining) else {
-            break;
-        };
-
+    while let Some((keyword, keyword_len)) = parse_leading_keyword(remaining) {
         properties.push(FilterProp::WithKeyword {
             value: keyword.to_string(),
         });

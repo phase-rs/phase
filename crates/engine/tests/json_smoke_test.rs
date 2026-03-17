@@ -136,8 +136,8 @@ fn test_smoke_game_cast_spell() {
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let forest_id = scenario.add_real_card(P0, "Forest", Zone::Battlefield, &db);
-    let bolt_id = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, &db);
+    let forest_id = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    let bolt_id = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
 
     let mut runner = scenario.build();
 
@@ -209,7 +209,7 @@ fn test_smoke_game_combat_damage() {
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let bears_id = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, &db);
+    let bears_id = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
 
     let mut runner = scenario.build();
 

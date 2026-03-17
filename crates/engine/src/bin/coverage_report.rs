@@ -172,7 +172,7 @@ fn filter_to_manifest(summary: CoverageSummary, manifest: &BTreeSet<String>) -> 
         }
     }
     let mut missing_handler_frequency: Vec<(String, usize)> = freq.into_iter().collect();
-    missing_handler_frequency.sort_by(|a, b| b.1.cmp(&a.1));
+    missing_handler_frequency.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     CoverageSummary {
         total_cards,

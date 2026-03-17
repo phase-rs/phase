@@ -192,21 +192,21 @@ pub fn validate_blockers(
         // creatures with the specified quality.
         for kw in &attacker.keywords {
             match kw {
-                Keyword::Protection(ProtectionTarget::Color(color)) => {
-                    if blocker.color.contains(color) {
-                        return Err(format!(
-                            "{:?} cannot block {:?} (protection from {:?})",
-                            blocker_id, attacker_id, color
-                        ));
-                    }
+                Keyword::Protection(ProtectionTarget::Color(color))
+                    if blocker.color.contains(color) =>
+                {
+                    return Err(format!(
+                        "{:?} cannot block {:?} (protection from {:?})",
+                        blocker_id, attacker_id, color
+                    ));
                 }
-                Keyword::Protection(ProtectionTarget::Multicolored) => {
-                    if blocker.color.len() > 1 {
-                        return Err(format!(
-                            "{:?} cannot block {:?} (protection from multicolored)",
-                            blocker_id, attacker_id
-                        ));
-                    }
+                Keyword::Protection(ProtectionTarget::Multicolored)
+                    if blocker.color.len() > 1 =>
+                {
+                    return Err(format!(
+                        "{:?} cannot block {:?} (protection from multicolored)",
+                        blocker_id, attacker_id
+                    ));
                 }
                 _ => {}
             }

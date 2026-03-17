@@ -947,10 +947,8 @@ fn target_filter_matches_object(
                     FilterProp::Attacking => {
                         // Would need combat state check
                     }
-                    FilterProp::Tapped => {
-                        if !obj.tapped {
-                            return false;
-                        }
+                    FilterProp::Tapped if !obj.tapped => {
+                        return false;
                     }
                     FilterProp::NonType { value } => {
                         let excluded_type = match value.as_str() {
@@ -976,15 +974,13 @@ fn target_filter_matches_object(
                             }
                         }
                     }
-                    FilterProp::WithKeyword { value } => {
-                        if !obj.keywords.iter().any(|k| format!("{:?}", k) == *value) {
-                            return false;
-                        }
+                    FilterProp::WithKeyword { value }
+                        if !obj.keywords.iter().any(|k| format!("{:?}", k) == *value) =>
+                    {
+                        return false;
                     }
-                    FilterProp::Another => {
-                        if object_id == source_id {
-                            return false;
-                        }
+                    FilterProp::Another if object_id == source_id => {
+                        return false;
                     }
                     FilterProp::HasColor { color } => {
                         use crate::types::mana::ManaColor;
@@ -1002,20 +998,14 @@ fn target_filter_matches_object(
                             }
                         }
                     }
-                    FilterProp::PowerLE { value } => {
-                        if obj.power.unwrap_or(0) > *value {
-                            return false;
-                        }
+                    FilterProp::PowerLE { value } if obj.power.unwrap_or(0) > *value => {
+                        return false;
                     }
-                    FilterProp::PowerGE { value } => {
-                        if obj.power.unwrap_or(0) < *value {
-                            return false;
-                        }
+                    FilterProp::PowerGE { value } if obj.power.unwrap_or(0) < *value => {
+                        return false;
                     }
-                    FilterProp::Multicolored => {
-                        if obj.color.len() <= 1 {
-                            return false;
-                        }
+                    FilterProp::Multicolored if obj.color.len() <= 1 => {
+                        return false;
                     }
                     FilterProp::IsChosenCreatureType => {
                         let chosen = state
@@ -1172,26 +1162,20 @@ fn match_damage_done_once_by_controller(
     if let Some(ref vt) = trigger.valid_target {
         let trigger_controller = state.objects.get(&source_id).map(|o| o.controller);
         match vt {
-            TargetFilter::Controller => {
-                if trigger_controller != Some(*player_id) {
-                    return false;
-                }
+            TargetFilter::Controller if trigger_controller != Some(*player_id) => {
+                return false;
             }
             TargetFilter::Typed(TypedFilter {
                 controller: Some(crate::types::ability::ControllerRef::You),
                 ..
-            }) => {
-                if trigger_controller != Some(*player_id) {
-                    return false;
-                }
+            }) if trigger_controller != Some(*player_id) => {
+                return false;
             }
             TargetFilter::Typed(TypedFilter {
                 controller: Some(crate::types::ability::ControllerRef::Opponent),
                 ..
-            }) => {
-                if trigger_controller == Some(*player_id) {
-                    return false;
-                }
+            }) if trigger_controller == Some(*player_id) => {
+                return false;
             }
             TargetFilter::Player => {}
             _ => {}

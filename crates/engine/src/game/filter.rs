@@ -312,15 +312,11 @@ pub fn player_matches_filter(
 ) -> bool {
     for part in filter.split('+') {
         match part {
-            "You" => {
-                if source_controller != Some(player_id) {
-                    return false;
-                }
+            "You" if source_controller != Some(player_id) => {
+                return false;
             }
-            "Opp" => {
-                if source_controller == Some(player_id) {
-                    return false;
-                }
+            "Opp" if source_controller == Some(player_id) => {
+                return false;
             }
             _ => {}
         }

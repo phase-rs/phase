@@ -778,9 +778,9 @@ fn parse_devotion_condition(lower: &str) -> Option<StaticCondition> {
 
     // Parse comparison: "less than N" or "N or greater"
     let threshold = if let Some(n_text) = comparison.strip_prefix("less than ") {
-        parse_number(n_text.trim())?.0 as u32
+        parse_number(n_text.trim())?.0
     } else if let Some(n_rest) = comparison.strip_suffix(" or greater") {
-        parse_number(n_rest.trim())?.0 as u32
+        parse_number(n_rest.trim())?.0
     } else {
         return None;
     };
