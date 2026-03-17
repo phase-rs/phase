@@ -123,6 +123,49 @@ fn next_sub_needs_tracked_set(ability: &ResolvedAbility) -> bool {
     })
 }
 
+/// CR 603.7c: Extract an event-context target filter from an effect, if present.
+/// Returns the filter only for event-context variants (TriggeringSpellController, etc.)
+/// that auto-resolve from `state.current_trigger_event` at resolution time.
+fn extract_event_context_filter(
+    effect: &Effect,
+) -> Option<&crate::types::ability::TargetFilter> {
+    use crate::types::ability::TargetFilter;
+
+    let filter = match effect {
+        Effect::DealDamage { target, .. }
+        | Effect::Pump { target, .. }
+        | Effect::Destroy { target, .. }
+        | Effect::Tap { target, .. }
+        | Effect::Untap { target, .. }
+        | Effect::Bounce { target, .. }
+        | Effect::GainControl { target, .. }
+        | Effect::Counter { target, .. }
+        | Effect::Sacrifice { target, .. }
+        | Effect::AddCounter { target, .. }
+        | Effect::RemoveCounter { target, .. }
+        | Effect::PutCounter { target, .. }
+        | Effect::ChangeZone { target, .. }
+        | Effect::RevealHand { target, .. }
+        | Effect::Fight { target, .. }
+        | Effect::Attach { target, .. }
+        | Effect::Transform { target, .. }
+        | Effect::CopySpell { target, .. } => target,
+        _ => return None,
+    };
+
+    if matches!(
+        filter,
+        TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSource
+    ) {
+        Some(filter)
+    } else {
+        None
+    }
+}
+
 /// Resolve an ability and follow its sub_ability chain using typed nested structs.
 /// No SVar lookup, no parse_ability(). The depth is bounded by the data structure.
 pub fn resolve_ability_chain(
@@ -146,7 +189,30 @@ pub fn resolve_ability_chain(
 
     // Skip no-op unimplemented effects
     if !matches!(ability.effect, Effect::Unimplemented { .. }) {
-        let _ = resolve_effect(state, ability, events);
+        // CR 603.7c: If the ability has empty targets but its effect uses an event-context
+        // target filter (TriggeringSpellController, TriggeringSource, etc.), resolve the
+        // filter into an actual TargetRef using the current trigger event context.
+        let resolved_ability = if ability.targets.is_empty() {
+            if let Some(filter) = extract_event_context_filter(&ability.effect) {
+                if let Some(target_ref) = crate::game::targeting::resolve_event_context_target(
+                    state,
+                    filter,
+                    ability.source_id,
+                ) {
+                    let mut resolved = ability.clone();
+                    resolved.targets = vec![target_ref];
+                    Some(resolved)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let effective = resolved_ability.as_ref().unwrap_or(ability);
+        let _ = resolve_effect(state, effective, events);
     }
 
     // CR 603.7: Record moved objects as a tracked set for delayed trigger pronouns.
