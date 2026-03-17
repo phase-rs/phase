@@ -1,0 +1,85 @@
+---
+source: crates/engine/tests/oracle_parser.rs
+assertion_line: 128
+expression: result
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "Bounce",
+          "target": {
+            "type": "SelfRef"
+          },
+          "destination": null
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "sorcery_speed": false,
+        "condition": null,
+        "optional_targeting": false
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "origin": "Battlefield",
+      "destination": "Graveyard",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "combat_damage": false,
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "When Rancor is put into a graveyard from the battlefield, return Rancor to its owner's hand.",
+      "constraint": null,
+      "condition": null
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "affected": {
+        "type": "Typed",
+        "card_type": "Creature",
+        "subtype": null,
+        "controller": null,
+        "properties": [
+          {
+            "type": "EnchantedBy"
+          }
+        ]
+      },
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 0
+        },
+        {
+          "type": "AddKeyword",
+          "keyword": "Trample"
+        }
+      ],
+      "condition": null,
+      "affected_zone": null,
+      "effect_zone": null,
+      "characteristic_defining": false,
+      "description": "Enchanted creature gets +2/+0 and has trample."
+    }
+  ],
+  "replacements": [],
+  "extractedKeywords": []
+}

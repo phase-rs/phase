@@ -482,7 +482,7 @@ pub enum RestrictionExpiry {
 
 /// Limits the scope of a game restriction to specific sources or targets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type")]
+#[serde(tag = "type", content = "data")]
 pub enum RestrictionScope {
     SourcesControlledBy(PlayerId),
     SpecificSource(ObjectId),

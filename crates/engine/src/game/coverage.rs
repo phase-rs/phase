@@ -112,8 +112,16 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::SpecificObject(id) => format!("object #{}", id.0),
         TargetFilter::TrackedSet { id } => format!("tracked set #{}", id.0),
         TargetFilter::Not { filter } => format!("not {}", fmt_target(filter)),
-        TargetFilter::Or { filters } => filters.iter().map(fmt_target).collect::<Vec<_>>().join(" or "),
-        TargetFilter::And { filters } => filters.iter().map(fmt_target).collect::<Vec<_>>().join(" + "),
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .map(fmt_target)
+            .collect::<Vec<_>>()
+            .join(" or "),
+        TargetFilter::And { filters } => filters
+            .iter()
+            .map(fmt_target)
+            .collect::<Vec<_>>()
+            .join(" + "),
         TargetFilter::Typed(tf) => fmt_typed_filter(tf),
     }
 }
@@ -127,9 +135,10 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Tapped => parts.push("tapped".into()),
             FilterProp::NonType { value } => parts.push(format!("non-{value}")),
             FilterProp::WithKeyword { value } => parts.push(format!("with {value}")),
-            FilterProp::CountersGE { counter_type, count } => {
-                parts.push(format!("{count}+ {counter_type} counters"))
-            }
+            FilterProp::CountersGE {
+                counter_type,
+                count,
+            } => parts.push(format!("{count}+ {counter_type} counters")),
             FilterProp::CmcGE { value } => parts.push(format!("mv {value}+")),
             FilterProp::CmcLE { value } => parts.push(format!("mv {value}-")),
             FilterProp::InZone { zone } => parts.push(format!("in {zone:?}")),
@@ -153,12 +162,24 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
     if let Some(sub) = &tf.subtype {
         parts.push(sub.clone());
     }
-    let type_str = tf.card_type.as_ref().map(fmt_type_filter).unwrap_or_default();
+    let type_str = tf
+        .card_type
+        .as_ref()
+        .map(fmt_type_filter)
+        .unwrap_or_default();
     if parts.is_empty() {
-        if type_str.is_empty() { "any".into() } else { type_str }
+        if type_str.is_empty() {
+            "any".into()
+        } else {
+            type_str
+        }
     } else {
         let props = parts.join(" ");
-        if type_str.is_empty() { props } else { format!("{props} {type_str}") }
+        if type_str.is_empty() {
+            props
+        } else {
+            format!("{props} {type_str}")
+        }
     }
 }
 
@@ -223,23 +244,45 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::Draw { count } => {
-            if *count != 1 { d.push(("count".into(), count.to_string())); }
+            if *count != 1 {
+                d.push(("count".into(), count.to_string()));
+            }
         }
-        Effect::Pump { power, toughness, target } => {
-            d.push(("p/t".into(), format!("{}/{}", fmt_pt(power), fmt_pt(toughness))));
+        Effect::Pump {
+            power,
+            toughness,
+            target,
+        } => {
+            d.push((
+                "p/t".into(),
+                format!("{}/{}", fmt_pt(power), fmt_pt(toughness)),
+            ));
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::PumpAll { power, toughness, target } => {
-            d.push(("p/t".into(), format!("{}/{}", fmt_pt(power), fmt_pt(toughness))));
+        Effect::PumpAll {
+            power,
+            toughness,
+            target,
+        } => {
+            d.push((
+                "p/t".into(),
+                format!("{}/{}", fmt_pt(power), fmt_pt(toughness)),
+            ));
             if !matches!(target, TargetFilter::None) {
                 d.push(("filter".into(), fmt_target(target)));
             }
         }
-        Effect::Destroy { target } | Effect::Tap { target } | Effect::Untap { target }
-        | Effect::Sacrifice { target } | Effect::GainControl { target }
-        | Effect::Attach { target } | Effect::Fight { target }
-        | Effect::CopySpell { target } | Effect::Suspect { target }
-        | Effect::Transform { target } | Effect::Shuffle { target } => {
+        Effect::Destroy { target }
+        | Effect::Tap { target }
+        | Effect::Untap { target }
+        | Effect::Sacrifice { target }
+        | Effect::GainControl { target }
+        | Effect::Attach { target }
+        | Effect::Fight { target }
+        | Effect::CopySpell { target }
+        | Effect::Suspect { target }
+        | Effect::Transform { target }
+        | Effect::Shuffle { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::DestroyAll { target } | Effect::DamageAll { amount: _, target } => {
@@ -250,13 +293,26 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("amount".into(), fmt_damage_amount(amount)));
             }
         }
-        Effect::Counter { target, source_static, .. } => {
+        Effect::Counter {
+            target,
+            source_static,
+            ..
+        } => {
             d.push(("target".into(), fmt_target(target)));
             if source_static.is_some() {
                 d.push(("+ static".into(), "on source".into()));
             }
         }
-        Effect::Token { name, power, toughness, types, colors, keywords, count, tapped } => {
+        Effect::Token {
+            name,
+            power,
+            toughness,
+            types,
+            colors,
+            keywords,
+            count,
+            tapped,
+        } => {
             let mut desc = String::new();
             match count {
                 crate::types::ability::CountValue::Fixed(n) if *n != 1 => {
@@ -281,24 +337,44 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 let kws: Vec<_> = keywords.iter().map(|k| keyword_label(k)).collect();
                 desc.push_str(&format!(" with {}", kws.join(", ")));
             }
-            if *tapped { desc.push_str(" tapped"); }
+            if *tapped {
+                desc.push_str(" tapped");
+            }
             d.push(("token".into(), desc));
         }
-        Effect::AddCounter { counter_type, count, target }
-        | Effect::RemoveCounter { counter_type, count, target } => {
+        Effect::AddCounter {
+            counter_type,
+            count,
+            target,
+        }
+        | Effect::RemoveCounter {
+            counter_type,
+            count,
+            target,
+        } => {
             d.push(("counter".into(), format!("{count} {counter_type}")));
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::PutCounter { counter_type, count, target } => {
+        Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } => {
             d.push(("counter".into(), format!("{count} {counter_type}")));
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::MultiplyCounter { counter_type, multiplier, target } => {
+        Effect::MultiplyCounter {
+            counter_type,
+            multiplier,
+            target,
+        } => {
             d.push(("counter".into(), format!("{counter_type} ×{multiplier}")));
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::DiscardCard { count, target } | Effect::Discard { count, target } => {
-            if *count != 1 { d.push(("count".into(), count.to_string())); }
+            if *count != 1 {
+                d.push(("count".into(), count.to_string()));
+            }
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::Mill { count, target } => {
@@ -320,9 +396,19 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::LoseLife { amount } => {
             d.push(("amount".into(), amount.to_string()));
         }
-        Effect::ChangeZone { origin, destination, target }
-        | Effect::ChangeZoneAll { origin, destination, target } => {
-            if let Some(o) = origin { d.push(("from".into(), fmt_zone(o))); }
+        Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+        }
+        | Effect::ChangeZoneAll {
+            origin,
+            destination,
+            target,
+        } => {
+            if let Some(o) = origin {
+                d.push(("from".into(), fmt_zone(o)));
+            }
             d.push(("to".into(), fmt_zone(destination)));
             if !matches!(target, TargetFilter::None) {
                 d.push(("target".into(), fmt_target(target)));
@@ -330,32 +416,62 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         }
         Effect::Dig { count, destination } => {
             d.push(("count".into(), count.to_string()));
-            if let Some(dest) = destination { d.push(("to".into(), fmt_zone(dest))); }
+            if let Some(dest) = destination {
+                d.push(("to".into(), fmt_zone(dest)));
+            }
         }
-        Effect::Bounce { target, destination } => {
+        Effect::Bounce {
+            target,
+            destination,
+        } => {
             d.push(("target".into(), fmt_target(target)));
-            if let Some(dest) = destination { d.push(("to".into(), fmt_zone(dest))); }
+            if let Some(dest) = destination {
+                d.push(("to".into(), fmt_zone(dest)));
+            }
         }
-        Effect::SearchLibrary { filter, count, reveal } => {
+        Effect::SearchLibrary {
+            filter,
+            count,
+            reveal,
+        } => {
             d.push(("find".into(), fmt_target(filter)));
-            if *count != 1 { d.push(("count".into(), count.to_string())); }
-            if *reveal { d.push(("reveal".into(), "yes".into())); }
+            if *count != 1 {
+                d.push(("count".into(), count.to_string()));
+            }
+            if *reveal {
+                d.push(("reveal".into(), "yes".into()));
+            }
         }
-        Effect::Animate { power, toughness, types, target } => {
+        Effect::Animate {
+            power,
+            toughness,
+            types,
+            target,
+        } => {
             if let (Some(p), Some(t)) = (power, toughness) {
                 d.push(("p/t".into(), format!("{p}/{t}")));
             }
-            if !types.is_empty() { d.push(("types".into(), types.join(" "))); }
+            if !types.is_empty() {
+                d.push(("types".into(), types.join(" ")));
+            }
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::Choose { choice_type, persist } => {
+        Effect::Choose {
+            choice_type,
+            persist,
+        } => {
             d.push(("choice".into(), format!("{choice_type:?}")));
-            if *persist { d.push(("persist".into(), "yes".into())); }
+            if *persist {
+                d.push(("persist".into(), "yes".into()));
+            }
         }
         Effect::Mana { produced, .. } => {
             d.push(("mana".into(), format!("{produced:?}")));
         }
-        Effect::RevealHand { target, card_filter } => {
+        Effect::RevealHand {
+            target,
+            card_filter,
+        } => {
             d.push(("player".into(), fmt_target(target)));
             if !matches!(card_filter, TargetFilter::Any) {
                 d.push(("card filter".into(), fmt_target(card_filter)));
@@ -365,19 +481,37 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::ChooseCard { choices, target } => {
-            if !choices.is_empty() { d.push(("choices".into(), choices.join(", "))); }
+            if !choices.is_empty() {
+                d.push(("choices".into(), choices.join(", ")));
+            }
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::CreateDelayedTrigger { condition, uses_tracked_set, .. } => {
+        Effect::CreateDelayedTrigger {
+            condition,
+            uses_tracked_set,
+            ..
+        } => {
             d.push(("when".into(), format!("{condition:?}")));
-            if *uses_tracked_set { d.push(("tracked".into(), "yes".into())); }
+            if *uses_tracked_set {
+                d.push(("tracked".into(), "yes".into()));
+            }
         }
-        Effect::GenericEffect { duration, target, .. } => {
-            if let Some(dur) = duration { d.push(("duration".into(), fmt_duration(dur))); }
-            if let Some(t) = target { d.push(("target".into(), fmt_target(t))); }
+        Effect::GenericEffect {
+            duration, target, ..
+        } => {
+            if let Some(dur) = duration {
+                d.push(("duration".into(), fmt_duration(dur)));
+            }
+            if let Some(t) = target {
+                d.push(("target".into(), fmt_target(t)));
+            }
         }
-        Effect::Unimplemented { .. } | Effect::Explore | Effect::Proliferate
-        | Effect::SolveCase | Effect::Cleanup { .. } | Effect::AddRestriction { .. } => {}
+        Effect::Unimplemented { .. }
+        | Effect::Explore
+        | Effect::Proliferate
+        | Effect::SolveCase
+        | Effect::Cleanup { .. }
+        | Effect::AddRestriction { .. } => {}
     }
     d
 }
@@ -404,7 +538,13 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
         d.push(("timing".into(), "sorcery speed".into()));
     }
     if let Some(modal) = &def.modal {
-        d.push(("modal".into(), format!("choose {}-{} of {}", modal.min_choices, modal.max_choices, modal.mode_count)));
+        d.push((
+            "modal".into(),
+            format!(
+                "choose {}-{} of {}",
+                modal.min_choices, modal.max_choices, modal.mode_count
+            ),
+        ));
     }
     d
 }

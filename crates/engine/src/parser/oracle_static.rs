@@ -46,6 +46,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         if let Some(def) = parse_continuous_gets_has(
             &text[19..],
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])),
+            &text,
         ) {
             return Some(def);
         }
@@ -56,6 +57,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         if let Some(def) = parse_continuous_gets_has(
             &text[20..],
             TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy])),
+            &text,
         ) {
             return Some(def);
         }
@@ -65,6 +67,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         if let Some(def) = parse_continuous_gets_has(
             &text[15..],
             TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::EnchantedBy])),
+            &text,
         ) {
             return Some(def);
         }
@@ -75,6 +78,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         if let Some(def) = parse_continuous_gets_has(
             &text[18..],
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy])),
+            &text,
         ) {
             return Some(def);
         }
@@ -82,9 +86,11 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
 
     // --- "All creatures get/have ..." ---
     if lower.starts_with("all creatures ") {
-        if let Some(def) =
-            parse_continuous_gets_has(&text[14..], TargetFilter::Typed(TypedFilter::creature()))
-        {
+        if let Some(def) = parse_continuous_gets_has(
+            &text[14..],
+            TargetFilter::Typed(TypedFilter::creature()),
+            &text,
+        ) {
             return Some(def);
         }
     }
@@ -108,6 +114,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         if let Some(def) = parse_continuous_gets_has(
             &text[22..],
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            &text,
         ) {
             return Some(def);
         }
@@ -118,6 +125,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         if let Some(def) = parse_continuous_gets_has(
             &text[28..],
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            &text,
         ) {
             return Some(def);
         }
@@ -258,6 +266,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
                     after
                 ),
                 TargetFilter::SelfRef,
+                &text,
             );
         }
     }
@@ -443,7 +452,7 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
             } else {
                 typed_filter
             };
-            return parse_continuous_gets_has(after_prefix, typed_filter);
+            return parse_continuous_gets_has(after_prefix, typed_filter, text);
         }
     }
 
@@ -480,7 +489,7 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
             } else {
                 typed_filter
             };
-            return parse_continuous_gets_has(after_prefix, typed_filter);
+            return parse_continuous_gets_has(after_prefix, typed_filter, text);
         }
     }
 
@@ -1101,7 +1110,11 @@ fn is_capitalized_words(s: &str) -> bool {
 }
 
 /// Parse "gets +N/+M [and has {keyword}]" after the subject.
-fn parse_continuous_gets_has(text: &str, affected: TargetFilter) -> Option<StaticDefinition> {
+fn parse_continuous_gets_has(
+    text: &str,
+    affected: TargetFilter,
+    description: &str,
+) -> Option<StaticDefinition> {
     let modifications = parse_continuous_modifications(text);
 
     if modifications.is_empty() {
@@ -1111,7 +1124,8 @@ fn parse_continuous_gets_has(text: &str, affected: TargetFilter) -> Option<Stati
     Some(
         StaticDefinition::continuous()
             .affected(affected)
-            .modifications(modifications),
+            .modifications(modifications)
+            .description(description.to_string()),
     )
 }
 

@@ -1,0 +1,72 @@
+---
+source: crates/engine/tests/oracle_parser.rs
+assertion_line: 56
+expression: result
+---
+{
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Attach",
+        "target": {
+          "type": "Typed",
+          "card_type": "Creature",
+          "subtype": null,
+          "controller": "You",
+          "properties": []
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": {
+          "Cost": {
+            "shards": [],
+            "generic": 1
+          }
+        }
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": "Equip {1}",
+      "target_prompt": null,
+      "sorcery_speed": true,
+      "condition": null,
+      "optional_targeting": false
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "affected": {
+        "type": "Typed",
+        "card_type": "Creature",
+        "subtype": null,
+        "controller": null,
+        "properties": [
+          {
+            "type": "EquippedBy"
+          }
+        ]
+      },
+      "modifications": [
+        {
+          "type": "AddPower",
+          "value": 2
+        },
+        {
+          "type": "AddToughness",
+          "value": 0
+        }
+      ],
+      "condition": null,
+      "affected_zone": null,
+      "effect_zone": null,
+      "characteristic_defining": false,
+      "description": "Equipped creature gets +2/+0."
+    }
+  ],
+  "replacements": [],
+  "extractedKeywords": []
+}

@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Phase 31 context gathered
-last_updated: "2026-03-17T00:26:55.499Z"
-last_activity: 2026-03-16 — Phase 30 Plan 01 complete (Building Block Type Definitions)
+stopped_at: Completed 30-04-PLAN.md
+last_updated: "2026-03-17T01:53:16.000Z"
+last_activity: 2026-03-16 — Phase 30 Plan 04 complete (Adventure Frontend + Integration Test)
 progress:
   total_phases: 11
   completed_phases: 7
   total_plans: 51
-  completed_plans: 48
-  percent: 94
+  completed_plans: 49
+  percent: 96
 ---
 
 # Project State
@@ -25,11 +25,11 @@ See: .planning/PROJECT.md (updated 2026-03-11)
 
 ## Current Position
 
-Phase: 30 — Plan 3 of 4 complete
-Status: In Progress
-Last activity: 2026-03-17 — Phase 30 Plan 03 complete (Adventure Casting Subsystem)
+Phase: 30 — Plan 4 of 4 complete
+Status: Complete
+Last activity: 2026-03-16 — Phase 30 Plan 04 complete (Adventure Frontend + Integration Test)
 
-Progress: [██████████████████░░] 48/51 plans (94%)
+Progress: [███████████████████░] 49/51 plans (96%)
 
 ## Performance Metrics
 
@@ -78,6 +78,7 @@ Progress: [██████████████████░░] 48/51 p
 | Phase 30 P01 | 21min | 2 tasks | 13 files |
 | Phase 30 P02 | 32min | 2 tasks | 11 files |
 | Phase 30 P03 | 40min | 2 tasks | 6 files |
+| Phase 30 P04 | 23min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -243,6 +244,7 @@ Recent decisions affecting current work:
 - [30-03]: Adventure face data populated via rehydrate_game_from_card_db, not at deck load time
 - [30-03]: AI Adventure face selection delegated to minimax search (both options generated as candidates)
 - [30-03]: CastingPermission::AdventureCreature cleared on zone change from exile (prevents stale permissions)
+- [30-04]: RestrictionScope serde changed from internally-tagged to adjacently-tagged (tag+content) for TypeScript discriminated union compat
 
 ### Roadmap Evolution
 
@@ -262,6 +264,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-17T01:23:00Z
-Stopped at: Completed 30-03-PLAN.md
-Resume file: .planning/phases/30-implement-the-required-building-blocks-specified-in-the-summary/30-04-PLAN.md
+Last session: 2026-03-17T01:53:16Z
+Stopped at: Completed 30-04-PLAN.md (Phase 30 complete)
+Resume file: .planning/phases/31-add-mechanics-to-support-kaito-bane-of-nightmares/31-01-PLAN.md

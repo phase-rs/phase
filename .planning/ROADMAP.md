@@ -288,7 +288,7 @@ Plans:
 **Goal:** Deliver four composable engine building blocks: event-context target resolution, parser possessive references, Adventure casting subsystem (CR 715), and damage prevention disabling via GameRestriction system
 **Requirements**: BB-01, BB-02, BB-03, BB-04, BB-ALL
 **Depends on:** Phase 29
-**Plans:** 3/4 plans executed
+**Plans:** 4/4 plans complete
 
 **Execution Order:**
 Wave 1: Plan 01 (type definitions + parser patterns for all building blocks)
@@ -297,10 +297,10 @@ Wave 3: Plan 03 (Adventure casting engine + AI support)
 Wave 4: Plan 04 (Adventure frontend + Bonecrusher Giant integration test + human verify)
 
 Plans:
-- [ ] 30-01-PLAN.md — Type definitions (TargetFilter event-context variants, GameRestriction, CastingPermission, AddRestriction effect) + parser event-context possessive patterns
-- [ ] 30-02-PLAN.md — Pipeline wiring: trigger event threading, event-context target resolution, prevention gating, restriction cleanup, AddRestriction handler
-- [ ] 30-03-PLAN.md — Adventure casting subsystem: cast choice, exile-on-resolve, cast-from-exile, AI support
-- [ ] 30-04-PLAN.md — Adventure frontend UI, TypeScript types, Bonecrusher Giant integration test, human verification
+- [x] 30-01-PLAN.md — Type definitions (TargetFilter event-context variants, GameRestriction, CastingPermission, AddRestriction effect) + parser event-context possessive patterns — completed 2026-03-16
+- [x] 30-02-PLAN.md — Pipeline wiring: trigger event threading, event-context target resolution, prevention gating, restriction cleanup, AddRestriction handler — completed 2026-03-16
+- [x] 30-03-PLAN.md — Adventure casting subsystem: cast choice, exile-on-resolve, cast-from-exile, AI support — completed 2026-03-16
+- [x] 30-04-PLAN.md — Adventure frontend UI, TypeScript types, Bonecrusher Giant integration test, human verification — completed 2026-03-16
 
 ### Phase 31: Kaito, Bane of Nightmares Mechanics
 
