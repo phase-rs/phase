@@ -294,6 +294,41 @@ fn gather_active_continuous_effects(state: &GameState) -> Vec<ActiveContinuousEf
         }
     }
 
+    // CR 114.3: Emblems in the command zone have static abilities that affect the game
+    for &id in &state.command_zone {
+        let obj = match state.objects.get(&id) {
+            Some(o) if o.is_emblem => o,
+            _ => continue,
+        };
+
+        for (def_idx, def) in obj.static_definitions.iter().enumerate() {
+            if def.mode != StaticMode::Continuous {
+                continue;
+            }
+
+            if let Some(ref condition) = def.condition {
+                if !evaluate_condition(state, condition, obj.controller, id) {
+                    continue;
+                }
+            }
+
+            let affected_filter = def.affected.clone().unwrap_or(TargetFilter::Any);
+
+            for modification in &def.modifications {
+                effects.push(ActiveContinuousEffect {
+                    source_id: id,
+                    def_index: Some(def_idx),
+                    layer: modification.layer(),
+                    timestamp: obj.timestamp,
+                    modification: modification.clone(),
+                    affected_filter: affected_filter.clone(),
+                    mode: def.mode.clone(),
+                    characteristic_defining: def.characteristic_defining,
+                });
+            }
+        }
+    }
+
     // Gather transient continuous effects from state-level storage
     gather_transient_continuous_effects(state, &mut effects);
 
@@ -1918,5 +1953,76 @@ mod tests {
             !obj.keywords.contains(&Keyword::Hexproof),
             "should not have hexproof on opponent's turn"
         );
+    }
+
+    #[test]
+    fn emblem_static_applies_to_matching_creatures() {
+        let mut state = setup();
+
+        // Create a Ninja creature on the battlefield for Player 0
+        let ninja_id = make_creature(&mut state, "Ninja Spy", 2, 2, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&ninja_id).unwrap();
+            obj.card_types.subtypes.push("Ninja".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        // Create a non-Ninja creature for Player 0
+        let bear_id = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&bear_id).unwrap();
+            obj.card_types.subtypes.push("Bear".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        // Create a Ninja creature for Player 1 (opponent)
+        let opp_ninja_id = make_creature(&mut state, "Opp Ninja", 2, 2, PlayerId(1));
+        {
+            let obj = state.objects.get_mut(&opp_ninja_id).unwrap();
+            obj.card_types.subtypes.push("Ninja".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        // Create an emblem in the command zone for Player 0
+        // CR 114: "Ninjas you control get +1/+1"
+        let emblem_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Emblem".to_string(),
+            Zone::Command,
+        );
+        let emblem = state.objects.get_mut(&emblem_id).unwrap();
+        emblem.is_emblem = true;
+        emblem.static_definitions = vec![StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(TypedFilter {
+                card_type: None,
+                subtype: Some("Ninja".to_string()),
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            }))
+            .modifications(vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ])];
+
+        // Mark layers dirty and evaluate
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        // Player 0's Ninja should get +1/+1
+        let ninja = state.objects.get(&ninja_id).unwrap();
+        assert_eq!(ninja.power, Some(3), "Ninja should have 3 power (+1/+1 from emblem)");
+        assert_eq!(ninja.toughness, Some(3), "Ninja should have 3 toughness (+1/+1 from emblem)");
+
+        // Player 0's Bear should NOT get the bonus
+        let bear = state.objects.get(&bear_id).unwrap();
+        assert_eq!(bear.power, Some(2), "Bear should still have 2 power");
+        assert_eq!(bear.toughness, Some(2), "Bear should still have 2 toughness");
+
+        // Player 1's Ninja should NOT get the bonus (not "you control")
+        let opp_ninja = state.objects.get(&opp_ninja_id).unwrap();
+        assert_eq!(opp_ninja.power, Some(2), "Opponent's Ninja should still have 2 power");
+        assert_eq!(opp_ninja.toughness, Some(2), "Opponent's Ninja should still have 2 toughness");
     }
 }

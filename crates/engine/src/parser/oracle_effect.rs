@@ -574,10 +574,52 @@ fn lower_subject_predicate_ast(
     }
 }
 
+/// CR 114.1: Parse emblem creation from Oracle text.
+/// Handles both full form "you get an emblem with \"[text]\"" and
+/// subject-stripped form "get an emblem with \"[text]\"".
+fn try_parse_emblem_creation(lower: &str) -> Option<Effect> {
+    let rest = lower
+        .strip_prefix("you get an emblem with ")
+        .or_else(|| lower.strip_prefix("get an emblem with "))?;
+
+    // Extract the quoted emblem text (handles both "..." and '...' quoting)
+    let inner = rest
+        .trim()
+        .trim_end_matches('.')
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_matches('\u{201c}')
+        .trim_matches('\u{201d}');
+
+    if inner.is_empty() {
+        return None;
+    }
+
+    // Try to parse the emblem text as a static ability line
+    if let Some(static_def) = super::oracle_static::parse_static_line(inner) {
+        Some(Effect::CreateEmblem {
+            statics: vec![static_def],
+        })
+    } else {
+        // Fallback: create an emblem with an unimplemented static
+        Some(Effect::CreateEmblem {
+            statics: vec![StaticDefinition::new(StaticMode::Other(
+                "EmblemStatic".to_string(),
+            ))
+            .description(inner.to_string())],
+        })
+    }
+}
+
 fn parse_imperative_effect(text: &str) -> Effect {
     let lower = text.to_lowercase();
     if let Some(ast) = parse_imperative_family_ast(text, &lower) {
         return lower_imperative_family_ast(ast);
+    }
+
+    // CR 114.1: "you get an emblem with "[static text]""
+    if let Some(effect) = try_parse_emblem_creation(&lower) {
+        return effect;
     }
 
     // --- Fallback ---
@@ -6688,5 +6730,31 @@ mod tests {
         // Second effect (sub_ability) should be DealDamage
         let sub = def.sub_ability.as_ref().expect("should have sub_ability");
         assert!(matches!(sub.effect, Effect::DealDamage { .. }));
+    }
+
+    #[test]
+    fn effect_emblem_ninjas_get_plus_one() {
+        let e = parse_effect(
+            "You get an emblem with \"Ninjas you control get +1/+1.\"",
+        );
+        match e {
+            Effect::CreateEmblem { statics } => {
+                assert_eq!(statics.len(), 1);
+                let def = &statics[0];
+                assert_eq!(def.mode, StaticMode::Continuous);
+                // Should target Ninja creatures you control
+                assert!(def.affected.is_some());
+                // Should have AddPower and AddToughness modifications
+                assert!(def.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddPower { value: 1 }
+                )));
+                assert!(def.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddToughness { value: 1 }
+                )));
+            }
+            other => panic!("expected CreateEmblem, got {:?}", other),
+        }
     }
 }
