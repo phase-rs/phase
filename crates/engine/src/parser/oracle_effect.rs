@@ -2876,7 +2876,7 @@ fn strip_any_number_quantifier(text: &str) -> (String, Option<MultiTargetSpec>) 
             rebuilt,
             Some(MultiTargetSpec {
                 min: 0,
-                max: usize::MAX,
+                max: None,
             }),
         );
     }
@@ -2890,7 +2890,7 @@ fn strip_any_number_quantifier(text: &str) -> (String, Option<MultiTargetSpec>) 
                 rebuilt,
                 Some(MultiTargetSpec {
                     min: 0,
-                    max: n as usize,
+                    max: Some(n as usize),
                 }),
             );
         }
@@ -6483,7 +6483,7 @@ mod tests {
         assert_eq!(text, "exile creatures");
         let spec = spec.unwrap();
         assert_eq!(spec.min, 0);
-        assert_eq!(spec.max, usize::MAX);
+        assert_eq!(spec.max, None);
     }
 
     #[test]
@@ -6492,7 +6492,7 @@ mod tests {
         assert_eq!(text, "exile creatures");
         let spec = spec.unwrap();
         assert_eq!(spec.min, 0);
-        assert_eq!(spec.max, 3);
+        assert_eq!(spec.max, Some(3));
     }
 
     #[test]
@@ -6619,7 +6619,7 @@ mod tests {
         assert!(def.multi_target.is_some());
         let spec = def.multi_target.unwrap();
         assert_eq!(spec.min, 0);
-        assert_eq!(spec.max, usize::MAX);
+        assert_eq!(spec.max, None);
     }
 
     #[test]

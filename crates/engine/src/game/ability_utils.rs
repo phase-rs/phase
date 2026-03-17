@@ -1,5 +1,5 @@
 use crate::types::ability::{
-    AbilityDefinition, Effect, ModalChoice, ModalSelectionConstraint, QuantityExpr,
+    AbilityDefinition, Effect, ModalChoice, ModalSelectionConstraint,
     ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::game_state::{

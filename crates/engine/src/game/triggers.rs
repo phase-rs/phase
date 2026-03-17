@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    Effect, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TriggerCondition,
+    Effect, EffectKind, ResolvedAbility, TargetFilter, TargetRef, TriggerCondition,
     TriggerDefinition, TypedFilter,
 };
 use crate::types::card_type::CoreType;
@@ -863,7 +863,7 @@ fn target_filter_matches_object(
     filter: &TargetFilter,
     source_id: ObjectId,
 ) -> bool {
-    use crate::types::ability::{ControllerRef, FilterProp, QuantityExpr, TypeFilter};
+    use crate::types::ability::{ControllerRef, FilterProp, TypeFilter};
 
     let obj = match state.objects.get(&object_id) {
         Some(o) => o,

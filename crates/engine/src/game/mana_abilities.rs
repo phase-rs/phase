@@ -1,4 +1,4 @@
-use crate::types::ability::{AbilityDefinition, Effect, QuantityExpr};
+use crate::types::ability::{AbilityDefinition, Effect};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;

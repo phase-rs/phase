@@ -2,7 +2,7 @@ use rand::Rng;
 use thiserror::Error;
 
 use crate::types::ability::{
-    AbilityDefinition, ChoiceType, ChoiceValue, ChosenAttribute, EffectKind, QuantityExpr,
+    AbilityDefinition, ChoiceType, ChoiceValue, ChosenAttribute, EffectKind,
     ResolvedAbility, TargetRef,
 };
 use crate::types::actions::GameAction;

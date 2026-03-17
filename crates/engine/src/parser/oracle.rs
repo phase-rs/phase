@@ -1892,7 +1892,7 @@ fn parse_blight_count(text: &str) -> u32 {
 /// CR 719.1: Parse a Case's "To solve" condition text into a typed `SolveCondition`.
 /// Handles "you control no {filter}" and falls back to `Text` for others.
 fn parse_solve_condition(text: &str) -> SolveCondition {
-    use crate::types::ability::{ControllerRef, FilterProp, QuantityExpr, TargetFilter};
+    use crate::types::ability::{ControllerRef, FilterProp, TargetFilter};
 
     // "you control no suspected skeletons" → ObjectCount { filter, EQ, 0 }
     if let Some(rest) = text.strip_prefix("you control no ") {

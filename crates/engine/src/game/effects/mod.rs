@@ -1,5 +1,5 @@
 use crate::types::ability::{
-    AbilityCondition, AbilityKind, Effect, EffectError, QuantityExpr, ResolvedAbility,
+    AbilityCondition, AbilityKind, Effect, EffectError, ResolvedAbility,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};

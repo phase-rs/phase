@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, Effect, QuantityExpr,
+    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, Effect,
     ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
@@ -1564,32 +1564,18 @@ fn auto_tap_lands(
     }
 
     // Phase 3: tap and produce mana
+    // We bypass resolve_mana_ability here because auto-tap has already chosen
+    // which color each source should produce (via ManaSourceOption.mana_type).
+    // Resolving the raw ability would ignore that choice for AnyOneColor sources.
     for option in to_tap {
-        if let Some(ability_index) = option.ability_index {
-            let Some(ability_def) = state
-                .objects
-                .get(&option.object_id)
-                .and_then(|obj| obj.abilities.get(ability_index))
-                .cloned()
-            else {
-                continue;
-            };
-            let _ = mana_abilities::resolve_mana_ability(
-                state,
-                option.object_id,
-                player,
-                &ability_def,
-                events,
-            );
-            continue;
-        }
-
         if let Some(obj) = state.objects.get_mut(&option.object_id) {
-            obj.tapped = true;
+            if !obj.tapped {
+                obj.tapped = true;
+                events.push(GameEvent::PermanentTapped {
+                    object_id: option.object_id,
+                });
+            }
         }
-        events.push(GameEvent::PermanentTapped {
-            object_id: option.object_id,
-        });
         mana_payment::produce_mana(state, option.object_id, option.mana_type, player, events);
     }
 }

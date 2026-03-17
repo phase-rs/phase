@@ -534,7 +534,10 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
         d.push(("targeting".into(), "optional (up to)".into()));
     }
     if let Some(mt) = &def.multi_target {
-        d.push(("targets".into(), format!("{}-{}", mt.min, mt.max)));
+        d.push(("targets".into(), match mt.max {
+            Some(max) => format!("{}-{}", mt.min, max),
+            None => format!("{}+", mt.min),
+        }));
     }
     if def.condition.is_some() {
         d.push(("conditional".into(), "yes".into()));

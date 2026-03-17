@@ -524,7 +524,8 @@ pub enum DelayedTriggerCondition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MultiTargetSpec {
     pub min: usize,
-    pub max: usize,
+    /// `None` means "any number" (unlimited). CR 115.1d.
+    pub max: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------

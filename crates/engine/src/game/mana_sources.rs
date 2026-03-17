@@ -238,11 +238,16 @@ fn mana_options_from_production(produced: &ManaProduction) -> Vec<ManaType> {
         }
         ManaProduction::Colorless { .. } => vec![ManaType::Colorless],
         ManaProduction::AnyOneColor { color_options, .. }
-        | ManaProduction::AnyCombination { color_options, .. } => color_options
-            .first()
-            .map(mana_color_to_type)
-            .into_iter()
-            .collect(),
+        | ManaProduction::AnyCombination { color_options, .. } => {
+            let mut options = Vec::new();
+            for color in color_options {
+                let mana_type = mana_color_to_type(color);
+                if !options.contains(&mana_type) {
+                    options.push(mana_type);
+                }
+            }
+            options
+        }
         // TODO: resolve from object's chosen_attributes when mana source analysis
         // gets access to the source object's state
         ManaProduction::ChosenColor { .. } => Vec::new(),
