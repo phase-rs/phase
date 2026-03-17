@@ -209,6 +209,10 @@ body {
 .debug-bounds [data-debug-label] {
   outline: 2px solid color-mix(in srgb, currentColor 60%, transparent);
   outline-offset: -1px;
+}
+/* Only add position:relative for ::after labels on statically-positioned elements.
+   Elements with absolute/fixed/relative already have a positioning context. */
+.debug-bounds [data-debug-label]:not(.absolute):not(.fixed):not(.relative) {
   position: relative;
 }
 
@@ -250,3 +254,9 @@ body {
 .debug-bounds [data-debug-label="Player Hand"]::after { background: #06b6d4; }
 .debug-bounds [data-debug-label="Player Zones"]       { outline-color: #f59e0b; }
 .debug-bounds [data-debug-label="Player Zones"]::after { background: #f59e0b; }
+.debug-bounds [data-debug-label="Opp Top"]             { outline-color: #fb923c; }
+.debug-bounds [data-debug-label="Opp Top"]::after      { background: #fb923c; }
+.debug-bounds [data-debug-label="Opp Zones"]           { outline-color: #fbbf24; }
+.debug-bounds [data-debug-label="Opp Zones"]::after    { background: #fbbf24; }
+.debug-bounds [data-debug-label="Player Bottom"]       { outline-color: #818cf8; }
+.debug-bounds [data-debug-label="Player Bottom"]::after { background: #818cf8; }

@@ -122,7 +122,7 @@ export function PlayerHand() {
 
   return (
     <div
-      className="relative flex min-h-[calc(var(--card-h)*0.85)] shrink-0 items-end justify-center px-4 py-1"
+      className="relative flex min-h-[calc(var(--card-h)*0.45)] shrink-0 items-end justify-center overflow-visible px-4 py-1"
       style={{ perspective: "800px" }}
       onClick={handleContainerClick}
       onMouseLeave={() => {

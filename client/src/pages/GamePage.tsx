@@ -437,8 +437,8 @@ function GamePageContent({
     "--game-top-overlay-offset": `${topOverlayOffsetPx}px`,
   } as CSSProperties;
   const playerZoneRailStyle: ZoneRailStyle = {
-    "--card-w": "clamp(82px, 10vw, 126px)",
-    "--card-h": "clamp(115px, 14vw, 176px)",
+    "--card-w": "clamp(60px, 7vw, 95px)",
+    "--card-h": "clamp(84px, 9.8vw, 133px)",
   };
 
   return (
@@ -476,28 +476,28 @@ function GamePageContent({
         className={`relative z-10 flex h-full flex-col${isReconnecting ? " pointer-events-none" : ""}`}
         style={{ paddingTop: "var(--game-top-overlay-offset, 0px)" }}
       >
-        {/* Opponent hand + zones at top (mirrors player bottom) */}
-        <div className="relative z-20 flex shrink-0 items-start" data-debug-label="Opp Top">
-          <div className="min-w-0 flex-1 self-stretch" data-debug-label="Opp Hand">
-            <OpponentHand showCards={showAiHand} />
-          </div>
+        {/* Opponent hand + zones at top */}
+        <div className="relative z-20 w-full shrink-0" data-debug-label="Opp Top">
+          <OpponentHand showCards={showAiHand} />
           <div
-            className="z-30 flex shrink-0 items-start gap-2 px-2 py-1"
+            className="pointer-events-none absolute right-0 top-0 z-10 flex w-fit flex-col items-end gap-1 px-2 py-1 [&>*]:pointer-events-auto [&>div>*]:pointer-events-auto"
             style={playerZoneRailStyle}
             data-debug-label="Opp Zones"
           >
+            <div className="flex items-start gap-2">
+              <LibraryPile playerId={activeOpponentId} />
+              <GraveyardPile
+                playerId={activeOpponentId}
+                onClick={() =>
+                  setViewingZone({ zone: "graveyard", playerId: activeOpponentId })
+                }
+              />
+            </div>
             <ZoneIndicator
               zone="exile"
               playerId={activeOpponentId}
               onClick={() =>
                 setViewingZone({ zone: "exile", playerId: activeOpponentId })
-              }
-            />
-            <LibraryPile playerId={activeOpponentId} />
-            <GraveyardPile
-              playerId={activeOpponentId}
-              onClick={() =>
-                setViewingZone({ zone: "graveyard", playerId: activeOpponentId })
               }
             />
           </div>
@@ -520,26 +520,28 @@ function GamePageContent({
           <PlayerHud />
         </div>
 
-        {/* Player hand + zones at bottom */}
-        <div className="flex shrink-0 items-end" data-debug-label="Player Bottom">
+        {/* Player hand + zones at bottom — negative margin pushes hand content
+             below viewport edge so cards peek from the bottom (clipped by page root overflow-hidden).
+             Zones are anchored to top-0 so they stay in the visible area. */}
+        <div className="relative shrink-0 mb-[calc(var(--card-h)*-0.15)] sm:mb-[calc(var(--card-h)*-0.25)] md:mb-[calc(var(--card-h)*-0.35)]" data-debug-label="Player Bottom">
+          <PlayerHand />
           <div
-            className="z-30 flex shrink-0 items-end gap-2 px-2 py-1"
+            className="pointer-events-none absolute left-0 top-0 bottom-[calc(var(--card-h)*0.15)] sm:bottom-[calc(var(--card-h)*0.25)] md:bottom-[calc(var(--card-h)*0.35)] z-10 flex w-fit flex-col items-start justify-end gap-1 p-3 [&>*]:pointer-events-auto [&>div>*]:pointer-events-auto"
             style={playerZoneRailStyle}
             data-debug-label="Player Zones"
           >
-            <GraveyardPile
-              playerId={playerId}
-              onClick={() => setViewingZone({ zone: "graveyard", playerId })}
-            />
-            <LibraryPile playerId={playerId} />
             <ZoneIndicator
               zone="exile"
               playerId={playerId}
               onClick={() => setViewingZone({ zone: "exile", playerId })}
             />
-          </div>
-          <div className="min-w-0 flex-1 self-stretch" data-debug-label="Player Hand">
-            <PlayerHand />
+            <div className="flex items-end gap-2">
+              <GraveyardPile
+                playerId={playerId}
+                onClick={() => setViewingZone({ zone: "graveyard", playerId })}
+              />
+              <LibraryPile playerId={playerId} />
+            </div>
           </div>
         </div>
       </div>
