@@ -1,4 +1,4 @@
-use crate::types::ability::{AbilityDefinition, Effect};
+use crate::types::ability::{AbilityDefinition, Effect, QuantityExpr};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -63,7 +63,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityKind, CountValue, DamageAmount, Effect, ManaProduction, TargetFilter,
+        AbilityCost, AbilityKind, CountValue, DamageAmount, Effect, ManaProduction, QuantityExpr,
+        TargetFilter,
     };
     use crate::types::identifiers::CardId;
     use crate::types::mana::{ManaColor, ManaType};
@@ -93,7 +94,7 @@ mod tests {
         let def = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::DealDamage {
-                amount: DamageAmount::Fixed(1),
+                amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
             },
         )
@@ -103,8 +104,13 @@ mod tests {
 
     #[test]
     fn draw_ability_is_not_mana_ability() {
-        let def = AbilityDefinition::new(AbilityKind::Activated, Effect::Draw { count: 1 })
-            .cost(AbilityCost::Tap);
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        )
+        .cost(AbilityCost::Tap);
         assert!(!is_mana_ability(&def));
     }
 

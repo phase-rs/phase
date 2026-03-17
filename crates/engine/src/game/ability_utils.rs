@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    AbilityDefinition, Effect, ModalChoice, ModalSelectionConstraint, ResolvedAbility,
-    TargetFilter, TargetRef,
+    AbilityDefinition, Effect, ModalChoice, ModalSelectionConstraint, QuantityExpr,
+    ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::game_state::{
     GameState, TargetSelectionConstraint, TargetSelectionProgress, TargetSelectionSlot,
@@ -669,7 +669,8 @@ fn build_mode_sequences(
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityKind, Effect, ModalChoice, ModalSelectionConstraint, TargetFilter, TypedFilter,
+        AbilityKind, Effect, ModalChoice, ModalSelectionConstraint, QuantityExpr, TargetFilter,
+        TypedFilter,
     };
     use crate::types::game_state::{TargetSelectionConstraint, TargetSelectionSlot};
     use crate::types::zones::Zone;
@@ -894,7 +895,7 @@ mod tests {
         ability.optional_targeting = true;
         let mut ability = ability.sub_ability(ResolvedAbility::new(
             Effect::DealDamage {
-                amount: crate::types::ability::DamageAmount::Fixed(2),
+                amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Player,
             },
             vec![],

@@ -189,7 +189,9 @@ fn is_permanent_type(state: &GameState, object_id: ObjectId) -> bool {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{DamageAmount, Effect, ResolvedAbility, TargetRef, TypedFilter};
+    use crate::types::ability::{
+        DamageAmount, Effect, QuantityExpr, ResolvedAbility, TargetRef, TypedFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
@@ -520,7 +522,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::DealDamage {
-                amount: DamageAmount::Fixed(2),
+                amount: QuantityExpr::Fixed { value: 2 },
                 target: crate::types::ability::TargetFilter::Typed(TypedFilter::creature()),
             },
             vec![TargetRef::Object(first_target)],
@@ -529,7 +531,7 @@ mod tests {
         )
         .sub_ability(ResolvedAbility::new(
             Effect::DealDamage {
-                amount: DamageAmount::Fixed(2),
+                amount: QuantityExpr::Fixed { value: 2 },
                 target: crate::types::ability::TargetFilter::Typed(TypedFilter::creature()),
             },
             vec![TargetRef::Object(second_target)],

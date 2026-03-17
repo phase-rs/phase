@@ -1,5 +1,5 @@
 use crate::types::ability::{
-    AbilityDefinition, ReplacementDefinition, StaticDefinition, TriggerDefinition,
+    AbilityDefinition, QuantityExpr, ReplacementDefinition, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
@@ -281,7 +281,9 @@ mod tests {
         ];
         obj.abilities = vec![AbilityDefinition::new(
             crate::types::ability::AbilityKind::Activated,
-            crate::types::ability::Effect::Draw { count: 1 },
+            crate::types::ability::Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
         )];
         obj.color = vec![ManaColor::Green];
         id

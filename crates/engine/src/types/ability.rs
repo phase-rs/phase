@@ -2348,7 +2348,7 @@ mod tests {
     fn resolved_ability_serializes_and_roundtrips() {
         let ability = ResolvedAbility::new(
             Effect::DealDamage {
-                amount: DamageAmount::Fixed(3),
+                amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
             },
             vec![TargetRef::Object(ObjectId(10))],
@@ -2362,10 +2362,17 @@ mod tests {
 
     #[test]
     fn resolved_ability_with_sub_ability_roundtrips() {
-        let sub = ResolvedAbility::new(Effect::Draw { count: 1 }, vec![], ObjectId(1), PlayerId(0));
+        let sub = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
         let ability = ResolvedAbility::new(
             Effect::DealDamage {
-                amount: DamageAmount::Fixed(3),
+                amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -2430,7 +2437,9 @@ mod tests {
             mode: TriggerMode::ChangesZone,
             execute: Some(Box::new(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Draw { count: 1 },
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
             ))),
             valid_card: Some(TargetFilter::SelfRef),
             origin: Some(Zone::Battlefield),
@@ -2481,7 +2490,7 @@ mod tests {
             execute: Some(Box::new(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::GainLife {
-                    amount: LifeAmount::Fixed(1),
+                    amount: QuantityExpr::Fixed { value: 1 },
                     player: GainLifePlayer::Controller,
                 },
             ))),
@@ -2518,7 +2527,7 @@ mod tests {
         let ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::DealDamage {
-                amount: DamageAmount::Fixed(3),
+                amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
             },
         )
@@ -2530,7 +2539,9 @@ mod tests {
         })
         .sub_ability(AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Draw { count: 1 },
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
         ))
         .duration(Duration::UntilEndOfTurn)
         .description("Deal 3 damage, then draw a card.".to_string())
@@ -2819,7 +2830,9 @@ mod tests {
     fn resolved_ability_no_hashmap_fields() {
         // Verify ResolvedAbility can be created and round-tripped without any HashMap fields
         let ability = ResolvedAbility::new(
-            Effect::Draw { count: 2 },
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+            },
             vec![TargetRef::Player(PlayerId(0))],
             ObjectId(1),
             PlayerId(0),
@@ -2855,11 +2868,16 @@ mod modal_ability_tests {
 
     #[test]
     fn ability_definition_supports_modal() {
-        let mode1 = AbilityDefinition::new(AbilityKind::Spell, Effect::Draw { count: 1 });
+        let mode1 = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
         let mode2 = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::GainLife {
-                amount: LifeAmount::Fixed(3),
+                amount: QuantityExpr::Fixed { value: 3 },
                 player: GainLifePlayer::Controller,
             },
         );

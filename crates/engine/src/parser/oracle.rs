@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AdditionalCost,
-    CastingRestriction, Comparator, Effect, ModalChoice, ModalSelectionConstraint,
+    CastingRestriction, Comparator, Effect, ModalChoice, ModalSelectionConstraint, QuantityExpr,
     ReplacementDefinition, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
     TypedFilter,
 };
@@ -1888,7 +1888,7 @@ fn parse_blight_count(text: &str) -> u32 {
 /// CR 719.1: Parse a Case's "To solve" condition text into a typed `SolveCondition`.
 /// Handles "you control no {filter}" and falls back to `Text` for others.
 fn parse_solve_condition(text: &str) -> SolveCondition {
-    use crate::types::ability::{ControllerRef, FilterProp, TargetFilter};
+    use crate::types::ability::{ControllerRef, FilterProp, QuantityExpr, TargetFilter};
 
     // "you control no suspected skeletons" → ObjectCount { filter, EQ, 0 }
     if let Some(rest) = text.strip_prefix("you control no ") {
@@ -2042,7 +2042,12 @@ mod tests {
             &[],
         );
         assert_eq!(r.abilities.len(), 1);
-        assert!(matches!(r.abilities[0].effect, Effect::Draw { count: 1 }));
+        assert!(matches!(
+            r.abilities[0].effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 }
+            }
+        ));
     }
 
     #[test]
@@ -2055,7 +2060,12 @@ mod tests {
             &[],
         );
         assert_eq!(r.abilities.len(), 1);
-        assert!(matches!(r.abilities[0].effect, Effect::Draw { count: 1 }));
+        assert!(matches!(
+            r.abilities[0].effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 }
+            }
+        ));
     }
 
     #[test]
@@ -2279,7 +2289,12 @@ mod tests {
             .sub_ability
             .as_ref()
             .expect("expected draw follow-up");
-        assert!(matches!(draw.effect, Effect::Draw { count: 1 }));
+        assert!(matches!(
+            draw.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 }
+            }
+        ));
         let no_activate_tail = draw
             .sub_ability
             .as_ref()
@@ -2741,11 +2756,16 @@ mod tests {
         assert_eq!(modal.min_choices, 1);
         assert_eq!(modal.max_choices, 2);
         assert_eq!(modal.mode_count, 2);
-        assert!(matches!(r.abilities[0].effect, Effect::Draw { count: 1 }));
+        assert!(matches!(
+            r.abilities[0].effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 }
+            }
+        ));
         assert!(matches!(
             r.abilities[1].effect,
             Effect::GainLife {
-                amount: crate::types::ability::LifeAmount::Fixed(3),
+                amount: QuantityExpr::Fixed { value: 3 },
                 ..
             }
         ));
@@ -2764,11 +2784,16 @@ mod tests {
         assert_eq!(modal.min_choices, 1);
         assert_eq!(modal.max_choices, 2);
         assert_eq!(modal.mode_count, 2);
-        assert!(matches!(r.abilities[0].effect, Effect::Draw { count: 1 }));
+        assert!(matches!(
+            r.abilities[0].effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 }
+            }
+        ));
         assert!(matches!(
             r.abilities[1].effect,
             Effect::GainLife {
-                amount: crate::types::ability::LifeAmount::Fixed(3),
+                amount: QuantityExpr::Fixed { value: 3 },
                 ..
             }
         ));
@@ -2784,11 +2809,16 @@ mod tests {
             &[],
         );
         assert_eq!(r.abilities.len(), 2);
-        assert!(matches!(r.abilities[0].effect, Effect::Draw { count: 1 }));
+        assert!(matches!(
+            r.abilities[0].effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 }
+            }
+        ));
         assert!(matches!(
             r.abilities[1].effect,
             Effect::GainLife {
-                amount: crate::types::ability::LifeAmount::Fixed(3),
+                amount: QuantityExpr::Fixed { value: 3 },
                 ..
             }
         ));
@@ -2900,7 +2930,9 @@ mod tests {
 
         assert!(matches!(
             execute.mode_abilities[3].effect,
-            Effect::LoseLife { amount: 15 }
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 15 }
+            }
         ));
     }
 
@@ -3026,12 +3058,14 @@ mod tests {
         assert_eq!(modal_def.mode_abilities.len(), 2);
         assert!(matches!(
             modal_def.mode_abilities[0].effect,
-            Effect::Draw { count: 1 }
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 }
+            }
         ));
         assert!(matches!(
             modal_def.mode_abilities[1].effect,
             Effect::GainLife {
-                amount: crate::types::ability::LifeAmount::Fixed(3),
+                amount: QuantityExpr::Fixed { value: 3 },
                 ..
             }
         ));

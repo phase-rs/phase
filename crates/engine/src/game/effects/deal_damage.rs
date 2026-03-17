@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::game::filter;
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     DamageAmount, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
@@ -17,14 +18,9 @@ pub fn resolve(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let num_dmg: u32 = match &ability.effect {
-        Effect::DealDamage {
-            amount: DamageAmount::Fixed(n),
-            ..
-        } => *n as u32,
-        Effect::DealDamage {
-            amount: DamageAmount::Variable(_),
-            ..
-        } => 0,
+        Effect::DealDamage { amount, .. } => {
+            resolve_quantity_with_targets(state, amount, ability) as u32
+        }
         _ => return Err(EffectError::MissingParam("DealDamage amount".to_string())),
     };
 
@@ -164,7 +160,7 @@ pub fn resolve_all(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{TargetFilter, TypedFilter};
+    use crate::types::ability::{DamageAmount, QuantityExpr, TargetFilter, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -173,7 +169,9 @@ mod tests {
     fn make_ability(num_dmg: u32, targets: Vec<TargetRef>) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::DealDamage {
-                amount: DamageAmount::Fixed(num_dmg as i32),
+                amount: QuantityExpr::Fixed {
+                    value: num_dmg as i32,
+                },
                 target: TargetFilter::Any,
             },
             targets,

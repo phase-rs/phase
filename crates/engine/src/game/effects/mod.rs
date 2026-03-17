@@ -1,4 +1,6 @@
-use crate::types::ability::{AbilityCondition, AbilityKind, Effect, EffectError, ResolvedAbility};
+use crate::types::ability::{
+    AbilityCondition, AbilityKind, Effect, EffectError, QuantityExpr, ResolvedAbility,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
@@ -126,9 +128,7 @@ fn next_sub_needs_tracked_set(ability: &ResolvedAbility) -> bool {
 /// CR 603.7c: Extract an event-context target filter from an effect, if present.
 /// Returns the filter only for event-context variants (TriggeringSpellController, etc.)
 /// that auto-resolve from `state.current_trigger_event` at resolution time.
-fn extract_event_context_filter(
-    effect: &Effect,
-) -> Option<&crate::types::ability::TargetFilter> {
+fn extract_event_context_filter(effect: &Effect) -> Option<&crate::types::ability::TargetFilter> {
     use crate::types::ability::TargetFilter;
 
     let filter = match effect {
@@ -298,8 +298,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, DamageAmount, DelayedTriggerCondition, TargetFilter,
-        TargetRef,
+        AbilityDefinition, AbilityKind, DamageAmount, DelayedTriggerCondition, QuantityExpr,
+        TargetFilter, TargetRef,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::phase::Phase;
@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn is_known_effect_rejects_unimplemented() {
         let known = Effect::DealDamage {
-            amount: DamageAmount::Fixed(1),
+            amount: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
         };
         assert!(is_known_effect(&known));
@@ -351,7 +351,9 @@ mod tests {
         );
 
         let ability = ResolvedAbility::new(
-            Effect::Draw { count: 1 },
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
             vec![],
             ObjectId(100),
             PlayerId(0),
@@ -377,14 +379,16 @@ mod tests {
 
         // Build a chain: DealDamage -> Draw using typed sub_ability
         let sub = ResolvedAbility::new(
-            Effect::Draw { count: 1 },
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
             vec![],
             ObjectId(100),
             PlayerId(0),
         );
         let ability = ResolvedAbility::new(
             Effect::DealDamage {
-                amount: DamageAmount::Fixed(2),
+                amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -405,8 +409,14 @@ mod tests {
     #[test]
     fn chain_depth_exceeds_limit_returns_error() {
         let mut state = GameState::new_two_player(42);
-        let ability =
-            ResolvedAbility::new(Effect::Draw { count: 1 }, vec![], ObjectId(1), PlayerId(0));
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         let result = resolve_ability_chain(&mut state, &ability, &mut events, 21);

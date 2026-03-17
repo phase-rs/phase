@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    Effect, EffectKind, ResolvedAbility, TargetFilter, TargetRef, TriggerCondition,
+    Effect, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TriggerCondition,
     TriggerDefinition, TypedFilter,
 };
 use crate::types::card_type::CoreType;
@@ -863,7 +863,7 @@ fn target_filter_matches_object(
     filter: &TargetFilter,
     source_id: ObjectId,
 ) -> bool {
-    use crate::types::ability::{ControllerRef, FilterProp, TypeFilter};
+    use crate::types::ability::{ControllerRef, FilterProp, QuantityExpr, TypeFilter};
 
     let obj = match state.objects.get(&object_id) {
         Some(o) => o,
@@ -2024,7 +2024,7 @@ pub mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ControllerRef, FilterProp, GainLifePlayer, LifeAmount,
-        TargetFilter, TriggerDefinition, TypeFilter,
+        QuantityExpr, TargetFilter, TriggerDefinition, TypeFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
@@ -2199,7 +2199,9 @@ pub mod tests {
                 TriggerDefinition::new(TriggerMode::ChangesZone)
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
-                        Effect::Draw { count: 1 },
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
                     ))
                     .destination(Zone::Battlefield),
             );
@@ -2221,7 +2223,9 @@ pub mod tests {
                 TriggerDefinition::new(TriggerMode::ChangesZone)
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
-                        Effect::Draw { count: 1 },
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
                     ))
                     .destination(Zone::Battlefield),
             );
@@ -2439,7 +2443,9 @@ pub mod tests {
                 TriggerDefinition::new(TriggerMode::ChangesZone)
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
-                        Effect::Draw { count: 1 },
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
                     ))
                     .destination(Zone::Battlefield),
             );
@@ -2494,7 +2500,9 @@ pub mod tests {
                 TriggerDefinition::new(TriggerMode::ChangesZone)
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
-                        Effect::Draw { count: 1 },
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
                     ))
                     .destination(Zone::Battlefield),
             );
@@ -2516,7 +2524,9 @@ pub mod tests {
                 TriggerDefinition::new(TriggerMode::ChangesZone)
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
-                        Effect::Draw { count: 1 },
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
                     ))
                     .destination(Zone::Battlefield),
             );
@@ -2557,7 +2567,9 @@ pub mod tests {
                 TriggerDefinition::new(TriggerMode::ChangesZone)
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
-                        Effect::Draw { count: 1 },
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
                     ))
                     .valid_card(TargetFilter::Typed(TypedFilter::creature()))
                     .destination(Zone::Battlefield),
@@ -3046,15 +3058,19 @@ pub mod tests {
     #[test]
     fn build_triggered_ability_from_typed_execute() {
         let trig_def = TriggerDefinition::new(TriggerMode::ChangesZone).execute(
-            AbilityDefinition::new(AbilityKind::Database, Effect::Draw { count: 2 }).sub_ability(
-                AbilityDefinition::new(
-                    AbilityKind::Database,
-                    Effect::GainLife {
-                        amount: LifeAmount::Fixed(3),
-                        player: GainLifePlayer::Controller,
-                    },
-                ),
-            ),
+            AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 2 },
+                },
+            )
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    player: GainLifePlayer::Controller,
+                },
+            )),
         );
 
         let ability = build_triggered_ability(&trig_def, ObjectId(1), PlayerId(0));
@@ -3486,7 +3502,9 @@ pub mod tests {
                 TriggerDefinition::new(TriggerMode::ChangesZone)
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
-                        Effect::Draw { count: 1 },
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
                     ))
                     .destination(Zone::Battlefield),
             );

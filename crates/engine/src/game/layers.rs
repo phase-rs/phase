@@ -1116,7 +1116,7 @@ mod tests {
                 .with_ability_definition(AbilityDefinition::new(
                     AbilityKind::Activated,
                     Effect::GainLife {
-                        amount: LifeAmount::Fixed(1),
+                        amount: QuantityExpr::Fixed { value: 1 },
                         player: GainLifePlayer::Controller,
                     },
                 ))
@@ -1154,7 +1154,7 @@ mod tests {
                 .with_ability_definition(AbilityDefinition::new(
                     AbilityKind::Activated,
                     Effect::GainLife {
-                        amount: LifeAmount::Fixed(1),
+                        amount: QuantityExpr::Fixed { value: 1 },
                         player: GainLifePlayer::Controller,
                     },
                 ))

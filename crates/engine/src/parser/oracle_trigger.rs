@@ -2,8 +2,8 @@ use super::oracle_effect::parse_effect_chain;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{parse_number, parse_ordinal, strip_reminder_text};
 use crate::types::ability::{
-    AbilityKind, ControllerRef, FilterProp, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, TypeFilter, TypedFilter,
+    AbilityKind, ControllerRef, FilterProp, QuantityExpr, TargetFilter, TriggerCondition,
+    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::phase::Phase;
 use crate::types::triggers::TriggerMode;
@@ -1326,7 +1326,7 @@ fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinit
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{Duration, Effect, LifeAmount, PtValue};
+    use crate::types::ability::{Duration, Effect, LifeAmount, PtValue, QuantityExpr};
 
     #[test]
     fn trigger_etb_self() {
@@ -1517,7 +1517,7 @@ mod tests {
 
     #[test]
     fn trigger_self_or_another_creature_or_artifact_you_control() {
-        use crate::types::ability::{ControllerRef, TypeFilter};
+        use crate::types::ability::{ControllerRef, QuantityExpr, TypeFilter};
         let def = parse_trigger_line(
             "Whenever Haliya or another creature or artifact you control enters, you gain 1 life.",
             "Haliya, Guided by Light",
@@ -1925,7 +1925,7 @@ mod tests {
         assert!(matches!(
             sub.effect,
             Effect::GainLife {
-                amount: LifeAmount::Fixed(1),
+                amount: QuantityExpr::Fixed { value: 1 },
                 ..
             }
         ));

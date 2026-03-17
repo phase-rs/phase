@@ -4,7 +4,7 @@ use crate::game::game_object::{parse_counter_type, CounterType, GameObject};
 use crate::parser::oracle_util::parse_number;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, ActivationRestriction, CastingRestriction, Comparator,
-    SpellCastingOptionKind,
+    QuantityExpr, SpellCastingOptionKind,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::keywords::Keyword;
@@ -1388,7 +1388,7 @@ fn capitalize_condition_word(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{AbilityKind, Effect};
+    use crate::types::ability::{AbilityKind, Effect, QuantityExpr};
     use crate::types::card_type::CoreType;
     use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::CardId;
@@ -1696,7 +1696,12 @@ mod tests {
             Zone::Hand,
         );
         obj.card_types.core_types.push(CoreType::Sorcery);
-        let ability = AbilityDefinition::new(AbilityKind::Spell, Effect::Draw { count: 1 });
+        let ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
 
         assert!(check_spell_timing(&state, PlayerId(0), &obj, &ability, true).is_ok());
     }

@@ -1,3 +1,4 @@
+use crate::game::quantity::resolve_quantity;
 use crate::game::{players, zones};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
@@ -12,7 +13,9 @@ pub fn resolve(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let num_cards: usize = match &ability.effect {
-        Effect::Mill { count, .. } => *count as usize,
+        Effect::Mill { count, .. } => {
+            resolve_quantity(state, count, ability.controller, ability.source_id) as usize
+        }
         _ => 1,
     };
 
@@ -56,7 +59,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::TargetFilter;
+    use crate::types::ability::{QuantityExpr, TargetFilter};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -64,7 +67,9 @@ mod tests {
     fn make_mill_ability(num_cards: u32, targets: Vec<TargetRef>) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::Mill {
-                count: num_cards,
+                count: QuantityExpr::Fixed {
+                    value: num_cards as i32,
+                },
                 target: TargetFilter::Any,
             },
             targets,

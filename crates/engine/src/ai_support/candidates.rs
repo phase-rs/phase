@@ -755,7 +755,7 @@ mod tests {
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, BasicLandType,
         ChoiceType, ChosenAttribute, ChosenSubtypeKind, ContinuousModification, Effect,
-        ManaProduction, StaticDefinition, TargetFilter, TargetRef,
+        ManaProduction, QuantityExpr, StaticDefinition, TargetFilter, TargetRef,
     };
     use crate::types::identifiers::CardId;
     use crate::types::mana::{ManaColor, ManaCostShard};
@@ -1041,8 +1041,13 @@ mod tests {
             let obj = state.objects.get_mut(&source).unwrap();
             obj.card_types.core_types.push(CoreType::Artifact);
             obj.abilities.push(
-                AbilityDefinition::new(AbilityKind::Activated, Effect::Draw { count: QuantityExpr::Fixed { value: 1 } })
-                    .activation_restrictions(vec![ActivationRestriction::OnlyOnceEachTurn]),
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                )
+                .activation_restrictions(vec![ActivationRestriction::OnlyOnceEachTurn]),
             );
         }
         state.activated_abilities_this_turn.insert((source, 0), 1);

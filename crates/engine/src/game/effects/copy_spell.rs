@@ -1,4 +1,4 @@
-use crate::types::ability::{EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{EffectError, EffectKind, QuantityExpr, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -44,7 +44,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{DamageAmount, Effect, TargetFilter};
+    use crate::types::ability::{DamageAmount, Effect, QuantityExpr, TargetFilter};
     use crate::types::game_state::{StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -56,7 +56,7 @@ mod tests {
         // Put a spell on the stack
         let original_ability = ResolvedAbility::new(
             Effect::DealDamage {
-                amount: DamageAmount::Fixed(3),
+                amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
             },
             vec![],

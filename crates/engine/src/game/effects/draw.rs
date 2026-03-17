@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::game::quantity::resolve_quantity;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
@@ -15,7 +16,9 @@ pub fn resolve(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let num_cards = match &ability.effect {
-        Effect::Draw { count } => *count,
+        Effect::Draw { count } => {
+            resolve_quantity(state, count, ability.controller, ability.source_id) as u32
+        }
         _ => 1,
     };
 
@@ -79,12 +82,17 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::QuantityExpr;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
     fn make_ability(num_cards: u32) -> ResolvedAbility {
         ResolvedAbility::new(
-            Effect::Draw { count: num_cards },
+            Effect::Draw {
+                count: QuantityExpr::Fixed {
+                    value: num_cards as i32,
+                },
+            },
             vec![],
             ObjectId(100),
             PlayerId(0),

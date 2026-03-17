@@ -221,7 +221,7 @@ mod tests {
     use super::*;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ContinuousModification, DamageAmount, Effect, PtValue,
-        StaticDefinition, TargetFilter,
+        QuantityExpr, StaticDefinition, TargetFilter,
     };
     use crate::types::card_type::CardType;
     use crate::types::keywords::Keyword;
@@ -294,7 +294,7 @@ mod tests {
             abilities: vec![AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::DealDamage {
-                    amount: DamageAmount::Fixed(3),
+                    amount: QuantityExpr::Fixed { value: 3 },
                     target: TargetFilter::Any,
                 },
             )],

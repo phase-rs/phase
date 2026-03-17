@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, GainLifePlayer, LifeAmount, ResolvedAbility, TargetRef,
+    Effect, EffectError, EffectKind, GainLifePlayer, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -20,7 +21,7 @@ pub fn resolve_gain(
         _ => return Err(EffectError::MissingParam("GainLife amount".to_string())),
     };
 
-    // Resolve the target object (if any) for TargetedController / TargetPower.
+    // Resolve the target object (if any) for TargetedController.
     let target_obj = ability.targets.iter().find_map(|t| {
         if let TargetRef::Object(id) = t {
             state.objects.get(id)
@@ -36,10 +37,7 @@ pub fn resolve_gain(
         GainLifePlayer::Controller => ability.controller,
     };
 
-    let final_amount = match amount {
-        LifeAmount::Fixed(n) => *n,
-        LifeAmount::TargetPower => target_obj.and_then(|o| o.power).unwrap_or(0),
-    };
+    let final_amount = resolve_quantity_with_targets(state, amount, ability);
 
     if final_amount <= 0 {
         events.push(GameEvent::EffectResolved {
@@ -211,7 +209,12 @@ pub fn resolve_lose(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let amount: i32 = match &ability.effect {
-        Effect::LoseLife { amount } => *amount,
+        Effect::LoseLife { amount } => crate::game::quantity::resolve_quantity(
+            state,
+            amount,
+            ability.controller,
+            ability.source_id,
+        ),
         _ => return Err(EffectError::MissingParam("LoseLife amount".to_string())),
     };
 
@@ -276,7 +279,7 @@ pub fn resolve_lose(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::TargetRef;
+    use crate::types::ability::{QuantityExpr, TargetRef};
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
 
@@ -285,7 +288,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
             Effect::GainLife {
-                amount: LifeAmount::Fixed(5),
+                amount: QuantityExpr::Fixed { value: 5 },
                 player: GainLifePlayer::Controller,
             },
             vec![],
@@ -303,7 +306,9 @@ mod tests {
     fn lose_life_decreases_target_life() {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
-            Effect::LoseLife { amount: 3 },
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+            },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
             PlayerId(0),
@@ -320,7 +325,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
             Effect::GainLife {
-                amount: LifeAmount::Fixed(4),
+                amount: QuantityExpr::Fixed { value: 4 },
                 player: GainLifePlayer::Controller,
             },
             vec![],
@@ -340,7 +345,9 @@ mod tests {
     fn lose_life_emits_negative_life_changed() {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
-            Effect::LoseLife { amount: 2 },
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
             vec![TargetRef::Player(PlayerId(0))],
             ObjectId(100),
             PlayerId(0),

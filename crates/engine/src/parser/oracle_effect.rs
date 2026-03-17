@@ -8,9 +8,9 @@ use super::oracle_util::{
 };
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, ChoiceType, CountValue, DamageAmount,
-    DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer, LifeAmount,
-    ManaProduction, ManaSpendRestriction, MultiTargetSpec, PtValue, StaticDefinition, TargetFilter,
-    TypeFilter, TypedFilter,
+    DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer, ManaProduction,
+    ManaSpendRestriction, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
+    StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -18,6 +18,28 @@ use crate::types::phase::Phase;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
+/// Convert a DamageAmount to a QuantityExpr for the DealDamage effect.
+fn damage_amount_to_quantity(da: &DamageAmount) -> QuantityExpr {
+    match da {
+        DamageAmount::Fixed(n) => QuantityExpr::Fixed { value: *n },
+        DamageAmount::Variable(s) => QuantityExpr::Ref {
+            qty: QuantityRef::Variable(s.clone()),
+        },
+    }
+}
+
+/// Convert a QuantityExpr back to DamageAmount for DamageAll (which still uses DamageAmount).
+fn quantity_to_damage_amount(q: &QuantityExpr) -> DamageAmount {
+    match q {
+        QuantityExpr::Fixed { value } => DamageAmount::Fixed(*value),
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable(s),
+        } => DamageAmount::Variable(s.clone()),
+        _ => DamageAmount::Variable(format!("{q:?}")),
+    }
+}
+
+/// Convert a LifeAmount to a QuantityExpr for the GainLife effect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedEffectClause {
     effect: Effect,
@@ -365,8 +387,105 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
         return with_clause_duration(parse_effect_clause(rest), duration);
     }
 
+    // "for each" patterns: "draw a card for each [filter]", etc.
+    if let Some(clause) = try_parse_for_each_effect(text) {
+        return clause;
+    }
+
     let ast = parse_clause_ast(text);
     lower_clause_ast(ast)
+}
+
+/// Parse "for each" quantity patterns on draw/life/damage/mill effects.
+///
+/// Handles patterns like:
+///   - "draw a card for each opponent who lost life this turn"
+///   - "draw a card for each creature you control"
+///   - "gain 1 life for each creature you control"
+///   - "mill a card for each [counter type] counter on ~"
+fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+
+    // Find "for each" in the text
+    let for_each_idx = lower.find("for each ")?;
+    let base = text[..for_each_idx].trim();
+    let for_each_clause = &lower[for_each_idx + "for each ".len()..];
+    let base_lower = base.to_lowercase();
+
+    // Parse the "for each" clause into a QuantityRef
+    let qty = parse_for_each_clause(for_each_clause)?;
+    let quantity = QuantityExpr::Ref { qty };
+
+    // Parse the base effect and replace its count with the dynamic quantity
+    if base_lower.starts_with("draw ") || base_lower.contains(" draw") {
+        return Some(parsed_clause(Effect::Draw { count: quantity }));
+    }
+
+    if (base_lower.starts_with("you gain ") || base_lower.starts_with("gain "))
+        && base_lower.contains("life")
+    {
+        return Some(parsed_clause(Effect::GainLife {
+            amount: quantity,
+            player: GainLifePlayer::Controller,
+        }));
+    }
+
+    if (base_lower.starts_with("you lose ") || base_lower.starts_with("lose "))
+        && base_lower.contains("life")
+    {
+        return Some(parsed_clause(Effect::LoseLife { amount: quantity }));
+    }
+
+    None
+}
+
+/// Parse the clause after "for each" into a QuantityRef.
+fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
+    let clause = clause.trim().trim_end_matches('.');
+
+    // "opponent who lost life this turn"
+    if clause.contains("opponent") && clause.contains("lost life") {
+        return Some(QuantityRef::PlayerCount {
+            filter: PlayerFilter::OpponentLostLife,
+        });
+    }
+
+    // "opponent who gained life this turn"
+    if clause.contains("opponent") && clause.contains("gained life") {
+        return Some(QuantityRef::PlayerCount {
+            filter: PlayerFilter::OpponentGainedLife,
+        });
+    }
+
+    // "opponent"
+    if clause == "opponent" || clause == "opponent you have" {
+        return Some(QuantityRef::PlayerCount {
+            filter: PlayerFilter::Opponent,
+        });
+    }
+
+    // "[counter type] counter on ~" / "[counter type] counter on it"
+    if clause.contains("counter on") {
+        let counter_type = clause
+            .split("counter")
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !counter_type.is_empty() {
+            return Some(QuantityRef::CountersOnSelf {
+                counter_type: counter_type.replace('+', "plus").replace('-', "minus"),
+            });
+        }
+    }
+
+    // "creature you control", "artifact you control", etc.
+    let (filter, _) = parse_target(clause);
+    if !matches!(filter, TargetFilter::Any) {
+        return Some(QuantityRef::ObjectCount { filter });
+    }
+
+    None
 }
 
 fn parse_clause_ast(text: &str) -> ClauseAst {
@@ -1315,7 +1434,7 @@ fn parse_cost_resource_ast(text: &str, lower: &str) -> Option<CostResourceImpera
     if let Some(effect) = try_parse_damage(lower, text) {
         return match effect {
             Effect::DealDamage { amount, target } => Some(CostResourceImperativeAst::Damage {
-                amount,
+                amount: quantity_to_damage_amount(&amount),
                 target,
                 all: false,
             }),
@@ -1353,7 +1472,10 @@ fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect {
             if all {
                 Effect::DamageAll { amount, target }
             } else {
-                Effect::DealDamage { amount, target }
+                Effect::DealDamage {
+                    amount: damage_amount_to_quantity(&amount),
+                    target,
+                }
             }
         }
     }
@@ -1615,12 +1737,18 @@ fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<TargetedImperati
 
 fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect {
     match ast {
-        NumericImperativeAst::Draw { count } => Effect::Draw { count },
+        NumericImperativeAst::Draw { count } => Effect::Draw {
+            count: QuantityExpr::Fixed {
+                value: count as i32,
+            },
+        },
         NumericImperativeAst::GainLife { amount } => Effect::GainLife {
-            amount: LifeAmount::Fixed(amount),
+            amount: QuantityExpr::Fixed { value: amount },
             player: GainLifePlayer::Controller,
         },
-        NumericImperativeAst::LoseLife { amount } => Effect::LoseLife { amount },
+        NumericImperativeAst::LoseLife { amount } => Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: amount },
+        },
         NumericImperativeAst::Pump { power, toughness } => Effect::Pump {
             power,
             toughness,
@@ -1629,7 +1757,9 @@ fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect {
         NumericImperativeAst::Scry { count } => Effect::Scry { count },
         NumericImperativeAst::Surveil { count } => Effect::Surveil { count },
         NumericImperativeAst::Mill { count } => Effect::Mill {
-            count,
+            count: QuantityExpr::Fixed {
+                value: count as i32,
+            },
             target: TargetFilter::Any,
         },
     }
@@ -1928,7 +2058,9 @@ fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst> {
 fn lower_put_ast(ast: PutImperativeAst) -> Effect {
     match ast {
         PutImperativeAst::Mill { count } => Effect::Mill {
-            count,
+            count: QuantityExpr::Fixed {
+                value: count as i32,
+            },
             target: TargetFilter::Any,
         },
         PutImperativeAst::ZoneChange {
@@ -3057,7 +3189,9 @@ fn try_parse_targeted_controller_gain_life(text: &str) -> Option<ParsedEffectCla
         return None;
     }
     let amount = if lower.contains("equal to its power") || lower.contains("its power") {
-        LifeAmount::TargetPower
+        QuantityExpr::Ref {
+            qty: QuantityRef::TargetPower,
+        }
     } else {
         // Try to parse a fixed amount: "its controller gains 3 life"
         let after = &lower["its controller ".len()..];
@@ -3065,7 +3199,9 @@ fn try_parse_targeted_controller_gain_life(text: &str) -> Option<ParsedEffectCla
             .strip_prefix("gains ")
             .or_else(|| after.strip_prefix("gain "))
             .unwrap_or(after);
-        LifeAmount::Fixed(parse_number(after).map(|(n, _)| n as i32).unwrap_or(1))
+        QuantityExpr::Fixed {
+            value: parse_number(after).map(|(n, _)| n as i32).unwrap_or(1),
+        }
     };
     Some(parsed_clause(Effect::GainLife {
         amount,
@@ -3136,13 +3272,22 @@ fn try_parse_damage(lower: &str, _text: &str) -> Option<Effect> {
         return Some(Effect::DamageAll { amount, target });
     }
 
+    // Convert DamageAmount to QuantityExpr for DealDamage
+    let qty = damage_amount_to_quantity(&amount);
+
     // CR 603.7c: Check for event-context references before standard target parsing.
     if let Some(target) = parse_event_context_ref(after_to) {
-        return Some(Effect::DealDamage { amount, target });
+        return Some(Effect::DealDamage {
+            amount: qty,
+            target,
+        });
     }
 
     let (target, _) = parse_target(after_to);
-    Some(Effect::DealDamage { amount, target })
+    Some(Effect::DealDamage {
+        amount: qty,
+        target,
+    })
 }
 
 fn try_parse_pump(lower: &str, text: &str) -> Option<Effect> {
@@ -4247,7 +4392,7 @@ mod tests {
         assert!(matches!(
             e,
             Effect::DealDamage {
-                amount: DamageAmount::Fixed(3),
+                amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any
             }
         ));
@@ -4369,7 +4514,7 @@ mod tests {
         assert!(matches!(
             e,
             Effect::GainLife {
-                amount: LifeAmount::Fixed(3),
+                amount: QuantityExpr::Fixed { value: 3 },
                 ..
             }
         ));
@@ -4384,7 +4529,12 @@ mod tests {
     #[test]
     fn effect_draw() {
         let e = parse_effect("Draw two cards");
-        assert!(matches!(e, Effect::Draw { count: 2 }));
+        assert!(matches!(
+            e,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 }
+            }
+        ));
     }
 
     #[test]
@@ -4422,14 +4572,16 @@ mod tests {
         assert!(matches!(
             def.effect,
             Effect::GainLife {
-                amount: LifeAmount::Fixed(3),
+                amount: QuantityExpr::Fixed { value: 3 },
                 ..
             }
         ));
         assert!(def.sub_ability.is_some());
         assert!(matches!(
             def.sub_ability.unwrap().effect,
-            Effect::Draw { count: 1 }
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 }
+            }
         ));
     }
 
@@ -4441,7 +4593,9 @@ mod tests {
             matches!(
                 e,
                 Effect::GainLife {
-                    amount: LifeAmount::TargetPower,
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::TargetPower
+                    },
                     player: GainLifePlayer::TargetedController
                 }
             ),
@@ -4780,7 +4934,12 @@ mod tests {
     #[test]
     fn effect_you_may_draw() {
         let e = parse_effect("You may draw a card");
-        assert!(matches!(e, Effect::Draw { count: 1 }));
+        assert!(matches!(
+            e,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 }
+            }
+        ));
     }
 
     #[test]
@@ -4799,7 +4958,12 @@ mod tests {
     #[test]
     fn effect_they_draw() {
         let e = parse_effect("They draw two cards");
-        assert!(matches!(e, Effect::Draw { count: 2 }));
+        assert!(matches!(
+            e,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 }
+            }
+        ));
     }
 
     #[test]
@@ -4927,7 +5091,13 @@ mod tests {
     #[test]
     fn effect_put_top_cards_into_graveyard() {
         let e = parse_effect("Put the top 3 cards of your library into your graveyard");
-        assert!(matches!(e, Effect::Mill { count: 3, .. }));
+        assert!(matches!(
+            e,
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 3 },
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -5147,7 +5317,12 @@ mod tests {
     #[test]
     fn effect_target_player_draws() {
         let e = parse_effect("Target player draws a card");
-        assert!(matches!(e, Effect::Draw { count: 1 }));
+        assert!(matches!(
+            e,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 }
+            }
+        ));
     }
 
     #[test]
@@ -5314,7 +5489,12 @@ mod tests {
             }
         ));
         let sub = ability.sub_ability.expect("expected follow-up draw");
-        assert!(matches!(sub.effect, Effect::Draw { count: 1 }));
+        assert!(matches!(
+            sub.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 }
+            }
+        ));
     }
 
     #[test]
@@ -5515,7 +5695,9 @@ mod tests {
         assert!(matches!(
             e,
             Effect::DealDamage {
-                amount: DamageAmount::Variable(ref value),
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable(ref value)
+                },
                 ..
             } if value == "that much"
         ));
@@ -5527,10 +5709,63 @@ mod tests {
         assert!(matches!(
             e,
             Effect::DealDamage {
-                amount: DamageAmount::Variable(ref value),
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable(ref value)
+                },
                 ..
             } if value == "its power"
         ));
+    }
+
+    #[test]
+    fn effect_draw_for_each_opponent_lost_life() {
+        let e = parse_effect("Draw a card for each opponent who lost life this turn");
+        assert!(
+            matches!(
+                e,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::PlayerCount {
+                            filter: PlayerFilter::OpponentLostLife
+                        }
+                    }
+                }
+            ),
+            "Expected Draw with PlayerCount::OpponentLostLife, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_draw_for_each_creature_you_control() {
+        let e = parse_effect("Draw a card for each creature you control");
+        assert!(
+            matches!(
+                e,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. }
+                    }
+                }
+            ),
+            "Expected Draw with ObjectCount, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_gain_life_for_each_creature() {
+        let e = parse_effect("You gain 1 life for each creature you control");
+        assert!(
+            matches!(
+                e,
+                Effect::GainLife {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. }
+                    },
+                    ..
+                }
+            ),
+            "Expected GainLife with ObjectCount, got {e:?}"
+        );
     }
 
     #[test]
@@ -6383,7 +6618,7 @@ mod tests {
         let e = parse_effect("~ deals 2 damage to that spell's controller");
         match e {
             Effect::DealDamage { amount, target } => {
-                assert_eq!(amount, DamageAmount::Fixed(2));
+                assert_eq!(amount, QuantityExpr::Fixed { value: 2 });
                 assert_eq!(target, TargetFilter::TriggeringSpellController);
             }
             other => panic!("Expected DealDamage, got {:?}", other),
@@ -6395,7 +6630,7 @@ mod tests {
         let e = parse_effect("~ deals 3 damage to that player");
         match e {
             Effect::DealDamage { amount, target } => {
-                assert_eq!(amount, DamageAmount::Fixed(3));
+                assert_eq!(amount, QuantityExpr::Fixed { value: 3 });
                 assert_eq!(target, TargetFilter::TriggeringPlayer);
             }
             other => panic!("Expected DealDamage, got {:?}", other),

@@ -532,7 +532,7 @@ mod tests {
     use crate::game::combat::{AttackerInfo, CombatState};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, ControllerRef, Effect, TriggerDefinition, TypedFilter,
+        AbilityDefinition, ControllerRef, Effect, QuantityExpr, TriggerDefinition, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
@@ -1030,7 +1030,9 @@ mod tests {
                 let mut trigger = TriggerDefinition::new(TriggerMode::DamageDoneOnceByController)
                     .execute(AbilityDefinition::new(
                         crate::types::ability::AbilityKind::Spell,
-                        Effect::Draw { count: 1 },
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
                     ));
                 trigger.valid_source = Some(crate::types::ability::TargetFilter::Typed(
                     TypedFilter::creature().controller(ControllerRef::You),
@@ -1080,7 +1082,9 @@ mod tests {
                 let mut trigger = TriggerDefinition::new(TriggerMode::DamageDoneOnceByController)
                     .execute(AbilityDefinition::new(
                         crate::types::ability::AbilityKind::Spell,
-                        Effect::Draw { count: 1 },
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
                     ));
                 trigger.valid_source = Some(crate::types::ability::TargetFilter::Typed(
                     TypedFilter::creature().controller(ControllerRef::You),

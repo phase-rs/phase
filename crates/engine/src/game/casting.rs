@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, Effect, ResolvedAbility, TargetRef,
+    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, Effect, QuantityExpr,
+    ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor};
@@ -1599,7 +1600,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         BasicLandType, ChosenAttribute, ChosenSubtypeKind, ContinuousModification, DamageAmount,
-        StaticDefinition,
+        QuantityExpr, StaticDefinition,
     };
     use crate::types::card_type::CoreType;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -1662,7 +1663,7 @@ mod tests {
             obj.abilities.push(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::DealDamage {
-                    amount: crate::types::ability::DamageAmount::Fixed(3),
+                    amount: QuantityExpr::Fixed { value: 3 },
                     target: crate::types::ability::TargetFilter::Any,
                 },
             ));
@@ -1687,7 +1688,9 @@ mod tests {
             obj.card_types.core_types.push(CoreType::Sorcery);
             obj.abilities.push(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Draw { count: 2 },
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 2 },
+                },
             ));
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Blue],
@@ -1755,7 +1758,7 @@ mod tests {
             AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::DealDamage {
-                    amount: crate::types::ability::DamageAmount::Fixed(1),
+                    amount: QuantityExpr::Fixed { value: 1 },
                     target: crate::types::ability::TargetFilter::Any,
                 },
             )
@@ -2019,10 +2022,15 @@ mod tests {
         let obj = state.objects.get_mut(&source).unwrap();
         obj.card_types.core_types.push(CoreType::Artifact);
         obj.abilities.push(
-            AbilityDefinition::new(AbilityKind::Activated, Effect::Draw { count: 1 })
-                .activation_restrictions(vec![
-                    crate::types::ability::ActivationRestriction::OnlyOnceEachTurn,
-                ]),
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+            )
+            .activation_restrictions(vec![
+                crate::types::ability::ActivationRestriction::OnlyOnceEachTurn,
+            ]),
         );
 
         let mut events = Vec::new();
@@ -2048,7 +2056,7 @@ mod tests {
         obj.abilities.push(AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::DealDamage {
-                amount: crate::types::ability::DamageAmount::Fixed(1),
+                amount: QuantityExpr::Fixed { value: 1 },
                 target: crate::types::ability::TargetFilter::Any,
             },
         ));
@@ -2115,7 +2123,9 @@ mod tests {
             spell.card_types.core_types.push(CoreType::Instant);
             spell.abilities.push(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Draw { count: 1 },
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
             ));
             spell.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Black],
@@ -2160,7 +2170,9 @@ mod tests {
             spell.card_types.core_types.push(CoreType::Instant);
             spell.abilities.push(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Draw { count: 1 },
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
             ));
             spell.mana_cost = ManaCost::Cost {
                 shards: vec![ManaCostShard::Black],
@@ -2626,7 +2638,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::DealDamage {
-                amount: DamageAmount::Fixed(1),
+                amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Player,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -2689,20 +2701,22 @@ mod tests {
             obj.abilities.push(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::DealDamage {
-                    amount: crate::types::ability::DamageAmount::Fixed(2),
+                    amount: QuantityExpr::Fixed { value: 2 },
                     target: crate::types::ability::TargetFilter::Any,
                 },
             ));
             // Mode 1: Draw a card
             obj.abilities.push(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Draw { count: 1 },
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
             ));
             // Mode 2: Gain 3 life
             obj.abilities.push(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::GainLife {
-                    amount: crate::types::ability::LifeAmount::Fixed(3),
+                    amount: QuantityExpr::Fixed { value: 3 },
                     player: crate::types::ability::GainLifePlayer::Controller,
                 },
             ));
@@ -2894,7 +2908,12 @@ mod tests {
         match &state.stack[0].kind {
             StackEntryKind::Spell { ability, .. } => {
                 // First mode is Draw
-                assert!(matches!(ability.effect, Effect::Draw { count: 1 }));
+                assert!(matches!(
+                    ability.effect,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 }
+                    }
+                ));
                 // Second mode is GainLife as sub_ability
                 let sub = ability
                     .sub_ability
@@ -2959,7 +2978,7 @@ mod tests {
             abilities: vec![crate::types::ability::AbilityDefinition::new(
                 crate::types::ability::AbilityKind::Spell,
                 Effect::DealDamage {
-                    amount: DamageAmount::Fixed(2),
+                    amount: QuantityExpr::Fixed { value: 2 },
                     target: crate::types::ability::TargetFilter::Any,
                 },
             )],
@@ -3016,7 +3035,7 @@ mod tests {
                 card_id: CardId(70),
                 ability: ResolvedAbility::new(
                     Effect::DealDamage {
-                        amount: DamageAmount::Fixed(2),
+                        amount: QuantityExpr::Fixed { value: 2 },
                         target: crate::types::ability::TargetFilter::Any,
                     },
                     vec![TargetRef::Player(PlayerId(1))],
@@ -3064,7 +3083,7 @@ mod tests {
                 card_id: CardId(70),
                 ability: ResolvedAbility::new(
                     Effect::DealDamage {
-                        amount: DamageAmount::Fixed(2),
+                        amount: QuantityExpr::Fixed { value: 2 },
                         target: crate::types::ability::TargetFilter::Any,
                     },
                     vec![TargetRef::Player(PlayerId(1))],

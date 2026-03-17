@@ -170,7 +170,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Effect, TargetFilter, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter,
+        TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
@@ -225,7 +226,12 @@ mod tests {
             PlayerId(0),
             "Jace",
             3,
-            vec![make_loyalty_ability(1, Effect::Draw { count: 1 })],
+            vec![make_loyalty_ability(
+                1,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+            )],
         );
 
         let mut events = Vec::new();
@@ -268,7 +274,12 @@ mod tests {
             PlayerId(0),
             "Jace",
             3,
-            vec![make_loyalty_ability(1, Effect::Draw { count: 1 })],
+            vec![make_loyalty_ability(
+                1,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+            )],
         );
 
         let mut events = Vec::new();
@@ -290,7 +301,12 @@ mod tests {
             PlayerId(0),
             "Jace",
             3,
-            vec![make_loyalty_ability(1, Effect::Draw { count: 1 })],
+            vec![make_loyalty_ability(
+                1,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+            )],
         );
 
         // Activate loyalty
@@ -320,7 +336,12 @@ mod tests {
             PlayerId(0),
             "Jace",
             3,
-            vec![make_loyalty_ability(1, Effect::Draw { count: 1 })],
+            vec![make_loyalty_ability(
+                1,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+            )],
         );
 
         // Not main phase
@@ -384,8 +405,13 @@ mod tests {
     fn parse_loyalty_cost_prefers_typed_ability_cost() {
         use crate::types::ability::{AbilityCost, AbilityKind, Effect};
         // When AbilityCost::Loyalty is set, it should be used
-        let ability = AbilityDefinition::new(AbilityKind::Activated, Effect::Draw { count: 1 })
-            .cost(AbilityCost::Loyalty { amount: -3 });
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: -3 });
         assert_eq!(parse_loyalty_cost(&ability), -3);
     }
 
@@ -395,7 +421,9 @@ mod tests {
         // When no AbilityCost::Loyalty, fall back to 0
         let ability = crate::types::ability::AbilityDefinition::new(
             AbilityKind::Activated,
-            Effect::Draw { count: 1 },
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
         );
         assert_eq!(parse_loyalty_cost(&ability), 0);
     }
@@ -403,7 +431,12 @@ mod tests {
     #[test]
     fn parse_loyalty_cost_extracts_values() {
         assert_eq!(
-            parse_loyalty_cost(&make_loyalty_ability(1, Effect::Draw { count: 1 })),
+            parse_loyalty_cost(&make_loyalty_ability(
+                1,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 }
+                }
+            )),
             1
         );
         assert_eq!(
@@ -419,14 +452,19 @@ mod tests {
             parse_loyalty_cost(&make_loyalty_ability(
                 0,
                 Effect::Mill {
-                    count: 3,
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 3 },
                     target: crate::types::ability::TargetFilter::Any,
                 }
             )),
             0
         );
         // No loyalty cost
-        let no_cost = AbilityDefinition::new(AbilityKind::Activated, Effect::Draw { count: 1 });
+        let no_cost = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
         assert_eq!(parse_loyalty_cost(&no_cost), 0);
     }
 }

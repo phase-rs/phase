@@ -2,8 +2,8 @@ use super::oracle_effect::{parse_effect_chain, try_parse_named_choice};
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{parse_number, strip_reminder_text};
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChoiceType, Effect, FilterProp, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, TargetFilter, TypedFilter,
+    AbilityDefinition, AbilityKind, ChoiceType, Effect, FilterProp, QuantityExpr,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, TargetFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{ControllerRef, TypeFilter};
@@ -154,7 +154,12 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
     // Extract life amount: "pay 2 life", "pay 3 life", etc.
     let amount = extract_life_payment(norm_lower)?;
 
-    let lose_life = AbilityDefinition::new(AbilityKind::Spell, Effect::LoseLife { amount });
+    let lose_life = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: amount },
+        },
+    );
 
     let tap_self = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -455,7 +460,12 @@ mod tests {
         assert!(matches!(def.mode, ReplacementMode::Optional { .. }));
         // Accept branch: LoseLife { amount: 2 }
         let execute = def.execute.as_ref().unwrap();
-        assert!(matches!(execute.effect, Effect::LoseLife { amount: 2 }));
+        assert!(matches!(
+            execute.effect,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 }
+            }
+        ));
         // Decline branch: Tap { target: SelfRef }
         if let ReplacementMode::Optional { decline } = &def.mode {
             let decline = decline.as_ref().unwrap();
@@ -478,7 +488,12 @@ mod tests {
         )
         .unwrap();
         let execute = def.execute.as_ref().unwrap();
-        assert!(matches!(execute.effect, Effect::LoseLife { amount: 3 }));
+        assert!(matches!(
+            execute.effect,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 3 }
+            }
+        ));
     }
 
     #[test]
@@ -500,7 +515,9 @@ mod tests {
         ));
         assert!(matches!(
             execute.sub_ability.as_ref().unwrap().effect,
-            Effect::LoseLife { amount: 2 }
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 }
+            }
         ));
 
         if let ReplacementMode::Optional { decline } = &def.mode {

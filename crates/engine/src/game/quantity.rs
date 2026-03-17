@@ -37,9 +37,13 @@ pub fn resolve_quantity_with_targets(
 ) -> i32 {
     match expr {
         QuantityExpr::Fixed { value } => *value,
-        QuantityExpr::Ref { qty } => {
-            resolve_ref(state, qty, ability.controller, ability.source_id, &ability.targets)
-        }
+        QuantityExpr::Ref { qty } => resolve_ref(
+            state,
+            qty,
+            ability.controller,
+            ability.source_id,
+            &ability.targets,
+        ),
     }
 }
 
@@ -65,9 +69,7 @@ fn resolve_ref(
                 matches_target_filter_controlled(state, id, filter, source_id, controller)
             })
             .count() as i32,
-        QuantityRef::PlayerCount { filter } => {
-            resolve_player_count(state, filter, controller)
-        }
+        QuantityRef::PlayerCount { filter } => resolve_player_count(state, filter, controller),
         QuantityRef::CountersOnSelf { counter_type } => state
             .objects
             .get(&source_id)
@@ -93,25 +95,28 @@ fn resolve_ref(
                     }
                 })
                 .and_then(|obj| obj.power)
-                .unwrap_or(0) as i32
+                .unwrap_or(0)
         }
     }
 }
 
 /// Count players matching a PlayerFilter relative to the controller.
-fn resolve_player_count(
-    state: &GameState,
-    filter: &PlayerFilter,
-    controller: PlayerId,
-) -> i32 {
+fn resolve_player_count(state: &GameState, filter: &PlayerFilter, controller: PlayerId) -> i32 {
     state
         .players
         .iter()
-        .filter(|p| !p.is_eliminated && match filter {
-            PlayerFilter::Opponent => p.id != controller,
-            PlayerFilter::OpponentLostLife => p.id != controller && p.life_lost_this_turn > 0,
-            PlayerFilter::OpponentGainedLife => p.id != controller && p.life_gained_this_turn > 0,
-            PlayerFilter::All => true,
+        .filter(|p| {
+            !p.is_eliminated
+                && match filter {
+                    PlayerFilter::Opponent => p.id != controller,
+                    PlayerFilter::OpponentLostLife => {
+                        p.id != controller && p.life_lost_this_turn > 0
+                    }
+                    PlayerFilter::OpponentGainedLife => {
+                        p.id != controller && p.life_gained_this_turn > 0
+                    }
+                    PlayerFilter::All => true,
+                }
         })
         .count() as i32
 }
@@ -148,7 +153,10 @@ mod tests {
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::HandSize,
         };
-        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(99)), 4);
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(99)),
+            4
+        );
     }
 
     #[test]
@@ -189,9 +197,7 @@ mod tests {
 
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount {
-                filter: TargetFilter::Typed(
-                    TypedFilter::creature().controller(ControllerRef::You),
-                ),
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
             },
         };
         // Source is controlled by player 0

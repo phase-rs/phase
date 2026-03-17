@@ -1099,14 +1099,16 @@ mod tests {
     #[test]
     fn pending_trigger_roundtrips() {
         use crate::game::triggers::PendingTrigger;
-        use crate::types::ability::{Effect, ResolvedAbility};
+        use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility};
 
         let trigger = PendingTrigger {
             source_id: ObjectId(5),
             controller: PlayerId(0),
             condition: None,
             ability: ResolvedAbility::new(
-                Effect::Draw { count: QuantityExpr::Fixed { value: 1 } },
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
                 vec![],
                 ObjectId(5),
                 PlayerId(0),
@@ -1123,7 +1125,7 @@ mod tests {
     #[test]
     fn game_state_with_pending_trigger_and_exile_links() {
         use crate::game::triggers::PendingTrigger;
-        use crate::types::ability::{Effect, ResolvedAbility};
+        use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility};
 
         let mut state = GameState::new_two_player(42);
         state.exile_links.push(ExileLink {
@@ -1135,7 +1137,9 @@ mod tests {
             controller: PlayerId(0),
             condition: None,
             ability: ResolvedAbility::new(
-                Effect::Draw { count: QuantityExpr::Fixed { value: 1 } },
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
                 vec![],
                 ObjectId(5),
                 PlayerId(0),

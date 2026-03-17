@@ -1,7 +1,7 @@
 use indexmap::IndexMap;
 
 use crate::types::ability::{
-    AbilityDefinition, Effect, LifeAmount, ReplacementCondition, ReplacementMode,
+    AbilityDefinition, Effect, QuantityExpr, ReplacementCondition, ReplacementMode,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingReplacement, WaitingFor};
@@ -199,7 +199,7 @@ fn gain_life_replacement_delta(state: &GameState, rid: ReplacementId) -> Option<
 
     match &execute.effect {
         Effect::GainLife {
-            amount: LifeAmount::Fixed(delta),
+            amount: QuantityExpr::Fixed { value: delta },
             ..
         } if *delta > 0 && execute.sub_ability.is_none() => Some(*delta as u32),
         _ => None,
@@ -1224,7 +1224,7 @@ mod tests {
             ReplacementDefinition::new(ReplacementEvent::GainLife).execute(AbilityDefinition::new(
                 crate::types::ability::AbilityKind::Spell,
                 Effect::GainLife {
-                    amount: LifeAmount::Fixed(1),
+                    amount: QuantityExpr::Fixed { value: 1 },
                     player: GainLifePlayer::Controller,
                 },
             ));

@@ -10,7 +10,7 @@ use crate::game::engine::{apply, EngineError};
 use crate::game::game_object::GameObject;
 use crate::game::zones::create_object;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, AdditionalCost, DamageAmount, Effect, ReplacementDefinition,
+    AbilityDefinition, AbilityKind, AdditionalCost, Effect, QuantityExpr, ReplacementDefinition,
     StaticDefinition, TargetFilter, TriggerDefinition,
 };
 use crate::types::actions::GameAction;
@@ -181,7 +181,7 @@ impl GameScenario {
         let ability = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::DealDamage {
-                amount: DamageAmount::Fixed(3),
+                amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
             },
         );
@@ -894,7 +894,9 @@ mod tests {
         let mut scenario = GameScenario::new();
         let id = {
             let mut builder = scenario.add_creature(P0, "Wizard", 1, 1);
-            builder.with_ability(Effect::Draw { count: 1 });
+            builder.with_ability(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            });
             builder.with_static(StaticMode::Continuous);
             builder.id()
         };

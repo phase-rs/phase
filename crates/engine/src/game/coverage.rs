@@ -5,7 +5,7 @@ use crate::game::static_abilities::{build_static_registry, StaticAbilityHandler}
 use crate::game::triggers::build_trigger_registry;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, ControllerRef, DamageAmount,
-    Duration, Effect, FilterProp, LifeAmount, PtValue, ReplacementDefinition, ReplacementMode,
+    Duration, Effect, FilterProp, PtValue, QuantityExpr, ReplacementDefinition, ReplacementMode,
     StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card::CardFace;
@@ -221,6 +221,13 @@ fn fmt_damage_amount(a: &DamageAmount) -> String {
     }
 }
 
+fn fmt_quantity(q: &QuantityExpr) -> String {
+    match q {
+        QuantityExpr::Fixed { value } => value.to_string(),
+        QuantityExpr::Ref { qty } => format!("{qty:?}"),
+    }
+}
+
 fn fmt_duration(d: &Duration) -> String {
     match d {
         Duration::UntilEndOfTurn => "until end of turn",
@@ -240,12 +247,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
     let mut d = Vec::new();
     match effect {
         Effect::DealDamage { amount, target } => {
-            d.push(("amount".into(), fmt_damage_amount(amount)));
+            d.push(("amount".into(), fmt_quantity(amount)));
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::Draw { count } => {
-            if *count != 1 {
-                d.push(("count".into(), count.to_string()));
+            if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
+                d.push(("count".into(), fmt_quantity(count)));
             }
         }
         Effect::Pump {
@@ -378,23 +385,20 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::Mill { count, target } => {
-            d.push(("count".into(), count.to_string()));
+            d.push(("count".into(), fmt_quantity(count)));
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::Scry { count } | Effect::Surveil { count } => {
             d.push(("count".into(), count.to_string()));
         }
         Effect::GainLife { amount, player } => {
-            match amount {
-                LifeAmount::Fixed(n) => d.push(("amount".into(), n.to_string())),
-                LifeAmount::TargetPower => d.push(("amount".into(), "target's power".into())),
-            }
+            d.push(("amount".into(), fmt_quantity(amount)));
             if !matches!(player, crate::types::ability::GainLifePlayer::Controller) {
                 d.push(("player".into(), format!("{player:?}")));
             }
         }
         Effect::LoseLife { amount } => {
-            d.push(("amount".into(), amount.to_string()));
+            d.push(("amount".into(), fmt_quantity(amount)));
         }
         Effect::ChangeZone {
             origin,
@@ -1198,7 +1202,7 @@ mod tests {
             .push(crate::types::ability::AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::DealDamage {
-                    amount: DamageAmount::Fixed(3),
+                    amount: QuantityExpr::Fixed { value: 3 },
                     target: TargetFilter::Any,
                 },
             ));

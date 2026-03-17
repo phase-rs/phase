@@ -1,4 +1,6 @@
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DelayedTrigger, GameState};
 use crate::types::identifiers::TrackedSetId;
@@ -109,7 +111,9 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, QuantityExpr,
+    };
     use crate::types::identifiers::ObjectId;
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
@@ -117,7 +121,12 @@ mod tests {
     #[test]
     fn creates_delayed_trigger_on_state() {
         let mut state = GameState::new_two_player(42);
-        let effect_def = AbilityDefinition::new(AbilityKind::Spell, Effect::Draw { count: 1 });
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
         let ability = ResolvedAbility::new(
             Effect::CreateDelayedTrigger {
                 condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },

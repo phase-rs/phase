@@ -2,8 +2,8 @@ use rand::Rng;
 use thiserror::Error;
 
 use crate::types::ability::{
-    AbilityDefinition, ChoiceType, ChoiceValue, ChosenAttribute, EffectKind, ResolvedAbility,
-    TargetRef,
+    AbilityDefinition, ChoiceType, ChoiceValue, ChosenAttribute, EffectKind, QuantityExpr,
+    ResolvedAbility, TargetRef,
 };
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
@@ -462,10 +462,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
         ) => {
             let p = *player;
             // Validate timing: must be in declare blockers step or later in combat
-            if !matches!(
-                state.phase,
-                Phase::DeclareBlockers | Phase::CombatDamage
-            ) {
+            if !matches!(state.phase, Phase::DeclareBlockers | Phase::CombatDamage) {
                 return Err(EngineError::ActionNotAllowed(
                     "Ninjutsu can only be activated during the declare blockers step".to_string(),
                 ));
@@ -1792,15 +1789,22 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, DamageAmount, Effect, ResolvedAbility,
-        TargetFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, DamageAmount, Effect, QuantityExpr,
+        ResolvedAbility, TargetFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
 
     /// Create a simple test ability definition.
     fn make_draw_ability(num_cards: u32) -> AbilityDefinition {
-        AbilityDefinition::new(AbilityKind::Spell, Effect::Draw { count: QuantityExpr::Fixed { value: num_cards as i32 } })
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed {
+                    value: num_cards as i32,
+                },
+            },
+        )
     }
 
     /// Create a DealDamage ability for testing.
@@ -1813,7 +1817,7 @@ mod tests {
         let mut def = AbilityDefinition::new(
             kind,
             Effect::DealDamage {
-                amount: DamageAmount::Fixed(amount),
+                amount: QuantityExpr::Fixed { value: amount },
                 target: TargetFilter::Any,
             },
         );
@@ -3519,7 +3523,7 @@ mod trigger_target_tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ControllerRef, DamageAmount, Effect, ModalChoice,
-        ModalSelectionConstraint, TargetFilter, TargetRef, TypedFilter,
+        ModalSelectionConstraint, QuantityExpr, TargetFilter, TargetRef, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::TargetSelectionConstraint;
@@ -4161,7 +4165,7 @@ mod phase_trigger_regression_tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ControllerRef, Effect, FilterProp, GainLifePlayer,
-        LifeAmount, TargetFilter, TriggerDefinition, TypedFilter,
+        LifeAmount, QuantityExpr, TargetFilter, TriggerDefinition, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
@@ -4301,7 +4305,12 @@ mod phase_trigger_regression_tests {
             obj.card_types.core_types.push(CoreType::Creature);
             obj.trigger_definitions
                 .push(TriggerDefinition::new(TriggerMode::SpellCast).execute(
-                    AbilityDefinition::new(AbilityKind::Database, Effect::Draw { count: QuantityExpr::Fixed { value: 1 } }),
+                    AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ),
                 ));
         }
 
@@ -4584,7 +4593,9 @@ mod phase_trigger_regression_tests {
         )
         .sub_ability(AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::LoseLife { amount: QuantityExpr::Fixed { value: 2 } },
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
         ));
 
         let waiting_for =
