@@ -1,7 +1,7 @@
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetRef, TypedFilter,
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -114,6 +114,11 @@ pub fn resolve_all(
         })
         .map(|(id, _)| *id)
         .collect();
+
+    // CR 603.7: Clean up consumed tracked set after scanning.
+    if let TargetFilter::TrackedSet { id } = &effective_filter {
+        state.tracked_object_sets.remove(id);
+    }
 
     for obj_id in matching {
         zones::move_to_zone(state, obj_id, dest_zone, events);

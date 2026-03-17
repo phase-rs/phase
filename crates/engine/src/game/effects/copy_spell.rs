@@ -71,6 +71,7 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
                 ability: original_ability.clone(),
+                cast_as_adventure: false,
             },
         });
 
@@ -96,10 +97,12 @@ mod tests {
                 StackEntryKind::Spell {
                     card_id: c1,
                     ability: a1,
+                    ..
                 },
                 StackEntryKind::Spell {
                     card_id: c2,
                     ability: a2,
+                    ..
                 },
             ) => {
                 assert_eq!(c1, c2);

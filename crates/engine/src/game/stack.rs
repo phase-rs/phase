@@ -211,6 +211,7 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(100),
                 ability: resolved,
+                cast_as_adventure: false,
             },
         });
 
@@ -436,6 +437,7 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(60),
                 ability: resolved,
+                cast_as_adventure: false,
             },
         });
 
@@ -520,6 +522,7 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(72),
                 ability,
+                cast_as_adventure: false,
             },
         });
 

@@ -81,6 +81,10 @@ export function formatEvent(event: GameEvent): string {
       return `Replacement applied: ${event.data.event_type}`;
     case "CardsRevealed":
       return `Revealed: ${event.data.card_names.join(", ")}`;
+    case "CreatureSuspected":
+      return `Creature ${event.data.object_id} suspected`;
+    case "CaseSolved":
+      return `Case ${event.data.object_id} solved`;
     default:
       return `Event: ${(event as GameEvent).type}`;
   }

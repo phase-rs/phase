@@ -371,7 +371,7 @@ mod tests {
     use engine::types::keywords::Keyword;
     use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use engine::types::player::PlayerId;
-    use engine::types::statics::StaticMode;
+
     use engine::types::zones::Zone;
 
     fn make_face(name: &str, oracle_id: &str, keyword: Keyword) -> CardFace {

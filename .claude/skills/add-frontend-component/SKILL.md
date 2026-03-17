@@ -5,6 +5,11 @@ description: Use when adding or modifying frontend UI components — interactive
 
 # Adding a Frontend Component
 
+> **Hard rules — all frontend work must respect these (see CLAUDE.md § Design Principles):**
+> 1. **The frontend is a display layer, not a logic layer.** It renders engine-provided state and dispatches user actions — nothing more. It must never compute, derive, filter, or re-interpret game data. If a component needs a value the engine doesn't expose, the fix is to add it to the engine's output — not to calculate it client-side. Any "smart" frontend code is a bug.
+> 2. **CR-correctness is non-negotiable.** The frontend must never contradict the Comprehensive Rules. If it displays information (legal targets, valid choices, game state), that information must come directly from the engine, which is the CR-validated source of truth. Never approximate engine logic in TypeScript.
+> 3. **Build reusable component patterns.** New overlays and modals should follow existing patterns (CardChoiceModal, ModeChoiceModal). Extract shared behavior into composable components rather than duplicating across one-off implementations.
+
 The React/TypeScript frontend communicates with the Rust engine through a transport-agnostic adapter layer. Game state flows from engine → adapter → Zustand stores → React components. Player actions flow in reverse via `dispatch()`. This skill covers wiring new UI components into this pipeline.
 
 **Before you start:** Trace how `ScryChoice` works end-to-end. The current path is: `WaitingFor::ScryChoice` in Rust → TypeScript type in `adapter/types.ts` → `GamePage.tsx` renders `CardChoiceModal` → `CardChoiceModal` routes to `ScryModal` → `dispatch({ type: "SelectCards", data: { cards } })`.

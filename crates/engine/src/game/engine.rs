@@ -2078,6 +2078,7 @@ mod tests {
                         id1,
                         PlayerId(0),
                     ),
+                    cast_as_adventure: false,
                 },
             },
             &mut events,
@@ -2099,6 +2100,7 @@ mod tests {
                         id2,
                         PlayerId(0),
                     ),
+                    cast_as_adventure: false,
                 },
             },
             &mut events,
@@ -3360,6 +3362,7 @@ mod tests {
                         ObjectId(99),
                         PlayerId(1),
                     ),
+                    cast_as_adventure: false,
                 },
             });
             let result = apply(
@@ -4215,6 +4218,7 @@ mod phase_trigger_regression_tests {
                     creature_spell,
                     PlayerId(0),
                 ),
+                cast_as_adventure: false,
             },
         });
 

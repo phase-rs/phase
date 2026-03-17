@@ -74,6 +74,10 @@ pub enum GameAction {
     DecideOptionalCost {
         pay: bool,
     },
+    /// CR 715.3a: Choose creature face (true) or Adventure half (false).
+    ChooseAdventureFace {
+        creature: bool,
+    },
 }
 
 #[cfg(test)]

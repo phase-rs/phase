@@ -5,6 +5,11 @@ description: Use when modifying the casting flow, stack resolution, condition sy
 
 # Casting, Stack & Condition Systems
 
+> **Hard rules — casting, stack, and priority are the most rules-dense areas of MTG (see CLAUDE.md § Design Principles):**
+> 1. **CR-correctness is non-negotiable.** Casting (CR 601), activated abilities (CR 602), triggered abilities (CR 603), static abilities (CR 604), mana abilities (CR 605), stack resolution (CR 608), and priority (CR 117) are precisely specified. Every implementation must be verified against the relevant CR section and annotated. If you cannot cite the CR that governs a behavior, you have not validated it.
+> 2. **Build for the class, not the card.** Payment helpers (`pay_mana_cost`, `pay_ability_cost`), targeting, and condition checks are shared building blocks used by every spell and ability. Changes here must work for the entire class — never special-case a single card's casting behavior.
+> 3. **Test the exact rules behavior.** Every new WaitingFor state, casting step, or condition check needs tests that verify the CR-specified behavior, including edge cases (e.g., fizzle on illegal targets, intervening-if re-check at resolution). Test the building block, not one card's interaction.
+
 Reference for the spell casting pipeline, stack resolution, sub_ability chaining, and all condition systems. Use this to understand how spells go from hand → stack → resolution, and where to extend for new casting features.
 
 **Before you start:** Trace `Ward` for a casting-time interaction, or `TriggerCondition::LifeGainedThisTurn` for a condition that's checked at both trigger and resolution time.

@@ -10,17 +10,17 @@ Requirements for v1.2 milestone. Each maps to roadmap phases.
 ### Data Pipeline
 
 - [x] **DATA-01**: Engine loads card metadata (name, mana cost, types, P/T, colors, keywords, oracle text, layout) from MTGJSON AllCards AtomicCards.json using custom Rust types
-- [x] **DATA-02**: Engine defines a typed JSON ability schema mapping to AbilityDefinition, TriggerDefinition, StaticDefinition, and ReplacementDefinition types
-- [x] **DATA-03**: CardDatabase::load_json() merges MTGJSON metadata + ability JSON into CardFace, becoming the primary card loading path
-- [x] **DATA-04**: Ability JSON schema exports a JSON Schema definition via schemars for editor autocompletion and build-time validation
+- [x] **DATA-02**: Engine defines typed Rust enums (Effect, TriggerMode, StaticMode, ReplacementEvent) mapping to all ability definition types
+- [x] **DATA-03**: CardDatabase::load_json() merges MTGJSON metadata + typed ability definitions into CardFace, becoming the primary card loading path
+- [x] **DATA-04**: Ability type schema exports a JSON Schema definition via schemars for editor autocompletion and build-time validation
 
 ### Card Migration
 
-- [x] **MIGR-01**: All engine-supported cards (thousands — every card whose mechanics have registered handlers) are converted from Forge .txt to MTGJSON metadata + ability JSON via automated migration
+- [x] **MIGR-01**: All engine-supported cards use MTGJSON metadata + Oracle text parser for typed ability definitions
 - [x] **MIGR-02**: data/cardsfolder/ and data/standard-cards/ are removed from the repository; Forge parser is feature-gated behind forge-compat
-- [x] **MIGR-03**: Automated Forge-to-JSON migration tool converts all 32,300+ Forge .txt card definitions to the new ability JSON format, producing ability files for every engine-supported card
+- [x] **MIGR-03**: Card data pipeline generates typed ability definitions from Oracle text for all engine-supported cards
 - [x] **MIGR-04**: Card data includes MTGJSON scryfallOracleId for reliable frontend image lookups via Scryfall API
-- [x] **MIGR-05**: CI coverage gate updated to validate against JSON card data; all previously supported cards remain supported after migration
+- [x] **MIGR-05**: CI coverage gate validates card support; all previously supported cards remain supported after migration
 
 ### Testing
 
@@ -103,10 +103,7 @@ Deferred to v2+. Tracked but not in current roadmap.
 
 | Feature | Reason |
 |---------|--------|
-| Natural language ability parsing from oracle text | NLP problem far beyond this milestone's scope |
-| Runtime migration to Vec\<AbilityDefinition\> on GameObject | Research identified as cleaner long-term, but v1.2 can emit Forge-compatible strings from JSON loader — defer refactor to avoid touching ~13 source files |
 | Full git history rewrite to remove GPL files | git filter-branch is destructive; .gitignore + deletion sufficient for licensing purposes |
-| Manual ability authoring for unsupported cards | Migration tool handles supported cards; adding new handler coverage is separate work |
 | Cross-device player identity / accounts | Requires auth infrastructure, separate phase |
 | Friends list / friend invites | Requires persistent accounts, separate phase |
 | Spectator mode | Requires spectator state filter, separate phase |

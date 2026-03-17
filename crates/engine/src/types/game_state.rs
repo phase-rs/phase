@@ -239,6 +239,13 @@ pub enum WaitingFor {
         cost: AdditionalCost,
         pending_cast: Box<PendingCast>,
     },
+    /// CR 715.3a: Player chooses creature face vs Adventure half when casting
+    /// an Adventure card from hand (or exile with permission).
+    AdventureCastChoice {
+        player: PlayerId,
+        object_id: ObjectId,
+        card_id: CardId,
+    },
     /// CR 601.2c: Player chooses any number of legal targets from a set.
     /// Used for "exile any number of" and similar variable-count targeting.
     MultiTargetSelection {
@@ -292,6 +299,10 @@ pub enum StackEntryKind {
     Spell {
         card_id: CardId,
         ability: ResolvedAbility,
+        /// CR 715.4: True when this spell was cast as the Adventure half.
+        /// On resolution, exiled with AdventureCreature permission instead of going to graveyard.
+        #[serde(default)]
+        cast_as_adventure: bool,
     },
     ActivatedAbility {
         source_id: ObjectId,
@@ -988,6 +999,7 @@ mod tests {
                     ObjectId(2),
                     PlayerId(0),
                 ),
+                cast_as_adventure: false,
             },
         };
         assert_eq!(entry.id, ObjectId(1));

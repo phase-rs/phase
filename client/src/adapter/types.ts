@@ -175,6 +175,8 @@ export interface GameObject {
   entered_battlefield_turn: number | null;
   unimplemented_mechanics?: string[];
   has_summoning_sickness?: boolean;
+  is_suspected?: boolean;
+  case_state?: { is_solved: boolean; solve_condition: unknown } | null;
   devotion?: number;
   available_mana_colors?: ManaColor[];
   back_face?: {
@@ -392,7 +394,9 @@ export type GameEvent =
   | { type: "Transformed"; data: { object_id: ObjectId } }
   | { type: "DayNightChanged"; data: { new_state: string } }
   | { type: "TurnedFaceUp"; data: { object_id: ObjectId } }
-  | { type: "CardsRevealed"; data: { player: PlayerId; card_names: string[] } };
+  | { type: "CardsRevealed"; data: { player: PlayerId; card_names: string[] } }
+  | { type: "CreatureSuspected"; data: { object_id: ObjectId } }
+  | { type: "CaseSolved"; data: { object_id: ObjectId } };
 
 // ── Game State ───────────────────────────────────────────────────────────
 

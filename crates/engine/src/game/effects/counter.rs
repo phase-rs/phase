@@ -164,6 +164,7 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
                 ability: make_dummy_ability(obj_id, PlayerId(1)),
+                cast_as_adventure: false,
             },
         });
 
@@ -216,6 +217,7 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
                 ability: make_dummy_ability(obj_id, PlayerId(1)),
+                cast_as_adventure: false,
             },
         });
 
@@ -350,6 +352,7 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
                 ability: make_dummy_ability(spell_id, PlayerId(1)),
+                cast_as_adventure: false,
             },
         });
 

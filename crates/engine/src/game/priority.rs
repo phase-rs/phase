@@ -189,6 +189,7 @@ mod tests {
                     created_id,
                     PlayerId(0),
                 ),
+                cast_as_adventure: false,
             },
         });
 

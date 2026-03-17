@@ -4,13 +4,15 @@ use crate::game::game_object::GameObject;
 use crate::game::static_abilities::{build_static_registry, StaticAbilityHandler};
 use crate::game::triggers::build_trigger_registry;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AdditionalCost, Effect, ReplacementDefinition, ReplacementMode,
-    StaticDefinition, TriggerDefinition,
+    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, ControllerRef, DamageAmount,
+    Duration, Effect, FilterProp, LifeAmount, PtValue, ReplacementDefinition, ReplacementMode,
+    StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
+use crate::types::zones::Zone;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
@@ -28,6 +30,9 @@ pub struct ParsedItem {
     pub source_text: Option<String>,
     /// Whether this specific item is supported by the engine.
     pub supported: bool,
+    /// Key-value pairs of parsed parameters (e.g., target, amount, zone).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub details: Vec<(String, String)>,
     /// Nested items (sub-abilities, modal choices, composite costs).
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub children: Vec<ParsedItem>,
@@ -86,6 +91,385 @@ fn effect_type_name(effect: &Effect) -> String {
         .unwrap_or_else(|| "Unknown".to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Detail formatters — extract human-readable parameter summaries
+// ---------------------------------------------------------------------------
+
+fn fmt_target(filter: &TargetFilter) -> String {
+    match filter {
+        TargetFilter::None => "none".into(),
+        TargetFilter::Any => "any target".into(),
+        TargetFilter::Player => "player".into(),
+        TargetFilter::Controller => "controller".into(),
+        TargetFilter::SelfRef => "self".into(),
+        TargetFilter::StackAbility => "ability on stack".into(),
+        TargetFilter::AttachedTo => "attached permanent".into(),
+        TargetFilter::LastCreated => "last created".into(),
+        TargetFilter::TriggeringSpellController => "triggering spell's controller".into(),
+        TargetFilter::TriggeringSpellOwner => "triggering spell's owner".into(),
+        TargetFilter::TriggeringPlayer => "triggering player".into(),
+        TargetFilter::TriggeringSource => "triggering source".into(),
+        TargetFilter::SpecificObject(id) => format!("object #{}", id.0),
+        TargetFilter::TrackedSet { id } => format!("tracked set #{}", id.0),
+        TargetFilter::Not { filter } => format!("not {}", fmt_target(filter)),
+        TargetFilter::Or { filters } => filters.iter().map(fmt_target).collect::<Vec<_>>().join(" or "),
+        TargetFilter::And { filters } => filters.iter().map(fmt_target).collect::<Vec<_>>().join(" + "),
+        TargetFilter::Typed(tf) => fmt_typed_filter(tf),
+    }
+}
+
+fn fmt_typed_filter(tf: &TypedFilter) -> String {
+    let mut parts = Vec::new();
+    for prop in &tf.properties {
+        match prop {
+            FilterProp::Token => parts.push("token".into()),
+            FilterProp::Attacking => parts.push("attacking".into()),
+            FilterProp::Tapped => parts.push("tapped".into()),
+            FilterProp::NonType { value } => parts.push(format!("non-{value}")),
+            FilterProp::WithKeyword { value } => parts.push(format!("with {value}")),
+            FilterProp::CountersGE { counter_type, count } => {
+                parts.push(format!("{count}+ {counter_type} counters"))
+            }
+            FilterProp::CmcGE { value } => parts.push(format!("mv {value}+")),
+            FilterProp::CmcLE { value } => parts.push(format!("mv {value}-")),
+            FilterProp::InZone { zone } => parts.push(format!("in {zone:?}")),
+            FilterProp::Owned { controller } => parts.push(fmt_controller(controller)),
+            FilterProp::EnchantedBy => parts.push("enchanted by self".into()),
+            FilterProp::EquippedBy => parts.push("equipped by self".into()),
+            FilterProp::Another => parts.push("another".into()),
+            FilterProp::HasColor { color } => parts.push(color.clone()),
+            FilterProp::PowerLE { value } => parts.push(format!("power ≤{value}")),
+            FilterProp::PowerGE { value } => parts.push(format!("power ≥{value}")),
+            FilterProp::Multicolored => parts.push("multicolored".into()),
+            FilterProp::HasSupertype { value } => parts.push(value.to_lowercase()),
+            FilterProp::IsChosenCreatureType => parts.push("chosen type".into()),
+            FilterProp::Suspected => parts.push("suspected".into()),
+            FilterProp::Other { value } => parts.push(value.clone()),
+        }
+    }
+    if let Some(ctrl) = &tf.controller {
+        parts.push(fmt_controller(ctrl));
+    }
+    if let Some(sub) = &tf.subtype {
+        parts.push(sub.clone());
+    }
+    let type_str = tf.card_type.as_ref().map(fmt_type_filter).unwrap_or_default();
+    if parts.is_empty() {
+        if type_str.is_empty() { "any".into() } else { type_str }
+    } else {
+        let props = parts.join(" ");
+        if type_str.is_empty() { props } else { format!("{props} {type_str}") }
+    }
+}
+
+fn fmt_type_filter(tf: &TypeFilter) -> String {
+    match tf {
+        TypeFilter::Creature => "creature",
+        TypeFilter::Land => "land",
+        TypeFilter::Artifact => "artifact",
+        TypeFilter::Enchantment => "enchantment",
+        TypeFilter::Instant => "instant",
+        TypeFilter::Sorcery => "sorcery",
+        TypeFilter::Planeswalker => "planeswalker",
+        TypeFilter::Permanent => "permanent",
+        TypeFilter::Card => "card",
+        TypeFilter::Any => "any",
+    }
+    .into()
+}
+
+fn fmt_controller(ctrl: &ControllerRef) -> String {
+    match ctrl {
+        ControllerRef::You => "you control",
+        ControllerRef::Opponent => "opponent controls",
+    }
+    .into()
+}
+
+fn fmt_pt(p: &PtValue) -> String {
+    match p {
+        PtValue::Fixed(n) => format!("{n:+}"),
+        PtValue::Variable(s) => format!("+{s}"),
+    }
+}
+
+fn fmt_damage_amount(a: &DamageAmount) -> String {
+    match a {
+        DamageAmount::Fixed(n) => n.to_string(),
+        DamageAmount::Variable(s) => s.clone(),
+    }
+}
+
+fn fmt_duration(d: &Duration) -> String {
+    match d {
+        Duration::UntilEndOfTurn => "until end of turn",
+        Duration::UntilYourNextTurn => "until your next turn",
+        Duration::UntilHostLeavesPlay => "while on battlefield",
+        Duration::Permanent => "permanent",
+    }
+    .into()
+}
+
+fn fmt_zone(z: &Zone) -> String {
+    format!("{z:?}")
+}
+
+/// Extract key-value detail pairs from an `Effect`'s parameters.
+fn effect_details(effect: &Effect) -> Vec<(String, String)> {
+    let mut d = Vec::new();
+    match effect {
+        Effect::DealDamage { amount, target } => {
+            d.push(("amount".into(), fmt_damage_amount(amount)));
+            d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::Draw { count } => {
+            if *count != 1 { d.push(("count".into(), count.to_string())); }
+        }
+        Effect::Pump { power, toughness, target } => {
+            d.push(("p/t".into(), format!("{}/{}", fmt_pt(power), fmt_pt(toughness))));
+            d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::PumpAll { power, toughness, target } => {
+            d.push(("p/t".into(), format!("{}/{}", fmt_pt(power), fmt_pt(toughness))));
+            if !matches!(target, TargetFilter::None) {
+                d.push(("filter".into(), fmt_target(target)));
+            }
+        }
+        Effect::Destroy { target } | Effect::Tap { target } | Effect::Untap { target }
+        | Effect::Sacrifice { target } | Effect::GainControl { target }
+        | Effect::Attach { target } | Effect::Fight { target }
+        | Effect::CopySpell { target } | Effect::Suspect { target }
+        | Effect::Transform { target } | Effect::Shuffle { target } => {
+            d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::DestroyAll { target } | Effect::DamageAll { amount: _, target } => {
+            if !matches!(target, TargetFilter::None) {
+                d.push(("filter".into(), fmt_target(target)));
+            }
+            if let Effect::DamageAll { amount, .. } = effect {
+                d.push(("amount".into(), fmt_damage_amount(amount)));
+            }
+        }
+        Effect::Counter { target, source_static, .. } => {
+            d.push(("target".into(), fmt_target(target)));
+            if source_static.is_some() {
+                d.push(("+ static".into(), "on source".into()));
+            }
+        }
+        Effect::Token { name, power, toughness, types, colors, keywords, count, tapped } => {
+            let mut desc = String::new();
+            match count {
+                crate::types::ability::CountValue::Fixed(n) if *n != 1 => {
+                    desc.push_str(&format!("{n}× "));
+                }
+                crate::types::ability::CountValue::Variable(v) => {
+                    desc.push_str(&format!("{v}× "));
+                }
+                _ => {}
+            }
+            desc.push_str(&format!("{}/{} ", fmt_pt(power), fmt_pt(toughness)));
+            if !colors.is_empty() {
+                let c: Vec<_> = colors.iter().map(|c| format!("{c:?}")).collect();
+                desc.push_str(&c.join("/"));
+                desc.push(' ');
+            }
+            desc.push_str(name);
+            if !types.is_empty() {
+                desc.push_str(&format!(" ({})", types.join(" ")));
+            }
+            if !keywords.is_empty() {
+                let kws: Vec<_> = keywords.iter().map(|k| keyword_label(k)).collect();
+                desc.push_str(&format!(" with {}", kws.join(", ")));
+            }
+            if *tapped { desc.push_str(" tapped"); }
+            d.push(("token".into(), desc));
+        }
+        Effect::AddCounter { counter_type, count, target }
+        | Effect::RemoveCounter { counter_type, count, target } => {
+            d.push(("counter".into(), format!("{count} {counter_type}")));
+            d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::PutCounter { counter_type, count, target } => {
+            d.push(("counter".into(), format!("{count} {counter_type}")));
+            d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::MultiplyCounter { counter_type, multiplier, target } => {
+            d.push(("counter".into(), format!("{counter_type} ×{multiplier}")));
+            d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::DiscardCard { count, target } | Effect::Discard { count, target } => {
+            if *count != 1 { d.push(("count".into(), count.to_string())); }
+            d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::Mill { count, target } => {
+            d.push(("count".into(), count.to_string()));
+            d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::Scry { count } | Effect::Surveil { count } => {
+            d.push(("count".into(), count.to_string()));
+        }
+        Effect::GainLife { amount, player } => {
+            match amount {
+                LifeAmount::Fixed(n) => d.push(("amount".into(), n.to_string())),
+                LifeAmount::TargetPower => d.push(("amount".into(), "target's power".into())),
+            }
+            if !matches!(player, crate::types::ability::GainLifePlayer::Controller) {
+                d.push(("player".into(), format!("{player:?}")));
+            }
+        }
+        Effect::LoseLife { amount } => {
+            d.push(("amount".into(), amount.to_string()));
+        }
+        Effect::ChangeZone { origin, destination, target }
+        | Effect::ChangeZoneAll { origin, destination, target } => {
+            if let Some(o) = origin { d.push(("from".into(), fmt_zone(o))); }
+            d.push(("to".into(), fmt_zone(destination)));
+            if !matches!(target, TargetFilter::None) {
+                d.push(("target".into(), fmt_target(target)));
+            }
+        }
+        Effect::Dig { count, destination } => {
+            d.push(("count".into(), count.to_string()));
+            if let Some(dest) = destination { d.push(("to".into(), fmt_zone(dest))); }
+        }
+        Effect::Bounce { target, destination } => {
+            d.push(("target".into(), fmt_target(target)));
+            if let Some(dest) = destination { d.push(("to".into(), fmt_zone(dest))); }
+        }
+        Effect::SearchLibrary { filter, count, reveal } => {
+            d.push(("find".into(), fmt_target(filter)));
+            if *count != 1 { d.push(("count".into(), count.to_string())); }
+            if *reveal { d.push(("reveal".into(), "yes".into())); }
+        }
+        Effect::Animate { power, toughness, types, target } => {
+            if let (Some(p), Some(t)) = (power, toughness) {
+                d.push(("p/t".into(), format!("{p}/{t}")));
+            }
+            if !types.is_empty() { d.push(("types".into(), types.join(" "))); }
+            d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::Choose { choice_type, persist } => {
+            d.push(("choice".into(), format!("{choice_type:?}")));
+            if *persist { d.push(("persist".into(), "yes".into())); }
+        }
+        Effect::Mana { produced, .. } => {
+            d.push(("mana".into(), format!("{produced:?}")));
+        }
+        Effect::RevealHand { target, card_filter } => {
+            d.push(("player".into(), fmt_target(target)));
+            if !matches!(card_filter, TargetFilter::Any) {
+                d.push(("card filter".into(), fmt_target(card_filter)));
+            }
+        }
+        Effect::TargetOnly { target } => {
+            d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::ChooseCard { choices, target } => {
+            if !choices.is_empty() { d.push(("choices".into(), choices.join(", "))); }
+            d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::CreateDelayedTrigger { condition, uses_tracked_set, .. } => {
+            d.push(("when".into(), format!("{condition:?}")));
+            if *uses_tracked_set { d.push(("tracked".into(), "yes".into())); }
+        }
+        Effect::GenericEffect { duration, target, .. } => {
+            if let Some(dur) = duration { d.push(("duration".into(), fmt_duration(dur))); }
+            if let Some(t) = target { d.push(("target".into(), fmt_target(t))); }
+        }
+        Effect::Unimplemented { .. } | Effect::Explore | Effect::Proliferate
+        | Effect::SolveCase | Effect::Cleanup { .. } | Effect::AddRestriction { .. } => {}
+    }
+    d
+}
+
+/// Extract detail pairs from an `AbilityDefinition` (non-effect fields).
+fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
+    let mut d = Vec::new();
+    if def.kind != AbilityKind::Spell {
+        d.push(("kind".into(), format!("{:?}", def.kind)));
+    }
+    if let Some(dur) = &def.duration {
+        d.push(("duration".into(), fmt_duration(dur)));
+    }
+    if def.optional_targeting {
+        d.push(("targeting".into(), "optional (up to)".into()));
+    }
+    if let Some(mt) = &def.multi_target {
+        d.push(("targets".into(), format!("{}-{}", mt.min, mt.max)));
+    }
+    if def.condition.is_some() {
+        d.push(("conditional".into(), "yes".into()));
+    }
+    if def.sorcery_speed {
+        d.push(("timing".into(), "sorcery speed".into()));
+    }
+    if let Some(modal) = &def.modal {
+        d.push(("modal".into(), format!("choose {}-{} of {}", modal.min_choices, modal.max_choices, modal.mode_count)));
+    }
+    d
+}
+
+/// Extract detail pairs from a `TriggerDefinition` (non-effect fields).
+fn trigger_details(trig: &TriggerDefinition) -> Vec<(String, String)> {
+    let mut d = Vec::new();
+    if let Some(vc) = &trig.valid_card {
+        d.push(("watches".into(), fmt_target(vc)));
+    }
+    if let Some(origin) = &trig.origin {
+        d.push(("from".into(), fmt_zone(origin)));
+    }
+    if let Some(dest) = &trig.destination {
+        d.push(("to".into(), fmt_zone(dest)));
+    }
+    if !trig.trigger_zones.is_empty() {
+        let zones: Vec<_> = trig.trigger_zones.iter().map(fmt_zone).collect();
+        d.push(("active in".into(), zones.join(", ")));
+    }
+    if let Some(phase) = &trig.phase {
+        d.push(("phase".into(), format!("{phase:?}")));
+    }
+    if trig.optional {
+        d.push(("optional".into(), "yes".into()));
+    }
+    if trig.combat_damage {
+        d.push(("combat damage".into(), "yes".into()));
+    }
+    if let Some(vt) = &trig.valid_target {
+        d.push(("valid target".into(), fmt_target(vt)));
+    }
+    if let Some(vs) = &trig.valid_source {
+        d.push(("valid source".into(), fmt_target(vs)));
+    }
+    if trig.constraint.is_some() {
+        d.push(("constraint".into(), "yes".into()));
+    }
+    if trig.condition.is_some() {
+        d.push(("condition".into(), "yes".into()));
+    }
+    d
+}
+
+/// Extract detail pairs from a `StaticDefinition`.
+fn static_details(stat: &StaticDefinition) -> Vec<(String, String)> {
+    let mut d = Vec::new();
+    if let Some(affected) = &stat.affected {
+        d.push(("affects".into(), fmt_target(affected)));
+    }
+    if !stat.modifications.is_empty() {
+        d.push(("modifications".into(), stat.modifications.len().to_string()));
+    }
+    if stat.condition.is_some() {
+        d.push(("conditional".into(), "yes".into()));
+    }
+    if stat.characteristic_defining {
+        d.push(("CDA".into(), "yes".into()));
+    }
+    if let Some(zone) = &stat.affected_zone {
+        d.push(("zone".into(), fmt_zone(zone)));
+    }
+    d
+}
+
 /// Extract a human-readable label for a keyword.
 fn keyword_label(kw: &Keyword) -> String {
     serde_json::to_value(kw)
@@ -114,6 +498,7 @@ pub fn build_parse_details(
             label: keyword_label(kw),
             source_text: None,
             supported: !matches!(kw, Keyword::Unknown(_)),
+            details: vec![],
             children: vec![],
         });
     }
@@ -136,6 +521,7 @@ pub fn build_parse_details(
             label: format!("{}", trig.mode),
             source_text: trig.description.clone(),
             supported: mode_supported && children.iter().all(|c| c.is_fully_supported()),
+            details: trigger_details(trig),
             children,
         });
     }
@@ -147,6 +533,7 @@ pub fn build_parse_details(
             label: format!("{}", stat.mode),
             source_text: stat.description.clone(),
             supported: static_registry.contains_key(&stat.mode),
+            details: static_details(stat),
             children: vec![],
         });
     }
@@ -175,6 +562,7 @@ pub fn build_parse_details(
             label: format!("{}", repl.event),
             source_text: repl.description.clone(),
             supported: execute_supported,
+            details: vec![],
             children,
         });
     }
@@ -196,6 +584,9 @@ fn build_ability_item(def: &AbilityDefinition) -> ParsedItem {
         Effect::Unimplemented { description, .. } => description.clone(),
         _ => None,
     });
+
+    let mut details = effect_details(&def.effect);
+    details.extend(ability_details(def));
 
     let mut children = Vec::new();
 
@@ -219,6 +610,7 @@ fn build_ability_item(def: &AbilityDefinition) -> ParsedItem {
         label,
         source_text,
         supported,
+        details,
         children,
     }
 }
@@ -238,6 +630,7 @@ fn build_cost_item(cost: &AbilityCost, items: &mut Vec<ParsedItem>) {
                 label: description.clone(),
                 source_text: Some(description.clone()),
                 supported: false,
+                details: vec![],
                 children: vec![],
             });
         }

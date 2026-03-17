@@ -70,6 +70,7 @@ interface ParsedItem {
   label: string;
   source_text?: string;
   supported: boolean;
+  details?: [string, string][];
   children?: ParsedItem[];
 }
 
@@ -604,10 +605,10 @@ function CardParseDetail({ card }: { card: CardCoverageResult }) {
                   seg.itemId ? (
                     <span
                       key={segIdx}
-                      className={`cursor-default rounded-[3px] border-b transition-colors duration-100 ${
+                      className={`cursor-pointer rounded-[3px] transition-colors duration-100 ${
                         hoveredId === seg.itemId
-                          ? `${CATEGORY_BG_COLORS[seg.item!.category]} ${CATEGORY_UNDERLINE_COLORS[seg.item!.category]}`
-                          : `border-transparent ${seg.item!.supported ? "text-slate-200" : "text-rose-300"}`
+                          ? `${CATEGORY_BG_COLORS[seg.item!.category]} border-b ${CATEGORY_UNDERLINE_COLORS[seg.item!.category]}`
+                          : `border-b border-dashed ${seg.item!.supported ? `${CATEGORY_UNDERLINE_COLORS[seg.item!.category]} text-slate-200` : "border-rose-400/50 text-rose-300"}`
                       }`}
                       onMouseEnter={() => onHover(seg.itemId)}
                       onMouseLeave={() => onHover(null)}
@@ -717,6 +718,19 @@ function ParseTreeNode({
           {item.source_text && (
             <div className="mt-0.5 font-mono text-[11px] leading-snug text-slate-500">
               &ldquo;{item.source_text}&rdquo;
+            </div>
+          )}
+          {item.details && item.details.length > 0 && (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {item.details.map(([key, value], i) => (
+                <span
+                  key={i}
+                  className={`inline-flex items-baseline gap-1 rounded-[4px] px-1.5 py-0.5 text-[10px] leading-tight ${CATEGORY_BG_COLORS[item.category]}`}
+                >
+                  <span className="text-slate-500">{key}</span>
+                  <span className={CATEGORY_COLORS[item.category]}>{value}</span>
+                </span>
+              ))}
             </div>
           )}
         </div>

@@ -352,6 +352,7 @@ mod tests {
                     ObjectId(99),
                     PlayerId(1),
                 ),
+                cast_as_adventure: false,
             },
         });
         let result = handle_activate_loyalty(&mut state, PlayerId(0), pw, 0, &mut events);

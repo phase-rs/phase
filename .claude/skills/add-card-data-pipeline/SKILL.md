@@ -5,6 +5,11 @@ description: Use when modifying the card data pipeline — adding new fields to 
 
 # Card Data Pipeline
 
+> **Hard rules — all pipeline work must respect these (see CLAUDE.md § Design Principles):**
+> 1. **CR-correctness is non-negotiable.** The pipeline is the bridge between Oracle text and engine types. Parser output must faithfully represent the Comprehensive Rules semantics of each card. If a synthesis function or parser pattern produces an incorrect typed representation, the engine will enforce wrong rules. Verify every new pattern against the relevant CR section and annotate the code.
+> 2. **Build for the class, not the card.** Every parser pattern, synthesis function, and export field must handle a *category* of cards. A synthesis function that works for one card but mishandles the next card with the same keyword pattern is a defect. Test with multiple representative cards from the class.
+> 3. **Test the building block.** Every new parser pattern needs a unit test. Every new synthesis function needs a test verifying its output. Run `cargo coverage` after changes to verify coverage improvements. Run `cargo insta review` if snapshot tests are affected.
+
 The card data pipeline converts raw MTGJSON card data into the typed `card-data.json` consumed by the WASM frontend and multiplayer server. Understanding this pipeline is essential when adding new ability types, fields, or synthesis steps — a change to the export format must propagate through all loading paths.
 
 **Before you start:** Run the pipeline end-to-end once to see what it produces: `cargo run --release --bin oracle-gen -- data --stats > /tmp/test-export.json 2>/tmp/stats.txt && head -1 /tmp/stats.txt`

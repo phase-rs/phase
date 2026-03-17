@@ -1174,6 +1174,19 @@ fn pay_and_push(
     cost: &crate::types::mana::ManaCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    pay_and_push_adventure(state, player, object_id, card_id, ability, cost, false, events)
+}
+
+fn pay_and_push_adventure(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    ability: ResolvedAbility,
+    cost: &crate::types::mana::ManaCost,
+    cast_as_adventure: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     // Check for X in cost -- if present, return ManaPayment for player input
     if let crate::types::mana::ManaCost::Cost { shards, .. } = cost {
         if shards.contains(&ManaCostShard::X) {
@@ -1214,7 +1227,11 @@ fn pay_and_push(
             id: object_id,
             source_id: object_id,
             controller: player,
-            kind: StackEntryKind::Spell { card_id, ability },
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability,
+                cast_as_adventure,
+            },
         },
         events,
     );
@@ -1622,6 +1639,7 @@ mod tests {
                     ObjectId(99),
                     PlayerId(1),
                 ),
+                cast_as_adventure: false,
             },
         });
 

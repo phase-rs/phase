@@ -272,6 +272,7 @@ mod tests {
                     ObjectId(998),
                     PlayerId(1),
                 ),
+                cast_as_adventure: false,
             },
         });
         let card_id = add_spell_to_hand(

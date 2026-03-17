@@ -234,6 +234,18 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
             }
             actions
         }
+        WaitingFor::AdventureCastChoice { player, .. } => vec![
+            candidate(
+                GameAction::ChooseAdventureFace { creature: true },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::ChooseAdventureFace { creature: false },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+        ],
         WaitingFor::GameOver { .. } => Vec::new(),
     }
 }
@@ -276,7 +288,8 @@ fn actor(state: &GameState) -> Option<PlayerId> {
         | WaitingFor::DiscardToHandSize { player, .. }
         | WaitingFor::OptionalCostChoice { player, .. }
         | WaitingFor::AbilityModeChoice { player, .. }
-        | WaitingFor::MultiTargetSelection { player, .. } => Some(*player),
+        | WaitingFor::MultiTargetSelection { player, .. }
+        | WaitingFor::AdventureCastChoice { player, .. } => Some(*player),
         WaitingFor::GameOver { .. } => None,
     }
 }

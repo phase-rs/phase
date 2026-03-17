@@ -8,14 +8,17 @@ phase.rs is a Magic: The Gathering game engine written in Rust (compiling to nat
 
 ## Design Principles — READ THIS FIRST
 
-**Above all else, this project prioritizes idiomatic Rust and clean, extensible architecture. This is non-negotiable and overrides convenience, speed-of-delivery, or "getting it working." Every code change must pass through this lens before anything else.**
+**Above all else, this project prioritizes three co-equal pillars: idiomatic Rust, composable building-block architecture, and strict fidelity to the MTG Comprehensive Rules. These are non-negotiable and override convenience, speed-of-delivery, or "getting it working." Every code change must pass through all three lenses before anything else.**
 
 - **Idiomatic Rust, always.** Use Rust's type system, ownership model, and idioms to their fullest. Prefer `enum` over stringly-typed data. Prefer exhaustive `match` over fallback defaults. Prefer trait-based polymorphism over dynamic dispatch when the type set is known. If the idiomatic path is harder, take it anyway — shortcuts compound into debt.
-- **The engine is the source of truth.** All game logic, validation, derived state, and rules live in the `engine` crate. Transport layers (WASM bridge, Tauri IPC, WebSocket server) are thin serialization boundaries — zero game logic allowed.
-- **Push logic down, not out.** If multiple consumers need the same behavior, it belongs in the engine. Never duplicate logic across adapters. When in doubt, put it in the engine.
+- **Rules-correct over convenient — the #1 hard rule.** This is an MTG rules engine — correctness to the Comprehensive Rules is a hard requirement, not a nice-to-have. Every implementation pattern MUST be verified against the relevant CR section before it is considered complete. When a rules-correct implementation is more complex than a shortcut, take the complex path. A simpler implementation that gets the rules wrong is not simpler — it is wrong. If you are unsure whether a behavior is rules-correct, look up the CR section, annotate the code, and implement what the rules say, not what seems reasonable. "It works for most cases" is not acceptable when the CR specifies exact behavior. No game logic ships without CR validation.
+- **Build for the class, not the card.** Every new enum variant, parser pattern, effect handler, or filter must handle a *category* of cards, not a single card. Before writing any logic, ask: "How many cards does this cover?" If the answer is one, you're building a special case — find the general pattern and build that instead. A one-off that works for one card but breaks for the next card with the same pattern is not a building block; it is technical debt.
+- **The engine owns all logic.** All game rules, validation, derived state, and computed values live in the `engine` crate. Transport layers (WASM bridge, Tauri IPC, WebSocket server) are thin serialization boundaries — zero game logic allowed. If multiple consumers need the same behavior, it belongs in the engine. Never duplicate logic across adapters. When in doubt, put it in the engine.
+- **The frontend is a display layer, not a logic layer.** The React client renders engine-provided state and dispatches user actions — nothing more. It must never compute, derive, transform, or re-interpret game data. If the frontend needs a value, the engine must provide it. Formatting for display (e.g., string interpolation of engine-provided fields) is acceptable; calculating, filtering, or inferring game state is not. Any "smart" frontend code is a bug — move it to the engine.
+- **Compose from building blocks.** Every new capability should be decomposed into reusable primitives that unlock future features. Before writing specific logic, ask: "What is the general pattern here?" and build that instead. Examples: `contains_possessive`/`contains_object_pronoun` for Oracle text matching, `ChangeZone` + `Shuffle` composition for compound shuffles, the sub_ability chain for multi-step effects.
 - **Extend, don't hack.** New features should slot cleanly into existing patterns (effect handlers, game modules, ability definitions). If a feature requires working around the architecture, the architecture should be extended first.
-- **Compose from building blocks.** Every new capability should be decomposed into reusable primitives that unlock future features. A one-off solution that handles one card is worse than a composable building block that handles fifty. Before writing specific logic, ask: "What is the general pattern here?" and build that instead. Examples: `contains_possessive`/`contains_object_pronoun` for Oracle text matching, `ChangeZone` + `Shuffle` composition for compound shuffles, the sub_ability chain for multi-step effects.
-- **Production quality, always.** Write code as if a professional team will audit every line. No "good enough for now." No tech debt IOUs. Every function should be clear, every abstraction should earn its keep, and every pattern should be consistent across the codebase. If you're about to write something that duplicates existing logic, stop and factor out the shared building block first.
+- **Trace before you build.** Before implementing a new pattern, trace how an existing analogous feature works end-to-end (e.g., trace `enter_tapped` before building `enter_with_counters`; trace `Changeling` before building a new CDA). This prevents reinventing existing infrastructure and ensures consistency.
+- **Production quality, always.** Write code as if a professional team will audit every line. No "good enough for now." No tech debt IOUs. Every function should be clear, every abstraction should earn its keep, and every pattern should be consistent across the codebase.
 
 ### When in Doubt
 
@@ -24,6 +27,8 @@ phase.rs is a Magic: The Gathering game engine written in Rust (compiling to nat
 - Should I add a special case? → Extend the existing pattern instead.
 - Am I solving one card or a pattern? → Build the building block, not the special case.
 - Is this the Rust way? → Check how `std` and well-known crates solve similar problems.
+- Does this match the Comprehensive Rules? → Look up the CR section, annotate the code, implement what it says.
+- Am I computing something in the frontend? → Move it to the engine and expose it in the state.
 
 ### CRITICAL: Multi-Agent Safety — Do Not Revert Other Agents' Work
 
@@ -49,9 +54,7 @@ Violating this rule causes cascading failures across the team. Treat every line 
 
 If the answer to any of these is wrong, **stop and refactor before moving on.** Do not leave architectural debt for later — fix it now, in the same change.
 
-**Rules-correct over convenient.** This is an MTG rules engine — correctness to the Comprehensive Rules is a hard requirement, not a nice-to-have. When a rules-correct implementation is more complex than a shortcut, take the complex path. A simpler implementation that gets the rules wrong is not simpler — it is wrong. If you are unsure whether a behavior is rules-correct, look up the CR section, annotate the code, and implement what the rules say, not what seems reasonable. "It works for most cases" is not acceptable when the CR specifies exact behavior.
-
-**Trace before you build.** Before implementing a new pattern, trace how an existing analogous feature works end-to-end (e.g., trace `enter_tapped` before building `enter_with_counters`; trace `Changeling` before building a new CDA). This prevents reinventing existing infrastructure and ensures consistency.
+**Test the building block, not the special case.** Tests should verify that composable primitives work correctly across their full input range — not just that one card's Oracle text parses. A parser test for "exile target creature" is more valuable than a test for a single card name. Effect handler tests should exercise the handler's parameters, not replay a single card's resolution. When a building block is extended, add tests for the new capability at the building-block level.
 
 ## Setup
 
@@ -171,6 +174,8 @@ State is filtered per-player (`filter_state_for_player`) to hide opponent's hand
 
 ### React Frontend (`client/src/`)
 
+**The frontend is strictly a display layer.** It receives fully-resolved state from the engine and renders it. It must not compute derived game values, filter game objects by rules logic, or infer anything the engine should provide. If a component needs data the engine doesn't currently expose, the fix is to add it to the engine's output — not to compute it client-side.
+
 - **`adapter/`** — Transport-agnostic `EngineAdapter` interface with four implementations:
   - `WasmAdapter` — Direct WASM calls (browser/PWA), serialized through async queue
   - `TauriAdapter` — Tauri IPC (desktop), dynamically imported to avoid bundling in web
@@ -252,6 +257,8 @@ These patterns must be used on first write, not fixed after clippy complains:
 4. Do not annotate boilerplate, serialization, or plumbing — only code that implements a game rule.
 
 **Lookup:** `grep -r "CR 704" crates/engine/` finds all state-based action implementations. `grep -rn "CR \d" crates/engine/` lists all rule annotations. The `mtg-rules-auditor` agent can produce a full coverage report on demand.
+
+### General Conventions
 
 - Rust: `cargo fmt` + `clippy -D warnings` enforced in CI
 - TypeScript: ESLint with `@typescript-eslint/recommended`, unused vars prefixed with `_`

@@ -803,6 +803,7 @@ mod tests {
                     spell_id,
                     PlayerId(0),
                 ),
+                cast_as_adventure: false,
             },
         });
         let filter = TargetFilter::Typed(TypedFilter::card());
@@ -848,6 +849,7 @@ mod tests {
                     spell_id,
                     PlayerId(1),
                 ),
+                cast_as_adventure: false,
             },
         });
         let spell_obj = state.objects.get_mut(&spell_id).unwrap();

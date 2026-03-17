@@ -14,7 +14,7 @@ A player can sit down, pick a Standard-legal deck, and play a full game of Magic
 
 <!-- Shipped and confirmed valuable. -->
 
-- ✓ Load card data from MTGJSON (MIT) metadata + typed JSON ability definitions — v1.0, v1.2
+- ✓ Load card data from MTGJSON (MIT) metadata + Oracle text parser for typed ability definitions — v1.0, v1.2
 - ✓ Full MTG turn structure: untap, upkeep, draw, main, combat, main2, end — v1.0
 - ✓ Priority system with the stack (LIFO spell/ability resolution) — v1.0
 - ✓ State-based actions (0 life, 0 toughness, legend rule, etc.) — v1.0
@@ -51,11 +51,11 @@ A player can sit down, pick a Standard-legal deck, and play a full game of Magic
 
 <!-- Current scope. Building toward these. -->
 
-- [x] MTGJSON integration — pull card metadata from MTGJSON's MIT-licensed JSON — v1.2
-- [x] Own ability format — typed JSON schema for abilities/triggers/effects mapping to Rust types — v1.2
-- [x] Card format migration — convert 78 curated Standard cards to new format — v1.2
+- [x] MTGJSON integration — card metadata from MTGJSON's MIT-licensed JSON — v1.2
+- [x] Oracle text parser — typed ability definitions parsed from Oracle text at build time — v1.2
 - [x] License change — relicense as MIT/Apache-2.0 dual license — v1.2
-- [ ] Test suite — comprehensive rules correctness tests using XMage MIT scenarios as reference
+- [ ] Test suite — comprehensive rules correctness tests
+- [ ] N-player + Commander — extend engine to support 2-6 players with format-awareness — v1.2
 
 ### Out of Scope
 
@@ -63,7 +63,7 @@ A player can sit down, pick a Standard-legal deck, and play a full game of Magic
 
 - Draft/Sealed game modes — significant additional UI/logic, defer to v2
 - Quest/Campaign mode — narrative framework not core to gameplay
-- Commander/multiplayer formats — adds multiplayer complexity beyond 1v1
+- Commander/multiplayer formats — in progress (Phase 29)
 - Commercial distribution — open-source project, Scryfall images require non-commercial use
 - Direct OOP class hierarchy port — functional architecture chosen over mirroring traditional MTG engine OOP patterns
 - React Native — web technologies (CSS Grid, transforms, Framer Motion) better suited for card game layouts
@@ -109,11 +109,11 @@ Shipped v1.1 with ~51,500 LOC (33.4k Rust + 18.1k TypeScript) across 5 Rust crat
 | Functional architecture over OOP port | Discriminated unions and pattern matching over class hierarchies | ✓ Good — Rust enums + pattern matching produced clean, extensible code |
 | Rust engine + React frontend | Native performance for AI/rules engine, web flexibility for card game UI | ✓ Good — WASM binary only 19 KB, AI search fast in native Rust |
 | Tauri desktop + PWA/WASM tablet | Same engine compiles to native and WASM, thin adapter layer | ✓ Good — EngineAdapter abstraction works cleanly across all 3 transports |
-| MTGJSON + typed ability JSON | MIT-licensed data source, typed schema with schemars validation | ✓ Good — clean licensing, typed definitions, JSON pipeline |
+| MTGJSON + Oracle text parser | MIT-licensed card metadata, Oracle text parsed into typed Rust enums at build time | ✓ Good — clean licensing, fully typed ability definitions, no hand-authored JSON |
 | Standard format first | Popular format, moderate complexity, 2 years of sets | ✓ Good — 100% Standard coverage achieved in v1.1 |
 | Scryfall for card images | Free for non-commercial, comprehensive API | ✓ Good — dual-size (art_crop + normal) with IndexedDB caching |
 | Event bus for triggers (not hardcoded) | 137 trigger types need extensible architecture | ✓ Good — per-call registry build is cheap and avoids static patterns |
-| Tree/DAG effect representation | Conditional ability chains need branching | ✓ Good — SVar resolution with sub-ability chaining handles complex cards |
+| Tree/DAG effect representation | Conditional ability chains need branching | ✓ Good — typed SubAbility chaining handles complex cards |
 | HashMap<ObjectId, GameObject> central store | Zones as Vec<ObjectId> with central lookup | ✓ Good — simple, fast, avoids ownership complexity |
 | ChaCha20Rng for cross-platform determinism | StdRng not guaranteed same across platforms | ✓ Good — WASM and native produce identical sequences from same seed |
 | fn pointer effect/trigger/static registries | Built per apply() call, cheap HashMap | ✓ Good — simple, no trait objects or global state |
@@ -129,14 +129,14 @@ Shipped v1.1 with ~51,500 LOC (33.4k Rust + 18.1k TypeScript) across 5 Rust crat
 
 ## Current Milestone: v1.2 Migrate Data Source & Add Tests
 
-**Goal:** Migrate to MTGJSON (MIT-licensed) + custom ability format, add comprehensive test coverage, and relicense as MIT/Apache-2.0.
+**Goal:** Migrate to MTGJSON (MIT-licensed) with Oracle text parser for ability definitions, add comprehensive test coverage, relicense as MIT/Apache-2.0, and extend to N-player/Commander.
 
 **Target features:**
 - MTGJSON integration for card metadata
-- Own typed JSON ability/trigger/effect schema
-- Migration of 78 curated Standard cards
+- Oracle text parser producing fully typed Rust ability definitions at build time
 - MIT/Apache-2.0 relicensing
-- Comprehensive rules correctness test suite (XMage MIT reference)
+- N-player engine support (2-6 players) with Commander, FFA, 2HG formats
+- Composable building-block mechanics for broader card coverage
 
 ---
-*Last updated: 2026-03-11 after v1.2 relicensing complete*
+*Last updated: 2026-03-16 after research file cleanup*
