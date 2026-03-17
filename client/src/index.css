@@ -204,3 +204,49 @@ body {
     --art-crop-base: clamp(5.25rem, 7.75vw, 7.25rem);
   }
 }
+
+/* Debug layout bounds — toggled via Ctrl+Shift+D */
+.debug-bounds [data-debug-label] {
+  outline: 2px solid color-mix(in srgb, currentColor 60%, transparent);
+  outline-offset: -1px;
+  position: relative;
+}
+
+.debug-bounds [data-debug-label]::after {
+  content: attr(data-debug-label);
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 9999;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: monospace;
+  line-height: 1.4;
+  color: #000;
+  pointer-events: none;
+}
+
+/* Distinct colors per area */
+.debug-bounds [data-debug-label="Opp Hand"]          { outline-color: #f97316; }
+.debug-bounds [data-debug-label="Opp Hand"]::after   { background: #f97316; }
+.debug-bounds [data-debug-label="Opp HUD"]           { outline-color: #eab308; }
+.debug-bounds [data-debug-label="Opp HUD"]::after    { background: #eab308; }
+.debug-bounds [data-debug-label="Battlefield"]        { outline-color: #22c55e; }
+.debug-bounds [data-debug-label="Battlefield"]::after { background: #22c55e; }
+.debug-bounds [data-debug-label="Opp Creatures"]      { outline-color: #ef4444; }
+.debug-bounds [data-debug-label="Opp Creatures"]::after { background: #ef4444; }
+.debug-bounds [data-debug-label="Creatures"]          { outline-color: #ef4444; }
+.debug-bounds [data-debug-label="Creatures"]::after   { background: #ef4444; }
+.debug-bounds [data-debug-label="Middle Row"]         { outline-color: #a855f7; }
+.debug-bounds [data-debug-label="Middle Row"]::after  { background: #a855f7; }
+.debug-bounds [data-debug-label="Lands"]              { outline-color: #14b8a6; }
+.debug-bounds [data-debug-label="Lands"]::after       { background: #14b8a6; }
+.debug-bounds [data-debug-label="Support"]            { outline-color: #ec4899; }
+.debug-bounds [data-debug-label="Support"]::after     { background: #ec4899; }
+.debug-bounds [data-debug-label="Player HUD"]         { outline-color: #3b82f6; }
+.debug-bounds [data-debug-label="Player HUD"]::after  { background: #3b82f6; }
+.debug-bounds [data-debug-label="Player Hand"]        { outline-color: #06b6d4; }
+.debug-bounds [data-debug-label="Player Hand"]::after { background: #06b6d4; }
+.debug-bounds [data-debug-label="Player Zones"]       { outline-color: #f59e0b; }
+.debug-bounds [data-debug-label="Player Zones"]::after { background: #f59e0b; }

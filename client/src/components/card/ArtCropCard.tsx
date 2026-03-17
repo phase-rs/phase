@@ -42,7 +42,8 @@ export function ArtCropCard({ objectId }: ArtCropCardProps) {
   const frameGradient = getFrameGradient(displayColors);
   const lightText = frameNeedsLightText(displayColors);
   const ptDisplay = computePTDisplay(obj);
-  const counters = Object.entries(obj.counters);
+  // Filter out Loyalty counters — shown separately as the loyalty badge
+  const counters = Object.entries(obj.counters).filter(([type]) => type !== "Loyalty");
   const devotionValue = obj.devotion ?? null;
 
   // --- Dynamic Text Sizing Logic ---
@@ -171,9 +172,9 @@ export function ArtCropCard({ objectId }: ArtCropCardProps) {
         </div>
       )}
 
-      {/* Floating loyalty */}
+      {/* Floating loyalty — shifts left when P/T is also visible (animated planeswalker-creature) */}
       {obj.loyalty != null && (
-        <div className="absolute -bottom-[3px] -right-[3px] z-20">
+        <div className={`absolute -bottom-[3px] z-20 ${ptDisplay ? "-left-[3px]" : "-right-[3px]"}`}>
           <div className="rounded-full bg-gradient-to-b from-[#e2e4e6] to-[#888c91] p-[2px] shadow-[inset_0_1px_1px_rgba(255,255,255,0.9),inset_0_-1px_1px_rgba(0,0,0,0.5),0_2px_4px_rgba(0,0,0,0.8)] border border-black/80">
             <div className="bg-gray-800 border-[1px] border-amber-600/50 rounded-full px-2.5 py-[1px] min-w-[2.75rem] flex justify-center items-center shadow-[inset_0_2px_4px_rgba(0,0,0,0.8),inset_0_1px_2px_rgba(0,0,0,0.9),0_1px_0_rgba(255,255,255,0.2)]">
               <span className={`font-bold text-amber-400 leading-none ${loyaltyClass}`}>

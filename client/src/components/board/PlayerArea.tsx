@@ -105,11 +105,13 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
     </div>
   ) : null;
   const middleRow = (
-    <div className="flex min-h-0 items-start justify-between gap-4">
+    <div className="flex min-h-0 items-start justify-between gap-4" data-debug-label="Middle Row">
       <div
         className="z-10 flex min-w-0 basis-0 flex-1 flex-wrap items-start justify-start gap-2"
         style={LAND_COL_STYLE}
+        data-debug-label="Lands"
       >
+        <CommandZone playerId={playerId} />
         {partitioned?.lands.map((g) => (
           <GroupedPermanentDisplay key={g.ids[0]} group={g} />
         ))}
@@ -118,6 +120,7 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
       <div
         className="z-10 flex min-w-0 basis-0 flex-1 justify-end"
         style={OTHER_COL_STYLE}
+        data-debug-label="Support"
       >
         <BattlefieldRow
           groups={partitioned?.support ?? []}
@@ -130,7 +133,7 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
 
   return (
     <div
-      className={`relative flex min-h-0 flex-1 ${isEliminated ? "opacity-40 grayscale" : ""}`}
+      className={`relative flex min-h-0 flex-1 overflow-visible ${isEliminated ? "opacity-40 grayscale" : ""}`}
       data-testid={`player-area-${playerId}`}
     >
       <div
@@ -143,17 +146,21 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
         {isMirrored ? (
           <>
             <BattlefieldRow groups={partitioned?.other ?? []} rowType="other" />
-            {middleRow}
-            <div className="mt-auto">
+            <div className="shrink-0">
+              {middleRow}
+            </div>
+            <div className="min-h-0 flex-1" data-debug-label="Opp Creatures">
               <BattlefieldRow groups={creatures} rowType="creatures" />
             </div>
           </>
         ) : (
           <>
-            <div>
+            <div className="min-h-0 flex-1" data-debug-label="Creatures">
               <BattlefieldRow groups={creatures} rowType="creatures" />
             </div>
-            {middleRow}
+            <div className="shrink-0">
+              {middleRow}
+            </div>
             <BattlefieldRow groups={partitioned?.other ?? []} rowType="other" />
           </>
         )}
@@ -166,10 +173,7 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
           <CommanderDamage playerId={playerId} />
         </div>
       )}
-      {/* Emblem display (shown in any format when emblems exist) */}
-      <div className="absolute left-2 bottom-2 z-20">
-        <CommandZone playerId={playerId} />
-      </div>
+      {/* Emblem display — inline in the land column, see middleRow */}
       {/* Eliminated badge */}
       {isEliminated && (
         <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">

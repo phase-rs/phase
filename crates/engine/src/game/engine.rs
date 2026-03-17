@@ -1764,7 +1764,7 @@ fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEvent>) {
         return;
     }
 
-    // Return exiled cards to the battlefield
+    // CR 610.3a: Return exiled cards to their previous zone
     for link in &to_return {
         // Only return if the card is still in exile
         let still_in_exile = state
@@ -1773,7 +1773,7 @@ fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEvent>) {
             .map(|obj| obj.zone == Zone::Exile)
             .unwrap_or(false);
         if still_in_exile {
-            zones::move_to_zone(state, link.exiled_id, Zone::Battlefield, events);
+            zones::move_to_zone(state, link.exiled_id, link.return_zone, events);
         }
     }
 
@@ -4021,10 +4021,11 @@ mod exile_return_tests {
             Zone::Exile,
         );
 
-        // Set up the exile link
+        // Set up the exile link (exiled from battlefield)
         state.exile_links.push(ExileLink {
             exiled_id,
             source_id,
+            return_zone: Zone::Battlefield,
         });
 
         // Simulate events where source leaves the battlefield
@@ -4037,7 +4038,7 @@ mod exile_return_tests {
         // Call check_exile_returns
         check_exile_returns(&mut state, &mut events.clone());
 
-        // Exiled card should return to battlefield
+        // CR 610.3a: Exiled card should return to its previous zone (battlefield)
         assert!(
             state.battlefield.contains(&exiled_id),
             "Exiled card should return to battlefield"
@@ -4052,6 +4053,63 @@ mod exile_return_tests {
             state.exile_links.is_empty(),
             "ExileLink should be cleaned up"
         );
+    }
+
+    /// CR 610.3a: When a card exiled from hand (e.g., Deep-Cavern Bat) is returned,
+    /// it goes back to hand, not to the battlefield.
+    #[test]
+    fn exile_return_to_hand_when_exiled_from_hand() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Deep-Cavern Bat".to_string(),
+            Zone::Battlefield,
+        );
+
+        let exiled_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Exiled From Hand".to_string(),
+            Zone::Exile,
+        );
+
+        // Exiled from hand → should return to hand
+        state.exile_links.push(ExileLink {
+            exiled_id,
+            source_id,
+            return_zone: Zone::Hand,
+        });
+
+        let events = vec![crate::types::events::GameEvent::ZoneChanged {
+            object_id: source_id,
+            from: Zone::Battlefield,
+            to: Zone::Graveyard,
+        }];
+
+        check_exile_returns(&mut state, &mut events.clone());
+
+        // CR 610.3a: Card returns to hand, NOT battlefield
+        assert!(
+            state.players[1].hand.contains(&exiled_id),
+            "Card exiled from hand should return to hand"
+        );
+        assert!(
+            !state.battlefield.contains(&exiled_id),
+            "Card exiled from hand should NOT go to battlefield"
+        );
+        assert!(
+            !state.exile.contains(&exiled_id),
+            "Card should no longer be in exile"
+        );
+        assert!(state.exile_links.is_empty());
     }
 
     #[test]
@@ -4078,6 +4136,7 @@ mod exile_return_tests {
         state.exile_links.push(ExileLink {
             exiled_id,
             source_id,
+            return_zone: Zone::Battlefield,
         });
 
         let events = vec![crate::types::events::GameEvent::ZoneChanged {
@@ -4134,10 +4193,12 @@ mod exile_return_tests {
         state.exile_links.push(ExileLink {
             exiled_id,
             source_id,
+            return_zone: Zone::Battlefield,
         });
         state.exile_links.push(ExileLink {
             exiled_id: other_exiled,
             source_id: other_source,
+            return_zone: Zone::Battlefield,
         });
 
         let events = vec![crate::types::events::GameEvent::ZoneChanged {

@@ -301,6 +301,7 @@ function GamePageContent({
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
   const objects = gameState?.objects;
   const [showAiHand, setShowAiHand] = useState(false);
+  const [showDebugBounds, setShowDebugBounds] = useState(false);
   const [viewingZone, setViewingZone] = useState<{
     zone: "graveyard" | "exile";
     playerId: number;
@@ -352,6 +353,18 @@ function GamePageContent({
     : null;
 
   useKeyboardShortcuts();
+
+  // Toggle debug layout bounds with Ctrl+Shift+D
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.shiftKey && e.key === "D") {
+        e.preventDefault();
+        setShowDebugBounds((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   // Sync card size preference to CSS custom properties
   const cardSize = usePreferencesStore((s) => s.cardSize);
@@ -433,7 +446,7 @@ function GamePageContent({
   return (
     <div
       ref={containerRef}
-      className="relative h-[100dvh] w-full overflow-hidden bg-gray-950"
+      className={`relative h-[100dvh] w-full overflow-hidden bg-gray-950${showDebugBounds ? " debug-bounds" : ""}`}
       style={gamePageStyle}
     >
       <BattlefieldBackground />
@@ -466,33 +479,38 @@ function GamePageContent({
         style={{ paddingTop: "var(--game-top-overlay-offset, 0px)" }}
       >
         {/* Opponent hand at top */}
-        <div className="relative z-20 shrink-0">
+        <div className="relative z-20 shrink-0" data-debug-label="Opp Hand">
           <OpponentHand showCards={showAiHand} />
         </div>
 
         {/* Opponent avatar centered below their hand */}
-        <div className="relative z-20 shrink-0">
+        <div className="relative z-20 shrink-0" data-debug-label="Opp HUD">
           <OpponentHud
             opponentName={isOnlineMode ? opponentDisplayName : undefined}
           />
         </div>
 
         {/* Battlefield */}
-        <div className="relative z-10 min-h-0 flex-1">
+        <div className="relative z-10 flex min-h-0 flex-1 flex-col overflow-hidden" data-debug-label="Battlefield">
           <GameBoard />
         </div>
 
         {/* Player avatar centered with flanking phase indicators */}
-        <PlayerHud />
+        <div data-debug-label="Player HUD">
+          <PlayerHud />
+        </div>
 
         {/* Player hand at bottom */}
-        <PlayerHand />
+        <div data-debug-label="Player Hand">
+          <PlayerHand />
+        </div>
       </div>
 
       {/* Player zones — bottom-left: graveyard pile, library pile, exile badge */}
       <div
         className="fixed z-30 flex items-end gap-3 px-1 py-1"
         style={playerZoneRailStyle}
+        data-debug-label="Player Zones"
       >
         <GraveyardPile
           playerId={playerId}

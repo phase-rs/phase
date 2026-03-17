@@ -66,7 +66,9 @@ pub fn resolve(
                             {
                                 // Damage to planeswalker removes loyalty counters
                                 let current = obj.loyalty.unwrap_or(0);
-                                obj.loyalty = Some(current.saturating_sub(amount));
+                                let new_loyalty = current.saturating_sub(amount);
+                                obj.loyalty = Some(new_loyalty);
+                                obj.counters.insert(crate::game::game_object::CounterType::Loyalty, new_loyalty);
                             } else {
                                 obj.damage_marked += amount;
                             }

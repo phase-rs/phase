@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AdditionalCost,
-    CastingRestriction, Comparator, Effect, ModalChoice, ModalSelectionConstraint, QuantityExpr,
+    CastingRestriction, Comparator, Effect, ModalChoice, ModalSelectionConstraint,
     ReplacementDefinition, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
     TypedFilter,
 };
@@ -1964,6 +1964,7 @@ fn normalize_self_refs_for_static(text: &str, card_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::QuantityExpr;
     use crate::types::mana::ManaCost;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
@@ -3176,4 +3177,5 @@ mod tests {
         // Mandatory without "or" currently falls through (no choice to present)
         assert!(result.is_none());
     }
+
 }

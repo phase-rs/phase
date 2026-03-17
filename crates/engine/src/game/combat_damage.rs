@@ -427,7 +427,9 @@ fn apply_combat_damage(
                                 {
                                     // Damage to planeswalker removes loyalty
                                     let current = target_obj.loyalty.unwrap_or(0);
-                                    target_obj.loyalty = Some(current.saturating_sub(amount));
+                                    let new_loyalty = current.saturating_sub(amount);
+                                    target_obj.loyalty = Some(new_loyalty);
+                                    target_obj.counters.insert(crate::game::game_object::CounterType::Loyalty, new_loyalty);
                                 } else {
                                     target_obj.damage_marked += amount;
                                     if source_has_deathtouch {

@@ -18,7 +18,6 @@ use super::ability_utils::{
     validate_selected_targets, TargetSelectionAdvance,
 };
 use super::engine::EngineError;
-use super::mana_abilities;
 use super::mana_payment;
 use super::mana_sources::{self, ManaSourceOption};
 use super::restrictions;

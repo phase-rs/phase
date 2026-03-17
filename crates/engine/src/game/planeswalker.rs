@@ -6,6 +6,7 @@ use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 
 use super::engine::EngineError;
+use super::game_object::CounterType;
 use super::stack;
 
 use crate::types::ability::ResolvedAbility;
@@ -95,9 +96,12 @@ pub fn handle_activate_loyalty(
     let resolved = build_pw_resolved(ability_def, pw_id, player);
 
     // Adjust loyalty
+    // CR 306.5d: Loyalty abilities add/remove loyalty counters as a cost.
+    // Sync both obj.loyalty (display) and obj.counters[Loyalty] (used by HasCounters condition).
     let new_loyalty = (current_loyalty + loyalty_cost).max(0) as u32;
     let obj = state.objects.get_mut(&pw_id).unwrap();
     obj.loyalty = Some(new_loyalty);
+    obj.counters.insert(CounterType::Loyalty, new_loyalty);
     obj.loyalty_activated_this_turn = true;
 
     // Emit counter events

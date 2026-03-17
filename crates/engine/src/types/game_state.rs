@@ -17,6 +17,7 @@ use super::match_config::{MatchConfig, MatchPhase, MatchScore};
 use super::phase::Phase;
 use super::player::{Player, PlayerId};
 use super::proposed_event::{ProposedEvent, ReplacementId};
+use super::zones::Zone;
 
 use crate::game::combat::CombatState;
 use crate::game::deck_loading::DeckEntry;
@@ -42,6 +43,8 @@ pub enum DayNight {
 pub struct ExileLink {
     pub exiled_id: ObjectId,
     pub source_id: ObjectId,
+    /// CR 610.3a: The zone the exiled object occupied before being exiled.
+    pub return_zone: Zone,
 }
 
 /// Tracks commander damage dealt to a specific player by a specific commander.
@@ -1074,6 +1077,7 @@ mod tests {
         let link = ExileLink {
             exiled_id: ObjectId(10),
             source_id: ObjectId(5),
+            return_zone: Zone::Battlefield,
         };
         let json = serde_json::to_string(&link).unwrap();
         let deserialized: ExileLink = serde_json::from_str(&json).unwrap();
@@ -1137,6 +1141,7 @@ mod tests {
         state.exile_links.push(ExileLink {
             exiled_id: ObjectId(10),
             source_id: ObjectId(5),
+            return_zone: Zone::Battlefield,
         });
         state.pending_trigger = Some(PendingTrigger {
             source_id: ObjectId(5),

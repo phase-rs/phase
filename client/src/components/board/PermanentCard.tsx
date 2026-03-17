@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef } from "react";
 
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -60,45 +60,8 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
 
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
   const cardRef = useRef<HTMLDivElement | null>(null);
-  const [baseSize, setBaseSize] = useState({ width: 0, height: 0 });
-
-  useEffect(() => {
-    const element = cardRef.current;
-    if (!element) return;
-
-    const updateSize = () => {
-      setBaseSize({
-        width: element.offsetWidth,
-        height: element.offsetHeight,
-      });
-    };
-
-    updateSize();
-
-    if (typeof ResizeObserver === "undefined") {
-      return undefined;
-    }
-
-    const resizeObserver = new ResizeObserver(updateSize);
-    resizeObserver.observe(element);
-
-    return () => {
-      resizeObserver.disconnect();
-    };
-  }, [battlefieldCardDisplay, objectId]);
 
   const tapAngle = tapRotation === "mtga" ? 17 : 90;
-  const isRotated = obj ? (obj.tapped || false) : false;
-
-  const tapLiftCompensation = useMemo(() => {
-    if (!isRotated || baseSize.width === 0 || baseSize.height === 0) return 0;
-
-    const radians = Math.abs(tapAngle) * Math.PI / 180;
-    const rotatedHeight =
-      (baseSize.height * Math.cos(radians)) + (baseSize.width * Math.sin(radians));
-
-    return Math.max(0, (rotatedHeight - baseSize.height) / 2);
-  }, [baseSize.height, baseSize.width, isRotated, tapAngle]);
 
   const allExileLinks = useGameStore((s) => s.gameState?.exile_links);
   const exileLinks = useMemo(
@@ -182,7 +145,8 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
     ? "0 0 6px 1px rgba(255,255,255,0.3)"
     : undefined;
 
-  const counters = Object.entries(obj.counters);
+  // Filter out Loyalty counters — shown separately as the loyalty badge
+  const counters = Object.entries(obj.counters).filter(([type]) => type !== "Loyalty");
 
   const validAttackerIds =
     waitingFor?.type === "DeclareAttackers"
@@ -248,7 +212,7 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
       animate={{
         rotate: isRotatedFull ? tapAngle : 0,
         opacity: tapOpacity,
-        y: attackSlide + tapLiftCompensation,
+        y: attackSlide,
       }}
       transition={{ type: "spring", stiffness: 300, damping: 20 }}
       onClick={handleClick}

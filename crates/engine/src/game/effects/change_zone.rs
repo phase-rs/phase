@@ -51,9 +51,11 @@ pub fn resolve(
                             if let Some(crate::types::ability::Duration::UntilHostLeavesPlay) =
                                 &ability.duration
                             {
+                                // CR 610.3a: Track origin zone so the card returns there
                                 state.exile_links.push(crate::types::game_state::ExileLink {
                                     exiled_id: object_id,
                                     source_id: ability.source_id,
+                                    return_zone: from_zone,
                                 });
                             }
                         }
@@ -238,6 +240,8 @@ mod tests {
         assert_eq!(state.exile_links.len(), 1);
         assert_eq!(state.exile_links[0].exiled_id, target_id);
         assert_eq!(state.exile_links[0].source_id, source_id);
+        // CR 610.3a: return_zone should be the zone before exile
+        assert_eq!(state.exile_links[0].return_zone, Zone::Battlefield);
     }
 
     #[test]

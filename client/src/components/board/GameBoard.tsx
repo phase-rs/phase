@@ -79,7 +79,7 @@ export function GameBoard() {
   ) : null;
 
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col overflow-visible">
+    <div className="relative flex min-h-0 flex-1 flex-col">
       {/* Opponent area */}
       {is1v1 ? (
         // 1v1: single opponent in focused mode (identical to original layout)

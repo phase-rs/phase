@@ -1,5 +1,5 @@
 use crate::types::ability::{
-    AbilityDefinition, QuantityExpr, ReplacementDefinition, StaticDefinition, TriggerDefinition,
+    AbilityDefinition, ReplacementDefinition, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
@@ -253,6 +253,7 @@ pub fn manifest(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::QuantityExpr;
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaColor;
 

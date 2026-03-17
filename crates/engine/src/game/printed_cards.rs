@@ -5,7 +5,7 @@ use crate::types::game_state::GameState;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 
 use super::derived::derive_display_state;
-use super::game_object::{BackFaceData, GameObject};
+use super::game_object::{BackFaceData, CounterType, GameObject};
 use super::layers::evaluate_layers;
 
 pub fn printed_ref_from_face(card_face: &CardFace) -> Option<PrintedCardRef> {
@@ -35,6 +35,10 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     obj.power = power;
     obj.toughness = toughness;
     obj.loyalty = loyalty;
+    // CR 306.5b: Sync loyalty counters so HasCounters condition works for animation statics.
+    if let Some(loy) = loyalty {
+        obj.counters.insert(CounterType::Loyalty, loy);
+    }
     obj.card_types = card_face.card_type.clone();
     obj.mana_cost = card_face.mana_cost.clone();
     obj.keywords = keywords.clone();

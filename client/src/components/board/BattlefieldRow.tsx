@@ -17,18 +17,18 @@ const ROW_JUSTIFY: Record<string, string> = {
 
 function getCreatureScale(groupCount: number, display: "art_crop" | "full_card"): number {
   if (display === "art_crop") {
-    if (groupCount <= 1) return 1.45;
-    if (groupCount === 2) return 1.35;
-    if (groupCount === 3) return 1.25;
-    if (groupCount === 4) return 1.15;
-    if (groupCount <= 6) return 1.06;
+    if (groupCount <= 1) return 1.25;
+    if (groupCount === 2) return 1.18;
+    if (groupCount === 3) return 1.12;
+    if (groupCount === 4) return 1.06;
+    if (groupCount <= 6) return 1.03;
     return 1;
   }
 
-  if (groupCount <= 1) return 1.18;
-  if (groupCount === 2) return 1.14;
-  if (groupCount === 3) return 1.1;
-  if (groupCount === 4) return 1.05;
+  if (groupCount <= 1) return 1.12;
+  if (groupCount === 2) return 1.08;
+  if (groupCount === 3) return 1.05;
+  if (groupCount === 4) return 1.02;
   return 1;
 }
 
