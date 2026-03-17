@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, HashSet};
 
 use crate::game::casting;
+use crate::game::combat;
 use crate::game::combat::AttackTarget;
 use crate::game::deck_loading::DeckEntry;
+use crate::game::keywords;
 use crate::game::mana_sources;
 use crate::types::ability::ChoiceType;
 use crate::types::ability::TargetRef;
@@ -246,6 +248,30 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        WaitingFor::NinjutsuActivation {
+            player,
+            ninjutsu_cards,
+            unblocked_attackers,
+        } => {
+            let mut actions = vec![candidate(
+                GameAction::PassPriority,
+                TacticalClass::Pass,
+                Some(*player),
+            )];
+            for &card_id in ninjutsu_cards {
+                for &attacker_id in unblocked_attackers {
+                    actions.push(candidate(
+                        GameAction::ActivateNinjutsu {
+                            ninjutsu_card_id: card_id,
+                            attacker_to_return: attacker_id,
+                        },
+                        TacticalClass::Ability,
+                        Some(*player),
+                    ));
+                }
+            }
+            actions
+        }
         WaitingFor::GameOver { .. } => Vec::new(),
     }
 }
@@ -289,7 +315,8 @@ fn actor(state: &GameState) -> Option<PlayerId> {
         | WaitingFor::OptionalCostChoice { player, .. }
         | WaitingFor::AbilityModeChoice { player, .. }
         | WaitingFor::MultiTargetSelection { player, .. }
-        | WaitingFor::AdventureCastChoice { player, .. } => Some(*player),
+        | WaitingFor::AdventureCastChoice { player, .. }
+        | WaitingFor::NinjutsuActivation { player, .. } => Some(*player),
         WaitingFor::GameOver { .. } => None,
     }
 }
@@ -360,6 +387,26 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                         ));
                     }
                 }
+            }
+        }
+    }
+
+    // CR 702.49a: Offer Ninjutsu activations during declare blockers step
+    if matches!(state.phase, Phase::DeclareBlockers | Phase::CombatDamage)
+        && state.active_player == player
+    {
+        let ninjutsu_cards = keywords::ninjutsu_cards_in_hand(state, player);
+        let unblocked = combat::unblocked_attackers(state);
+        for card_id in &ninjutsu_cards {
+            for &attacker_id in &unblocked {
+                actions.push(candidate(
+                    GameAction::ActivateNinjutsu {
+                        ninjutsu_card_id: *card_id,
+                        attacker_to_return: attacker_id,
+                    },
+                    TacticalClass::Ability,
+                    Some(player),
+                ));
             }
         }
     }
@@ -994,7 +1041,7 @@ mod tests {
             let obj = state.objects.get_mut(&source).unwrap();
             obj.card_types.core_types.push(CoreType::Artifact);
             obj.abilities.push(
-                AbilityDefinition::new(AbilityKind::Activated, Effect::Draw { count: 1 })
+                AbilityDefinition::new(AbilityKind::Activated, Effect::Draw { count: QuantityExpr::Fixed { value: 1 } })
                     .activation_restrictions(vec![ActivationRestriction::OnlyOnceEachTurn]),
             );
         }

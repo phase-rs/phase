@@ -437,6 +437,25 @@ pub fn declare_blockers(
     Ok(())
 }
 
+/// CR 702.49a: Returns ObjectIds of attackers that have no blockers assigned.
+/// Used by Ninjutsu to determine which attackers can be returned to hand.
+pub fn unblocked_attackers(state: &GameState) -> Vec<ObjectId> {
+    let Some(combat) = &state.combat else {
+        return Vec::new();
+    };
+    combat
+        .attackers
+        .iter()
+        .filter(|a| {
+            combat
+                .blocker_assignments
+                .get(&a.object_id)
+                .map_or(true, |blockers| blockers.is_empty())
+        })
+        .map(|a| a.object_id)
+        .collect()
+}
+
 /// Check if a creature has summoning sickness (entered this turn without Haste).
 pub fn has_summoning_sickness(obj: &GameObject, turn_number: u32) -> bool {
     if !obj.card_types.core_types.contains(&CoreType::Creature) {

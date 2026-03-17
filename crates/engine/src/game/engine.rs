@@ -452,6 +452,57 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             super::transform::transform_permanent(state, object_id, &mut events)?;
             WaitingFor::Priority { player: p }
         }
+        // CR 702.49a: Ninjutsu activation during combat
+        (
+            WaitingFor::Priority { player },
+            GameAction::ActivateNinjutsu {
+                ninjutsu_card_id,
+                attacker_to_return,
+            },
+        ) => {
+            let p = *player;
+            // Validate timing: must be in declare blockers step or later in combat
+            if !matches!(
+                state.phase,
+                Phase::DeclareBlockers | Phase::CombatDamage
+            ) {
+                return Err(EngineError::ActionNotAllowed(
+                    "Ninjutsu can only be activated during the declare blockers step".to_string(),
+                ));
+            }
+            super::keywords::activate_ninjutsu(
+                state,
+                p,
+                ninjutsu_card_id,
+                attacker_to_return,
+                &mut events,
+            )
+            .map_err(EngineError::InvalidAction)?;
+            WaitingFor::Priority { player: p }
+        }
+        // Also handle Ninjutsu from WaitingFor::NinjutsuActivation
+        (
+            WaitingFor::NinjutsuActivation { player, .. },
+            GameAction::ActivateNinjutsu {
+                ninjutsu_card_id,
+                attacker_to_return,
+            },
+        ) => {
+            let p = *player;
+            super::keywords::activate_ninjutsu(
+                state,
+                p,
+                ninjutsu_card_id,
+                attacker_to_return,
+                &mut events,
+            )
+            .map_err(EngineError::InvalidAction)?;
+            WaitingFor::Priority { player: p }
+        }
+        // Player can pass on Ninjutsu activation
+        (WaitingFor::NinjutsuActivation { player, .. }, GameAction::PassPriority) => {
+            WaitingFor::Priority { player: *player }
+        }
         // Scry: player selects cards to put on TOP (in order), rest go to bottom
         (
             WaitingFor::ScryChoice { player, cards },
@@ -1749,7 +1800,7 @@ mod tests {
 
     /// Create a simple test ability definition.
     fn make_draw_ability(num_cards: u32) -> AbilityDefinition {
-        AbilityDefinition::new(AbilityKind::Spell, Effect::Draw { count: num_cards })
+        AbilityDefinition::new(AbilityKind::Spell, Effect::Draw { count: QuantityExpr::Fixed { value: num_cards as i32 } })
     }
 
     /// Create a DealDamage ability for testing.
@@ -3671,7 +3722,7 @@ mod trigger_target_tests {
             mode_abilities: vec![AbilityDefinition::new(
                 AbilityKind::Database,
                 Effect::DealDamage {
-                    amount: DamageAmount::Fixed(1),
+                    amount: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Player,
                 },
             )],
@@ -3718,7 +3769,7 @@ mod trigger_target_tests {
             condition: None,
             ability: crate::types::ability::ResolvedAbility::new(
                 Effect::DealDamage {
-                    amount: DamageAmount::Fixed(1),
+                    amount: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Player,
                 },
                 vec![],
@@ -3727,7 +3778,7 @@ mod trigger_target_tests {
             )
             .sub_ability(crate::types::ability::ResolvedAbility::new(
                 Effect::DealDamage {
-                    amount: DamageAmount::Fixed(1),
+                    amount: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Player,
                 },
                 vec![],
@@ -3827,7 +3878,7 @@ mod trigger_target_tests {
             condition: None,
             ability: crate::types::ability::ResolvedAbility::new(
                 Effect::DealDamage {
-                    amount: DamageAmount::Fixed(1),
+                    amount: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Player,
                 },
                 vec![],
@@ -3836,7 +3887,7 @@ mod trigger_target_tests {
             )
             .sub_ability(crate::types::ability::ResolvedAbility::new(
                 Effect::DealDamage {
-                    amount: DamageAmount::Fixed(1),
+                    amount: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Player,
                 },
                 vec![],
@@ -3908,7 +3959,7 @@ mod trigger_target_tests {
             mode_abilities: vec![AbilityDefinition::new(
                 AbilityKind::Database,
                 Effect::DealDamage {
-                    amount: DamageAmount::Fixed(1),
+                    amount: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Typed(
                         TypedFilter::default().controller(ControllerRef::Opponent),
                     ),
@@ -4157,7 +4208,7 @@ mod phase_trigger_regression_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Activated,
                         Effect::GainLife {
-                            amount: LifeAmount::Fixed(1),
+                            amount: QuantityExpr::Fixed { value: 1 },
                             player: GainLifePlayer::Controller,
                         },
                     ))
@@ -4250,7 +4301,7 @@ mod phase_trigger_regression_tests {
             obj.card_types.core_types.push(CoreType::Creature);
             obj.trigger_definitions
                 .push(TriggerDefinition::new(TriggerMode::SpellCast).execute(
-                    AbilityDefinition::new(AbilityKind::Database, Effect::Draw { count: 1 }),
+                    AbilityDefinition::new(AbilityKind::Database, Effect::Draw { count: QuantityExpr::Fixed { value: 1 } }),
                 ));
         }
 
@@ -4369,7 +4420,7 @@ mod phase_trigger_regression_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
                         Effect::GainLife {
-                            amount: LifeAmount::Fixed(1),
+                            amount: QuantityExpr::Fixed { value: 1 },
                             player: GainLifePlayer::Controller,
                         },
                     )),
@@ -4533,7 +4584,7 @@ mod phase_trigger_regression_tests {
         )
         .sub_ability(AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::LoseLife { amount: 2 },
+            Effect::LoseLife { amount: QuantityExpr::Fixed { value: 2 } },
         ));
 
         let waiting_for =

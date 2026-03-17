@@ -132,6 +132,36 @@ fn synthesize_equip(face: &mut CardFace) {
     face.abilities.extend(equip_abilities);
 }
 
+/// CR 702.49a: Synthesize a marker activated ability from Keyword::Ninjutsu so that
+/// legal_actions can enumerate it. The actual activation is handled by the
+/// GameAction::ActivateNinjutsu path, not by the normal activated ability resolution.
+fn synthesize_ninjutsu(face: &mut CardFace) {
+    let ninjutsu_abilities: Vec<AbilityDefinition> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| {
+            if let Keyword::Ninjutsu(cost) = kw {
+                Some(
+                    AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::Unimplemented {
+                            name: "Ninjutsu".to_string(),
+                            description: None,
+                        },
+                    )
+                    .cost(AbilityCost::Ninjutsu {
+                        mana_cost: cost.clone(),
+                    }),
+                )
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    face.abilities.extend(ninjutsu_abilities);
+}
+
 /// If the card has Changeling as a printed keyword, emit a characteristic-defining
 /// static ability that grants all creature types (expanded at runtime via
 /// `GameState::all_creature_types`).
@@ -251,6 +281,7 @@ fn build_oracle_face(mtgjson: &AtomicCard, oracle_id: Option<String>) -> CardFac
 
     synthesize_basic_land_mana(&mut face);
     synthesize_equip(&mut face);
+    synthesize_ninjutsu(&mut face);
     synthesize_changeling_cda(&mut face);
     synthesize_kicker(&mut face);
     face

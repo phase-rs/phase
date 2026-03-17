@@ -44,7 +44,8 @@ pub fn acting_player(waiting_for: &WaitingFor) -> Option<PlayerId> {
         | WaitingFor::OptionalCostChoice { player, .. }
         | WaitingFor::AbilityModeChoice { player, .. }
         | WaitingFor::MultiTargetSelection { player, .. }
-        | WaitingFor::AdventureCastChoice { player, .. } => Some(*player),
+        | WaitingFor::AdventureCastChoice { player, .. }
+        | WaitingFor::NinjutsuActivation { player, .. } => Some(*player),
         WaitingFor::GameOver { .. } => None,
     }
 }

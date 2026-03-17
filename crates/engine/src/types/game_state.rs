@@ -277,6 +277,15 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ability_cost: Option<AbilityCost>,
     },
+    /// CR 702.49a: Player may activate Ninjutsu from hand during declare blockers step.
+    /// Presented when the attacking player has Ninjutsu cards in hand and unblocked attackers.
+    NinjutsuActivation {
+        player: PlayerId,
+        /// Cards in hand with the Ninjutsu keyword.
+        ninjutsu_cards: Vec<CardId>,
+        /// Unblocked attackers that can be returned to hand.
+        unblocked_attackers: Vec<ObjectId>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1097,7 +1106,7 @@ mod tests {
             controller: PlayerId(0),
             condition: None,
             ability: ResolvedAbility::new(
-                Effect::Draw { count: 1 },
+                Effect::Draw { count: QuantityExpr::Fixed { value: 1 } },
                 vec![],
                 ObjectId(5),
                 PlayerId(0),
@@ -1126,7 +1135,7 @@ mod tests {
             controller: PlayerId(0),
             condition: None,
             ability: ResolvedAbility::new(
-                Effect::Draw { count: 1 },
+                Effect::Draw { count: QuantityExpr::Fixed { value: 1 } },
                 vec![],
                 ObjectId(5),
                 PlayerId(0),

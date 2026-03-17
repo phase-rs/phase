@@ -78,6 +78,11 @@ pub enum GameAction {
     ChooseAdventureFace {
         creature: bool,
     },
+    /// CR 702.49a: Activate Ninjutsu from hand during declare blockers step.
+    ActivateNinjutsu {
+        ninjutsu_card_id: CardId,
+        attacker_to_return: ObjectId,
+    },
 }
 
 #[cfg(test)]
