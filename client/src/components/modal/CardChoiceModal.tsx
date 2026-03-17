@@ -54,6 +54,9 @@ export function CardChoiceModal() {
     case "DiscardToHandSize":
       if (waitingFor.data.player !== playerId) return null;
       return <DiscardModal data={waitingFor.data} />;
+    case "DiscardForCost":
+      if (waitingFor.data.player !== playerId) return null;
+      return <DiscardModal data={waitingFor.data} title="Discard as additional cost" />;
     default:
       return null;
   }
@@ -474,7 +477,7 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
 
 // ── Discard to Hand Size Modal ───────────────────────────────────────────────
 
-function DiscardModal({ data }: { data: DiscardToHandSize["data"] }) {
+function DiscardModal({ data, title = "Discard" }: { data: DiscardToHandSize["data"]; title?: string }) {
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const inspectObject = useUiStore((s) => s.inspectObject);
@@ -508,7 +511,7 @@ function DiscardModal({ data }: { data: DiscardToHandSize["data"] }) {
 
   return (
     <ChoiceOverlay
-      title="Discard"
+      title={title}
       subtitle={`Choose ${data.count} card${data.count > 1 ? "s" : ""} to discard`}
     >
       <div className={CHOICE_CARD_ROW_CLASS}>

@@ -289,6 +289,17 @@ pub enum WaitingFor {
         /// Unblocked attackers that can be returned to hand.
         unblocked_attackers: Vec<ObjectId>,
     },
+    /// CR 601.2b: Player must choose a card to discard as part of an additional casting cost.
+    /// After selection, the card is discarded and casting continues via `pay_and_push`.
+    DiscardForCost {
+        player: PlayerId,
+        /// How many cards to discard.
+        count: usize,
+        /// Eligible cards in hand (excludes the spell being cast).
+        cards: Vec<ObjectId>,
+        /// The pending cast to resume after the discard is complete.
+        pending_cast: Box<PendingCast>,
+    },
 }
 
 impl WaitingFor {
@@ -319,7 +330,8 @@ impl WaitingFor {
             | WaitingFor::AbilityModeChoice { player, .. }
             | WaitingFor::MultiTargetSelection { player, .. }
             | WaitingFor::AdventureCastChoice { player, .. }
-            | WaitingFor::NinjutsuActivation { player, .. } => Some(*player),
+            | WaitingFor::NinjutsuActivation { player, .. }
+            | WaitingFor::DiscardForCost { player, .. } => Some(*player),
             WaitingFor::GameOver { .. } => None,
         }
     }
@@ -1053,8 +1065,30 @@ mod tests {
                 ability_index: Some(0),
                 ability_cost: None,
             },
+            WaitingFor::DiscardForCost {
+                player: PlayerId(0),
+                count: 1,
+                cards: vec![ObjectId(1)],
+                pending_cast: Box::new(PendingCast {
+                    object_id: ObjectId(1),
+                    card_id: CardId(1),
+                    ability: ResolvedAbility::new(
+                        crate::types::ability::Effect::Unimplemented {
+                            name: "Dummy".to_string(),
+                            description: None,
+                        },
+                        vec![],
+                        ObjectId(1),
+                        PlayerId(0),
+                    ),
+                    cost: ManaCost::NoCost,
+                    activation_cost: None,
+                    activation_ability_index: None,
+                    target_constraints: vec![],
+                }),
+            },
         ];
-        assert_eq!(variants.len(), 17);
+        assert_eq!(variants.len(), 18);
     }
 
     #[test]

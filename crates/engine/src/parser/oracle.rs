@@ -1597,6 +1597,7 @@ fn make_unimplemented(line: &str) -> AbilityDefinition {
 /// Recognized patterns:
 /// - "you may blight N" → `Optional(Blight { count: N })`
 /// - "blight N or pay {M}" → `Choice(Blight { count: N }, Mana { cost: M })`
+/// - General "X or Y" → `Choice(X, Y)` using `parse_single_cost` for each fragment
 fn parse_additional_cost_line(lower: &str, _raw: &str) -> Option<AdditionalCost> {
     // Pattern: "you may blight N" → Optional
     if let Some(pos) = lower.find("you may blight ") {
@@ -1605,7 +1606,7 @@ fn parse_additional_cost_line(lower: &str, _raw: &str) -> Option<AdditionalCost>
         return Some(AdditionalCost::Optional(AbilityCost::Blight { count }));
     }
 
-    // Pattern: "blight N or pay {M}" → Choice
+    // Pattern: "blight N or pay {M}" → Choice (specific pattern with case-sensitive mana)
     if let Some(pos) = lower.find("blight ") {
         let after_blight = &lower[pos + "blight ".len()..];
         let count = parse_blight_count(after_blight);
@@ -1619,6 +1620,25 @@ fn parse_additional_cost_line(lower: &str, _raw: &str) -> Option<AdditionalCost>
                     AbilityCost::Mana { cost: mana_cost },
                 ));
             }
+        }
+    }
+
+    // General "X or Y" choice pattern using parse_single_cost for each fragment.
+    // Strip the standard additional-cost prefix and trailing period.
+    let body = lower
+        .strip_prefix("as an additional cost to cast this spell, ")
+        .unwrap_or(lower)
+        .trim_end_matches('.');
+
+    if let Some((left, right)) = body.split_once(" or ") {
+        let cost_a = super::oracle_cost::parse_single_cost(left.trim());
+        let cost_b = super::oracle_cost::parse_single_cost(right.trim());
+        // Both fragments must parse to known costs — Unimplemented means the split was wrong
+        // (e.g. "sacrifice an artifact or creature" splits incorrectly on " or ").
+        if !matches!(cost_a, AbilityCost::Unimplemented { .. })
+            && !matches!(cost_b, AbilityCost::Unimplemented { .. })
+        {
+            return Some(AdditionalCost::Choice(cost_a, cost_b));
         }
     }
 
@@ -3181,6 +3201,48 @@ mod tests {
         let raw = "As an additional cost to cast this spell, blight 2.";
         let result = parse_additional_cost_line(lower, raw);
         // Mandatory without "or" currently falls through (no choice to present)
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_additional_cost_discard_or_pay_life() {
+        let lower = "as an additional cost to cast this spell, discard a card or pay 3 life.";
+        let raw = "As an additional cost to cast this spell, discard a card or pay 3 life.";
+        let result = parse_additional_cost_line(lower, raw);
+        match result {
+            Some(AdditionalCost::Choice(
+                AbilityCost::Discard {
+                    count: 1,
+                    random: false,
+                    ..
+                },
+                AbilityCost::PayLife { amount: 3 },
+            )) => {}
+            other => panic!("Expected Choice(Discard, PayLife), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_additional_cost_sacrifice_or_mana() {
+        let lower = "as an additional cost to cast this spell, sacrifice a creature or pay {2}.";
+        let raw = "As an additional cost to cast this spell, sacrifice a creature or pay {2}.";
+        let result = parse_additional_cost_line(lower, raw);
+        match result {
+            Some(AdditionalCost::Choice(
+                AbilityCost::Sacrifice { .. },
+                AbilityCost::Mana { .. },
+            )) => {}
+            other => panic!("Expected Choice(Sacrifice, Mana), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_additional_cost_sacrifice_compound_type_not_choice() {
+        // "sacrifice an artifact or creature" is a single sacrifice cost, not a choice
+        let lower = "as an additional cost to cast this spell, sacrifice an artifact or creature.";
+        let raw = "As an additional cost to cast this spell, sacrifice an artifact or creature.";
+        let result = parse_additional_cost_line(lower, raw);
+        // Should return None — "creature" alone is Unimplemented, rejecting the split
         assert!(result.is_none());
     }
 }

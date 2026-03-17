@@ -841,6 +841,25 @@ fn lower_subject_predicate_ast(
                     target: subject.affected,
                 });
             }
+            // CR 701.16a: "<player> reveals the top [N] card(s) of their library"
+            let pred_lower = text.to_lowercase();
+            if pred_lower.starts_with("reveal ")
+                && pred_lower.contains("top")
+                && pred_lower.contains("library")
+            {
+                let count = if let Some(pos) = pred_lower.find("top ") {
+                    let after_top = &pred_lower[pos + 4..];
+                    super::oracle_util::parse_number(after_top)
+                        .map(|(n, _)| n)
+                        .unwrap_or(1)
+                } else {
+                    1
+                };
+                return parsed_clause(Effect::RevealTop {
+                    player: subject.affected,
+                    count,
+                });
+            }
             lower_imperative_clause(&text)
         }
     }
@@ -2228,9 +2247,9 @@ fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
             target: TargetFilter::Any,
             card_filter: TargetFilter::Any,
         },
-        HandRevealImperativeAst::RevealTop { count } => Effect::Dig {
+        HandRevealImperativeAst::RevealTop { count } => Effect::RevealTop {
+            player: TargetFilter::Controller,
             count,
-            destination: None,
         },
     }
 }
@@ -3273,6 +3292,13 @@ fn parse_subject_application(subject: &str) -> Option<SubjectApplication> {
     if lower == "that player" {
         return Some(SubjectApplication {
             affected: TargetFilter::Player,
+            target: None,
+        });
+    }
+    // CR 506.3d: "defending player" as subject — resolves from combat state.
+    if lower == "defending player" {
+        return Some(SubjectApplication {
+            affected: TargetFilter::DefendingPlayer,
             target: None,
         });
     }
@@ -4568,6 +4594,7 @@ fn deconjugate_verb(text: &str) -> String {
 fn starts_with_subject_prefix(lower: &str) -> bool {
     [
         "all ",
+        "defending player ",
         "each opponent ",
         "each player ",
         "enchanted ",
@@ -5178,7 +5205,19 @@ mod tests {
     #[test]
     fn effect_reveal_top_cards() {
         let e = parse_effect("Reveal the top 3 cards of your library");
-        assert!(matches!(e, Effect::Dig { count: 3, .. }));
+        assert!(matches!(e, Effect::RevealTop { count: 3, .. }));
+    }
+
+    #[test]
+    fn effect_defending_player_reveals_top_card() {
+        let e = parse_effect("defending player reveals the top card of their library");
+        match e {
+            Effect::RevealTop { player, count } => {
+                assert_eq!(player, TargetFilter::DefendingPlayer);
+                assert_eq!(count, 1);
+            }
+            other => panic!("Expected RevealTop, got {:?}", other),
+        }
     }
 
     #[test]

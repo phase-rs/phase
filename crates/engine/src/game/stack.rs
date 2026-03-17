@@ -189,9 +189,7 @@ fn is_permanent_type(state: &GameState, object_id: ObjectId) -> bool {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{
-        Effect, QuantityExpr, ResolvedAbility, TargetRef, TypedFilter,
-    };
+    use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetRef, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;

@@ -109,6 +109,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::TriggeringSpellOwner => "triggering spell's owner".into(),
         TargetFilter::TriggeringPlayer => "triggering player".into(),
         TargetFilter::TriggeringSource => "triggering source".into(),
+        TargetFilter::DefendingPlayer => "defending player".into(),
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
         TargetFilter::TrackedSet { id } => format!("tracked set #{}", id.0),
@@ -482,6 +483,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             if !matches!(card_filter, TargetFilter::Any) {
                 d.push(("card filter".into(), fmt_target(card_filter)));
             }
+        }
+        Effect::RevealTop { player, count } => {
+            d.push(("player".into(), fmt_target(player)));
+            d.push(("count".into(), count.to_string()));
         }
         Effect::TargetOnly { target } => {
             d.push(("target".into(), fmt_target(target)));

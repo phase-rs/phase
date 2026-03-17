@@ -49,12 +49,12 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
             candidate(
                 GameAction::MulliganDecision { keep: true },
                 TacticalClass::Selection,
-                actor(state),
+                state.waiting_for.acting_player(),
             ),
             candidate(
                 GameAction::MulliganDecision { keep: false },
                 TacticalClass::Selection,
-                actor(state),
+                state.waiting_for.acting_player(),
             ),
         ],
         WaitingFor::MulliganBottomCards { player, count } => {
@@ -213,6 +213,21 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        WaitingFor::DiscardForCost {
+            player,
+            count,
+            cards,
+            ..
+        } => combinations(cards, *count)
+            .into_iter()
+            .map(|combo| {
+                candidate(
+                    GameAction::SelectCards { cards: combo },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::MultiTargetSelection {
             player,
             legal_targets,
@@ -287,37 +302,6 @@ fn candidate(
             actor,
             tactical_class,
         },
-    }
-}
-
-fn actor(state: &GameState) -> Option<PlayerId> {
-    match &state.waiting_for {
-        WaitingFor::Priority { player }
-        | WaitingFor::MulliganDecision { player, .. }
-        | WaitingFor::MulliganBottomCards { player, .. }
-        | WaitingFor::ManaPayment { player }
-        | WaitingFor::TargetSelection { player, .. }
-        | WaitingFor::DeclareAttackers { player, .. }
-        | WaitingFor::DeclareBlockers { player, .. }
-        | WaitingFor::ReplacementChoice { player, .. }
-        | WaitingFor::EquipTarget { player, .. }
-        | WaitingFor::ScryChoice { player, .. }
-        | WaitingFor::DigChoice { player, .. }
-        | WaitingFor::SurveilChoice { player, .. }
-        | WaitingFor::RevealChoice { player, .. }
-        | WaitingFor::SearchChoice { player, .. }
-        | WaitingFor::TriggerTargetSelection { player, .. }
-        | WaitingFor::BetweenGamesSideboard { player, .. }
-        | WaitingFor::BetweenGamesChoosePlayDraw { player, .. }
-        | WaitingFor::NamedChoice { player, .. }
-        | WaitingFor::ModeChoice { player, .. }
-        | WaitingFor::DiscardToHandSize { player, .. }
-        | WaitingFor::OptionalCostChoice { player, .. }
-        | WaitingFor::AbilityModeChoice { player, .. }
-        | WaitingFor::MultiTargetSelection { player, .. }
-        | WaitingFor::AdventureCastChoice { player, .. }
-        | WaitingFor::NinjutsuActivation { player, .. } => Some(*player),
-        WaitingFor::GameOver { .. } => None,
     }
 }
 

@@ -154,7 +154,7 @@ pub fn check_fizzle(original_targets: &[TargetRef], legal_targets: &[TargetRef])
 pub fn resolve_event_context_target(
     state: &GameState,
     filter: &TargetFilter,
-    _source_id: ObjectId,
+    source_id: ObjectId,
 ) -> Option<TargetRef> {
     match filter {
         TargetFilter::TriggeringSpellController => {
@@ -178,6 +178,12 @@ pub fn resolve_event_context_target(
             let event = state.current_trigger_event.as_ref()?;
             let obj_id = extract_source_from_event(event)?;
             Some(TargetRef::Object(obj_id))
+        }
+        // CR 506.3d: "defending player" — look up from combat state using the source creature.
+        TargetFilter::DefendingPlayer => {
+            let combat = state.combat.as_ref()?;
+            let attacker_info = combat.attackers.iter().find(|a| a.object_id == source_id)?;
+            Some(TargetRef::Player(attacker_info.defending_player))
         }
         _ => None,
     }

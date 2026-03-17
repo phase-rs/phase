@@ -4,6 +4,7 @@ import { motion } from "framer-motion";
 
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { dispatchAction } from "../../game/dispatch.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import type { StackEntry as StackEntryType } from "../../adapter/types.ts";
@@ -20,6 +21,7 @@ interface StackEntryProps {
 export function StackEntry({ entry, index, isTop, isPending, cardSize, style }: StackEntryProps) {
   const playerId = usePlayerId();
   const objects = useGameStore((s) => s.gameState?.objects);
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
   const inspectObject = useUiStore((s) => s.inspectObject);
 
   const sourceObj = objects?.[entry.source_id];
@@ -32,6 +34,30 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style }: 
     entry.kind.type === "ActivatedAbility" ? "Activated" : "Triggered";
   const controllerLabel = entry.controller === playerId ? "You" : "Opp";
 
+  // Targeting: check if this stack entry is a valid target for the current selection
+  const isHumanTargetSelection =
+    (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
+    && waitingFor.data.player === playerId;
+  const currentTargetRefs = isHumanTargetSelection
+    ? waitingFor.data.selection.current_legal_targets
+    : [];
+  const isValidTarget = isHumanTargetSelection && currentTargetRefs.some(
+    (target) => "Object" in target && target.Object === entry.id,
+  );
+
+  // Ring style: targeting glow overrides default ring
+  const ringClass = isValidTarget
+    ? "ring-2 ring-amber-400/60 shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]"
+    : "ring-1 ring-white/10";
+
+  const handleClick = () => {
+    if (isValidTarget) {
+      dispatchAction({ type: "ChooseTarget", data: { target: { Object: entry.id } } });
+    } else {
+      inspectObject(entry.source_id);
+    }
+  };
+
   return (
     <motion.div
       layout
@@ -41,13 +67,14 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style }: 
       transition={{ delay: index * 0.03 }}
       style={style}
       className="relative cursor-pointer"
+      onClick={handleClick}
       onMouseEnter={() => inspectObject(entry.source_id)}
       onMouseLeave={() => inspectObject(null)}
     >
       {/* Card image with explicit inline dimensions (Tailwind can't handle dynamic values) */}
       <div
         style={{ width: cardSize.width, height: cardSize.height }}
-        className="overflow-hidden rounded-lg shadow-lg ring-1 ring-white/10"
+        className={`overflow-hidden rounded-lg shadow-lg ${ringClass}`}
       >
         {isLoading || !src ? (
           <div

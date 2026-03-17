@@ -29,6 +29,10 @@ pub fn parse_event_context_ref(text: &str) -> Option<TargetFilter> {
     if lower == "that permanent" || lower.starts_with("that permanent") {
         return Some(TargetFilter::TriggeringSource);
     }
+    // CR 506.3d: "defending player" — the player being attacked by the source creature.
+    if lower == "defending player" || lower.starts_with("defending player") {
+        return Some(TargetFilter::DefendingPlayer);
+    }
 
     None
 }
@@ -1162,6 +1166,18 @@ mod tests {
     fn parse_event_context_returns_none_for_non_event() {
         assert_eq!(parse_event_context_ref("target creature"), None);
         assert_eq!(parse_event_context_ref("any target"), None);
+    }
+
+    #[test]
+    fn parse_event_context_defending_player() {
+        let filter = parse_event_context_ref("defending player");
+        assert_eq!(filter, Some(TargetFilter::DefendingPlayer));
+    }
+
+    #[test]
+    fn parse_event_context_defending_player_prefix() {
+        let filter = parse_event_context_ref("defending player reveals the top card");
+        assert_eq!(filter, Some(TargetFilter::DefendingPlayer));
     }
 
     #[test]

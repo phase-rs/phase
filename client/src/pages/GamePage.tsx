@@ -1342,6 +1342,9 @@ function OptionalCostModal() {
 
   const { cost } = waitingFor.data;
   const { title, payLabel, skipLabel } = additionalCostChoices(cost);
+  // Mandatory Choice costs (e.g. "discard a card or pay 3 life") require picking one —
+  // no cancel/close allowed. Optional costs allow canceling the cast.
+  const isMandatoryChoice = cost.type === "Choice";
 
   return (
     <ChoiceModal
@@ -1353,7 +1356,7 @@ function OptionalCostModal() {
       onChoose={(id) =>
         dispatch({ type: "DecideOptionalCost", data: { pay: id === "pay" } })
       }
-      onClose={() => dispatch({ type: "CancelCast" })}
+      onClose={isMandatoryChoice ? undefined : () => dispatch({ type: "CancelCast" })}
     />
   );
 }

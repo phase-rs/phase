@@ -85,7 +85,9 @@ pub enum GameAction {
         attacker_to_return: ObjectId,
     },
     /// Set auto-pass mode for the acting player (CR 117.4).
-    SetAutoPass { mode: AutoPassRequest },
+    SetAutoPass {
+        mode: AutoPassRequest,
+    },
     /// Cancel any active auto-pass for the acting player.
     CancelAutoPass,
 }

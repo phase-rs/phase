@@ -566,6 +566,7 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
                     | TargetFilter::TriggeringSpellOwner
                     | TargetFilter::TriggeringPlayer
                     | TargetFilter::TriggeringSource
+                    | TargetFilter::DefendingPlayer
                     | TargetFilter::ParentTarget
             ) {
                 None
@@ -586,6 +587,7 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
                     | TargetFilter::TriggeringSpellOwner
                     | TargetFilter::TriggeringPlayer
                     | TargetFilter::TriggeringSource
+                    | TargetFilter::DefendingPlayer
                     | TargetFilter::ParentTarget
             ) {
                 None
@@ -1067,11 +1069,12 @@ fn target_filter_matches_object(
             .tracked_object_sets
             .get(id)
             .is_some_and(|set| set.contains(&object_id)),
-        // CR 603.7c: Event-context references resolve to players, not objects.
+        // CR 603.7c / CR 506.3d: Event-context references resolve to players, not objects.
         TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
-        | TargetFilter::TriggeringSource => false,
+        | TargetFilter::TriggeringSource
+        | TargetFilter::DefendingPlayer => false,
         // ParentTarget resolves to parent ability's targets at resolution time.
         TargetFilter::ParentTarget => false,
     }

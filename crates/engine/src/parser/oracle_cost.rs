@@ -58,7 +58,7 @@ fn split_cost_parts(text: &str) -> Vec<&str> {
     parts
 }
 
-fn parse_single_cost(text: &str) -> AbilityCost {
+pub fn parse_single_cost(text: &str) -> AbilityCost {
     let text = text.trim();
     let lower = text.to_lowercase();
 
@@ -213,6 +213,18 @@ fn parse_single_cost(text: &str) -> AbilityCost {
             let (filter, remainder) = parse_target(&target_text);
             if remainder.trim().is_empty() {
                 return AbilityCost::TapCreatures { count, filter };
+            }
+        }
+    }
+
+    // "Pay {N}{W}" — mana cost with "pay" prefix
+    if let Some(mana_text) = lower.strip_prefix("pay ") {
+        let mana_text = mana_text.trim();
+        if mana_text.starts_with('{') {
+            if let Some((cost, rest)) = parse_mana_symbols(mana_text) {
+                if rest.trim().is_empty() {
+                    return AbilityCost::Mana { cost };
+                }
             }
         }
     }

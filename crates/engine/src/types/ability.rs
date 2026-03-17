@@ -720,6 +720,9 @@ pub enum TargetFilter {
     /// (e.g., "tap target creature and put a stun counter on it").
     /// At resolution time, the sub_ability chain inherits parent targets automatically.
     ParentTarget,
+    /// CR 506.3d: Resolves to the player being attacked by the source creature.
+    /// Looked up from `state.combat.attackers` using the trigger's source_id.
+    DefendingPlayer,
 }
 
 /// A dynamic game quantity — a runtime lookup into the game state.
@@ -1288,6 +1291,15 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         card_filter: TargetFilter,
     },
+    /// CR 701.16a: Reveal the top N card(s) of a player's library.
+    RevealTop {
+        /// The player whose library to reveal from.
+        #[serde(default = "default_target_filter_any")]
+        player: TargetFilter,
+        /// Number of cards to reveal.
+        #[serde(default = "default_one")]
+        count: u32,
+    },
     /// No-op effect that only establishes targeting for sub-abilities in the chain.
     /// Produced by Oracle text like "Choose target creature" where the sentence exists
     /// solely to designate a target referenced by subsequent sentences via "that creature".
@@ -1441,6 +1453,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Transform { .. } => "Transform",
         Effect::SearchLibrary { .. } => "SearchLibrary",
         Effect::RevealHand { .. } => "RevealHand",
+        Effect::RevealTop { .. } => "RevealTop",
         Effect::TargetOnly { .. } => "TargetOnly",
         Effect::Choose { .. } => "Choose",
         Effect::Suspect { .. } => "Suspect",
@@ -1565,6 +1578,7 @@ impl From<&Effect> for EffectKind {
             Effect::Transform { .. } => EffectKind::Transform,
             Effect::SearchLibrary { .. } => EffectKind::SearchLibrary,
             Effect::RevealHand { .. } => EffectKind::Reveal,
+            Effect::RevealTop { .. } => EffectKind::Reveal,
             Effect::TargetOnly { .. } => EffectKind::TargetOnly,
             Effect::Choose { .. } => EffectKind::Choose,
             Effect::Suspect { .. } => EffectKind::Suspect,

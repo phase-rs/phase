@@ -31,6 +31,7 @@ pub mod mill;
 pub mod proliferate;
 pub mod pump;
 pub mod reveal_hand;
+pub mod reveal_top;
 pub mod sacrifice;
 pub mod scry;
 pub mod search_library;
@@ -91,6 +92,7 @@ pub fn resolve_effect(
         Effect::Transform { .. } => transform_effect::resolve(state, ability, events),
         Effect::SearchLibrary { .. } => search_library::resolve(state, ability, events),
         Effect::RevealHand { .. } => reveal_hand::resolve(state, ability, events),
+        Effect::RevealTop { .. } => reveal_top::resolve(state, ability, events),
         Effect::TargetOnly { .. } => Ok(()), // no-op: targeting is established at cast time
         Effect::Choose { .. } => choose::resolve(state, ability, events),
         Effect::Suspect { .. } => suspect::resolve(state, ability, events),
@@ -150,6 +152,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&crate::types::abilit
         | Effect::Attach { target, .. }
         | Effect::Transform { target, .. }
         | Effect::CopySpell { target, .. } => target,
+        Effect::RevealTop { player, .. } => player,
         _ => return None,
     };
 
@@ -159,6 +162,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&crate::types::abilit
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSource
+            | TargetFilter::DefendingPlayer
     ) {
         Some(filter)
     } else {

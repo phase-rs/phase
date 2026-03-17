@@ -340,6 +340,35 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             casting::handle_cancel_cast(state, pending_cast, &mut events);
             WaitingFor::Priority { player: *player }
         }
+        // CR 601.2b: Player selected cards to discard as additional casting cost.
+        (
+            WaitingFor::DiscardForCost {
+                player,
+                count,
+                cards: legal_cards,
+                pending_cast,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => casting::handle_discard_for_cost(
+            state,
+            *player,
+            *pending_cast.clone(),
+            *count,
+            legal_cards,
+            &chosen,
+            &mut events,
+        )?,
+        (
+            WaitingFor::DiscardForCost {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => {
+            casting::handle_cancel_cast(state, pending_cast, &mut events);
+            WaitingFor::Priority { player: *player }
+        }
         (WaitingFor::ManaPayment { player }, GameAction::CancelCast) => {
             WaitingFor::Priority { player: *player }
         }
@@ -1398,8 +1427,7 @@ fn handle_empty_attackers(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    super::combat::declare_attackers(state, &[], events)
-        .map_err(EngineError::InvalidAction)?;
+    super::combat::declare_attackers(state, &[], events).map_err(EngineError::InvalidAction)?;
 
     // Process triggers for AttackersDeclared (even with no attackers)
     triggers::process_triggers(state, events);
@@ -1422,8 +1450,7 @@ fn handle_empty_blockers(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    super::combat::declare_blockers(state, &[], events)
-        .map_err(EngineError::InvalidAction)?;
+    super::combat::declare_blockers(state, &[], events).map_err(EngineError::InvalidAction)?;
 
     triggers::process_triggers(state, events);
     if let Some(wf) = begin_pending_trigger_target_selection(state)? {

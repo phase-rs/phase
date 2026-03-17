@@ -235,10 +235,6 @@ impl<'a> PlannerServices<'a> {
         evaluate_for_planner(state, self.ai_player, &self.config.weights)
     }
 
-    pub fn acting_player(&self, state: &GameState) -> Option<PlayerId> {
-        acting_player(state)
-    }
-
     pub fn tactical_score(
         &self,
         state: &GameState,
@@ -291,7 +287,7 @@ impl<'a> PlannerServices<'a> {
     pub fn planner_evaluation(&self, state: &GameState) -> PlannerEvaluation {
         let ctx = self.build_decision_context(state);
         let candidates = self.validate_candidates(state, ctx.candidates.clone());
-        let scoring_player = self.acting_player(state).unwrap_or(self.ai_player);
+        let scoring_player = state.waiting_for.acting_player().unwrap_or(self.ai_player);
         PlannerEvaluation {
             priors: self.policy_priors(state, &ctx, &candidates, scoring_player),
             value: self.evaluate_for_planner(state),
@@ -340,7 +336,7 @@ impl<'a> PlannerServices<'a> {
             return self.reduce_utility(state, &evaluation.value);
         }
 
-        let rollout_player = self.acting_player(state).unwrap_or(self.ai_player);
+        let rollout_player = state.waiting_for.acting_player().unwrap_or(self.ai_player);
         let sample_count = self.config.search.rollout_samples.max(1) as usize;
         let mut priors = evaluation.priors;
         priors.sort_by(|a, b| {
@@ -405,7 +401,7 @@ impl BeamContinuationPlanner {
             return services.evaluate_state(state);
         }
 
-        let node_player = services.acting_player(state);
+        let node_player = state.waiting_for.acting_player();
         let is_maximizing = node_player.is_none_or(|player| player == services.ai_player);
         let scoring_player = node_player.unwrap_or(services.ai_player);
         let ranked = rank_candidates(
@@ -535,7 +531,7 @@ impl MctsPlanner {
             }
             budget.tick();
 
-            let actor = services.acting_player(&state);
+            let actor = state.waiting_for.acting_player();
             let node_key = SearchNodeKey::new(&state, actor);
             let is_terminal = matches!(state.waiting_for, WaitingFor::GameOver { .. });
             let needs_expansion = !self.tree.get(&node_key).is_some_and(|node| node.expanded);
@@ -573,7 +569,7 @@ impl MctsPlanner {
             let Some(next_state) = services.apply_candidate(&state, &candidate) else {
                 break services.reduce_utility(&state, &services.evaluate_for_planner(&state));
             };
-            let child_key = SearchNodeKey::new(&next_state, services.acting_player(&next_state));
+            let child_key = SearchNodeKey::new(&next_state, next_state.waiting_for.acting_player());
             if let Some(node) = self.tree.get_mut(&node_key) {
                 if let Some(edge) = node.edges.get_mut(edge_index) {
                     edge.child_key = Some(child_key);
@@ -607,7 +603,7 @@ impl ContinuationPlanner for MctsPlanner {
         budget: &mut SearchBudget,
     ) -> f64 {
         self.tree.clear();
-        let root_key = SearchNodeKey::new(state, services.acting_player(state));
+        let root_key = SearchNodeKey::new(state, state.waiting_for.acting_player());
         for _ in 0..self.config.simulations {
             if budget.exhausted() {
                 break;
@@ -673,37 +669,6 @@ pub fn apply_candidate(state: &GameState, candidate: &CandidateAction) -> Option
     let mut sim = state.clone();
     apply(&mut sim, candidate.action.clone()).ok()?;
     Some(sim)
-}
-
-pub fn acting_player(state: &GameState) -> Option<PlayerId> {
-    match &state.waiting_for {
-        WaitingFor::Priority { player }
-        | WaitingFor::MulliganDecision { player, .. }
-        | WaitingFor::MulliganBottomCards { player, .. }
-        | WaitingFor::ManaPayment { player }
-        | WaitingFor::TargetSelection { player, .. }
-        | WaitingFor::DeclareAttackers { player, .. }
-        | WaitingFor::DeclareBlockers { player, .. }
-        | WaitingFor::ReplacementChoice { player, .. }
-        | WaitingFor::EquipTarget { player, .. }
-        | WaitingFor::ScryChoice { player, .. }
-        | WaitingFor::DigChoice { player, .. }
-        | WaitingFor::SurveilChoice { player, .. }
-        | WaitingFor::RevealChoice { player, .. }
-        | WaitingFor::SearchChoice { player, .. }
-        | WaitingFor::TriggerTargetSelection { player, .. }
-        | WaitingFor::BetweenGamesSideboard { player, .. }
-        | WaitingFor::BetweenGamesChoosePlayDraw { player, .. }
-        | WaitingFor::NamedChoice { player, .. }
-        | WaitingFor::ModeChoice { player, .. }
-        | WaitingFor::DiscardToHandSize { player, .. }
-        | WaitingFor::OptionalCostChoice { player, .. }
-        | WaitingFor::AbilityModeChoice { player, .. }
-        | WaitingFor::MultiTargetSelection { player, .. }
-        | WaitingFor::AdventureCastChoice { player, .. }
-        | WaitingFor::NinjutsuActivation { player, .. } => Some(*player),
-        WaitingFor::GameOver { .. } => None,
-    }
 }
 
 #[cfg(test)]

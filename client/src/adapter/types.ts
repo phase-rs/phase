@@ -346,7 +346,8 @@ export type WaitingFor =
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
   | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; pending_cast: PendingCast } }
   | { type: "AdventureCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
-  | { type: "NinjutsuActivation"; data: { player: PlayerId; ninjutsu_cards: CardId[]; unblocked_attackers: ObjectId[] } };
+  | { type: "NinjutsuActivation"; data: { player: PlayerId; ninjutsu_cards: CardId[]; unblocked_attackers: ObjectId[] } }
+  | { type: "DiscardForCost"; data: { player: PlayerId; count: number; cards: ObjectId[]; pending_cast: PendingCast } };
 
 // ── Action Result ────────────────────────────────────────────────────────
 

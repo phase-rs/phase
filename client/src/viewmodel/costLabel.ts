@@ -39,7 +39,10 @@ export function formatCost(cost: SerializedCost): string {
     }
     case "PayLife": return `${cost.amount} life`;
     case "Sacrifice": return "Sacrifice";
-    case "Discard": return "Discard";
+    case "Discard": {
+      const count = (cost as { count?: number }).count ?? 1;
+      return `Discard ${count} card${count > 1 ? "s" : ""}`;
+    }
     case "Blight": return `Blight ${(cost as { count?: number }).count ?? 1}`;
     case "Composite":
       return (cost.costs ?? []).map(formatCost).join(", ");
