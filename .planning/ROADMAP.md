@@ -289,7 +289,7 @@ Plans:
 **Goal:** Deliver four composable engine building blocks: event-context target resolution, parser possessive references, Adventure casting subsystem (CR 715), and damage prevention disabling via GameRestriction system
 **Requirements**: BB-01, BB-02, BB-03, BB-04, BB-ALL
 **Depends on:** Phase 29
-**Plans:** 4 plans
+**Plans:** 1/4 plans executed
 
 **Execution Order:**
 Wave 1: Plan 01 (type definitions + parser patterns for all building blocks)
@@ -302,3 +302,13 @@ Plans:
 - [ ] 30-02-PLAN.md — Pipeline wiring: trigger event threading, event-context target resolution, prevention gating, restriction cleanup, AddRestriction handler
 - [ ] 30-03-PLAN.md — Adventure casting subsystem: cast choice, exile-on-resolve, cast-from-exile, AI support
 - [ ] 30-04-PLAN.md — Adventure frontend UI, TypeScript types, Bonecrusher Giant integration test, human verification
+
+### Phase 31: add mechanics to support Kaito, Bane of Nightmares (docs/plan-kaito-bane-of-nightmares.md)
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 30
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd:plan-phase 31 to break down)

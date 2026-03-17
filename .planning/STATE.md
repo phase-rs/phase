@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Migrate Data Source & Add Tests
 status: executing
-stopped_at: Phase 30 context gathered
-last_updated: "2026-03-16T22:54:50.065Z"
-last_activity: 2026-03-11 — Phase 29 Plan 11 complete (Commander Deck Builder and Format Legality)
+stopped_at: Completed 30-01-PLAN.md
+last_updated: "2026-03-17T00:06:30.013Z"
+last_activity: 2026-03-16 — Phase 30 Plan 01 complete (Building Block Type Definitions)
 progress:
-  total_phases: 10
+  total_phases: 11
   completed_phases: 7
-  total_plans: 47
-  completed_plans: 45
-  percent: 85
+  total_plans: 51
+  completed_plans: 46
+  percent: 90
 ---
 
 # Project State
@@ -25,11 +25,11 @@ See: .planning/PROJECT.md (updated 2026-03-11)
 
 ## Current Position
 
-Phase: 29 — Plan 11 of 16 complete
+Phase: 30 — Plan 1 of 4 complete
 Status: In Progress
-Last activity: 2026-03-11 — Phase 29 Plan 11 complete (Commander Deck Builder and Format Legality)
+Last activity: 2026-03-16 — Phase 30 Plan 01 complete (Building Block Type Definitions)
 
-Progress: [████████████████░░░░] 43/47 plans (85%)
+Progress: [████████████████░░░░] 46/51 plans (90%)
 
 ## Performance Metrics
 
@@ -75,6 +75,7 @@ Progress: [████████████████░░░░] 43/47 p
 | Phase 29 P10 | 5min | 2 tasks | 11 files |
 | Phase 29 P11 | 7min | 2 tasks | 12 files |
 | Phase 29 P12 | 15min | 3 tasks | 6 files |
+| Phase 30 P01 | 21min | 2 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -228,6 +229,10 @@ Recent decisions affecting current work:
 - [29-11]: Commander stored as string[] on ParsedDeck; LegalityBadge reads Scryfall legalities directly
 - [29-11]: MTGJSON legalities HashMap<String, String> with serde(default) for backward compat
 - [Phase 29]: LobbyView accepts connectionMode prop to show mode-specific UI (server vs P2P)
+- [30-01]: GameEvent derives Eq (required by StackEntryKind Eq derive with trigger_event field)
+- [30-01]: Event-context TargetFilter variants excluded from extract_target_filter_from_effect (auto-resolve, no targeting)
+- [30-01]: TriggeringSource used for both "that source" and "that permanent" in trigger context
+- [30-01]: Effect::AddRestriction handler is no-op stub pending Plan 02 wiring
 
 ### Roadmap Evolution
 
@@ -235,6 +240,7 @@ Recent decisions affecting current work:
 - Phase 28 added: Native Ability Data Model — Eliminate all remaining Forge scripting DSL from card data format and engine runtime
 - Phase 29 added: Support N players in engine and on board in React for various formats
 - Phase 30 added: Implement the required building blocks specified in the summary
+- Phase 31 added: Add mechanics to support Kaito, Bane of Nightmares (docs/plan-kaito-bane-of-nightmares.md)
 
 ### Pending Todos
 
@@ -246,6 +252,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-16T22:54:50.061Z
-Stopped at: Phase 30 context gathered
-Resume file: .planning/phases/30-implement-the-required-building-blocks-specified-in-the-summary/30-CONTEXT.md
+Last session: 2026-03-17T00:06:30.009Z
+Stopped at: Completed 30-01-PLAN.md
+Resume file: None
