@@ -117,6 +117,10 @@ fn land_mana_options(
     options
 }
 
+/// CR 605.3a — Mana abilities must still satisfy activation conditions.
+/// Delegates to the shared restriction checker so that `RequiresCondition`,
+/// once-per-turn limits, sorcery-speed, and all other restriction types
+/// are enforced uniformly for mana source analysis.
 fn activation_condition_satisfied(
     state: &GameState,
     controller: PlayerId,
@@ -124,114 +128,14 @@ fn activation_condition_satisfied(
     ability_index: usize,
     ability: &AbilityDefinition,
 ) -> bool {
-    // Check typed activation_restrictions (the primary path).
-    if restrictions::check_activation_restrictions(
+    restrictions::check_activation_restrictions(
         state,
         controller,
         object_id,
         ability_index,
         &ability.activation_restrictions,
     )
-    .is_err()
-    {
-        return false;
-    }
-
-    // Legacy: check sub_ability chain for Unimplemented condition markers.
-    let Some(required_subtypes) = extract_land_subtype_activation_condition(ability) else {
-        return true;
-    };
-
-    state.battlefield.iter().any(|oid| {
-        let Some(obj) = state.objects.get(oid) else {
-            return false;
-        };
-        obj.controller == controller
-            && obj.card_types.core_types.contains(&CoreType::Land)
-            && obj
-                .card_types
-                .subtypes
-                .iter()
-                .any(|subtype| required_subtypes.iter().any(|s| s == subtype))
-    })
-}
-
-fn extract_land_subtype_activation_condition(ability: &AbilityDefinition) -> Option<Vec<String>> {
-    let mut cursor = ability.sub_ability.as_deref();
-    while let Some(def) = cursor {
-        if let Some(subtypes) = parse_land_subtype_condition_from_effect(&def.effect) {
-            return Some(subtypes);
-        }
-        cursor = def.sub_ability.as_deref();
-    }
-    None
-}
-
-fn parse_land_subtype_condition_from_effect(effect: &Effect) -> Option<Vec<String>> {
-    let Effect::Unimplemented { name, description } = effect else {
-        return None;
-    };
-    let description = description.as_deref()?;
-
-    if name == "activate_only_if_controls_land_subtype_any" {
-        let mut subtypes = Vec::new();
-        for raw in description
-            .split('|')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            if let Some(subtype) = canonical_basic_land_subtype(raw) {
-                if !subtypes.contains(&subtype.to_string()) {
-                    subtypes.push(subtype.to_string());
-                }
-            } else {
-                return None;
-            }
-        }
-        return (!subtypes.is_empty()).then_some(subtypes);
-    }
-
-    if name == "activate" {
-        return parse_basic_land_subtype_activation_text(description);
-    }
-
-    None
-}
-
-fn parse_basic_land_subtype_activation_text(text: &str) -> Option<Vec<String>> {
-    let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
-    let prefix = "activate only if you control ";
-    if !lower.starts_with(prefix) {
-        return None;
-    }
-
-    let rest = &lower[prefix.len()..];
-    let mut subtypes = Vec::new();
-    for raw_part in rest.split(" or ") {
-        let part = raw_part
-            .trim()
-            .trim_start_matches("a ")
-            .trim_start_matches("an ")
-            .trim();
-        let subtype = canonical_basic_land_subtype(part)?;
-        let subtype = subtype.to_string();
-        if !subtypes.contains(&subtype) {
-            subtypes.push(subtype);
-        }
-    }
-
-    (!subtypes.is_empty()).then_some(subtypes)
-}
-
-fn canonical_basic_land_subtype(raw: &str) -> Option<&'static str> {
-    match raw {
-        "plains" | "Plains" => Some("Plains"),
-        "island" | "Island" => Some("Island"),
-        "swamp" | "Swamp" => Some("Swamp"),
-        "mountain" | "Mountain" => Some("Mountain"),
-        "forest" | "Forest" => Some("Forest"),
-        _ => None,
-    }
+    .is_ok()
 }
 
 fn mana_options_from_ability(ability: &AbilityDefinition) -> Vec<ManaType> {
@@ -312,56 +216,65 @@ mod tests {
         .cost(AbilityCost::Tap)
     }
 
-    fn add_gloomlake_verge(state: &mut GameState, controller: PlayerId) -> ObjectId {
+    fn add_verge_land(
+        state: &mut GameState,
+        controller: PlayerId,
+        name: &str,
+        unconditional_color: ManaColor,
+        conditional_color: ManaColor,
+        condition_text: &str,
+    ) -> ObjectId {
+        use crate::types::ability::ActivationRestriction;
+
         let verge = create_object(
             state,
             CardId(100),
             controller,
-            "Gloomlake Verge".to_string(),
+            name.to_string(),
             Zone::Battlefield,
         );
         let obj = state.objects.get_mut(&verge).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
-        obj.abilities.push(verge_ability(ManaColor::Blue));
+        obj.abilities.push(verge_ability(unconditional_color));
         obj.abilities.push(
-            AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::Mana {
-                    produced: ManaProduction::Fixed {
-                        colors: vec![ManaColor::Black],
-                    },
-                    restrictions: vec![],
+            verge_ability(conditional_color).activation_restrictions(vec![
+                ActivationRestriction::RequiresCondition {
+                    text: condition_text.to_string(),
                 },
-            )
-            .cost(AbilityCost::Tap)
-            .sub_ability(AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::Unimplemented {
-                    name: "activate".to_string(),
-                    description: Some(
-                        "Activate only if you control an Island or a Swamp".to_string(),
-                    ),
-                },
-            )),
+            ]),
         );
         verge
     }
 
     #[test]
-    fn conditional_land_options_include_only_unconditional_color_without_support() {
+    fn conditional_mana_blocked_without_supporting_land() {
         let mut state = GameState::new_two_player(42);
-        let verge = add_gloomlake_verge(&mut state, PlayerId(0));
+        let verge = add_verge_land(
+            &mut state,
+            PlayerId(0),
+            "Gloomlake Verge",
+            ManaColor::Blue,
+            ManaColor::Black,
+            "you control an Island or a Swamp",
+        );
 
         let options = activatable_land_mana_options(&state, verge, PlayerId(0));
-        let colors: Vec<_> = options.iter().map(|o| o.mana_type).collect();
-        assert!(colors.contains(&ManaType::Blue));
-        assert!(!colors.contains(&ManaType::Black));
+        let types: Vec<_> = options.iter().map(|o| o.mana_type).collect();
+        assert!(types.contains(&ManaType::Blue));
+        assert!(!types.contains(&ManaType::Black));
     }
 
     #[test]
-    fn conditional_land_options_include_secondary_color_with_supporting_subtype() {
+    fn conditional_mana_allowed_with_supporting_land() {
         let mut state = GameState::new_two_player(42);
-        let verge = add_gloomlake_verge(&mut state, PlayerId(0));
+        let verge = add_verge_land(
+            &mut state,
+            PlayerId(0),
+            "Gloomlake Verge",
+            ManaColor::Blue,
+            ManaColor::Black,
+            "you control an Island or a Swamp",
+        );
         let island = create_object(
             &mut state,
             CardId(101),
@@ -374,15 +287,22 @@ mod tests {
         island_obj.card_types.subtypes.push("Island".to_string());
 
         let options = activatable_land_mana_options(&state, verge, PlayerId(0));
-        let colors: Vec<_> = options.iter().map(|o| o.mana_type).collect();
-        assert!(colors.contains(&ManaType::Blue));
-        assert!(colors.contains(&ManaType::Black));
+        let types: Vec<_> = options.iter().map(|o| o.mana_type).collect();
+        assert!(types.contains(&ManaType::Blue));
+        assert!(types.contains(&ManaType::Black));
     }
 
     #[test]
     fn display_colors_ignore_tapped_state() {
         let mut state = GameState::new_two_player(42);
-        let verge = add_gloomlake_verge(&mut state, PlayerId(0));
+        let verge = add_verge_land(
+            &mut state,
+            PlayerId(0),
+            "Gloomlake Verge",
+            ManaColor::Blue,
+            ManaColor::Black,
+            "you control an Island or a Swamp",
+        );
         let swamp = create_object(
             &mut state,
             CardId(102),
@@ -400,38 +320,17 @@ mod tests {
         assert!(colors.contains(&ManaColor::Black));
     }
 
-    /// Riverpyre Verge-style land: activation restriction via `activation_restrictions`
-    /// field (not sub_ability chain). Without the fix, the mana source calculator
-    /// would ignore the restriction and report {U} as available.
-    fn add_riverpyre_verge(state: &mut GameState, controller: PlayerId) -> ObjectId {
-        use crate::types::ability::ActivationRestriction;
-
-        let verge = create_object(
-            state,
-            CardId(200),
-            controller,
-            "Riverpyre Verge".to_string(),
-            Zone::Battlefield,
-        );
-        let obj = state.objects.get_mut(&verge).unwrap();
-        obj.card_types.core_types.push(CoreType::Land);
-        // {T}: Add {R}. (unconditional)
-        obj.abilities.push(verge_ability(ManaColor::Red));
-        // {T}: Add {U}. Activate only if you control an Island or a Mountain.
-        obj.abilities.push(
-            verge_ability(ManaColor::Blue).activation_restrictions(vec![
-                ActivationRestriction::RequiresCondition {
-                    text: "you control an Island or a Mountain".to_string(),
-                },
-            ]),
-        );
-        verge
-    }
-
     #[test]
-    fn activation_restrictions_block_conditional_mana_without_support() {
+    fn riverpyre_verge_blocks_blue_without_island_or_mountain() {
         let mut state = GameState::new_two_player(42);
-        let verge = add_riverpyre_verge(&mut state, PlayerId(0));
+        let verge = add_verge_land(
+            &mut state,
+            PlayerId(0),
+            "Riverpyre Verge",
+            ManaColor::Red,
+            ManaColor::Blue,
+            "you control an Island or a Mountain",
+        );
 
         let options = activatable_land_mana_options(&state, verge, PlayerId(0));
         let types: Vec<_> = options.iter().map(|o| o.mana_type).collect();
@@ -440,10 +339,16 @@ mod tests {
     }
 
     #[test]
-    fn activation_restrictions_allow_conditional_mana_with_support() {
+    fn riverpyre_verge_allows_blue_with_mountain() {
         let mut state = GameState::new_two_player(42);
-        let verge = add_riverpyre_verge(&mut state, PlayerId(0));
-        // Add a Mountain to satisfy the condition.
+        let verge = add_verge_land(
+            &mut state,
+            PlayerId(0),
+            "Riverpyre Verge",
+            ManaColor::Red,
+            ManaColor::Blue,
+            "you control an Island or a Mountain",
+        );
         let mountain = create_object(
             &mut state,
             CardId(201),
@@ -459,29 +364,5 @@ mod tests {
         let types: Vec<_> = options.iter().map(|o| o.mana_type).collect();
         assert!(types.contains(&ManaType::Red));
         assert!(types.contains(&ManaType::Blue), "blue should be available with Mountain in play");
-    }
-
-    #[test]
-    fn parse_canonical_condition_payload() {
-        let def = AbilityDefinition::new(
-            AbilityKind::Activated,
-            Effect::Mana {
-                produced: ManaProduction::Fixed {
-                    colors: vec![ManaColor::Blue],
-                },
-                restrictions: vec![],
-            },
-        )
-        .cost(AbilityCost::Tap)
-        .sub_ability(AbilityDefinition::new(
-            AbilityKind::Activated,
-            Effect::Unimplemented {
-                name: "activate_only_if_controls_land_subtype_any".to_string(),
-                description: Some("Island|Swamp".to_string()),
-            },
-        ));
-
-        let parsed = extract_land_subtype_activation_condition(&def).unwrap();
-        assert_eq!(parsed, vec!["Island".to_string(), "Swamp".to_string()]);
     }
 }
