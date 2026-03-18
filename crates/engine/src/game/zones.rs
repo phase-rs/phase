@@ -112,6 +112,11 @@ pub fn move_to_zone(
     // Prune host-bound transient effects when a permanent leaves the battlefield
     if from == Zone::Battlefield {
         super::layers::prune_host_left_effects(state, object_id);
+
+        // Clean up manual mana-tap tracking for departing permanents
+        for tapped in state.lands_tapped_for_mana.values_mut() {
+            tapped.retain(|&id| id != object_id);
+        }
     }
 
     super::restrictions::record_zone_change(state, object_id, from, to);

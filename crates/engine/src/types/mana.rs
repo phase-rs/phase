@@ -334,6 +334,14 @@ impl ManaPool {
         self.mana.clear();
     }
 
+    /// Remove all mana units produced by the given source.
+    /// Returns the number of units removed (zero if mana was already spent).
+    pub fn remove_from_source(&mut self, source_id: ObjectId) -> usize {
+        let before = self.mana.len();
+        self.mana.retain(|u| u.source_id != source_id);
+        before - self.mana.len()
+    }
+
     pub fn spend(&mut self, color: ManaType) -> Option<ManaUnit> {
         if let Some(pos) = self.mana.iter().position(|m| m.color == color) {
             Some(self.mana.swap_remove(pos))
@@ -580,6 +588,43 @@ mod tests {
             subtypes: vec!["Elf".to_string()],
         };
         assert!(pool.spend_for(ManaType::Green, &elf_spell).is_some());
+    }
+
+    #[test]
+    fn remove_from_source_removes_matching_units() {
+        let mut pool = ManaPool::default();
+        pool.add(ManaUnit {
+            color: ManaType::Green,
+            source_id: ObjectId(10),
+            snow: false,
+            restrictions: Vec::new(),
+        });
+        pool.add(ManaUnit {
+            color: ManaType::Red,
+            source_id: ObjectId(10),
+            snow: false,
+            restrictions: Vec::new(),
+        });
+        pool.add(ManaUnit {
+            color: ManaType::Blue,
+            source_id: ObjectId(20),
+            snow: false,
+            restrictions: Vec::new(),
+        });
+
+        let removed = pool.remove_from_source(ObjectId(10));
+        assert_eq!(removed, 2);
+        assert_eq!(pool.total(), 1);
+        assert_eq!(pool.count_color(ManaType::Blue), 1);
+    }
+
+    #[test]
+    fn remove_from_source_returns_zero_when_no_match() {
+        let mut pool = ManaPool::default();
+        pool.add(make_unit(ManaType::White));
+        let removed = pool.remove_from_source(ObjectId(99));
+        assert_eq!(removed, 0);
+        assert_eq!(pool.total(), 1);
     }
 
     #[test]

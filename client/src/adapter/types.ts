@@ -381,6 +381,7 @@ export type GameAction =
   | { type: "DeclareBlockers"; data: { assignments: [ObjectId, ObjectId][] } }
   | { type: "MulliganDecision"; data: { keep: boolean } }
   | { type: "TapLandForMana"; data: { object_id: ObjectId } }
+  | { type: "UntapLandForMana"; data: { object_id: ObjectId } }
   | { type: "SelectCards"; data: { cards: ObjectId[] } }
   | { type: "SelectTargets"; data: { targets: TargetRef[] } }
   | { type: "ChooseTarget"; data: { target: TargetRef | null } }
@@ -491,6 +492,7 @@ export interface GameState {
   restrictions?: GameRestriction[];
   command_zone?: ObjectId[];
   auto_pass?: Record<number, AutoPassMode>;
+  lands_tapped_for_mana?: Record<number, number[]>;
 }
 
 export type AutoPassMode =

@@ -757,6 +757,8 @@ fn bottom_card_actions(state: &GameState, player: PlayerId, count: u8) -> Vec<Ca
         .collect()
 }
 
+// Note: UntapLandForMana is intentionally omitted — it is a human-only undo action.
+// AI never populates lands_tapped_for_mana, so the handler would reject it anyway.
 fn mana_payment_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction> {
     let mut actions = Vec::new();
     for &obj_id in &state.battlefield {

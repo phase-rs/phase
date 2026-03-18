@@ -4,7 +4,6 @@ export const UNDOABLE_ACTIONS = new Set([
   "DeclareAttackers",
   "DeclareBlockers",
   "ActivateAbility",
-  "TapLandForMana",
 ]);
 
 /** Maximum number of undo history entries. */

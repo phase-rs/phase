@@ -511,6 +511,12 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub auto_pass: HashMap<PlayerId, AutoPassMode>,
 
+    /// CR 605.3: Lands manually tapped for mana via TapLandForMana this priority window.
+    /// Per-player map enables multiplayer correctness (e.g., UnlessPayment opponent tapping).
+    /// Cleared on priority pass, cast, non-mana action, or phase transition.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub lands_tapped_for_mana: HashMap<PlayerId, Vec<ObjectId>>,
+
     #[serde(default)]
     pub match_config: MatchConfig,
     #[serde(default)]
@@ -708,6 +714,7 @@ impl GameState {
             commander_damage: Vec::new(),
             priority_passes: BTreeSet::new(),
             auto_pass: HashMap::new(),
+            lands_tapped_for_mana: HashMap::new(),
             match_config: MatchConfig::default(),
             match_phase: MatchPhase::InGame,
             match_score: MatchScore::default(),
@@ -833,6 +840,7 @@ impl PartialEq for GameState {
             && self.commander_damage == other.commander_damage
             && self.priority_passes == other.priority_passes
             && self.auto_pass == other.auto_pass
+            && self.lands_tapped_for_mana == other.lands_tapped_for_mana
             && self.match_config == other.match_config
             && self.match_phase == other.match_phase
             && self.match_score == other.match_score

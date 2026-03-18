@@ -33,6 +33,11 @@ pub enum GameAction {
     TapLandForMana {
         object_id: ObjectId,
     },
+    /// CR 605.3a: Undo a manual mana ability activation — untap source, remove produced mana.
+    /// Only valid for lands in `lands_tapped_for_mana` whose mana hasn't been spent.
+    UntapLandForMana {
+        object_id: ObjectId,
+    },
     SelectCards {
         cards: Vec<ObjectId>,
     },

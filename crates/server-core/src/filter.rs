@@ -33,6 +33,11 @@ pub fn filter_state_for_player(state: &GameState, viewer: PlayerId) -> GameState
     // Only show the viewer's own auto-pass flag
     filtered.auto_pass.retain(|pid, _| *pid == viewer);
 
+    // Only show the viewer's own manual mana-tap tracking
+    filtered
+        .lands_tapped_for_mana
+        .retain(|pid, _| *pid == viewer);
+
     for pool in &mut filtered.deck_pools {
         if pool.player != viewer {
             pool.registered_main.clear();

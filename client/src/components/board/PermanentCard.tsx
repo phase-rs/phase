@@ -45,7 +45,6 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
     (s) => s.gameState?.combat?.attackers,
   );
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const undo = useGameStore((s) => s.undo);
 
   // Primitive count — stable reference for glow ring, no infinite loop
   const activatableCount = useGameStore((s) => {
@@ -69,14 +68,10 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
     [allExileLinks, objectId],
   );
 
-  // Check if this specific permanent was tapped in the most recent undoable action
-  // by comparing its tapped state against the previous snapshot
+  // Engine-driven undo check: land is in the player's lands_tapped_for_mana tracking
   const isUndoableTap = useGameStore((s) => {
-    if (s.stateHistory.length === 0) return false;
-    const prev = s.stateHistory[s.stateHistory.length - 1];
-    const prevObj = prev.objects[objectId];
-    const curObj = s.gameState?.objects[objectId];
-    return !!prevObj && !prevObj.tapped && !!curObj?.tapped && curObj.controller === playerId;
+    const tapped = s.gameState?.lands_tapped_for_mana?.[playerId] ?? [];
+    return tapped.includes(objectId);
   });
 
   const longPressHandlers = useLongPress(
@@ -178,7 +173,7 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
         setPendingAbilityChoice({ objectId, actions });
       }
     } else if (isUndoableTap) {
-      undo();
+      dispatchAction({ type: "UntapLandForMana", data: { object_id: objectId } });
     } else {
       selectObject(isSelected ? null : objectId);
     }
