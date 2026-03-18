@@ -1674,6 +1674,12 @@ pub struct ModalChoice {
 #[serde(tag = "type")]
 pub enum ModalSelectionConstraint {
     DifferentTargetPlayers,
+    /// CR 700.2: Each mode may only be chosen once per turn for this source.
+    /// Oracle text: "choose one that hasn't been chosen this turn"
+    NoRepeatThisTurn,
+    /// CR 700.2: Each mode may only be chosen once total for this source.
+    /// Oracle text: "choose one that hasn't been chosen"
+    NoRepeatThisGame,
 }
 
 /// Structured activation-time restrictions parsed from Oracle text.

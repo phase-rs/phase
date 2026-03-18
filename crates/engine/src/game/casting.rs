@@ -13,8 +13,9 @@ use crate::types::zones::Zone;
 use super::ability_utils::{
     assign_selected_slots_in_chain, assign_targets_in_chain, auto_select_targets,
     begin_target_selection, build_chained_resolved, build_resolved_from_def, build_target_slots,
-    choose_target, flatten_targets_in_chain, target_constraints_from_modal, validate_modal_indices,
-    validate_selected_targets, TargetSelectionAdvance,
+    choose_target, compute_unavailable_modes, flatten_targets_in_chain,
+    target_constraints_from_modal, validate_modal_indices, validate_selected_targets,
+    TargetSelectionAdvance,
 };
 use super::engine::EngineError;
 use super::mana_payment;
@@ -718,7 +719,8 @@ pub fn handle_select_modes(
         }
     };
 
-    validate_modal_indices(&modal, &indices)?;
+    // Spells resolve once — no cross-resolution mode constraints apply.
+    validate_modal_indices(&modal, &indices, &[])?;
 
     // CR 702.172b: Spree mode costs are additional costs — sum chosen modes and add to base cost.
     // TODO CR 702.172b: When "cast without paying mana cost" is implemented, Spree mode costs
@@ -1203,6 +1205,7 @@ pub fn handle_activate_ability(
                 ));
             }
         }
+        let unavailable_modes = compute_unavailable_modes(state, source_id, modal);
         return Ok(WaitingFor::AbilityModeChoice {
             player,
             modal: modal.clone(),
@@ -1211,6 +1214,7 @@ pub fn handle_activate_ability(
             is_activated: true,
             ability_index: Some(ability_index),
             ability_cost: ability_def.cost.clone(),
+            unavailable_modes,
         });
     }
 

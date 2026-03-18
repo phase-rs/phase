@@ -19,8 +19,8 @@ use crate::types::zones::Zone;
 use super::ability_utils::{
     assign_selected_slots_in_chain, assign_targets_in_chain, auto_select_targets,
     begin_target_selection, build_chained_resolved, build_target_slots, choose_target,
-    flatten_targets_in_chain, validate_modal_indices, validate_selected_targets,
-    TargetSelectionAdvance,
+    compute_unavailable_modes, flatten_targets_in_chain, record_modal_mode_choices,
+    validate_modal_indices, validate_selected_targets, TargetSelectionAdvance,
 };
 use super::casting;
 use super::derived::derive_display_state;
@@ -1177,10 +1177,12 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 is_activated,
                 ability_index,
                 ability_cost,
+                unavailable_modes,
             },
             GameAction::SelectModes { indices },
         ) => {
-            validate_modal_indices(modal, &indices)?;
+            validate_modal_indices(modal, &indices, unavailable_modes)?;
+            record_modal_mode_choices(state, *source_id, modal, &indices);
 
             let p = *player;
             let sid = *source_id;
@@ -1571,6 +1573,15 @@ fn begin_pending_trigger_target_selection(
     // CR 700.2a: Modal trigger — prompt for mode selection before stack.
     if let Some(ref modal) = trigger.modal {
         if !trigger.mode_abilities.is_empty() {
+            let unavailable_modes = compute_unavailable_modes(state, trigger.source_id, modal);
+
+            // CR 700.2: All modes already chosen — ability cannot be put on the stack
+            // without a mode selection. Clear pending trigger and skip.
+            if unavailable_modes.len() >= modal.mode_count {
+                state.pending_trigger = None;
+                return Ok(None);
+            }
+
             return Ok(Some(WaitingFor::AbilityModeChoice {
                 player: trigger.controller,
                 modal: modal.clone(),
@@ -1579,6 +1590,7 @@ fn begin_pending_trigger_target_selection(
                 is_activated: false,
                 ability_index: None,
                 ability_cost: None,
+                unavailable_modes,
             }));
         }
     }
@@ -4066,6 +4078,7 @@ mod trigger_target_tests {
             is_activated: false,
             ability_index: None,
             ability_cost: None,
+            unavailable_modes: vec![],
         };
 
         let result = apply(
@@ -4310,6 +4323,7 @@ mod trigger_target_tests {
             is_activated: false,
             ability_index: None,
             ability_cost: None,
+            unavailable_modes: vec![],
         };
 
         let result = apply(
@@ -4323,6 +4337,94 @@ mod trigger_target_tests {
             result.is_err(),
             "unsatisfiable target constraints should be rejected"
         );
+    }
+
+    #[test]
+    fn all_modes_exhausted_clears_pending_trigger() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let source_id = ObjectId(50);
+        let modal = ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 2,
+            mode_descriptions: vec!["Mode A".to_string(), "Mode B".to_string()],
+            constraints: vec![ModalSelectionConstraint::NoRepeatThisTurn],
+            ..Default::default()
+        };
+
+        // Mark both modes as already chosen this turn.
+        state.modal_modes_chosen_this_turn.insert((source_id, 0));
+        state.modal_modes_chosen_this_turn.insert((source_id, 1));
+
+        // Set a pending trigger with this modal.
+        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+            source_id,
+            controller: PlayerId(0),
+            condition: None,
+            ability: ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "placeholder".to_string(),
+                    description: None,
+                },
+                vec![],
+                source_id,
+                PlayerId(0),
+            ),
+            timestamp: 1,
+            target_constraints: Vec::new(),
+            trigger_event: None,
+            modal: Some(modal),
+            mode_abilities: vec![
+                AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 4 },
+                        player: crate::types::ability::GainLifePlayer::Controller,
+                    },
+                ),
+                AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 2 },
+                        player: crate::types::ability::GainLifePlayer::Controller,
+                    },
+                ),
+            ],
+        });
+
+        // Call the private function via the engine path.
+        let result = begin_pending_trigger_target_selection(&mut state).unwrap();
+
+        // CR 700.2: All modes exhausted — no AbilityModeChoice produced.
+        assert!(result.is_none());
+        // Pending trigger should be cleared.
+        assert!(state.pending_trigger.is_none());
+    }
+
+    #[test]
+    fn modal_mode_tracking_resets_on_new_turn() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 1;
+        state.phase = Phase::PreCombatMain;
+
+        let source_id = ObjectId(50);
+        state.modal_modes_chosen_this_turn.insert((source_id, 0));
+        state.modal_modes_chosen_this_turn.insert((source_id, 1));
+        state.modal_modes_chosen_this_game.insert((source_id, 0));
+
+        // Simulate new turn.
+        let mut events = Vec::new();
+        super::turns::start_next_turn(&mut state, &mut events);
+
+        // Turn-scoped should be cleared.
+        assert!(state.modal_modes_chosen_this_turn.is_empty());
+        // Game-scoped should persist.
+        assert!(state.modal_modes_chosen_this_game.contains(&(source_id, 0)));
     }
 }
 

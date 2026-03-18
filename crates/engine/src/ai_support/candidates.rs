@@ -181,12 +181,17 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
             modal.min_choices,
             modal.max_choices,
         ),
-        WaitingFor::AbilityModeChoice { player, modal, .. } => mode_actions(
-            *player,
-            modal.mode_count,
-            modal.min_choices,
-            modal.max_choices,
-        ),
+        WaitingFor::AbilityModeChoice {
+            player,
+            modal,
+            unavailable_modes,
+            ..
+        } => {
+            let available: Vec<usize> = (0..modal.mode_count)
+                .filter(|i| !unavailable_modes.contains(i))
+                .collect();
+            mode_actions_from_available(*player, &available, modal.min_choices, modal.max_choices)
+        }
         WaitingFor::DiscardToHandSize {
             player,
             count,
@@ -597,9 +602,18 @@ fn mode_actions(
     max: usize,
 ) -> Vec<CandidateAction> {
     let indices: Vec<usize> = (0..mode_count).collect();
+    mode_actions_from_available(player, &indices, min, max)
+}
+
+fn mode_actions_from_available(
+    player: PlayerId,
+    available: &[usize],
+    min: usize,
+    max: usize,
+) -> Vec<CandidateAction> {
     let mut actions = Vec::new();
-    for pick_count in min..=max.min(mode_count) {
-        for combo in combinations_usize(&indices, pick_count) {
+    for pick_count in min..=max.min(available.len()) {
+        for combo in combinations_usize(available, pick_count) {
             actions.push(candidate(
                 GameAction::SelectModes { indices: combo },
                 TacticalClass::Selection,

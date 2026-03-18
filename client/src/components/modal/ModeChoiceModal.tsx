@@ -14,10 +14,15 @@ export function ModeChoiceModal() {
   const isModeChoice = waitingFor?.type === "ModeChoice" || waitingFor?.type === "AbilityModeChoice";
   const isAbilityMode = waitingFor?.type === "AbilityModeChoice";
   const modal: ModalChoice | null = isModeChoice ? waitingFor.data.modal : null;
+  const unavailableModes: number[] =
+    isAbilityMode && "unavailable_modes" in waitingFor.data
+      ? (waitingFor.data.unavailable_modes ?? [])
+      : [];
   const isMyChoice = isModeChoice && waitingFor.data.player === playerId;
 
   const toggleMode = useCallback(
     (index: number) => {
+      if (unavailableModes.includes(index)) return;
       setSelected((prev) => {
         if (!modal) return prev;
 
@@ -37,7 +42,7 @@ export function ModeChoiceModal() {
         return [...prev, index].sort((a, b) => a - b);
       });
     },
-    [modal],
+    [modal, unavailableModes],
   );
 
   const handleConfirm = useCallback(() => {
@@ -95,10 +100,13 @@ export function ModeChoiceModal() {
               {modal.mode_descriptions.map((desc, index) => {
                 const count = selected.filter((value) => value === index).length;
                 const isSelected = count > 0;
+                const isUnavailable = unavailableModes.includes(index);
                 return (
                   <button
                     key={index}
+                    disabled={isUnavailable}
                     onClick={() => {
+                      if (isUnavailable) return;
                       if (isSingleChoice) {
                         dispatch({ type: "SelectModes", data: { indices: [index] } });
                         setSelected([]);
@@ -107,12 +115,17 @@ export function ModeChoiceModal() {
                       }
                     }}
                     className={`rounded-[16px] border px-4 py-3 text-left transition ${
-                      isSelected
-                        ? "border-cyan-300/60 bg-cyan-500/12 ring-1 ring-cyan-400/40"
-                        : "border-white/8 bg-white/5 hover:bg-white/8 hover:ring-1 hover:ring-cyan-400/30"
+                      isUnavailable
+                        ? "cursor-not-allowed border-white/5 bg-white/3 opacity-40"
+                        : isSelected
+                          ? "border-cyan-300/60 bg-cyan-500/12 ring-1 ring-cyan-400/40"
+                          : "border-white/8 bg-white/5 hover:bg-white/8 hover:ring-1 hover:ring-cyan-400/30"
                     }`}
                   >
-                    <span className="font-semibold text-white">{desc}</span>
+                    <span className={`font-semibold ${isUnavailable ? "text-slate-500" : "text-white"}`}>{desc}</span>
+                    {isUnavailable && (
+                      <span className="ml-2 text-xs text-slate-500">(already chosen)</span>
+                    )}
                     {count > 0 && (
                       <span className="ml-2 inline-flex min-w-6 items-center justify-center rounded-full bg-cyan-300/20 px-2 py-0.5 text-xs font-semibold text-cyan-100">
                         {count}

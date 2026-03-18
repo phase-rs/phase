@@ -79,12 +79,77 @@ pub fn target_constraints_from_modal(modal: &ModalChoice) -> Vec<TargetSelection
     modal
         .constraints
         .iter()
-        .map(|constraint| match constraint {
+        .filter_map(|constraint| match constraint {
             ModalSelectionConstraint::DifferentTargetPlayers => {
-                TargetSelectionConstraint::DifferentTargetPlayers
+                Some(TargetSelectionConstraint::DifferentTargetPlayers)
             }
+            // NoRepeatThisTurn/NoRepeatThisGame are mode-selection constraints, not target constraints.
+            _ => None,
         })
         .collect()
+}
+
+/// Returns mode indices unavailable due to NoRepeatThisTurn/NoRepeatThisGame constraints.
+/// CR 700.2: Checks per-turn and per-game tracking maps for previously chosen modes.
+pub fn compute_unavailable_modes(
+    state: &GameState,
+    source_id: ObjectId,
+    modal: &ModalChoice,
+) -> Vec<usize> {
+    let mut unavailable = Vec::new();
+    for constraint in &modal.constraints {
+        match constraint {
+            ModalSelectionConstraint::NoRepeatThisTurn => {
+                for mode_idx in 0..modal.mode_count {
+                    if state
+                        .modal_modes_chosen_this_turn
+                        .contains(&(source_id, mode_idx))
+                    {
+                        unavailable.push(mode_idx);
+                    }
+                }
+            }
+            ModalSelectionConstraint::NoRepeatThisGame => {
+                for mode_idx in 0..modal.mode_count {
+                    if state
+                        .modal_modes_chosen_this_game
+                        .contains(&(source_id, mode_idx))
+                    {
+                        unavailable.push(mode_idx);
+                    }
+                }
+            }
+            _ => {} // Other constraints (e.g. DifferentTargetPlayers) are handled elsewhere
+        }
+    }
+    unavailable.sort_unstable();
+    unavailable.dedup();
+    unavailable
+}
+
+/// Records chosen mode indices for NoRepeat constraint enforcement.
+/// CR 700.2: Inserts into per-turn and/or per-game tracking maps.
+pub fn record_modal_mode_choices(
+    state: &mut GameState,
+    source_id: ObjectId,
+    modal: &ModalChoice,
+    indices: &[usize],
+) {
+    for constraint in &modal.constraints {
+        match constraint {
+            ModalSelectionConstraint::NoRepeatThisTurn => {
+                for &idx in indices {
+                    state.modal_modes_chosen_this_turn.insert((source_id, idx));
+                }
+            }
+            ModalSelectionConstraint::NoRepeatThisGame => {
+                for &idx in indices {
+                    state.modal_modes_chosen_this_game.insert((source_id, idx));
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 pub enum TargetSelectionAdvance {
@@ -585,7 +650,11 @@ fn chain_has_target_sink(ability: &ResolvedAbility) -> bool {
         .is_some_and(chain_has_target_sink)
 }
 
-pub fn validate_modal_indices(modal: &ModalChoice, indices: &[usize]) -> Result<(), EngineError> {
+pub fn validate_modal_indices(
+    modal: &ModalChoice,
+    indices: &[usize],
+    unavailable_modes: &[usize],
+) -> Result<(), EngineError> {
     if indices.len() < modal.min_choices || indices.len() > modal.max_choices {
         return Err(EngineError::InvalidAction(format!(
             "Must choose between {} and {} modes, got {}",
@@ -606,6 +675,12 @@ pub fn validate_modal_indices(modal: &ModalChoice, indices: &[usize]) -> Result<
         if !modal.allow_repeat_modes && !seen.insert(idx) {
             return Err(EngineError::InvalidAction(format!(
                 "Duplicate mode index {idx}"
+            )));
+        }
+        // CR 700.2: Reject modes already chosen per NoRepeatThisTurn/NoRepeatThisGame.
+        if unavailable_modes.contains(&idx) {
+            return Err(EngineError::InvalidAction(format!(
+                "Mode index {idx} is unavailable (already chosen)"
             )));
         }
     }
@@ -673,7 +748,8 @@ mod tests {
         AbilityKind, Effect, ModalChoice, ModalSelectionConstraint, QuantityExpr, TargetFilter,
         TypedFilter,
     };
-    use crate::types::game_state::{TargetSelectionConstraint, TargetSelectionSlot};
+    use crate::types::game_state::{GameState, TargetSelectionConstraint, TargetSelectionSlot};
+    use crate::types::identifiers::ObjectId;
     use crate::types::zones::Zone;
 
     #[test]
@@ -702,7 +778,74 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(validate_modal_indices(&modal, &[1, 1]).is_ok());
+        assert!(validate_modal_indices(&modal, &[1, 1], &[]).is_ok());
+    }
+
+    #[test]
+    fn validate_modal_indices_rejects_unavailable_modes() {
+        let modal = ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 3,
+            ..Default::default()
+        };
+
+        // Mode 1 is unavailable — should be rejected.
+        let result = validate_modal_indices(&modal, &[1], &[1]);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unavailable (already chosen)"));
+
+        // Mode 0 is available — should succeed.
+        assert!(validate_modal_indices(&modal, &[0], &[1]).is_ok());
+    }
+
+    #[test]
+    fn compute_unavailable_modes_returns_previously_chosen() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(100);
+
+        let modal = ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 3,
+            constraints: vec![ModalSelectionConstraint::NoRepeatThisTurn],
+            ..Default::default()
+        };
+
+        // No modes chosen yet.
+        assert!(compute_unavailable_modes(&state, source_id, &modal).is_empty());
+
+        // Record mode 1 chosen.
+        record_modal_mode_choices(&mut state, source_id, &modal, &[1]);
+        assert_eq!(
+            compute_unavailable_modes(&state, source_id, &modal),
+            vec![1]
+        );
+
+        // Different source_id is unaffected.
+        assert!(compute_unavailable_modes(&state, ObjectId(200), &modal).is_empty());
+    }
+
+    #[test]
+    fn record_modal_mode_choices_tracks_game_scoped() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(100);
+
+        let modal = ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 4,
+            constraints: vec![ModalSelectionConstraint::NoRepeatThisGame],
+            ..Default::default()
+        };
+
+        record_modal_mode_choices(&mut state, source_id, &modal, &[2]);
+        assert!(state.modal_modes_chosen_this_game.contains(&(source_id, 2)));
+        // Turn-scoped map should NOT be populated for game-scoped constraint.
+        assert!(!state.modal_modes_chosen_this_turn.contains(&(source_id, 2)));
     }
 
     #[test]

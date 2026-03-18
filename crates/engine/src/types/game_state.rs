@@ -279,6 +279,10 @@ pub enum WaitingFor {
         /// CR 602.2a: Announce → choose modes → choose targets → pay costs.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ability_cost: Option<AbilityCost>,
+        /// Mode indices unavailable due to NoRepeatThisTurn/NoRepeatThisGame constraints.
+        /// CR 700.2: Engine computes which modes have been previously chosen; frontend uses this to disable them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unavailable_modes: Vec<usize>,
     },
     /// CR 702.49a: Player may activate Ninjutsu from hand during declare blockers step.
     /// Presented when the attacking player has Ninjutsu cards in hand and unblocked attackers.
@@ -564,6 +568,17 @@ pub struct GameState {
     #[serde(default)]
     pub creature_died_this_turn: bool,
 
+    /// Modal modes chosen this turn per source: (ObjectId, mode_index).
+    /// CR 700.2: "choose one that hasn't been chosen this turn"
+    /// Note: ObjectId-keyed — zone changes create new ObjectId per CR 400.7, naturally resetting tracking.
+    #[serde(default)]
+    pub modal_modes_chosen_this_turn: HashSet<(ObjectId, usize)>,
+    /// Modal modes chosen this game per source: (ObjectId, mode_index).
+    /// CR 700.2: "choose one that hasn't been chosen" (game-scoped)
+    /// Note: ObjectId-keyed — zone changes create new ObjectId per CR 400.7, naturally resetting tracking.
+    #[serde(default)]
+    pub modal_modes_chosen_this_game: HashSet<(ObjectId, usize)>,
+
     /// Cards currently revealed to all players (e.g. during a RevealHand effect).
     /// `filter_state_for_player` skips hiding these cards.
     #[serde(default)]
@@ -720,6 +735,8 @@ impl GameState {
             players_who_had_artifact_etb_this_turn: HashSet::new(),
             cards_left_graveyard_this_turn: HashMap::new(),
             creature_died_this_turn: false,
+            modal_modes_chosen_this_turn: HashSet::new(),
+            modal_modes_chosen_this_game: HashSet::new(),
             revealed_cards: HashSet::new(),
             pending_continuation: None,
             pending_optional_effect: None,
@@ -850,6 +867,8 @@ impl PartialEq for GameState {
                 == other.players_who_had_artifact_etb_this_turn
             && self.cards_left_graveyard_this_turn == other.cards_left_graveyard_this_turn
             && self.creature_died_this_turn == other.creature_died_this_turn
+            && self.modal_modes_chosen_this_turn == other.modal_modes_chosen_this_turn
+            && self.modal_modes_chosen_this_game == other.modal_modes_chosen_this_game
             && self.pending_continuation == other.pending_continuation
             && self.last_named_choice == other.last_named_choice
     }
@@ -1080,6 +1099,7 @@ mod tests {
                 is_activated: true,
                 ability_index: Some(0),
                 ability_cost: None,
+                unavailable_modes: vec![],
             },
             WaitingFor::DiscardForCost {
                 player: PlayerId(0),

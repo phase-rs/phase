@@ -1426,6 +1426,16 @@ fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
     let (min_choices, max_choices) = parse_modal_choose_count(&text.to_lowercase());
     let mut allow_repeat_modes = false;
     let mut constraints = Vec::new();
+
+    // CR 700.2: Detect cross-resolution mode restrictions from Oracle text.
+    // The constraint phrase is part of the header sentence, not a period-delimited sub-sentence.
+    // Order matters — "this turn" is the more specific substring.
+    if header_lower.contains("that hasn't been chosen this turn") {
+        constraints.push(ModalSelectionConstraint::NoRepeatThisTurn);
+    } else if header_lower.contains("that hasn't been chosen") {
+        constraints.push(ModalSelectionConstraint::NoRepeatThisGame);
+    }
+
     for sentence in sentences.iter().skip(1) {
         let lower = sentence.to_lowercase();
         if lower == "you may choose the same mode more than once" {
@@ -3018,6 +3028,10 @@ mod tests {
             .expect("trigger should have execute");
         let modal = execute.modal.as_ref().expect("execute should be modal");
         assert_eq!(modal.mode_count, 4);
+        assert_eq!(
+            modal.constraints,
+            vec![ModalSelectionConstraint::NoRepeatThisGame]
+        );
         assert_eq!(execute.mode_abilities.len(), 4);
 
         assert!(matches!(
@@ -3076,6 +3090,49 @@ mod tests {
         )
         .expect("header should parse");
         assert!(header.allow_repeat_modes);
+    }
+
+    #[test]
+    fn modal_header_detects_no_repeat_this_turn_constraint() {
+        let header = parse_modal_header_ast("choose one that hasn't been chosen this turn —")
+            .expect("header should parse");
+        assert_eq!(
+            header.constraints,
+            vec![ModalSelectionConstraint::NoRepeatThisTurn]
+        );
+    }
+
+    #[test]
+    fn modal_header_detects_no_repeat_this_game_constraint() {
+        let header = parse_modal_header_ast("choose one that hasn't been chosen —")
+            .expect("header should parse");
+        assert_eq!(
+            header.constraints,
+            vec![ModalSelectionConstraint::NoRepeatThisGame]
+        );
+    }
+
+    #[test]
+    fn monument_to_endurance_parses_no_repeat_this_turn() {
+        let r = parse(
+            "At the beginning of your end step, choose one that hasn't been chosen this turn —\n• Put a +1/+1 counter on Monument to Endurance.\n• You gain 4 life.\n• Create a 0/0 green Hydra creature token with \"This creature gets +1/+1 for each counter on it.\"",
+            "Monument to Endurance",
+            &[],
+            &["Enchantment", "Creature"],
+            &[],
+        );
+        assert_eq!(r.triggers.len(), 1);
+        let execute = r.triggers[0]
+            .execute
+            .as_ref()
+            .expect("trigger should have execute");
+        let modal = execute.modal.as_ref().expect("execute should be modal");
+        assert_eq!(modal.mode_count, 3);
+        assert_eq!(
+            modal.constraints,
+            vec![ModalSelectionConstraint::NoRepeatThisTurn]
+        );
+        assert_eq!(execute.mode_abilities.len(), 3);
     }
 
     #[test]

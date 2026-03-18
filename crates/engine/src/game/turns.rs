@@ -90,6 +90,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.players_who_had_artifact_etb_this_turn.clear();
     state.cards_left_graveyard_this_turn.clear();
     state.creature_died_this_turn = false;
+    state.modal_modes_chosen_this_turn.clear();
     for player in &mut state.players {
         player.has_drawn_this_turn = false;
         player.lands_played_this_turn = 0;
