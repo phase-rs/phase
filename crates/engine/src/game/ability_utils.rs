@@ -29,6 +29,7 @@ pub fn build_resolved_from_def(
         resolved = resolved.condition(condition);
     }
     resolved.optional_targeting = def.optional_targeting;
+    resolved.optional = def.optional;
     resolved
 }
 

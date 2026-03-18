@@ -900,7 +900,7 @@ fn parse_quantity_comparison(lower: &str) -> Option<StaticCondition> {
 }
 
 /// Map a quantity phrase to a dynamic QuantityRef.
-fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
+pub(super) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
     match text.trim().trim_end_matches('.') {
         "cards in your hand" => Some(QuantityRef::HandSize),
         "your life total" => Some(QuantityRef::LifeTotal),

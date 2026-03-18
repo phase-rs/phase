@@ -369,6 +369,24 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             casting::handle_cancel_cast(state, pending_cast, &mut events);
             WaitingFor::Priority { player: *player }
         }
+        // CR 609.3: Player decided whether to perform an optional effect ("You may X").
+        (WaitingFor::OptionalEffectChoice { .. }, GameAction::DecideOptionalEffect { accept }) => {
+            if let Some(mut ability) = state.pending_optional_effect.take() {
+                ability.optional = false; // prevent re-prompt on re-entry
+                if accept {
+                    // CR 609.3: Player chose to perform — execute the full chain.
+                    ability.context.optional_effect_performed = true;
+                    effects::resolve_ability_chain(state, &ability, &mut events, 0)
+                        .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                }
+            }
+            // Resume with pending continuation if one was stashed (from resolve_ability_chain).
+            if let Some(continuation) = state.pending_continuation.take() {
+                effects::resolve_ability_chain(state, &continuation, &mut events, 0)
+                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+            }
+            state.waiting_for.clone()
+        }
         (WaitingFor::ManaPayment { player }, GameAction::CancelCast) => {
             WaitingFor::Priority { player: *player }
         }
@@ -1188,6 +1206,11 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 state.priority_pass_count = 0;
                 WaitingFor::Priority { player: p }
             } else {
+                // Preserve trigger_event from the stashed pending_trigger for event-context resolution.
+                let te = state
+                    .pending_trigger
+                    .as_ref()
+                    .and_then(|pt| pt.trigger_event.clone());
                 let target_slots = build_target_slots(state, &resolved)?;
                 let target_constraints = super::ability_utils::target_constraints_from_modal(modal);
                 if !target_slots.is_empty() {
@@ -1211,7 +1234,9 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                                 ability: resolved,
                                 timestamp: state.turn_number,
                                 target_constraints,
-                                trigger_event: None,
+                                trigger_event: te,
+                                modal: None,
+                                mode_abilities: vec![],
                             },
                             &mut events,
                         );
@@ -1223,7 +1248,9 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                             ability: resolved,
                             timestamp: state.turn_number,
                             target_constraints: target_constraints.clone(),
-                            trigger_event: None,
+                            trigger_event: te,
+                            modal: None,
+                            mode_abilities: vec![],
                         });
                         let selection = begin_target_selection(&target_slots, &target_constraints)?;
                         return Ok(ActionResult {
@@ -1246,7 +1273,9 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                             ability: resolved,
                             timestamp: state.turn_number,
                             target_constraints,
-                            trigger_event: None,
+                            trigger_event: te,
+                            modal: None,
+                            mode_abilities: vec![],
                         },
                         &mut events,
                     );
@@ -1467,6 +1496,21 @@ fn begin_pending_trigger_target_selection(
     let Some(trigger) = state.pending_trigger.as_ref() else {
         return Ok(None);
     };
+
+    // CR 700.2a: Modal trigger — prompt for mode selection before stack.
+    if let Some(ref modal) = trigger.modal {
+        if !trigger.mode_abilities.is_empty() {
+            return Ok(Some(WaitingFor::AbilityModeChoice {
+                player: trigger.controller,
+                modal: modal.clone(),
+                source_id: trigger.source_id,
+                mode_abilities: trigger.mode_abilities.clone(),
+                is_activated: false,
+                ability_index: None,
+                ability_cost: None,
+            }));
+        }
+    }
 
     let target_slots = build_target_slots(state, &trigger.ability)?;
     if target_slots.is_empty() {
@@ -3818,6 +3862,8 @@ mod trigger_target_tests {
             timestamp: 1,
             target_constraints: Vec::new(),
             trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
         });
 
         let legal_targets = vec![TargetRef::Object(target1), TargetRef::Object(target2)];
@@ -3896,6 +3942,8 @@ mod trigger_target_tests {
             timestamp: 1,
             target_constraints: Vec::new(),
             trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
         });
 
         state.waiting_for = WaitingFor::TriggerTargetSelection {
@@ -4005,6 +4053,8 @@ mod trigger_target_tests {
             timestamp: 1,
             target_constraints: vec![TargetSelectionConstraint::DifferentTargetPlayers],
             trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
         });
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
@@ -4114,6 +4164,8 @@ mod trigger_target_tests {
             timestamp: 1,
             target_constraints: target_constraints.clone(),
             trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
         });
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),

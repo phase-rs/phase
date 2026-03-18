@@ -289,6 +289,11 @@ pub enum WaitingFor {
         /// Unblocked attackers that can be returned to hand.
         unblocked_attackers: Vec<ObjectId>,
     },
+    /// CR 609.3: Player must choose whether to perform an optional effect ("You may X").
+    OptionalEffectChoice {
+        player: PlayerId,
+        source_id: ObjectId,
+    },
     /// CR 601.2b: Player must choose a card to discard as part of an additional casting cost.
     /// After selection, the card is discarded and casting continues via `pay_and_push`.
     DiscardForCost {
@@ -331,7 +336,8 @@ impl WaitingFor {
             | WaitingFor::MultiTargetSelection { player, .. }
             | WaitingFor::AdventureCastChoice { player, .. }
             | WaitingFor::NinjutsuActivation { player, .. }
-            | WaitingFor::DiscardForCost { player, .. } => Some(*player),
+            | WaitingFor::DiscardForCost { player, .. }
+            | WaitingFor::OptionalEffectChoice { player, .. } => Some(*player),
             WaitingFor::GameOver { .. } => None,
         }
     }
@@ -560,6 +566,10 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_continuation: Option<Box<crate::types::ability::ResolvedAbility>>,
 
+    /// Pending optional effect ability chain, awaiting player accept/decline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_optional_effect: Option<Box<crate::types::ability::ResolvedAbility>>,
+
     /// The most recently chosen named value (creature type, color, etc.).
     /// Set by the NamedChoice handler, consumed by continuation effects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -703,6 +713,7 @@ impl GameState {
             creature_died_this_turn: false,
             revealed_cards: HashSet::new(),
             pending_continuation: None,
+            pending_optional_effect: None,
             last_named_choice: None,
             all_creature_types: Vec::new(),
             all_card_names: Vec::new(),
@@ -1214,6 +1225,8 @@ mod tests {
             timestamp: 42,
             target_constraints: Vec::new(),
             trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: PendingTrigger = serde_json::from_str(&json).unwrap();
@@ -1246,6 +1259,8 @@ mod tests {
             timestamp: 1,
             target_constraints: Vec::new(),
             trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
         });
 
         let json = serde_json::to_string(&state).unwrap();

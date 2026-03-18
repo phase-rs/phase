@@ -401,6 +401,11 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
         return clause;
     }
 
+    // CR 121.6: "{verb} cards equal to {quantity}" — dynamic count from game state.
+    if let Some(clause) = try_parse_equal_to_quantity_effect(text) {
+        return clause;
+    }
+
     let ast = parse_clause_ast(text);
     lower_clause_ast(ast)
 }
@@ -440,13 +445,36 @@ fn try_parse_still_a_type(text: &str) -> Option<ParsedEffectClause> {
     })
 }
 
+/// Parse "{verb} cards equal to {quantity_ref}" patterns (CR 121.6).
+///
+/// Handles verbs whose count field is `QuantityExpr` (mill, draw).
+fn try_parse_equal_to_quantity_effect(text: &str) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    if let Some(rest) = lower.strip_prefix("mill cards equal to ") {
+        let rest = rest.trim().trim_end_matches('.');
+        let qty = super::oracle_static::parse_quantity_ref(rest)?;
+        return Some(parsed_clause(Effect::Mill {
+            count: QuantityExpr::Ref { qty },
+            target: TargetFilter::Any,
+        }));
+    }
+    if let Some(rest) = lower.strip_prefix("draw cards equal to ") {
+        let rest = rest.trim().trim_end_matches('.');
+        let qty = super::oracle_static::parse_quantity_ref(rest)?;
+        return Some(parsed_clause(Effect::Draw {
+            count: QuantityExpr::Ref { qty },
+        }));
+    }
+    None
+}
+
 /// Parse "for each" quantity patterns on draw/life/damage/mill effects.
 ///
 /// Handles patterns like:
-///   - "draw a card for each opponent who lost life this turn"
-///   - "draw a card for each creature you control"
-///   - "gain 1 life for each creature you control"
-///   - "mill a card for each [counter type] counter on ~"
+/// - "draw a card for each opponent who lost life this turn"
+/// - "draw a card for each creature you control"
+/// - "gain 1 life for each creature you control"
+/// - "mill a card for each [counter type] counter on ~"
 fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
 
@@ -1710,15 +1738,25 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
         }
 
         let (condition, text) = strip_additional_cost_conditional(normalized_text);
+        let (if_you_do, text) = if condition.is_none() {
+            strip_if_you_do_conditional(&text)
+        } else {
+            (None, text)
+        };
+        let condition = condition.or(if_you_do);
+        let (is_optional, text) = strip_optional_effect_prefix(&text);
         let (text_no_temporal, delayed_condition) = strip_temporal_suffix(&text);
         let (text_no_qty, multi_target) = strip_any_number_quantifier(text_no_temporal);
         let clause = parse_effect_clause(&text_no_qty);
         let mut def = AbilityDefinition::new(kind, clause.effect);
+        if is_optional {
+            def.optional = true;
+        }
         if let Some(duration) = clause.duration {
             def = def.duration(duration);
         }
-        if let Some(condition) = condition {
-            def = def.condition(condition);
+        if let Some(ref condition) = condition {
+            def = def.condition(condition.clone());
         }
         if let Some(spec) = multi_target {
             def = def.multi_target(spec);
@@ -3240,6 +3278,28 @@ fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCondition>, S
         )
     } else {
         (None, text.to_string())
+    }
+}
+
+/// CR 608.2c: Detect "if you do, {effect}" conditional connector.
+fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityCondition>, String) {
+    let lower = text.to_lowercase();
+    if let Some(rest) = lower.strip_prefix("if you do, ") {
+        let offset = text.len() - rest.len();
+        (Some(AbilityCondition::IfYouDo), text[offset..].to_string())
+    } else {
+        (None, text.to_string())
+    }
+}
+
+/// Strip "you may " prefix, returning whether the effect is optional.
+fn strip_optional_effect_prefix(text: &str) -> (bool, String) {
+    let lower = text.to_lowercase();
+    if let Some(rest) = lower.strip_prefix("you may ") {
+        let offset = text.len() - rest.len();
+        (true, text[offset..].to_string())
+    } else {
+        (false, text.to_string())
     }
 }
 

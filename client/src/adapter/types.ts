@@ -356,7 +356,8 @@ export type WaitingFor =
   | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; pending_cast: PendingCast } }
   | { type: "AdventureCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
   | { type: "NinjutsuActivation"; data: { player: PlayerId; ninjutsu_cards: CardId[]; unblocked_attackers: ObjectId[] } }
-  | { type: "DiscardForCost"; data: { player: PlayerId; count: number; cards: ObjectId[]; pending_cast: PendingCast } };
+  | { type: "DiscardForCost"; data: { player: PlayerId; count: number; cards: ObjectId[]; pending_cast: PendingCast } }
+  | { type: "OptionalEffectChoice"; data: { player: PlayerId; source_id: ObjectId } };
 
 // ── Action Result ────────────────────────────────────────────────────────
 
@@ -392,6 +393,7 @@ export type GameAction =
   | { type: "DecideOptionalCost"; data: { pay: boolean } }
   | { type: "ChooseAdventureFace"; data: { creature: boolean } }
   | { type: "ActivateNinjutsu"; data: { ninjutsu_card_id: CardId; attacker_to_return: ObjectId } }
+  | { type: "DecideOptionalEffect"; data: { accept: boolean } }
   | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn" } } }
   | { type: "CancelAutoPass" };
 

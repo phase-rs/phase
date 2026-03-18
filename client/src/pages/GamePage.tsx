@@ -374,6 +374,29 @@ function GamePageContent({
     root.style.setProperty("--card-size-scale", String(scale));
   }, [cardSize]);
 
+  // Auto-open graveyard/exile viewer when the engine is waiting for a target in that zone
+  useEffect(() => {
+    if (!gameState) return;
+    const wf = gameState.waiting_for;
+    if (
+      (wf?.type !== "TargetSelection" && wf?.type !== "TriggerTargetSelection")
+      || wf.data.player !== playerId
+    ) return;
+
+    const legalTargets = wf.data.selection.current_legal_targets;
+    // Find the first legal target whose engine-provided zone is Graveyard or Exile
+    for (const t of legalTargets) {
+      if (!("Object" in t)) continue;
+      const obj = gameState.objects[t.Object];
+      if (!obj) continue;
+      if (obj.zone === "Graveyard" || obj.zone === "Exile") {
+        const zone = obj.zone === "Graveyard" ? "graveyard" : "exile";
+        setViewingZone({ zone, playerId: obj.owner });
+        return;
+      }
+    }
+  }, [gameState, playerId]);
+
   const handleMulliganChoice = useCallback(
     (id: string) => {
       dispatch({
@@ -698,6 +721,12 @@ function GamePageContent({
       {waitingFor?.type === "OptionalCostChoice" &&
         waitingFor.data.player === playerId && (
           <OptionalCostModal />
+        )}
+
+      {/* Optional effect choice ("You may X") */}
+      {waitingFor?.type === "OptionalEffectChoice" &&
+        waitingFor.data.player === playerId && (
+          <OptionalEffectModal />
         )}
 
       {waitingFor?.type === "MulliganDecision" &&
@@ -1357,6 +1386,32 @@ function OptionalCostModal() {
         dispatch({ type: "DecideOptionalCost", data: { pay: id === "pay" } })
       }
       onClose={isMandatoryChoice ? undefined : () => dispatch({ type: "CancelCast" })}
+    />
+  );
+}
+
+// ── Optional Effect Choice Modal ────────────────────────────────────────
+
+function OptionalEffectModal() {
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const objects = useGameStore((s) => s.gameState?.objects ?? {});
+
+  if (waitingFor?.type !== "OptionalEffectChoice") return null;
+
+  const sourceObj = objects[waitingFor.data.source_id];
+  const sourceName = sourceObj?.name ?? "Effect";
+
+  return (
+    <ChoiceModal
+      title={`${sourceName} — Optional Effect`}
+      options={[
+        { id: "accept", label: "Yes" },
+        { id: "decline", label: "No" },
+      ]}
+      onChoose={(id) =>
+        dispatch({ type: "DecideOptionalEffect", data: { accept: id === "accept" } })
+      }
     />
   );
 }

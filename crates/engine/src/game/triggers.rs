@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    Effect, EffectKind, ResolvedAbility, TargetFilter, TargetRef, TriggerCondition,
-    TriggerDefinition, TypedFilter,
+    AbilityDefinition, Effect, EffectKind, ModalChoice, ResolvedAbility, TargetFilter, TargetRef,
+    TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -37,6 +37,11 @@ pub struct PendingTrigger {
     /// CR 603.7c: The event that caused this trigger to fire, for event-context resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_event: Option<GameEvent>,
+    /// CR 700.2a: Modal trigger data for deferred mode selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modal: Option<ModalChoice>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mode_abilities: Vec<AbilityDefinition>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -74,6 +79,11 @@ fn collect_matching_triggers(
                     }
                 }
                 let ability = build_triggered_ability(trig_def, obj_id, controller);
+                let (modal, mode_abilities) = trig_def
+                    .execute
+                    .as_ref()
+                    .map(|exec| (exec.modal.clone(), exec.mode_abilities.clone()))
+                    .unwrap_or_default();
                 pending.push(PendingTrigger {
                     source_id: obj_id,
                     controller,
@@ -82,6 +92,8 @@ fn collect_matching_triggers(
                     timestamp,
                     target_constraints: Vec::new(),
                     trigger_event: Some(event.clone()),
+                    modal,
+                    mode_abilities,
                 });
                 record_trigger_fired(state, trig_def, obj_id, trig_idx);
             }
@@ -159,6 +171,8 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             timestamp,
                             target_constraints: Vec::new(),
                             trigger_event: Some(event.clone()),
+                            modal: None,
+                            mode_abilities: vec![],
                         });
                     }
                 }
@@ -215,6 +229,12 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
 
     let mut events_out = Vec::new();
     for trigger in pending {
+        // CR 700.2a: Modal triggered ability — stash for mode selection before pushing to stack.
+        if trigger.modal.is_some() && !trigger.mode_abilities.is_empty() {
+            state.pending_trigger = Some(trigger);
+            return;
+        }
+
         let target_slots = match super::ability_utils::build_target_slots(state, &trigger.ability) {
             Ok(target_slots) => target_slots,
             Err(_) => continue,
@@ -322,6 +342,8 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
             timestamp: state.turn_number,
             target_constraints: Vec::new(),
             trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
         };
         push_pending_trigger_to_stack(state, pending, &mut new_events);
     }

@@ -188,6 +188,16 @@ pub fn resolve_ability_chain(
         return Ok(());
     }
 
+    // CR 609.3: "You may" effects prompt the controller before execution.
+    if ability.optional {
+        state.pending_optional_effect = Some(Box::new(ability.clone()));
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: ability.controller,
+            source_id: ability.source_id,
+        };
+        return Ok(());
+    }
+
     // CR 603.7: Snapshot event count so we can detect objects moved by this effect.
     let events_before = events.len();
 
@@ -258,6 +268,7 @@ pub fn resolve_ability_chain(
         if let Some(ref condition) = sub.condition {
             let condition_met = match condition {
                 AbilityCondition::AdditionalCostPaid => ability.context.additional_cost_paid,
+                AbilityCondition::IfYouDo => ability.context.optional_effect_performed,
             };
             if !condition_met {
                 return Ok(());
@@ -276,6 +287,7 @@ pub fn resolve_ability_chain(
                 | WaitingFor::TriggerTargetSelection { .. }
                 | WaitingFor::NamedChoice { .. }
                 | WaitingFor::MultiTargetSelection { .. }
+                | WaitingFor::OptionalEffectChoice { .. }
         ) {
             let mut sub_clone = sub.as_ref().clone();
             if sub_clone.targets.is_empty() && !ability.targets.is_empty() {

@@ -1734,6 +1734,9 @@ pub struct AbilityDefinition {
     /// When true, targeting is optional ("up to one"). Player may choose zero targets.
     #[serde(default)]
     pub optional_targeting: bool,
+    /// CR 609.3: When true, the controller chooses whether to perform this effect ("You may X").
+    #[serde(default)]
+    pub optional: bool,
     /// Variable-count targeting: min/max targets the player can choose.
     /// When present, resolution enters MultiTargetSelection instead of immediate resolve.
     /// CR 601.2c + CR 115.1d.
@@ -1765,6 +1768,7 @@ impl AbilityDefinition {
             activation_restrictions: Vec::new(),
             condition: None,
             optional_targeting: false,
+            optional: false,
             multi_target: None,
             modal: None,
             mode_abilities: Vec::new(),
@@ -1816,6 +1820,11 @@ impl AbilityDefinition {
         self
     }
 
+    pub fn optional(mut self) -> Self {
+        self.optional = true;
+        self
+    }
+
     pub fn optional_targeting(mut self) -> Self {
         self.optional_targeting = true;
         self
@@ -1841,6 +1850,8 @@ impl AbilityDefinition {
 pub enum AbilityCondition {
     /// This ability only fires if the spell's optional additional cost was paid.
     AdditionalCostPaid,
+    /// CR 608.2c: "If you do" — sub_ability executes only if the parent optional effect was performed.
+    IfYouDo,
 }
 
 /// Casting-time facts that flow with a spell from casting through resolution.
@@ -1850,6 +1861,10 @@ pub struct SpellContext {
     /// Whether the spell's optional additional cost was paid during casting.
     #[serde(default)]
     pub additional_cost_paid: bool,
+    /// Whether an optional "you may" effect was performed during resolution.
+    /// Used by AbilityCondition::IfYouDo to gate dependent sub_abilities.
+    #[serde(default)]
+    pub optional_effect_performed: bool,
 }
 
 /// Intervening-if condition for triggered abilities.
@@ -2310,6 +2325,9 @@ pub struct ResolvedAbility {
     /// When true, targeting is optional ("up to one"). Player may choose zero targets.
     #[serde(default)]
     pub optional_targeting: bool,
+    /// CR 609.3: Optional effect — controller prompted before execution.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 impl ResolvedAbility {
@@ -2331,6 +2349,7 @@ impl ResolvedAbility {
             condition: None,
             context: SpellContext::default(),
             optional_targeting: false,
+            optional: false,
         }
     }
 

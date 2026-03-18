@@ -31,7 +31,8 @@ expression: result
       "target_prompt": null,
       "sorcery_speed": true,
       "condition": null,
-      "optional_targeting": false
+      "optional_targeting": false,
+      "optional": false
     }
   ],
   "triggers": [],

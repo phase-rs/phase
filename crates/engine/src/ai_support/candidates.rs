@@ -287,6 +287,20 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
             }
             actions
         }
+        WaitingFor::OptionalEffectChoice { .. } => {
+            vec![
+                candidate(
+                    GameAction::DecideOptionalEffect { accept: true },
+                    TacticalClass::Utility,
+                    state.waiting_for.acting_player(),
+                ),
+                candidate(
+                    GameAction::DecideOptionalEffect { accept: false },
+                    TacticalClass::Utility,
+                    state.waiting_for.acting_player(),
+                ),
+            ]
+        }
         WaitingFor::GameOver { .. } => Vec::new(),
     }
 }

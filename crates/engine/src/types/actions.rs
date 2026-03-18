@@ -84,6 +84,10 @@ pub enum GameAction {
         ninjutsu_card_id: CardId,
         attacker_to_return: ObjectId,
     },
+    /// CR 609.3: Accept or decline an optional effect ("You may X").
+    DecideOptionalEffect {
+        accept: bool,
+    },
     /// Set auto-pass mode for the acting player (CR 117.4).
     SetAutoPass {
         mode: AutoPassRequest,
