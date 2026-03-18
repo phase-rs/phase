@@ -1,6 +1,8 @@
 use super::oracle_effect::parse_effect_chain;
 use super::oracle_target::parse_type_phrase;
-use super::oracle_util::{merge_or_filters, parse_number, parse_ordinal, strip_reminder_text};
+use super::oracle_util::{
+    canonicalize_subtype_name, merge_or_filters, parse_number, parse_ordinal, strip_reminder_text,
+};
 use crate::types::ability::{
     AbilityKind, ControllerRef, FilterProp, TargetFilter, TriggerCondition, TriggerConstraint,
     TriggerDefinition, TypeFilter, TypedFilter,
@@ -418,7 +420,6 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
     // Fallback: no subject parsed, return Any
     (TargetFilter::Any, text)
 }
-
 
 /// Add FilterProp::Another to a TargetFilter. Distributes into Or branches recursively.
 fn add_another_prop(filter: TargetFilter) -> TargetFilter {
@@ -945,23 +946,6 @@ fn build_controlled_subtype_filters(
     } else {
         Some(filters)
     }
-}
-
-fn canonicalize_subtype_name(text: &str) -> String {
-    text.split_whitespace()
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => {
-                    let mut capitalized = first.to_uppercase().collect::<String>();
-                    capitalized.push_str(chars.as_str());
-                    capitalized
-                }
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 // ---------------------------------------------------------------------------
@@ -2418,12 +2402,14 @@ mod tests {
     }
 
     #[test]
-    fn trigger_samurai_or_warrior_attacks_alone_stays_unknown() {
+    fn trigger_samurai_or_warrior_attacks_alone() {
         let def = parse_trigger_line(
             "Whenever a Samurai or Warrior you control attacks alone, draw a card.",
             "Raiyuu, Storm's Edge",
         );
-        assert!(matches!(def.mode, TriggerMode::Unknown(_)));
+        // Now that parse_type_phrase recognizes subtypes ("Samurai", "Warrior"),
+        // the trigger parser correctly identifies this as an Attacks trigger.
+        assert!(matches!(def.mode, TriggerMode::Attacks));
     }
 
     #[test]

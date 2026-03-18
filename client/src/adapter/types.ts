@@ -259,12 +259,19 @@ export interface CombatState {
   first_strike_done: boolean;
 }
 
+// ── Resolved Ability (structural type for stack/pending cast abilities) ──
+
+export interface ResolvedAbility {
+  targets: TargetRef[];
+  sub_ability?: ResolvedAbility;
+}
+
 // ── Stack ────────────────────────────────────────────────────────────────
 
 export type StackEntryKind =
-  | { type: "Spell"; data: { card_id: CardId; ability: unknown } }
-  | { type: "ActivatedAbility"; data: { source_id: ObjectId; ability: unknown } }
-  | { type: "TriggeredAbility"; data: { source_id: ObjectId; ability: unknown } };
+  | { type: "Spell"; data: { card_id: CardId; ability: ResolvedAbility } }
+  | { type: "ActivatedAbility"; data: { source_id: ObjectId; ability: ResolvedAbility } }
+  | { type: "TriggeredAbility"; data: { source_id: ObjectId; ability: ResolvedAbility } };
 
 export interface StackEntry {
   id: ObjectId;
@@ -278,7 +285,7 @@ export interface StackEntry {
 export interface PendingCast {
   object_id: ObjectId;
   card_id: CardId;
-  ability: unknown;
+  ability: ResolvedAbility;
   cost: ManaCost;
   activation_cost?: SerializedAbilityCost;
   activation_ability_index?: number;

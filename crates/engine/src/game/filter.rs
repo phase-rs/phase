@@ -288,6 +288,30 @@ fn matches_filter_prop(
                 Err(_) => true, // Unknown supertype — permissive
             }
         }
+        // CR 205.4b: Object does NOT have this color.
+        FilterProp::NotColor { color } => {
+            use crate::types::mana::ManaColor;
+            let mana_color = match color.as_str() {
+                "White" => Some(ManaColor::White),
+                "Blue" => Some(ManaColor::Blue),
+                "Black" => Some(ManaColor::Black),
+                "Red" => Some(ManaColor::Red),
+                "Green" => Some(ManaColor::Green),
+                _ => None,
+            };
+            match mana_color {
+                Some(mc) => !obj.color.contains(&mc),
+                None => true, // Unknown color — permissive
+            }
+        }
+        // CR 205.4a: Object does NOT have this supertype.
+        FilterProp::NotSupertype { value } => {
+            let st: Result<crate::types::card_type::Supertype, _> = value.parse();
+            match st {
+                Ok(supertype) => !obj.card_types.supertypes.contains(&supertype),
+                Err(_) => true, // Unknown supertype — permissive
+            }
+        }
         FilterProp::IsChosenCreatureType => match source.chosen_creature_type {
             Some(chosen) => obj
                 .card_types

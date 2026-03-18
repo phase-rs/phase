@@ -154,6 +154,10 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Multicolored => parts.push("multicolored".into()),
             FilterProp::HasSupertype { value } => parts.push(value.to_lowercase()),
             FilterProp::IsChosenCreatureType => parts.push("chosen type".into()),
+            FilterProp::NotColor { color } => parts.push(format!("non-{}", color.to_lowercase())),
+            FilterProp::NotSupertype { value } => {
+                parts.push(format!("non-{}", value.to_lowercase()));
+            }
             FilterProp::Suspected => parts.push("suspected".into()),
             FilterProp::Other { value } => parts.push(value.clone()),
         }

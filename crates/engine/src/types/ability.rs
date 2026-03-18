@@ -609,6 +609,16 @@ pub enum FilterProp {
     /// Matches objects whose subtypes include the source object's chosen creature type.
     /// Used for "of the chosen type" patterns (Cavern of Souls, Metallic Mimic).
     IsChosenCreatureType,
+    /// CR 205.4b: Matches objects that do NOT have a specific color.
+    /// Parallel to `HasColor` — used for "nonblack", "nonwhite" in negation stacks.
+    NotColor {
+        color: String,
+    },
+    /// CR 205.4a: Matches objects that do NOT have a specific supertype.
+    /// Parallel to `HasSupertype` — used for "nonbasic", "nonlegendary" in negation stacks.
+    NotSupertype {
+        value: String,
+    },
     /// CR 702.157a: Matches suspected creatures.
     Suspected,
     Other {
@@ -1886,6 +1896,13 @@ pub enum ReplacementCondition {
     /// Replacement is suppressed if the controller controls any permanent with a listed subtype.
     /// Used for check lands (Clifftop Retreat, Drowned Catacomb, etc.).
     UnlessControlsSubtype { subtypes: Vec<String> },
+    /// "unless you control N or fewer other [type]"
+    /// CR 614.1c — condition checked when determining replacement applicability.
+    /// Replacement is suppressed if the controller controls N or fewer other permanents
+    /// matching the filter (excluding the entering permanent itself).
+    /// The filter MUST have `ControllerRef::You` and `FilterProp::Another` pre-set by the parser.
+    /// Used for fast lands (Spirebluff Canal, Blackcleave Cliffs, etc.).
+    UnlessControlsOtherLeq { count: u32, filter: TypedFilter },
 }
 
 /// Rate-limiting constraint for triggered abilities.

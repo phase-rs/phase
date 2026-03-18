@@ -1,8 +1,10 @@
 use indexmap::IndexMap;
 
 use crate::types::ability::{
-    AbilityDefinition, Effect, QuantityExpr, ReplacementCondition, ReplacementMode,
+    AbilityDefinition, Effect, QuantityExpr, ReplacementCondition, ReplacementMode, TargetFilter,
 };
+
+use super::filter::matches_target_filter;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingReplacement, WaitingFor};
 use crate::types::identifiers::ObjectId;
@@ -727,6 +729,22 @@ fn evaluate_replacement_condition(
             });
             // If the "unless" is satisfied (they DO control one), skip the replacement
             !controls_any
+        }
+        // CR 305.7 + CR 614.1c — fast lands enter tapped unless controller has
+        // N or fewer other lands; condition evaluated as the replacement applies.
+        ReplacementCondition::UnlessControlsOtherLeq { count, filter } => {
+            let target_filter = TargetFilter::Typed(filter.clone());
+            let matching_count = state
+                .objects
+                .values()
+                .filter(|o| {
+                    o.zone == Zone::Battlefield
+                        && matches_target_filter(state, o.id, &target_filter, source_id)
+                })
+                .count() as u32;
+            // "unless you control N or fewer" → suppressed when count ≤ N
+            // Replacement applies (enters tapped) when count > N
+            matching_count > *count
         }
     }
 }

@@ -5,7 +5,7 @@ use crate::types::identifiers::TrackedSetId;
 use crate::types::keywords::Keyword;
 use crate::types::zones::Zone;
 
-use super::oracle_util::{contains_possessive, merge_or_filters};
+use super::oracle_util::{contains_possessive, merge_or_filters, parse_subtype};
 
 /// Parse an event-context possessive reference from Oracle text.
 /// These resolve from the triggering event, not from player targeting.
@@ -178,6 +178,23 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         pos += consumed;
     }
 
+    // CR 205.4a: Parse supertype prefix: "legendary", "basic", "snow"
+    // Must come BEFORE color prefix so "legendary white creature" works:
+    // supertype consumed first, then color at the new position.
+    for &(prefix, supertype_name) in &[
+        ("legendary ", "Legendary"),
+        ("basic ", "Basic"),
+        ("snow ", "Snow"),
+    ] {
+        if lower[pos..].starts_with(prefix) {
+            properties.push(FilterProp::HasSupertype {
+                value: supertype_name.to_string(),
+            });
+            pos += prefix.len();
+            break;
+        }
+    }
+
     // Handle color prefix: "white creature", "red spell", etc.
     let color_prop = parse_color_prefix(&lower[pos..]);
     if let Some((ref prop, color_len)) = color_prop {
@@ -185,19 +202,62 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         pos += color_len;
     }
 
-    // Handle "non" prefix
-    let (negated_type, non_prefix) = parse_non_prefix(&lower[pos..]);
-    if non_prefix > 0 {
-        pos += non_prefix;
+    // CR 205.4b: Parse one or more comma-separated negation prefixes.
+    // "noncreature, nonland permanent" → [NonType("creature"), NonType("land")]
+    // "nonartifact, nonblack creature" → [NonType("artifact"), NotColor("Black")]
+    //
+    // parse_non_prefix uses whitespace as word boundary, but in stacked negation the
+    // separator is ", " (comma-space). We must strip the trailing comma from the negated
+    // word when the ", non" continuation pattern follows.
+    loop {
+        let remaining = &lower[pos..];
+        let Some(after_non) = remaining.strip_prefix("non") else {
+            break;
+        };
+        let after_non = after_non.strip_prefix('-').unwrap_or(after_non);
+        let prefix_len = remaining.len() - after_non.len(); // "non" or "non-"
+
+        // Find the negated word: ends at comma or whitespace
+        let end = after_non
+            .find(|c: char| c.is_whitespace() || c == ',')
+            .unwrap_or(after_non.len());
+        if end == 0 {
+            break;
+        }
+        let negated = &after_non[..end];
+        properties.push(classify_negation(negated));
+        pos += prefix_len + end;
+
+        // Check for ", non" continuation (stacked negation)
+        if let Some(rest) = lower[pos..].strip_prefix(", ") {
+            if rest.starts_with("non") {
+                pos += ", ".len();
+                continue;
+            }
+        }
+        // Consume trailing whitespace after the negated word
+        if pos < lower.len() && lower.as_bytes()[pos] == b' ' {
+            pos += 1;
+        }
+        break;
     }
 
-    // Parse the core type
+    // Parse the core type, falling back to subtype recognition
     let (card_type, subtype, type_len) = parse_core_type(&lower[pos..]);
     pos += type_len;
 
-    if let Some(neg) = negated_type {
-        properties.push(FilterProp::NonType { value: neg });
-    }
+    // If no core type was found, try subtype recognition as fallback.
+    // "Zombies you control" → subtype="Zombie", no card_type.
+    let subtype = if card_type.is_none() && subtype.is_none() {
+        if let Some((sub_name, sub_len)) = parse_subtype(&lower[pos..]) {
+            pos += sub_len;
+            Some(sub_name)
+        } else {
+            None
+        }
+    } else {
+        subtype
+    };
 
     if let Some(consumed) = parse_token_suffix(&lower[pos..]) {
         properties.push(FilterProp::Token);
@@ -212,7 +272,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     // Check ", and " first (Oxford comma before final element) since it starts with ", "
     if let Some(after_comma_and) = rest_lower.strip_prefix(", and ") {
         let after_trimmed = after_comma_and.trim_start();
-        if parse_core_type(after_trimmed).0.is_some() {
+        if starts_with_type_word(after_trimmed) {
             let comma_and_text = &text[pos + rest_offset + ", and ".len()..];
             let (other_filter, final_rest) = parse_type_phrase(comma_and_text);
             let left = typed(card_type.unwrap_or(TypeFilter::Any), subtype, properties);
@@ -224,7 +284,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     // CR 205.3a: Comma between non-final elements ("artifacts, creatures, ...")
     if let Some(after_comma) = rest_lower.strip_prefix(", ") {
         let after_trimmed = after_comma.trim_start();
-        if parse_core_type(after_trimmed).0.is_some() {
+        if starts_with_type_word(after_trimmed) {
             let comma_text = &text[pos + rest_offset + ", ".len()..];
             let (other_filter, final_rest) = parse_type_phrase(comma_text);
             let left = typed(card_type.unwrap_or(TypeFilter::Any), subtype, properties);
@@ -265,6 +325,19 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         );
     }
 
+    // CR 601.2d: "and/or" between types — for filter purposes, equivalent to Or.
+    // Must be checked BEFORE "and " to prevent "and " from consuming "and/or ".
+    if let Some(after_and_or) = rest_lower.strip_prefix("and/or ") {
+        let after_trimmed = after_and_or.trim_start();
+        if starts_with_type_word(after_trimmed) {
+            let and_or_text = &text[pos + rest_offset + "and/or ".len()..];
+            let (other_filter, final_rest) = parse_type_phrase(and_or_text);
+            let left = typed(card_type.unwrap_or(TypeFilter::Any), subtype, properties);
+            let combined = merge_or_filters(left, other_filter);
+            return (distribute_controller_to_or(combined), final_rest);
+        }
+    }
+
     // CR 205.3a: Oracle "and" between type words is set-union ("artifacts and creatures"
     // = any object that is an artifact OR a creature), not set-intersection.
     // TargetFilter::Or is correct here.
@@ -272,8 +345,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     // false matches on effect text like "destroy target creature and draw a card".
     if let Some(after_and_kw) = rest_lower.strip_prefix("and ") {
         let after_and = after_and_kw.trim_start();
-        let (next_type, _, _) = parse_core_type(after_and);
-        if next_type.is_some() {
+        if starts_with_type_word(after_and) {
             let and_text = &text[pos + rest_offset + 4..];
             let (other_filter, final_rest) = parse_type_phrase(and_text);
             let mut left = typed(card_type.unwrap_or(TypeFilter::Any), subtype, properties);
@@ -377,21 +449,63 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     (filter, &text[pos..])
 }
 
-fn parse_non_prefix(text: &str) -> (Option<String>, usize) {
-    if let Some(rest) = text.strip_prefix("non") {
-        // Strip optional hyphen: "non-Human" and "nonland" both valid
-        let rest = rest.strip_prefix('-').unwrap_or(rest);
-        let consumed_prefix = text.len() - rest.len(); // "non" or "non-"
-        let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-        let negated = rest[..end].to_string();
-        // We consumed "non[-]{type} " but the core type is the NEXT word, so return just the negated type
-        (
-            Some(negated),
-            consumed_prefix + end + if rest.len() > end { 1 } else { 0 },
-        )
-    } else {
-        (None, 0)
+/// CR 205.4b: Classify a negated word by semantic layer.
+/// `parse_non_prefix` strips "non"/"non-" and lowercases, so `negated` is e.g. "black", "basic", "creature".
+fn classify_negation(negated: &str) -> FilterProp {
+    match negated {
+        // Color negation — parallel to HasColor
+        "white" => FilterProp::NotColor {
+            color: "White".to_string(),
+        },
+        "blue" => FilterProp::NotColor {
+            color: "Blue".to_string(),
+        },
+        "black" => FilterProp::NotColor {
+            color: "Black".to_string(),
+        },
+        "red" => FilterProp::NotColor {
+            color: "Red".to_string(),
+        },
+        "green" => FilterProp::NotColor {
+            color: "Green".to_string(),
+        },
+        // CR 205.4a: Supertype negation — parallel to HasSupertype
+        "basic" => FilterProp::NotSupertype {
+            value: "Basic".to_string(),
+        },
+        "legendary" => FilterProp::NotSupertype {
+            value: "Legendary".to_string(),
+        },
+        "snow" => FilterProp::NotSupertype {
+            value: "Snow".to_string(),
+        },
+        // Type/subtype negation
+        _ => FilterProp::NonType {
+            value: negated.to_string(),
+        },
     }
+}
+
+/// Guard: does text start with something `parse_type_phrase` would recognize?
+/// Used to prevent comma/and/or recursion on non-type text.
+fn starts_with_type_word(text: &str) -> bool {
+    // Core type: "creature", "artifact", "permanent", etc.
+    if parse_core_type(text).0.is_some() {
+        return true;
+    }
+    // Subtype: "zombie", "vampires", "elves", etc.
+    if parse_subtype(text).is_some() {
+        return true;
+    }
+    // CR 205.4b: Negated type prefix: "noncreature spell", "nonland permanent"
+    if let Some(after_non) = text.strip_prefix("non") {
+        let after_non = after_non.strip_prefix('-').unwrap_or(after_non);
+        if let Some(ws_pos) = after_non.find(|c: char| c.is_whitespace()) {
+            let after_negated = after_non[ws_pos..].trim_start();
+            return parse_core_type(after_negated).0.is_some();
+        }
+    }
+    false
 }
 
 /// Distribute the controller from the last `Typed` element in an `Or` filter
@@ -1390,8 +1504,7 @@ mod tests {
 
     #[test]
     fn comma_list_three_types_with_opponent_control() {
-        let (f, rest) =
-            parse_type_phrase("artifacts, creatures, and lands your opponents control");
+        let (f, rest) = parse_type_phrase("artifacts, creatures, and lands your opponents control");
         match f {
             TargetFilter::Or { ref filters } => {
                 assert_eq!(filters.len(), 3);
@@ -1429,10 +1542,7 @@ mod tests {
                     filters[0],
                     TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact))
                 );
-                assert_eq!(
-                    filters[1],
-                    TargetFilter::Typed(TypedFilter::creature())
-                );
+                assert_eq!(filters[1], TargetFilter::Typed(TypedFilter::creature()));
                 assert_eq!(
                     filters[2],
                     TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment))
@@ -1445,8 +1555,7 @@ mod tests {
 
     #[test]
     fn comma_list_you_control() {
-        let (f, rest) =
-            parse_type_phrase("creatures, artifacts, and enchantments you control");
+        let (f, rest) = parse_type_phrase("creatures, artifacts, and enchantments you control");
         match f {
             TargetFilter::Or { ref filters } => {
                 assert_eq!(filters.len(), 3);
@@ -1474,8 +1583,7 @@ mod tests {
 
     #[test]
     fn comma_list_four_elements() {
-        let (f, rest) =
-            parse_type_phrase("artifacts, creatures, enchantments, and lands");
+        let (f, rest) = parse_type_phrase("artifacts, creatures, enchantments, and lands");
         match f {
             TargetFilter::Or { ref filters } => {
                 assert_eq!(filters.len(), 4);
@@ -1483,10 +1591,7 @@ mod tests {
                     filters[0],
                     TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact))
                 );
-                assert_eq!(
-                    filters[1],
-                    TargetFilter::Typed(TypedFilter::creature())
-                );
+                assert_eq!(filters[1], TargetFilter::Typed(TypedFilter::creature()));
                 assert_eq!(
                     filters[2],
                     TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment))
@@ -1503,8 +1608,7 @@ mod tests {
 
     #[test]
     fn comma_list_no_oxford_comma() {
-        let (f, rest) =
-            parse_type_phrase("artifacts, creatures and lands your opponents control");
+        let (f, rest) = parse_type_phrase("artifacts, creatures and lands your opponents control");
         match f {
             TargetFilter::Or { ref filters } => {
                 assert_eq!(filters.len(), 3);
@@ -1534,8 +1638,7 @@ mod tests {
 
     #[test]
     fn comma_list_remainder() {
-        let (f, rest) =
-            parse_type_phrase("artifacts, creatures, and lands enter tapped");
+        let (f, rest) = parse_type_phrase("artifacts, creatures, and lands enter tapped");
         match f {
             TargetFilter::Or { ref filters } => {
                 assert_eq!(filters.len(), 3);
@@ -1543,5 +1646,333 @@ mod tests {
             other => panic!("Expected Or filter, got {:?}", other),
         }
         assert_eq!(rest, " enter tapped");
+    }
+
+    // ── Feature 1: Stacked negation ──
+
+    #[test]
+    fn noncreature_nonland_permanent() {
+        let (f, rest) = parse_type_phrase("noncreature, nonland permanent");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                FilterProp::NonType {
+                    value: "creature".to_string()
+                },
+                FilterProp::NonType {
+                    value: "land".to_string()
+                },
+            ]))
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn noncreature_nonland_permanents_you_control() {
+        let (f, rest) = parse_type_phrase("noncreature, nonland permanents you control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .controller(ControllerRef::You)
+                    .properties(vec![
+                        FilterProp::NonType {
+                            value: "creature".to_string()
+                        },
+                        FilterProp::NonType {
+                            value: "land".to_string()
+                        },
+                    ])
+            )
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn nonartifact_nonblack_creature() {
+        // CR 205.4b: "nonartifact" → NonType, "nonblack" → NotColor
+        let (f, rest) = parse_type_phrase("nonartifact, nonblack creature");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::NonType {
+                    value: "artifact".to_string()
+                },
+                FilterProp::NotColor {
+                    color: "Black".to_string()
+                },
+            ]))
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn triple_stacked_negation() {
+        let (f, _) = parse_type_phrase("noncreature, nonland, nonartifact permanent");
+        match f {
+            TargetFilter::Typed(TypedFilter {
+                properties,
+                card_type,
+                ..
+            }) => {
+                assert_eq!(card_type, Some(TypeFilter::Permanent));
+                assert_eq!(properties.len(), 3);
+                assert!(
+                    matches!(&properties[0], FilterProp::NonType { value } if value == "creature")
+                );
+                assert!(matches!(&properties[1], FilterProp::NonType { value } if value == "land"));
+                assert!(
+                    matches!(&properties[2], FilterProp::NonType { value } if value == "artifact")
+                );
+            }
+            other => panic!("Expected Typed, got {:?}", other),
+        }
+    }
+
+    // ── Feature 1: starts_with_type_word guard ──
+
+    #[test]
+    fn starts_with_type_word_core_types() {
+        assert!(starts_with_type_word("creatures"));
+        assert!(starts_with_type_word("artifact"));
+        assert!(starts_with_type_word("permanents you control"));
+    }
+
+    #[test]
+    fn starts_with_type_word_negated() {
+        assert!(starts_with_type_word("noncreature spell"));
+        assert!(starts_with_type_word("nonland permanent"));
+    }
+
+    #[test]
+    fn starts_with_type_word_subtypes() {
+        assert!(starts_with_type_word("zombie"));
+        assert!(starts_with_type_word("vampires"));
+        assert!(starts_with_type_word("elves"));
+    }
+
+    #[test]
+    fn starts_with_type_word_rejects_non_types() {
+        assert!(!starts_with_type_word("draw a card"));
+        assert!(!starts_with_type_word("destroy target"));
+        assert!(!starts_with_type_word("you control"));
+    }
+
+    // ── Feature 2: Subtype recognition ──
+
+    #[test]
+    fn zombies_you_control() {
+        let (f, rest) = parse_type_phrase("zombies you control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Zombie".to_string())
+                    .controller(ControllerRef::You)
+            )
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn elves_you_control_irregular_plural() {
+        let (f, rest) = parse_type_phrase("elves you control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Elf".to_string())
+                    .controller(ControllerRef::You)
+            )
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn equipment_subtype() {
+        let (f, _) = parse_type_phrase("equipment you control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Equipment".to_string())
+                    .controller(ControllerRef::You)
+            )
+        );
+    }
+
+    #[test]
+    fn forest_land_subtype() {
+        let (f, _) = parse_type_phrase("forest");
+        match f {
+            TargetFilter::Typed(TypedFilter { subtype, .. }) => {
+                assert_eq!(subtype, Some("Forest".to_string()));
+            }
+            other => panic!("Expected Typed, got {:?}", other),
+        }
+    }
+
+    // ── Feature 3: Supertype prefixes ──
+
+    #[test]
+    fn legendary_creature() {
+        let (f, _) = parse_type_phrase("legendary creature");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::HasSupertype {
+                    value: "Legendary".to_string(),
+                }
+            ]))
+        );
+    }
+
+    #[test]
+    fn basic_lands_you_control() {
+        let (f, _) = parse_type_phrase("basic lands you control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::land()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::HasSupertype {
+                        value: "Basic".to_string(),
+                    }])
+            )
+        );
+    }
+
+    #[test]
+    fn snow_permanents() {
+        let (f, _) = parse_type_phrase("snow permanents");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                FilterProp::HasSupertype {
+                    value: "Snow".to_string(),
+                }
+            ]))
+        );
+    }
+
+    #[test]
+    fn legendary_white_creature() {
+        // CR 205.4a: Supertype + color compose in properties
+        let (f, _) = parse_type_phrase("legendary white creature");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::HasSupertype {
+                    value: "Legendary".to_string()
+                },
+                FilterProp::HasColor {
+                    color: "White".to_string()
+                },
+            ]))
+        );
+    }
+
+    #[test]
+    fn nonbasic_land() {
+        // CR 205.4a: "nonbasic" → NotSupertype, not NonType
+        let (f, _) = parse_type_phrase("nonbasic land");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::land().properties(vec![FilterProp::NotSupertype {
+                    value: "Basic".to_string(),
+                }])
+            )
+        );
+    }
+
+    #[test]
+    fn nonbasic_lands_opponent_controls() {
+        let (f, _) = parse_type_phrase("nonbasic lands an opponent controls");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::land()
+                    .controller(ControllerRef::Opponent)
+                    .properties(vec![FilterProp::NotSupertype {
+                        value: "Basic".to_string(),
+                    }])
+            )
+        );
+    }
+
+    // ── Feature 4: "and/or" separator ──
+
+    #[test]
+    fn artifact_and_or_enchantment() {
+        let (f, _) = parse_type_phrase("artifact and/or enchantment");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 2);
+                assert_eq!(
+                    filters[0],
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact))
+                );
+                assert_eq!(
+                    filters[1],
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment))
+                );
+            }
+            other => panic!("Expected Or filter, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn instant_and_or_sorcery() {
+        let (f, _) = parse_type_phrase("instant and/or sorcery");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 2);
+            }
+            other => panic!("Expected Or filter, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn creature_and_or_planeswalker_you_control() {
+        let (f, _) = parse_type_phrase("creature and/or planeswalker you control");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 2);
+                // Both branches should have controller distributed
+                for filter in filters {
+                    if let TargetFilter::Typed(typed) = filter {
+                        assert_eq!(typed.controller, Some(ControllerRef::You));
+                    } else {
+                        panic!("Expected Typed in Or, got {:?}", filter);
+                    }
+                }
+            }
+            other => panic!("Expected Or filter, got {:?}", other),
+        }
+    }
+
+    // ── Regression: existing tests still pass with new features ──
+
+    #[test]
+    fn existing_nonland_still_works() {
+        // Single non-prefix (not stacked) should work as before
+        let (f, _) = parse_type_phrase("nonland permanent");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::permanent().properties(vec![FilterProp::NonType {
+                    value: "land".to_string(),
+                }])
+            )
+        );
+    }
+
+    #[test]
+    fn and_still_works_with_non_type_text() {
+        // "creature and draw a card" — "and" should NOT recurse because "draw" isn't a type
+        let (f, rest) = parse_type_phrase("creature and draw a card");
+        assert_eq!(f, TargetFilter::Typed(TypedFilter::creature()));
+        assert!(rest.contains("and draw"), "rest = {:?}", rest);
     }
 }

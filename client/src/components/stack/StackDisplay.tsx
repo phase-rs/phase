@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 
 import { StackEntry } from "./StackEntry.tsx";
+import { StackTargetArcs } from "./StackTargetArcs.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
-import type { StackEntry as StackEntryType } from "../../adapter/types.ts";
+import type { ObjectId, StackEntry as StackEntryType } from "../../adapter/types.ts";
 import { getStackCardSize } from "../board/boardSizing.ts";
 
 const EMPTY_STACK: StackEntryType[] = [];
@@ -28,6 +29,7 @@ export function StackDisplay() {
   const waitingFor = useGameStore((s) => s.waitingFor);
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [viewport, setViewport] = useState(getViewportSize);
+  const [hoveredStackEntryId, setHoveredStackEntryId] = useState<ObjectId | null>(null);
 
   useEffect(() => {
     function handleResize() {
@@ -56,6 +58,12 @@ export function StackDisplay() {
     if (!pendingEntry) return stack;
     return [...stack, pendingEntry];
   }, [stack, pendingEntry]);
+
+  const activeStackEntryId = hoveredStackEntryId ?? fullStack[fullStack.length - 1]?.id ?? null;
+
+  const handleStackEntryHover = useCallback((entryId: ObjectId, hovered: boolean) => {
+    setHoveredStackEntryId(hovered ? entryId : null);
+  }, []);
 
   if (fullStack.length === 0) return null;
 
@@ -171,6 +179,7 @@ export function StackDisplay() {
                     isTop={index === displayStack.length - 1}
                     isPending={pendingEntry != null && entry.id === pendingEntry.id}
                     cardSize={cardSize}
+                    onHoverChange={(hovered) => handleStackEntryHover(entry.id, hovered)}
                     style={{
                       position: "absolute",
                       top: index * staggerY,
@@ -183,6 +192,11 @@ export function StackDisplay() {
             </div>
           </div>
         </motion.div>
+        <StackTargetArcs
+          stack={displayStack}
+          activeEntryId={activeStackEntryId}
+          isCollapsed={isCollapsed}
+        />
       </motion.div>
     </AnimatePresence>
   );

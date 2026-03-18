@@ -278,6 +278,518 @@ pub fn parse_mana_production(text: &str) -> Option<(Vec<ManaColor>, &str)> {
     Some((colors, &text[pos..]))
 }
 
+/// Capitalize the first letter of each word in a subtype name.
+/// "human soldier" → "Human Soldier"
+pub fn canonicalize_subtype_name(text: &str) -> String {
+    text.split_whitespace()
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut capitalized = first.to_uppercase().collect::<String>();
+                    capitalized.push_str(chars.as_str());
+                    capitalized
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Irregular plural → singular mappings for MTG creature subtypes.
+/// Only entries that cannot be resolved by stripping "-s" or "-es".
+const SUBTYPE_PLURALS: &[(&str, &str)] = &[
+    ("elves", "Elf"),
+    ("dwarves", "Dwarf"),
+    ("wolves", "Wolf"),
+    ("halves", "Half"),
+    ("fungi", "Fungus"),
+    ("loci", "Locus"),
+    ("djinn", "Djinn"),
+    ("sphinxes", "Sphinx"),
+    ("foxes", "Fox"),
+    ("octopi", "Octopus"),
+    ("mice", "Mouse"),
+    ("oxen", "Ox"),
+    ("allies", "Ally"),
+    ("armies", "Army"),
+    ("faeries", "Faerie"),
+    ("zombies", "Zombie"),
+    ("sorceries", "Sorcery"),
+    ("ponies", "Pony"),
+    ("harpies", "Harpy"),
+    ("berserkers", "Berserker"),
+];
+
+/// Comprehensive list of MTG subtypes (creature types, land types, spell types, etc.).
+/// Case-insensitive matching is done by lowercasing the input.
+/// This covers the standard MTGJSON subtype list plus common Oracle text usage.
+const SUBTYPES: &[&str] = &[
+    // ── Creature types (alphabetical) ──
+    "Advisor",
+    "Aetherborn",
+    "Alien",
+    "Ally",
+    "Angel",
+    "Antelope",
+    "Ape",
+    "Archer",
+    "Archon",
+    "Armadillo",
+    "Army",
+    "Artificer",
+    "Assassin",
+    "Assembly-Worker",
+    "Astartes",
+    "Atog",
+    "Aurochs",
+    "Avatar",
+    "Azra",
+    "Badger",
+    "Balloon",
+    "Barbarian",
+    "Bard",
+    "Basilisk",
+    "Bat",
+    "Bear",
+    "Beast",
+    "Beeble",
+    "Beholder",
+    "Berserker",
+    "Bird",
+    "Blinkmoth",
+    "Boar",
+    "Bringer",
+    "Brushwagg",
+    "Bureaucrat",
+    "Camarid",
+    "Camel",
+    "Capybara",
+    "Caribou",
+    "Carrier",
+    "Cat",
+    "Centaur",
+    "Cephalid",
+    "Chimera",
+    "Citizen",
+    "Cleric",
+    "Clown",
+    "Cockatrice",
+    "Construct",
+    "Coward",
+    "Crab",
+    "Crocodile",
+    "Ctan",
+    "Custodes",
+    "Cyberman",
+    "Cyclops",
+    "Dalek",
+    "Dauthi",
+    "Demigod",
+    "Demon",
+    "Deserter",
+    "Detective",
+    "Devil",
+    "Dinosaur",
+    "Djinn",
+    "Doctor",
+    "Dog",
+    "Dragon",
+    "Drake",
+    "Dreadnought",
+    "Drone",
+    "Druid",
+    "Dryad",
+    "Dwarf",
+    "Efreet",
+    "Egg",
+    "Elder",
+    "Eldrazi",
+    "Elemental",
+    "Elephant",
+    "Elf",
+    "Elk",
+    "Employee",
+    "Eye",
+    "Faerie",
+    "Ferret",
+    "Fish",
+    "Flagbearer",
+    "Fox",
+    "Fractal",
+    "Frog",
+    "Fungus",
+    "Gamer",
+    "Gargoyle",
+    "Germ",
+    "Giant",
+    "Gith",
+    "Gnoll",
+    "Gnome",
+    "Goat",
+    "Goblin",
+    "God",
+    "Golem",
+    "Gorgon",
+    "Graveborn",
+    "Gremlin",
+    "Griffin",
+    "Guest",
+    "Hag",
+    "Halfling",
+    "Hamster",
+    "Harpy",
+    "Hellion",
+    "Hippo",
+    "Hippogriff",
+    "Homarid",
+    "Homunculus",
+    "Horror",
+    "Horse",
+    "Human",
+    "Hydra",
+    "Hyena",
+    "Illusion",
+    "Imp",
+    "Incarnation",
+    "Inkling",
+    "Inquisitor",
+    "Insect",
+    "Jackal",
+    "Jellyfish",
+    "Juggernaut",
+    "Kavu",
+    "Kirin",
+    "Kithkin",
+    "Knight",
+    "Kobold",
+    "Kor",
+    "Kraken",
+    "Lamia",
+    "Lammasu",
+    "Leech",
+    "Leviathan",
+    "Lhurgoyf",
+    "Licid",
+    "Lizard",
+    "Llama",
+    "Locus",
+    "Manticore",
+    "Masticore",
+    "Mercenary",
+    "Merfolk",
+    "Metathran",
+    "Minion",
+    "Minotaur",
+    "Mite",
+    "Mole",
+    "Monger",
+    "Mongoose",
+    "Monk",
+    "Monkey",
+    "Moonfolk",
+    "Mount",
+    "Mouse",
+    "Mutant",
+    "Myr",
+    "Mystic",
+    "Naga",
+    "Nautilus",
+    "Necron",
+    "Nephilim",
+    "Nightmare",
+    "Nightstalker",
+    "Ninja",
+    "Noble",
+    "Noggle",
+    "Nomad",
+    "Nymph",
+    "Octopus",
+    "Ogre",
+    "Ooze",
+    "Orb",
+    "Orc",
+    "Orgg",
+    "Otter",
+    "Ouphe",
+    "Ox",
+    "Oyster",
+    "Pangolin",
+    "Peasant",
+    "Pegasus",
+    "Pentavite",
+    "Performer",
+    "Pest",
+    "Phelddagrif",
+    "Phoenix",
+    "Phyrexian",
+    "Pilot",
+    "Pincher",
+    "Pirate",
+    "Plant",
+    "Pony",
+    "Praetor",
+    "Primarch",
+    "Prism",
+    "Processor",
+    "Rabbit",
+    "Raccoon",
+    "Ranger",
+    "Rat",
+    "Rebel",
+    "Reflection",
+    "Rhino",
+    "Rigger",
+    "Robot",
+    "Rogue",
+    "Sable",
+    "Salamander",
+    "Samurai",
+    "Sand",
+    "Saproling",
+    "Satyr",
+    "Scarecrow",
+    "Scion",
+    "Scorpion",
+    "Scout",
+    "Sculpture",
+    "Serf",
+    "Serpent",
+    "Servo",
+    "Shade",
+    "Shaman",
+    "Shapeshifter",
+    "Shark",
+    "Sheep",
+    "Siren",
+    "Skeleton",
+    "Slith",
+    "Sliver",
+    "Slug",
+    "Snail",
+    "Snake",
+    "Soldier",
+    "Soltari",
+    "Spawn",
+    "Specter",
+    "Spellshaper",
+    "Sphinx",
+    "Spider",
+    "Spike",
+    "Spirit",
+    "Splinter",
+    "Sponge",
+    "Squid",
+    "Squirrel",
+    "Starfish",
+    "Surrakar",
+    "Survivor",
+    "Suspect",
+    "Tentacle",
+    "Tetravite",
+    "Thalakos",
+    "Thopter",
+    "Thrull",
+    "Tiefling",
+    "Treefolk",
+    "Trilobite",
+    "Troll",
+    "Turtle",
+    "Tyranid",
+    "Unicorn",
+    "Vampire",
+    "Vedalken",
+    "Viashino",
+    "Volver",
+    "Wall",
+    "Walrus",
+    "Warlock",
+    "Warrior",
+    "Weasel",
+    "Weird",
+    "Werewolf",
+    "Whale",
+    "Wizard",
+    "Wolf",
+    "Wolverine",
+    "Wombat",
+    "Worm",
+    "Wraith",
+    "Wurm",
+    "Yeti",
+    "Zombie",
+    "Zubera",
+    // ── Land subtypes ──
+    "Desert",
+    "Forest",
+    "Gate",
+    "Island",
+    "Lair",
+    "Mine",
+    "Mountain",
+    "Plains",
+    "Power-Plant",
+    "Swamp",
+    "Tower",
+    "Urza's",
+    // ── Artifact subtypes ──
+    "Blood",
+    "Clue",
+    "Contraption",
+    "Equipment",
+    "Food",
+    "Fortification",
+    "Gold",
+    "Incubator",
+    "Junk",
+    "Map",
+    "Powerstone",
+    "Treasure",
+    "Vehicle",
+    // ── Enchantment subtypes ──
+    "Aura",
+    "Background",
+    "Cartouche",
+    "Case",
+    "Class",
+    "Curse",
+    "Role",
+    "Room",
+    "Rune",
+    "Saga",
+    "Shard",
+    "Shrine",
+    // ── Spell subtypes ──
+    "Adventure",
+    "Arcane",
+    "Lesson",
+    "Trap",
+    // ── Planeswalker subtypes ──
+    "Ajani",
+    "Aminatou",
+    "Angrath",
+    "Arlinn",
+    "Ashiok",
+    "Basri",
+    "Bolas",
+    "Calix",
+    "Chandra",
+    "Comet",
+    "Dack",
+    "Dakkon",
+    "Daretti",
+    "Davriel",
+    "Dihada",
+    "Domri",
+    "Dovin",
+    "Ellywick",
+    "Elspeth",
+    "Estrid",
+    "Freyalise",
+    "Garruk",
+    "Gideon",
+    "Grist",
+    "Guff",
+    "Huatli",
+    "Jace",
+    "Jared",
+    "Jaya",
+    "Jeska",
+    "Kaito",
+    "Karn",
+    "Kasmina",
+    "Kaya",
+    "Kiora",
+    "Koth",
+    "Liliana",
+    "Lolth",
+    "Lukka",
+    "Minsc",
+    "Mordenkainen",
+    "Nahiri",
+    "Narset",
+    "Niko",
+    "Nissa",
+    "Nixilis",
+    "Oko",
+    "Quintorius",
+    "Ral",
+    "Rowan",
+    "Saheeli",
+    "Samut",
+    "Sarkhan",
+    "Serra",
+    "Sivitri",
+    "Sorin",
+    "Szat",
+    "Tamiyo",
+    "Teferi",
+    "Teyo",
+    "Tezzeret",
+    "Tibalt",
+    "Tyvar",
+    "Ugin",
+    "Urza",
+    "Venser",
+    "Vivien",
+    "Vraska",
+    "Will",
+    "Windgrace",
+    "Wrenn",
+    "Xenagos",
+    "Yanggu",
+    "Yanling",
+    "Zariel",
+];
+
+/// Check if `text` starts with `prefix` using ASCII case-insensitive comparison,
+/// followed by a word boundary (non-alphanumeric or end of string).
+fn starts_with_word_ci(text: &str, prefix: &str) -> bool {
+    if text.len() < prefix.len() {
+        return false;
+    }
+    if !text[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        return false;
+    }
+    let after = &text[prefix.len()..];
+    after.is_empty() || after.starts_with(|c: char| !c.is_alphanumeric())
+}
+
+/// Try to match a subtype at the start of text (case-insensitive).
+/// Returns `(canonical_name, bytes_consumed)` or `None`.
+/// Handles plural forms (regular and irregular).
+pub fn parse_subtype(text: &str) -> Option<(String, usize)> {
+    // Check irregular plurals first (they take priority over regular matching)
+    for &(plural, singular) in SUBTYPE_PLURALS {
+        if starts_with_word_ci(text, plural) {
+            return Some((singular.to_string(), plural.len()));
+        }
+    }
+
+    // Check each subtype (singular and regular plural)
+    for &subtype in SUBTYPES {
+        // Try singular
+        if starts_with_word_ci(text, subtype) {
+            return Some((subtype.to_string(), subtype.len()));
+        }
+
+        // Try regular plural: subtype + "s" — check subtype prefix + 's' at boundary
+        let plural_len = subtype.len() + 1;
+        if text.len() >= plural_len
+            && text[..subtype.len()].eq_ignore_ascii_case(subtype)
+            && text.as_bytes()[subtype.len()] == b's'
+        {
+            let after = &text[plural_len..];
+            if after.is_empty() || after.starts_with(|c: char| !c.is_alphanumeric()) {
+                return Some((subtype.to_string(), plural_len));
+            }
+        }
+    }
+
+    None
+}
+
 /// Merge two filters into an Or, flattening nested Or branches.
 pub fn merge_or_filters(a: TargetFilter, b: TargetFilter) -> TargetFilter {
     let mut filters = Vec::new();
@@ -466,5 +978,53 @@ mod tests {
             "shuffle",
             "into"
         ));
+    }
+
+    // ── parse_subtype building block tests ──
+
+    #[test]
+    fn parse_subtype_singular() {
+        assert_eq!(parse_subtype("zombie"), Some(("Zombie".to_string(), 6)));
+        assert_eq!(parse_subtype("Zombie"), Some(("Zombie".to_string(), 6)));
+    }
+
+    #[test]
+    fn parse_subtype_regular_plural() {
+        assert_eq!(parse_subtype("zombies"), Some(("Zombie".to_string(), 7)));
+        assert_eq!(parse_subtype("vampires"), Some(("Vampire".to_string(), 8)));
+    }
+
+    #[test]
+    fn parse_subtype_irregular_plural() {
+        assert_eq!(parse_subtype("elves"), Some(("Elf".to_string(), 5)));
+        assert_eq!(parse_subtype("dwarves"), Some(("Dwarf".to_string(), 7)));
+        assert_eq!(parse_subtype("wolves"), Some(("Wolf".to_string(), 6)));
+    }
+
+    #[test]
+    fn parse_subtype_non_creature() {
+        assert_eq!(
+            parse_subtype("equipment"),
+            Some(("Equipment".to_string(), 9))
+        );
+        assert_eq!(parse_subtype("forest"), Some(("Forest".to_string(), 6)));
+        assert_eq!(parse_subtype("aura"), Some(("Aura".to_string(), 4)));
+    }
+
+    #[test]
+    fn parse_subtype_rejects_non_subtypes() {
+        assert_eq!(parse_subtype("creature"), None);
+        assert_eq!(parse_subtype("draw"), None);
+        assert_eq!(parse_subtype("destroy"), None);
+    }
+
+    #[test]
+    fn parse_subtype_word_boundary() {
+        // "goblin" should match but "goblinking" should not
+        assert_eq!(
+            parse_subtype("goblin you control"),
+            Some(("Goblin".to_string(), 6))
+        );
+        assert_eq!(parse_subtype("goblinking"), None);
     }
 }

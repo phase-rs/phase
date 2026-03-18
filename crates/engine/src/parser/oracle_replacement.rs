@@ -31,6 +31,12 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
         return Some(def);
     }
 
+    // --- Fast lands: "enters tapped unless you control N or fewer other [type]" ---
+    // Must be checked BEFORE check lands (both match "unless you control").
+    if let Some(def) = parse_fast_land(&norm_lower, &text) {
+        return Some(def);
+    }
+
     // --- Check lands: "enters tapped unless you control a [LandType] or a [LandType]" ---
     // Must be checked BEFORE the generic "enters tapped" pattern.
     if let Some(def) = parse_check_land(&norm_lower, &text) {
@@ -289,6 +295,53 @@ fn parse_check_land(norm_lower: &str, original_text: &str) -> Option<Replacement
             .valid_card(TargetFilter::SelfRef)
             .description(original_text.to_string())
             .condition(ReplacementCondition::UnlessControlsSubtype { subtypes }),
+    )
+}
+
+/// Parse fast land pattern: "enters tapped unless you control N or fewer other [type]"
+/// Returns Mandatory ReplacementDefinition with an UnlessControlsOtherLeq condition.
+/// CR 305.7 + CR 614.1c — fast lands (Spirebluff Canal, Blackcleave Cliffs, etc.).
+fn parse_fast_land(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+    if !norm_lower.contains("enters tapped")
+        && !norm_lower.contains("enters the battlefield tapped")
+    {
+        return None;
+    }
+
+    let unless_idx = norm_lower.find("unless you control ")?;
+    let rest = &norm_lower[unless_idx + "unless you control ".len()..];
+
+    // Parse "two or fewer other lands." → count=2, remainder="or fewer other lands."
+    let (count, after_number) = parse_number(rest)?;
+    let after_or_fewer = after_number.trim_start().strip_prefix("or fewer ")?;
+    let type_text = after_or_fewer.trim_end_matches('.');
+
+    // parse_type_phrase handles "other lands" → TypedFilter { Land, [Another] }
+    let (filter, leftover) = parse_type_phrase(type_text);
+    if !leftover.trim().is_empty() {
+        return None;
+    }
+
+    // Extract TypedFilter and inject ControllerRef::You (not visible in the parsed fragment)
+    let typed_filter = match filter {
+        TargetFilter::Typed(tf) => tf.controller(ControllerRef::You),
+        _ => return None,
+    };
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Tap {
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            .description(original_text.to_string())
+            .condition(ReplacementCondition::UnlessControlsOtherLeq {
+                count,
+                filter: typed_filter,
+            }),
     )
 }
 
@@ -970,5 +1023,71 @@ mod tests {
             }
             other => panic!("Expected Or filter with 3 elements, got {other:?}"),
         }
+    }
+
+    // ── Fast land tests ──
+
+    #[test]
+    fn fast_land_spirebluff_canal() {
+        let def = parse_replacement_line(
+            "This land enters tapped unless you control two or fewer other lands.",
+            "Spirebluff Canal",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(def.mode, ReplacementMode::Mandatory));
+        assert!(matches!(
+            def.execute.as_ref().unwrap().effect,
+            Effect::Tap {
+                target: TargetFilter::SelfRef
+            }
+        ));
+        match &def.condition {
+            Some(ReplacementCondition::UnlessControlsOtherLeq { count, filter }) => {
+                assert_eq!(*count, 2);
+                assert_eq!(filter.card_type, Some(TypeFilter::Land));
+                assert_eq!(filter.controller, Some(ControllerRef::You));
+                assert!(filter.properties.contains(&FilterProp::Another));
+            }
+            other => panic!("Expected UnlessControlsOtherLeq, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fast_land_generality_three_or_fewer() {
+        // Hypothetical: "three or fewer" should parse count=3
+        let def = parse_replacement_line(
+            "This land enters tapped unless you control three or fewer other lands.",
+            "Hypothetical Land",
+        )
+        .unwrap();
+        match &def.condition {
+            Some(ReplacementCondition::UnlessControlsOtherLeq { count, .. }) => {
+                assert_eq!(*count, 3);
+            }
+            other => panic!("Expected UnlessControlsOtherLeq, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fast_land_does_not_capture_check_land() {
+        // Check lands must still parse as UnlessControlsSubtype, not UnlessControlsOtherLeq
+        let def = parse_replacement_line(
+            "This land enters tapped unless you control a Mountain or a Plains.",
+            "Clifftop Retreat",
+        )
+        .unwrap();
+        assert!(matches!(
+            def.condition,
+            Some(ReplacementCondition::UnlessControlsSubtype { .. })
+        ));
+    }
+
+    #[test]
+    fn unconditional_enters_tapped_unaffected_by_fast_land() {
+        // Plain "enters tapped" must still work (no condition)
+        let def = parse_replacement_line("This land enters tapped.", "Some Tapland").unwrap();
+        assert!(def.condition.is_none());
     }
 }

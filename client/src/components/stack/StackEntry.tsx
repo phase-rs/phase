@@ -16,9 +16,10 @@ interface StackEntryProps {
   isPending?: boolean;
   cardSize: { width: number; height: number };
   style?: CSSProperties;
+  onHoverChange?: (hovered: boolean) => void;
 }
 
-export function StackEntry({ entry, index, isTop, isPending, cardSize, style }: StackEntryProps) {
+export function StackEntry({ entry, index, isTop, isPending, cardSize, style, onHoverChange }: StackEntryProps) {
   const playerId = usePlayerId();
   const objects = useGameStore((s) => s.gameState?.objects);
   const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
@@ -66,10 +67,17 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style }: 
       exit={{ opacity: 0, x: 30, scale: 0.9 }}
       transition={{ delay: index * 0.03 }}
       style={style}
+      data-stack-entry={entry.id}
       className="relative cursor-pointer"
       onClick={handleClick}
-      onMouseEnter={() => inspectObject(entry.source_id)}
-      onMouseLeave={() => inspectObject(null)}
+      onMouseEnter={() => {
+        inspectObject(entry.source_id);
+        onHoverChange?.(true);
+      }}
+      onMouseLeave={() => {
+        inspectObject(null);
+        onHoverChange?.(false);
+      }}
     >
       {/* Card image with explicit inline dimensions (Tailwind can't handle dynamic values) */}
       <div

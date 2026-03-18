@@ -23,9 +23,10 @@ data structures, never executes game rules.
 3. **Unrecognized text → `Effect::Unimplemented`, never panic.** The parser is best-effort. Unknown
    patterns fall through cleanly; the engine skips `Unimplemented` effects without crashing.
 
-4. **Follow the existing type patterns.** The data model already has parallel enum families for
-   amounts (`DamageAmount`), players (`GainLifePlayer`), targets (`TargetFilter`), etc. New
-   semantic distinctions belong in the type layer, not as ad-hoc boolean flags.
+4. **Follow the existing type patterns.** The data model uses `QuantityExpr` for all amounts/counts,
+   `QuantityRef` for dynamic game-state references, `PlayerFilter` for player-level conditions,
+   `GainLifePlayer` for player targeting, and `TargetFilter` for object targeting. New semantic
+   distinctions belong in the type layer, not as ad-hoc boolean flags.
 
 ---
 
@@ -34,27 +35,46 @@ data structures, never executes game rules.
 ```
 oracle.rs               Entry point: parse_oracle_text()
 oracle_effect.rs        Effect / ability parsing (the main file)
-oracle_target.rs        Target filter parsing (TargetFilter)
+oracle_target.rs        Target filter parsing (TargetFilter) + event-context references
 oracle_cost.rs          Cost parsing (AbilityCost)
 oracle_trigger.rs       Trigger condition parsing
 oracle_static.rs        Static ability parsing
-oracle_replacement.rs   Replacement effect parsing
+oracle_replacement.rs   Replacement effect parsing (lands, graveyard exile, counters, …)
 oracle_util.rs          Shared utilities (parse_number, parse_mana_production, …)
 ```
 
 ### Parse pipeline for a spell ability
 
+The effect parser uses a two-phase approach: first build a `ClauseAst` (structured intermediate
+representation), then lower it into typed `Effect` data.
+
 ```
 parse_oracle_text()
-  └── parse_effect_chain(text)          # splits "Sentence 1. Sentence 2." into chain
-        └── parse_effect_clause(sent)   # handles one sentence
-              ├── strip_leading_duration()   # "until end of turn, …"
-              ├── strip_leading_conditional() # "if X, Y"
-              ├── try_parse_subject_*_clause() # subject-specific clauses (continuous, become…)
-              ├── try_parse_targeted_controller_*() # ← NEW: subject-preserving helpers
-              ├── strip_subject_clause()  # strips "its controller", "you", etc. → recurse
-              └── parse_imperative_effect()  # bare verb phrases: "draw", "exile", "gain"
+  └── parse_effect_chain(text)             # splits "Sentence 1. Sentence 2." into sub_ability chain
+        └── parse_effect_clause(sent)      # handles one sentence
+              ├── try_parse_damage_prevention_disabled() # CR 614.16
+              ├── strip_leading_duration()               # "until end of turn, …"
+              ├── try_parse_still_a_type()               # "it's still a land" (CR 205.1a)
+              ├── try_parse_for_each_effect()             # "draw a card for each [filter]"
+              └── parse_clause_ast(text) → lower_clause_ast(ast)
+                    ├── Conditional { clause }            # "if X, Y" → lower body
+                    ├── SubjectPredicate { subject, predicate }
+                    │     (via try_parse_subject_predicate_ast)
+                    │     ├── try_parse_subject_continuous_clause() # "creatures you control get…"
+                    │     ├── try_parse_subject_become_clause()     # "~ becomes a [type]…"
+                    │     ├── try_parse_subject_restriction_clause()# "~ can't attack…"
+                    │     └── strip_subject_clause() → ImperativeFallback
+                    └── Imperative { text } → lower_imperative_clause()
+                          ├── try_parse_targeted_controller_gain_life()
+                          ├── try_parse_compound_shuffle()     # multi-step shuffles
+                          ├── try_split_targeted_compound()    # "tap X and put counter on it"
+                          └── parse_imperative_effect()        # bare verb phrases
 ```
+
+The `ClauseAst` enum separates sentence structure from effect lowering:
+- **`Imperative`** — bare verb phrases ("draw two cards", "exile target creature")
+- **`SubjectPredicate`** — subject + verb ("creatures you control get +1/+1")
+- **`Conditional`** — "if X, Y" wrappers (body is lowered recursively)
 
 ---
 
@@ -68,6 +88,12 @@ information**.
 applies to), you **must** intercept the text *before* `strip_subject_clause` is called, using a
 dedicated `try_parse_*` helper that preserves the subject's meaning.
 
+In the current AST-based pipeline, subject interception happens at two levels:
+1. **In `try_parse_subject_predicate_ast`** — for subject-verb clauses like "creatures you control
+   get +1/+1" (continuous, become, restriction predicates).
+2. **In `lower_imperative_clause`** — for imperative clauses where the subject is semantically
+   critical (e.g. `try_parse_targeted_controller_gain_life`).
+
 ### Example: "Its controller gains life equal to its power"
 
 ❌ Wrong approach — letting `strip_subject_clause` handle it:
@@ -78,9 +104,9 @@ dedicated `try_parse_*` helper that preserves the subject's meaning.
     → GainLife { amount: Fixed(1), player: Controller }  ← BUG: wrong player, wrong amount
 ```
 
-✅ Correct approach — intercept before stripping:
+✅ Correct approach — intercept in `lower_imperative_clause`, before `parse_imperative_effect`:
 ```rust
-// In parse_effect_clause, BEFORE strip_subject_clause:
+// In lower_imperative_clause, BEFORE parse_imperative_effect:
 if let Some(clause) = try_parse_targeted_controller_gain_life(text) {
     return clause;
 }
@@ -91,7 +117,7 @@ fn try_parse_targeted_controller_gain_life(text: &str) -> Option<ParsedEffectCla
     if !lower.starts_with("its controller ") { return None; }
     // … parse amount and player, preserving semantic context
     Some(parsed_clause(Effect::GainLife {
-        amount: LifeAmount::TargetPower,
+        amount: QuantityExpr::Ref { qty: QuantityRef::TargetPower },
         player: GainLifePlayer::TargetedController,
     }))
 }
@@ -104,21 +130,20 @@ fn try_parse_targeted_controller_gain_life(text: &str) -> Option<ParsedEffectCla
 ### Step 1 — Add the variant to `Effect` in `types/ability.rs`
 
 Follow existing patterns:
-- Use enum fields for variants that carry distinct data (e.g. `DamageAmount`, `LifeAmount`).
+- Use enum fields for variants that carry distinct data (e.g. `QuantityExpr`, `QuantityRef`).
 - **Never use boolean flags** as a substitute for a proper enum variant. Boolean flags create
   undefined combinations and obscure intent.
+- Use `QuantityExpr` for any amount/count field — never raw `i32` on new effects.
 - Mark optional fields `#[serde(default)]` so old card-data.json files are still deserializable.
 - Add the variant name to `effect_variant_name()` and a dispatch arm to `resolve_effect()`.
 
 ```rust
-// Good: mutually exclusive cases in the type system
-pub enum LifeAmount {
-    Fixed(i32),
-    TargetPower,
-}
+// Good: QuantityExpr separates fixed constants from dynamic game-state references
+Draw { count: QuantityExpr },
+DealDamage { amount: QuantityExpr, target: TargetFilter },
 
-// Bad: boolean flag alongside a numeric field
-GainLife { amount: i32, use_target_power: bool }  // ← DON'T DO THIS
+// Bad: raw integer with boolean flag
+Draw { count: i32, use_variable: bool }  // ← DON'T DO THIS
 ```
 
 ### Step 2 — Handle the effect in `game/effects/`
@@ -130,8 +155,12 @@ Create or extend an effect handler in `crates/engine/src/game/effects/`:
 
 ### Step 3 — Add the parser logic in `oracle_effect.rs`
 
-- Add a pattern match in `parse_imperative_effect()` for bare verb forms.
-- If the subject matters, add a `try_parse_*` helper called **before** `strip_subject_clause()`.
+- **Bare verb forms** (e.g. "exile target creature"): add a pattern in `parse_imperative_effect()`.
+- **Subject-preserving effects** (e.g. "its controller gains life"): add a `try_parse_*` helper
+  in `lower_imperative_clause()`, before `parse_imperative_effect()` is called.
+- **Subject-predicate effects** (e.g. "creatures you control get +1/+1"): extend
+  `try_parse_subject_predicate_ast()` or add a new predicate variant to `PredicateAst`.
+- **"For each" patterns**: extend `try_parse_for_each_effect()` and `parse_for_each_clause()`.
 - Use `strip_prefix()` over manual index arithmetic to avoid clippy warnings.
 - Return `Effect::Unimplemented { name, description }` for patterns that are recognized but
   not yet implemented rather than panicking or silently returning a wrong effect.
@@ -146,7 +175,7 @@ fn effect_its_controller_gains_life_equal_to_power() {
     assert!(matches!(
         e,
         Effect::GainLife {
-            amount: LifeAmount::TargetPower,
+            amount: QuantityExpr::Ref { qty: QuantityRef::TargetPower },
             player: GainLifePlayer::TargetedController,
         }
     ));
@@ -172,19 +201,122 @@ This means:
 
 ---
 
-## Handling "Equal to X" Amounts
+## Amounts — `QuantityExpr` and `QuantityRef`
 
-Several effects have amounts derived from game state (power, toughness, CMC, etc.) rather than
-fixed integers. Model these as enum variants, following `DamageAmount` and `LifeAmount`:
+Effects that carry a count or amount (`Draw`, `DealDamage`, `GainLife`, `LoseLife`, `Mill`) use
+`QuantityExpr` instead of raw integers. This separates **fixed constants** from **dynamic
+game-state lookups** at the type level:
 
-| Oracle phrase                       | Type / variant           |
-|-------------------------------------|--------------------------|
-| "N damage" / "N life"               | `Fixed(i32)`             |
-| "damage/life equal to its power"    | `TargetPower`            |
-| "that much damage"                  | `Variable("that much")`  |
+```rust
+pub enum QuantityExpr {
+    Ref { qty: QuantityRef },   // dynamic — resolved from game state at runtime
+    Fixed { value: i32 },       // literal constant
+}
 
-When parsing "equal to its power" / "equal to its toughness", always return the enum variant —
-never `Fixed(0)` as a sentinel value.
+pub enum QuantityRef {
+    HandSize,                              // cards in controller's hand
+    LifeTotal,                             // controller's life total
+    GraveyardSize,                         // cards in controller's graveyard
+    LifeAboveStarting,                     // life - starting life (CR 107.1)
+    ObjectCount { filter: TargetFilter },  // "for each creature you control"
+    PlayerCount { filter: PlayerFilter },  // "for each opponent who lost life"
+    CountersOnSelf { counter_type: String },// "for each [type] counter on ~"
+    Variable { name: String },             // "X", "that much"
+    TargetPower,                           // power of targeted permanent
+}
+```
+
+**Mapping Oracle text → `QuantityExpr`:**
+
+| Oracle phrase                              | Type / variant                                     |
+|--------------------------------------------|----------------------------------------------------|
+| "3 damage" / "2 life"                      | `QuantityExpr::Fixed { value: N }`                 |
+| "damage equal to its power"                | `QuantityExpr::Ref { qty: QuantityRef::TargetPower }` |
+| "X damage"                                 | `QuantityExpr::Ref { qty: QuantityRef::Variable { name: "X" } }` |
+| "a card for each creature you control"     | `QuantityExpr::Ref { qty: QuantityRef::ObjectCount { filter } }` |
+| "a card for each opponent who lost life"   | `QuantityExpr::Ref { qty: QuantityRef::PlayerCount { filter } }` |
+
+**Rules:**
+- When parsing "equal to its power" / "for each [filter]", always return a `QuantityRef` variant —
+  never `Fixed { value: 0 }` as a sentinel.
+- `QuantityRef` contains only dynamic references that require game-state lookup. Constants
+  (`Fixed`) belong in `QuantityExpr`, not `QuantityRef` — this is the "separate abstraction layers"
+  principle (see CLAUDE.md).
+
+**Legacy amount types** (`DamageAmount`, `LifeAmount`) still exist for backward compatibility but
+new effects should use `QuantityExpr`.
+
+---
+
+## Replacement Effect Parser — `oracle_replacement.rs`
+
+`parse_replacement_line` classifies replacement effects by priority. **Order matters** — patterns
+that are subsets of other patterns must be checked later:
+
+```
+parse_replacement_line(text, card_name)
+  ├── parse_as_enters_choose()          # "As ~ enters, choose a [type]" (must be BEFORE shock)
+  ├── parse_shock_land()                # "you may pay N life. If you don't, enters tapped"
+  ├── parse_fast_land()                 # "enters tapped unless you control N or fewer other [type]"
+  ├── parse_check_land()                # "enters tapped unless you control a [LandType] or..."
+  ├── parse_external_enters_tapped()    # "Creatures your opponents control enter tapped" (CR 614.12)
+  ├── unconditional enters tapped       # "~ enters the battlefield tapped"
+  ├── parse_graveyard_exile_replacement()  # "If a card would be put into a graveyard, exile it"
+  ├── "~ would die" / "~ would be destroyed"
+  ├── "Prevent all [combat] damage"
+  ├── "you would draw" / "you would gain life" / "would lose life"
+  └── parse_enters_with_counters()      # "~ enters with N [type] counter(s)"
+```
+
+Replacement definitions use the builder pattern:
+```rust
+ReplacementDefinition::new(ReplacementEvent::Moved)
+    .execute(ability)
+    .condition(ReplacementCondition::UnlessControlsSubtype { subtypes })
+    .valid_card(filter)
+    .destination_zone(Zone::Battlefield)
+    .description(text)
+```
+
+`ReplacementCondition` encodes land-cycle conditions as typed variants:
+
+| Land cycle   | Condition variant                                 |
+|--------------|---------------------------------------------------|
+| Check lands  | `UnlessControlsSubtype { subtypes: Vec<String> }` |
+| Fast lands   | `UnlessControlsOtherLeq { count, filter }`        |
+| Shock lands  | `ReplacementMode::Optional { decline: Some(…) }`  |
+
+### Adding a new replacement pattern
+
+1. Add a `parse_*` function matching the Oracle text pattern.
+2. Insert it at the correct priority in `parse_replacement_line` — before any pattern it overlaps with.
+3. Add parser tests in the `#[cfg(test)]` module.
+
+---
+
+## Event-Context References — `parse_event_context_ref`
+
+Trigger effects often reference entities from the triggering event rather than targeting a player
+or permanent. `parse_event_context_ref()` in `oracle_target.rs` handles these anaphoric references:
+
+| Oracle phrase                    | `TargetFilter` variant          |
+|----------------------------------|---------------------------------|
+| "that spell's controller"       | `TriggeringSpellController`     |
+| "that spell's owner"            | `TriggeringSpellOwner`          |
+| "that player"                   | `TriggeringPlayer`              |
+| "that source" / "that permanent"| `TriggeringSource`              |
+| "defending player"              | `DefendingPlayer` (CR 506.3d)   |
+
+**Rule:** `parse_event_context_ref` must be checked **before** standard `parse_target` for
+trigger-based effects. These filters resolve at runtime from the triggering event context, not
+from targeting.
+
+### Other notable `TargetFilter` variants
+
+| Variant                           | Purpose                                               |
+|-----------------------------------|-------------------------------------------------------|
+| `ParentTarget`                    | Resolves to same targets as parent ability (compound effects) |
+| `TrackedSet { id: TrackedSetId }` | CR 603.7: anaphoric pronoun resolution for delayed triggers ("those cards", "the exiled cards") |
 
 ---
 
@@ -265,3 +397,6 @@ in `process_triggers()` using `(ObjectId, trigger_index)` tracking sets on `Game
 | Hardcoding `amount: 1` as default when text is unparseable | Prefer `Unimplemented` so the gap is visible in coverage reports |
 | Not recognizing `~` as self-reference in effect parsers | Always check for `~` alongside "this creature", "it", etc. — `parse_target` handles this |
 | Monolithic condition parsing | Use subject+event decomposition — add subjects and events independently |
+| Raw `i32` for effect amounts on new effects | Use `QuantityExpr` — separates fixed constants from dynamic game-state lookups |
+| Splitting compound effects on " and " naively | Use `try_split_targeted_compound` which delegates to `parse_target` for boundary detection |
+| Putting `Fixed(i32)` inside `QuantityRef` | `QuantityRef` is only for dynamic references; constants go in `QuantityExpr::Fixed` |

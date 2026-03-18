@@ -57,6 +57,8 @@ mod etb;
 mod keywords;
 #[path = "rules/layers.rs"]
 mod layers;
+#[path = "rules/replacement.rs"]
+mod replacement;
 #[path = "rules/sba.rs"]
 mod sba;
 #[path = "rules/stack.rs"]

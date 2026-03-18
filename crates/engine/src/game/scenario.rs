@@ -165,6 +165,26 @@ impl GameScenario {
         id
     }
 
+    /// Add a land to a player's hand. Returns a `CardBuilder` for fluent chaining.
+    pub fn add_land_to_hand(&mut self, player: PlayerId, name: &str) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.base_card_types = obj.card_types.clone();
+
+        CardBuilder {
+            state: &mut self.state,
+            id,
+        }
+    }
+
     /// Add a "Lightning Bolt" instant to a player's hand. Returns its `ObjectId`.
     pub fn add_bolt_to_hand(&mut self, player: PlayerId) -> ObjectId {
         let card_id = CardId(self.state.next_object_id);
@@ -412,6 +432,13 @@ impl<'a> CardBuilder<'a> {
         let obj = self.obj();
         obj.replacement_definitions.push(replacement.clone());
         obj.base_replacement_definitions.push(replacement);
+        self
+    }
+
+    pub fn with_replacement_definition(&mut self, def: ReplacementDefinition) -> &mut Self {
+        let obj = self.obj();
+        obj.replacement_definitions.push(def.clone());
+        obj.base_replacement_definitions.push(def);
         self
     }
 
