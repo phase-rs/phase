@@ -334,8 +334,14 @@ mod tests {
 
         let options = activatable_land_mana_options(&state, verge, PlayerId(0));
         let types: Vec<_> = options.iter().map(|o| o.mana_type).collect();
-        assert!(types.contains(&ManaType::Red), "unconditional red should be available");
-        assert!(!types.contains(&ManaType::Blue), "blue should NOT be available without Island/Mountain");
+        assert!(
+            types.contains(&ManaType::Red),
+            "unconditional red should be available"
+        );
+        assert!(
+            !types.contains(&ManaType::Blue),
+            "blue should NOT be available without Island/Mountain"
+        );
     }
 
     #[test]
@@ -363,6 +369,9 @@ mod tests {
         let options = activatable_land_mana_options(&state, verge, PlayerId(0));
         let types: Vec<_> = options.iter().map(|o| o.mana_type).collect();
         assert!(types.contains(&ManaType::Red));
-        assert!(types.contains(&ManaType::Blue), "blue should be available with Mountain in play");
+        assert!(
+            types.contains(&ManaType::Blue),
+            "blue should be available with Mountain in play"
+        );
     }
 }

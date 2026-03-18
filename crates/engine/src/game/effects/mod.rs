@@ -32,6 +32,7 @@ pub mod gain_control;
 pub mod life;
 pub mod mana;
 pub mod mill;
+pub mod pay;
 pub mod proliferate;
 pub mod pump;
 pub mod reveal_hand;
@@ -106,6 +107,7 @@ pub fn resolve_effect(
         Effect::CreateDelayedTrigger { .. } => delayed_trigger::resolve(state, ability, events),
         Effect::AddRestriction { .. } => add_restriction::resolve(state, ability, events),
         Effect::CreateEmblem { .. } => create_emblem::resolve(state, ability, events),
+        Effect::PayCost { .. } => pay::resolve(state, ability, events),
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);
@@ -309,7 +311,9 @@ pub fn resolve_ability_chain(
                 AbilityCondition::AdditionalCostPaidInstead => {
                     return Ok(());
                 }
-                AbilityCondition::IfYouDo => ability.context.optional_effect_performed,
+                AbilityCondition::IfYouDo => {
+                    ability.context.optional_effect_performed && !state.cost_payment_failed_flag
+                }
             };
             if !condition_met {
                 return Ok(());

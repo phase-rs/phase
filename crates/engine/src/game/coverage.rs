@@ -532,7 +532,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::SolveCase
         | Effect::Cleanup { .. }
         | Effect::AddRestriction { .. }
-        | Effect::CreateEmblem { .. } => {}
+        | Effect::CreateEmblem { .. }
+        | Effect::PayCost { .. } => {}
     }
     d
 }

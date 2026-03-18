@@ -1,3 +1,5 @@
+import { useCallback } from "react";
+
 import { audioManager } from "../../audio/AudioManager.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -11,6 +13,27 @@ export function PlayerHud() {
   const setMasterMuted = usePreferencesStore((s) => s.setMasterMuted);
   const playerId = usePlayerId();
   const isMyTurn = useGameStore((s) => s.gameState?.active_player === playerId);
+  const waitingFor = useGameStore((s) => s.waitingFor);
+  const dispatch = useGameStore((s) => s.dispatch);
+
+  const isHumanTargetSelection =
+    (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
+    && waitingFor.data.player === playerId;
+  const isValidTarget = isHumanTargetSelection && (waitingFor.data.selection?.current_legal_targets ?? []).some(
+    (target) => "Player" in target && target.Player === playerId,
+  );
+
+  const handleTargetClick = useCallback(() => {
+    if (isValidTarget) {
+      dispatch({ type: "ChooseTarget", data: { target: { Player: playerId } } });
+    }
+  }, [isValidTarget, dispatch, playerId]);
+
+  const pillClass = isValidTarget
+    ? "bg-black/50 ring-[3px] ring-cyan-400 shadow-[0_0_20px_rgba(34,211,238,0.6),0_0_8px_rgba(34,211,238,0.4)] cursor-pointer"
+    : isMyTurn
+      ? "bg-black/50 ring-[3px] ring-emerald-400 shadow-[0_0_20px_rgba(52,211,153,0.5),0_0_6px_rgba(52,211,153,0.4)]"
+      : "bg-black/50";
 
   return (
     <div
@@ -21,11 +44,8 @@ export function PlayerHud() {
         <PhaseIndicatorLeft />
       </div>
       <div
-        className={`flex min-w-0 flex-wrap items-center justify-center gap-1.5 rounded-full px-2.5 py-1 transition-all duration-300 sm:flex-nowrap sm:gap-2 sm:px-3 ${
-          isMyTurn
-            ? "bg-black/50 ring-[3px] ring-emerald-400 shadow-[0_0_20px_rgba(52,211,153,0.5),0_0_6px_rgba(52,211,153,0.4)]"
-            : "bg-black/50"
-        }`}
+        onClick={handleTargetClick}
+        className={`flex min-w-0 flex-wrap items-center justify-center gap-1.5 rounded-full px-2.5 py-1 transition-all duration-300 sm:flex-nowrap sm:gap-2 sm:px-3 ${pillClass}`}
       >
         <LifeTotal playerId={playerId} size="lg" hideLabel />
         <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-gray-500">

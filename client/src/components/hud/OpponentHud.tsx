@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 
 import type { PlayerId } from "../../adapter/types.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
@@ -51,15 +51,44 @@ export function OpponentHud({ opponentName }: OpponentHudProps) {
     setFocusedOpponent,
   ]);
 
+  const waitingFor = useGameStore((s) => s.waitingFor);
+  const dispatch = useGameStore((s) => s.dispatch);
+  const isHumanTargetSelection =
+    (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
+    && waitingFor.data.player === playerId;
+  const validPlayerTargetIds = useMemo(() => {
+    if (!isHumanTargetSelection) return [] as number[];
+    return (waitingFor.data.selection?.current_legal_targets ?? [])
+      .filter((target): target is { Player: number } => "Player" in target)
+      .map((target) => target.Player);
+  }, [isHumanTargetSelection, waitingFor]);
+
+  const handlePlayerTarget = useCallback(
+    (targetPlayerId: number) => {
+      dispatch({ type: "ChooseTarget", data: { target: { Player: targetPlayerId } } });
+    },
+    [dispatch],
+  );
+
   if (!isMultiplayer) {
     // 1v1: single opponent pill (existing design)
     const opponentId = allOpponents[0] ?? (playerId === 0 ? 1 : 0);
     const isOpponentTurn = gameState?.active_player === opponentId;
+    const isValidTarget = validPlayerTargetIds.includes(opponentId);
     const label = opponentName ?? `Opp ${opponentId + 1}`;
+
+    const pillClass = isValidTarget
+      ? "bg-black/50 ring-[3px] ring-cyan-400 shadow-[0_0_20px_rgba(34,211,238,0.6),0_0_8px_rgba(34,211,238,0.4)] cursor-pointer"
+      : isOpponentTurn
+        ? "bg-black/50 ring-[3px] ring-red-400 shadow-[0_0_20px_rgba(248,113,113,0.5),0_0_6px_rgba(248,113,113,0.4)]"
+        : "bg-black/50";
 
     return (
       <div data-player-hud={String(opponentId)} className="flex items-center justify-center py-1">
-        <div className={`flex items-center gap-2 rounded-full px-3 py-1 transition-all duration-300 ${isOpponentTurn ? "bg-black/50 ring-[3px] ring-red-400 shadow-[0_0_20px_rgba(248,113,113,0.5),0_0_6px_rgba(248,113,113,0.4)]" : "bg-black/50"}`}>
+        <div
+          onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
+          className={`flex items-center gap-2 rounded-full px-3 py-1 transition-all duration-300 ${pillClass}`}
+        >
           <span className="text-xs font-medium text-gray-400">{label}</span>
           <LifeTotal playerId={opponentId} size="lg" hideLabel />
           <ManaPoolSummary playerId={opponentId} />
@@ -80,8 +109,9 @@ export function OpponentHud({ opponentName }: OpponentHudProps) {
           isFocused={focusedId === opId}
           isEliminated={eliminated.includes(opId)}
           isTeammate={teamBased && isTeammate(playerId, opId)}
+          isValidTarget={validPlayerTargetIds.includes(opId)}
           showMana={focusedId === opId}
-          onClick={() => setFocusedOpponent(opId)}
+          onClick={() => validPlayerTargetIds.includes(opId) ? handlePlayerTarget(opId) : setFocusedOpponent(opId)}
         />
       ))}
       <button
@@ -110,11 +140,12 @@ interface OpponentTabProps {
   isFocused: boolean;
   isEliminated: boolean;
   isTeammate: boolean;
+  isValidTarget: boolean;
   showMana: boolean;
   onClick: () => void;
 }
 
-function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, showMana, onClick }: OpponentTabProps) {
+function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isValidTarget, showMana, onClick }: OpponentTabProps) {
   const gameState = useGameStore((s) => s.gameState);
   const isTheirTurn = gameState?.active_player === playerId;
   const player = gameState?.players[playerId];
@@ -139,15 +170,17 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, show
 
   const label = ally ? "Ally" : `Opp ${playerId + 1}`;
 
-  const borderClass = isTheirTurn
-    ? "border-red-400 bg-black/60 ring-1 ring-red-400/40 shadow-[0_0_10px_rgba(248,113,113,0.3)]"
-    : ally
-      ? isFocused
-        ? "border-emerald-400 bg-gray-800/90 ring-1 ring-emerald-400/30"
-        : "border-emerald-600 bg-gray-900/80 hover:border-emerald-400 hover:bg-gray-800/80"
-      : isFocused
-        ? "border-amber-400 bg-gray-800/90 ring-1 ring-amber-400/30"
-        : "border-gray-600 bg-gray-900/80 hover:border-gray-400 hover:bg-gray-800/80";
+  const borderClass = isValidTarget
+    ? "border-cyan-400 bg-black/60 ring-2 ring-cyan-400/60 shadow-[0_0_16px_rgba(34,211,238,0.5)] cursor-pointer"
+    : isTheirTurn
+      ? "border-red-400 bg-black/60 ring-1 ring-red-400/40 shadow-[0_0_10px_rgba(248,113,113,0.3)]"
+      : ally
+        ? isFocused
+          ? "border-emerald-400 bg-gray-800/90 ring-1 ring-emerald-400/30"
+          : "border-emerald-600 bg-gray-900/80 hover:border-emerald-400 hover:bg-gray-800/80"
+        : isFocused
+          ? "border-amber-400 bg-gray-800/90 ring-1 ring-amber-400/30"
+          : "border-gray-600 bg-gray-900/80 hover:border-gray-400 hover:bg-gray-800/80";
 
   return (
     <button

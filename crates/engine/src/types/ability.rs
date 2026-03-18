@@ -897,6 +897,19 @@ pub enum StaticCondition {
 }
 
 // ---------------------------------------------------------------------------
+// PaymentCost — cost paid during effect resolution (not activation)
+// ---------------------------------------------------------------------------
+
+/// CR 118.1: A cost paid as part of an effect's resolution.
+/// Distinct from AbilityCost (which gates activation before the colon).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum PaymentCost {
+    Mana { cost: ManaCost },
+    Life { amount: u32 },
+}
+
+// ---------------------------------------------------------------------------
 // AbilityCost -- expanded typed variants
 // ---------------------------------------------------------------------------
 
@@ -1386,6 +1399,10 @@ pub enum Effect {
         #[serde(default)]
         statics: Vec<StaticDefinition>,
     },
+    /// CR 118.1: Pay a cost during effect resolution (mana or life).
+    PayCost {
+        cost: PaymentCost,
+    },
     /// Semantic marker for effects the engine has not yet implemented a handler for.
     /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.
     Unimplemented {
@@ -1504,6 +1521,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::CreateDelayedTrigger { .. } => "CreateDelayedTrigger",
         Effect::AddRestriction { .. } => "AddRestriction",
         Effect::CreateEmblem { .. } => "CreateEmblem",
+        Effect::PayCost { .. } => "PayCost",
         Effect::Unimplemented { name, .. } => name,
     }
 }
@@ -1567,6 +1585,7 @@ pub enum EffectKind {
     CreateDelayedTrigger,
     AddRestriction,
     CreateEmblem,
+    PayCost,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
     Equip,
@@ -1631,6 +1650,7 @@ impl From<&Effect> for EffectKind {
             Effect::CreateDelayedTrigger { .. } => EffectKind::CreateDelayedTrigger,
             Effect::AddRestriction { .. } => EffectKind::AddRestriction,
             Effect::CreateEmblem { .. } => EffectKind::CreateEmblem,
+            Effect::PayCost { .. } => EffectKind::PayCost,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,
         }
     }

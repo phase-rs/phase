@@ -629,6 +629,11 @@ pub struct GameState {
     /// Used by event-context TargetFilter variants to resolve trigger event data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_trigger_event: Option<GameEvent>,
+
+    /// Transient: set by PayCost resolver when payment fails.
+    /// Gates IfYouDo sub-abilities. Reset in DecideOptionalEffect handler.
+    #[serde(skip)]
+    pub cost_payment_failed_flag: bool,
 }
 
 /// A runtime-generated continuous effect stored at state level.
@@ -753,6 +758,7 @@ impl GameState {
             last_created_token_ids: Vec::new(),
             restrictions: Vec::new(),
             current_trigger_event: None,
+            cost_payment_failed_flag: false,
         }
     }
 

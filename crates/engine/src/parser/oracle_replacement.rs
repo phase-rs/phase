@@ -119,6 +119,14 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
         );
     }
 
+    // --- "If [source] would deal [noncombat] damage ... it deals that much damage plus N instead" ---
+    // CR 614.1a: Damage boost replacement effects. Parsed as Unimplemented for now.
+    if lower.contains("would deal") && lower.contains("damage") && lower.contains("instead") {
+        return Some(
+            ReplacementDefinition::new(ReplacementEvent::DamageDone).description(text.to_string()),
+        );
+    }
+
     // --- "[Subject] enters with N [type] counter(s)" ---
     if lower.contains("enters") && lower.contains("counter") {
         if let Some(def) = parse_enters_with_counters(&norm_lower, &text) {

@@ -402,6 +402,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
         }
         // CR 609.3: Player decided whether to perform an optional effect ("You may X").
         (WaitingFor::OptionalEffectChoice { .. }, GameAction::DecideOptionalEffect { accept }) => {
+            state.cost_payment_failed_flag = false; // Reset before resolution
             if let Some(mut ability) = state.pending_optional_effect.take() {
                 ability.optional = false; // prevent re-prompt on re-entry
                 if accept {

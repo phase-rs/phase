@@ -3,15 +3,15 @@ use std::str::FromStr;
 use super::oracle_static::parse_continuous_modifications;
 use super::oracle_target::{parse_event_context_ref, parse_target, parse_type_phrase};
 use super::oracle_util::{
-    contains_object_pronoun, contains_possessive, parse_mana_production, parse_number,
-    starts_with_possessive, strip_reminder_text,
+    contains_object_pronoun, contains_possessive, parse_mana_production, parse_mana_symbols,
+    parse_number, starts_with_possessive, strip_reminder_text,
 };
 use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, ChoiceType, CountValue, DamageAmount,
     DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer, ManaProduction,
-    ManaSpendRestriction, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
-    StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    ManaSpendRestriction, MultiTargetSpec, PaymentCost, PlayerFilter, PtValue, QuantityExpr,
+    QuantityRef, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
@@ -284,6 +284,10 @@ enum CostResourceImperativeAst {
         amount: DamageAmount,
         target: TargetFilter,
         all: bool,
+    },
+    /// CR 118.1: "pay {cost}" as an effect verb (mana or life).
+    Pay {
+        cost: PaymentCost,
     },
 }
 
@@ -1985,6 +1989,24 @@ fn parse_cost_resource_ast(text: &str, lower: &str) -> Option<CostResourceImpera
             );
         }
     }
+    if let Some(rest) = lower.strip_prefix("pay ") {
+        // "pay N life" → PaymentCost::Life (CR 118.2)
+        if let Some(life_rest) = rest.strip_suffix(" life") {
+            if let Some((n, _)) = parse_number(life_rest) {
+                return Some(CostResourceImperativeAst::Pay {
+                    cost: PaymentCost::Life { amount: n },
+                });
+            }
+        }
+        // "pay {2}{B}" → PaymentCost::Mana (CR 117.1)
+        let offset = text.len() - rest.len();
+        let rest_original = &text[offset..];
+        if let Some((mana_cost, _)) = parse_mana_symbols(rest_original.trim()) {
+            return Some(CostResourceImperativeAst::Pay {
+                cost: PaymentCost::Mana { cost: mana_cost },
+            });
+        }
+    }
     if lower.starts_with("add ") {
         return match try_parse_add_mana_effect(text) {
             Some(Effect::Mana {
@@ -2044,6 +2066,7 @@ fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect {
                 }
             }
         }
+        CostResourceImperativeAst::Pay { cost } => Effect::PayCost { cost },
     }
 }
 
@@ -8003,5 +8026,67 @@ mod tests {
             Some(AbilityCondition::AdditionalCostPaid),
             "expected AdditionalCostPaid (not Instead) for additive kicker"
         );
+    }
+
+    #[test]
+    fn pay_mana_cost_generic() {
+        let e = parse_effect("pay {2}");
+        assert!(matches!(
+            e,
+            Effect::PayCost {
+                cost: PaymentCost::Mana { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn pay_mana_cost_colored() {
+        let e = parse_effect("pay {1}{W}");
+        if let Effect::PayCost {
+            cost: PaymentCost::Mana { cost },
+        } = e
+        {
+            // Should have White shard + 1 generic
+            match cost {
+                ManaCost::Cost { shards, generic } => {
+                    assert!(shards
+                        .iter()
+                        .any(|s| *s == crate::types::mana::ManaCostShard::White));
+                    assert_eq!(generic, 1);
+                }
+                _ => panic!("expected ManaCost::Cost"),
+            }
+        } else {
+            panic!("expected PayCost::Mana, got {e:?}");
+        }
+    }
+
+    #[test]
+    fn pay_life_cost() {
+        let e = parse_effect("pay 3 life");
+        assert!(matches!(
+            e,
+            Effect::PayCost {
+                cost: PaymentCost::Life { amount: 3 }
+            }
+        ));
+    }
+
+    #[test]
+    fn pay_chain_you_may_if_you_do() {
+        let def = parse_effect_chain(
+            "you may pay {2}. If you do, draw a card.",
+            AbilityKind::Spell,
+        );
+        assert!(def.optional, "should be optional (you may)");
+        assert!(matches!(
+            def.effect,
+            Effect::PayCost {
+                cost: PaymentCost::Mana { .. }
+            }
+        ));
+        let sub = def.sub_ability.as_ref().expect("expected sub_ability");
+        assert_eq!(sub.condition, Some(AbilityCondition::IfYouDo));
+        assert!(matches!(sub.effect, Effect::Draw { .. }));
     }
 }

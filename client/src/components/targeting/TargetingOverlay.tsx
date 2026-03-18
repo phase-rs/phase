@@ -15,9 +15,6 @@ export function TargetingOverlay() {
   const currentTargetSlot = selection?.current_slot ?? 0;
   const activeSlot = targetSlots[currentTargetSlot];
   const isOptionalCurrentSlot = activeSlot?.optional === true;
-  const validPlayerTargets = selection?.current_legal_targets
-    .filter((target): target is { Player: number } => "Player" in target)
-    .map((target) => target.Player) ?? [];
 
   const handleCancel = useCallback(() => {
     dispatch({ type: "CancelCast" });
@@ -26,13 +23,6 @@ export function TargetingOverlay() {
   const handleSkip = useCallback(() => {
     dispatch({ type: "ChooseTarget", data: { target: null } });
   }, [dispatch]);
-
-  const handlePlayerTarget = useCallback(
-    (player: number) => {
-      dispatch({ type: "ChooseTarget", data: { target: { Player: player } } });
-    },
-    [dispatch],
-  );
 
   if (!isTargetSelection) return null;
 
@@ -60,19 +50,7 @@ export function TargetingOverlay() {
           </div>
         </div>
 
-        {validPlayerTargets.length > 0 && (
-          <div className="pointer-events-auto absolute left-0 right-0 top-20 flex justify-center gap-3">
-            {validPlayerTargets.map((targetPlayer) => (
-              <button
-                key={targetPlayer}
-                onClick={() => handlePlayerTarget(targetPlayer)}
-                className="rounded-lg bg-cyan-700 px-4 py-2 font-semibold text-white shadow-lg transition hover:bg-cyan-600"
-              >
-                Target Player {targetPlayer + 1}
-              </button>
-            ))}
-          </div>
-        )}
+        {/* Player targets are handled by PlayerHud/OpponentHud glow + click */}
 
         <div className="pointer-events-auto absolute bottom-6 left-0 right-0 flex justify-center gap-4">
           {waitingFor.type === "TargetSelection" && (

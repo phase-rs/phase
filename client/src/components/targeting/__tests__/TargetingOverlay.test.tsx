@@ -70,7 +70,7 @@ describe("TargetingOverlay", () => {
     cleanup();
   });
 
-  it("dispatches player target selections with incremental engine action payload", () => {
+  it("does not render player target buttons (handled by HUD components)", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
 
     act(() => {
@@ -83,12 +83,8 @@ describe("TargetingOverlay", () => {
 
     render(<TargetingOverlay />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Target Player 2" }));
-
-    expect(dispatch).toHaveBeenCalledWith({
-      type: "ChooseTarget",
-      data: { target: { Player: 1 } },
-    });
+    expect(screen.queryByRole("button", { name: /Target Player/i })).toBeNull();
+    expect(screen.getByText("Choose a target")).toBeInTheDocument();
   });
 
   it("dispatches null target when the active engine slot is optional and skipped", () => {
