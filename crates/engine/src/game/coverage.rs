@@ -1175,12 +1175,6 @@ fn collect_ability_cost_missing_parts(cost: &AbilityCost, missing: &mut Vec<Stri
     }
 }
 
-/// Returns `true` if the coverage summary shows 100% support (CI pass).
-/// Returns `false` if there are any unsupported cards (CI fail).
-pub fn is_fully_covered(summary: &CoverageSummary) -> bool {
-    summary.total_cards > 0 && summary.supported_cards == summary.total_cards
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

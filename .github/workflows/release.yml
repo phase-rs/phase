@@ -26,7 +26,9 @@ jobs:
           tool: wasm-bindgen-cli@0.2.114
 
       - name: Install binaryen
-        run: sudo apt-get install -y binaryen
+        run: |
+          curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
+          echo "$PWD/binaryen-version_123/bin" >> $GITHUB_PATH
 
       - uses: pnpm/action-setup@v4
         with:
@@ -111,7 +113,9 @@ jobs:
 
       - name: Install binaryen (Linux)
         if: matrix.os == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y binaryen
+        run: |
+          curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
+          echo "$PWD/binaryen-version_123/bin" >> $GITHUB_PATH
 
       - name: Install binaryen (macOS)
         if: matrix.os == 'macos'

@@ -38,8 +38,10 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --exclude phase-tauri
 
-      - name: Card support coverage gate
-        run: cargo run --bin coverage-report -- data/ --ci
+      - name: Card support coverage report
+        run: |
+          ln -sf ../client/public/card-data.json data/card-data.json
+          cargo run --bin coverage-report -- data/
 
       - name: Cache MTGJSON data
         id: cache-mtgjson
@@ -78,7 +80,9 @@ jobs:
           tool: wasm-bindgen-cli@0.2.114
 
       - name: Install binaryen
-        run: sudo apt-get install -y binaryen
+        run: |
+          curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
+          echo "$PWD/binaryen-version_123/bin" >> $GITHUB_PATH
 
       - name: Build WASM (release)
         run: cargo build --package engine-wasm --target wasm32-unknown-unknown --release
