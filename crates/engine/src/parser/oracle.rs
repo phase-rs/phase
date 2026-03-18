@@ -770,6 +770,24 @@ fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         return Some(direct);
     }
 
+    // CR 702.29: Typecycling — "{subtype}cycling {cost}" e.g. "plainscycling {2}"
+    // Guard: subtype prefix must be a single word (no spaces) to avoid false positives.
+    if let Some(cycling_pos) = text.find("cycling") {
+        if cycling_pos > 0 {
+            let subtype = &text[..cycling_pos];
+            if !subtype.contains(' ') {
+                let cost_str = text[cycling_pos + "cycling".len()..].trim();
+                if !cost_str.is_empty() {
+                    let colon_form = format!("typecycling:{subtype}:{cost_str}");
+                    let parsed: Keyword = colon_form.parse().unwrap();
+                    if !matches!(parsed, Keyword::Unknown(_)) {
+                        return Some(parsed);
+                    }
+                }
+            }
+        }
+    }
+
     // For parameterized keywords, find the first space to split name from parameter.
     // Oracle format: "protection from multicolored" → name="protection", rest="from multicolored"
     // Oracle format: "ward {2}" → name="ward", rest="{2}"
@@ -890,6 +908,14 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Amplify(_) => "amplify".to_string(),
         Keyword::Graft(_) => "graft".to_string(),
         Keyword::Devour(_) => "devour".to_string(),
+        Keyword::Toxic(_) => "toxic".to_string(),
+        Keyword::Saddle(_) => "saddle".to_string(),
+        Keyword::Soulshift(_) => "soulshift".to_string(),
+        Keyword::Backup(_) => "backup".to_string(),
+        Keyword::Squad(_) => "squad".to_string(),
+        Keyword::Typecycling { ref subtype, .. } => {
+            format!("{}cycling", subtype.to_lowercase())
+        }
         Keyword::Protection(_) => "protection".to_string(),
         Keyword::Kicker(_) => "kicker".to_string(),
         Keyword::Cycling(_) => "cycling".to_string(),
@@ -1421,6 +1447,19 @@ fn is_static_pattern(lower: &str) -> bool {
         || lower.contains("lose all abilities")
         || lower.contains("power is equal to")
         || lower.contains("power and toughness are each equal to")
+        // CR 509.1b: "must be blocked if able"
+        || lower.contains("must be blocked")
+        // CR 119.7: Lifegain prevention
+        || lower.contains("can't gain life")
+        // CR 702.8d: Flash-granting statics
+        || lower.contains("as though it had flash")
+        || lower.contains("as though they had flash")
+        // Blocking rules
+        || lower.contains("can block an additional")
+        || lower.contains("can block any number")
+        // Additional land drop
+        || lower.contains("play an additional land")
+        || lower.contains("play two additional lands")
 }
 
 fn is_granted_static_line(lower: &str) -> bool {
@@ -1622,6 +1661,11 @@ fn is_keyword_cost_line(lower: &str) -> bool {
         "miracle",
         "splice",
         "entwine",
+        "toxic",
+        "saddle",
+        "soulshift",
+        "backup",
+        "squad",
     ];
     keyword_costs.iter().any(|kw| {
         lower.starts_with(kw)
@@ -1629,6 +1673,11 @@ fn is_keyword_cost_line(lower: &str) -> bool {
                 || lower.as_bytes().get(kw.len()) == Some(&b' ')
                 || lower.as_bytes().get(kw.len()) == Some(&b'\t'))
     })
+        // CR 702.29: Typecycling — first word ends in "cycling" but isn't "cycling" itself
+        || lower
+            .split_whitespace()
+            .next()
+            .is_some_and(|w| w.ends_with("cycling") && w != "cycling")
 }
 
 /// Strip an "ability word — " prefix from a line.
@@ -3172,6 +3221,139 @@ mod tests {
             &r.extracted_keywords[0],
             Keyword::Protection(ProtectionTarget::Color(crate::types::mana::ManaColor::Red))
         ));
+    }
+
+    // ── Keyword pipeline tests (parse_keyword_from_oracle + is_keyword_cost_line) ──
+
+    #[test]
+    fn parse_keyword_from_oracle_toxic() {
+        // CR 702.164: Toxic N — parameterized keyword from Oracle text
+        let kw = parse_keyword_from_oracle("toxic 2").unwrap();
+        assert_eq!(kw, Keyword::Toxic(2));
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_saddle() {
+        // CR 702.173: Saddle N
+        let kw = parse_keyword_from_oracle("saddle 3").unwrap();
+        assert_eq!(kw, Keyword::Saddle(3));
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_soulshift() {
+        // CR 702.46: Soulshift N
+        let kw = parse_keyword_from_oracle("soulshift 7").unwrap();
+        assert_eq!(kw, Keyword::Soulshift(7));
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_backup() {
+        // CR 702.165: Backup N
+        let kw = parse_keyword_from_oracle("backup 1").unwrap();
+        assert_eq!(kw, Keyword::Backup(1));
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_squad() {
+        // CR 702.157: Squad {cost}
+        let kw = parse_keyword_from_oracle("squad {2}").unwrap();
+        assert!(matches!(kw, Keyword::Squad(ManaCost::Cost { .. })));
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_typecycling() {
+        // CR 702.29: Typecycling — "plainscycling {2}" is typecycling, not regular cycling
+        let kw = parse_keyword_from_oracle("plainscycling {2}").unwrap();
+        assert!(matches!(kw, Keyword::Typecycling { .. }));
+        if let Keyword::Typecycling { subtype, .. } = &kw {
+            assert_eq!(subtype, "Plains");
+        }
+
+        // "forestcycling {1}{G}" — different subtype
+        let kw2 = parse_keyword_from_oracle("forestcycling {1}{G}").unwrap();
+        if let Keyword::Typecycling { subtype, .. } = &kw2 {
+            assert_eq!(subtype, "Forest");
+        }
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_regular_cycling_not_typecycling() {
+        // "cycling {2}" must remain regular Cycling, not Typecycling
+        let kw = parse_keyword_from_oracle("cycling {2}").unwrap();
+        assert!(matches!(kw, Keyword::Cycling(_)));
+    }
+
+    #[test]
+    fn is_keyword_cost_line_new_keywords() {
+        assert!(is_keyword_cost_line("toxic 2"));
+        assert!(is_keyword_cost_line("saddle 3"));
+        assert!(is_keyword_cost_line("soulshift 7"));
+        assert!(is_keyword_cost_line("backup 1"));
+        assert!(is_keyword_cost_line("squad {2}"));
+    }
+
+    #[test]
+    fn is_keyword_cost_line_typecycling() {
+        // Typecycling lines should be recognized as keyword cost lines
+        assert!(is_keyword_cost_line("plainscycling {2}"));
+        assert!(is_keyword_cost_line("forestcycling {1}{G}"));
+        assert!(is_keyword_cost_line("islandcycling {2}"));
+        // Regular cycling still matches (existing behavior)
+        assert!(is_keyword_cost_line("cycling {2}"));
+    }
+
+    #[test]
+    fn is_keyword_cost_line_rejects_trigger_text() {
+        // "when you cycle a card" is trigger text, not a keyword cost line
+        assert!(!is_keyword_cost_line("when you cycle a card"));
+        assert!(!is_keyword_cost_line(
+            "whenever you cycle or discard a card"
+        ));
+    }
+
+    #[test]
+    fn end_to_end_toxic_keyword_no_unimplemented() {
+        // End-to-end: "Toxic 2" with MTGJSON keyword name "toxic" should be
+        // fully handled — no Unimplemented effects in output
+        let r = parse_with_keyword_names(
+            "Toxic 2",
+            "Glistener Elf",
+            &["toxic"],
+            &["Creature"],
+            &["Phyrexian", "Elf", "Warrior"],
+        );
+        let has_unimplemented = r.abilities.iter().any(|a| {
+            matches!(
+                a.effect,
+                crate::types::ability::Effect::Unimplemented { .. }
+            )
+        });
+        assert!(
+            !has_unimplemented,
+            "Toxic keyword line should not produce Unimplemented effects"
+        );
+    }
+
+    #[test]
+    fn end_to_end_typecycling_no_unimplemented() {
+        // "Plainscycling {2}" with MTGJSON keyword name should not produce Unimplemented
+        let r = parse_with_keyword_names(
+            "Plainscycling {2}",
+            "Twisted Abomination",
+            &["plainscycling"],
+            &["Creature"],
+            &["Zombie", "Mutant"],
+        );
+        let has_unimplemented = r.abilities.iter().any(|a| {
+            matches!(
+                a.effect,
+                crate::types::ability::Effect::Unimplemented { .. }
+            )
+        });
+        assert!(
+            !has_unimplemented,
+            "Typecycling keyword line should not produce Unimplemented effects"
+        );
     }
 
     #[test]

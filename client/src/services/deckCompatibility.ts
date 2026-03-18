@@ -17,6 +17,8 @@ export interface DeckCompatibilityResult {
   unknown_cards: string[];
   selected_format_compatible?: boolean | null;
   selected_format_reasons: string[];
+  /** Combined color identity of all cards in the deck, in WUBRG order (e.g. ["W", "U", "R"]). */
+  color_identity: string[];
 }
 
 interface DeckCompatibilityRequest {

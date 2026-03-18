@@ -403,6 +403,56 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         );
     }
 
+    // --- "must be blocked if able" (CR 509.1b) ---
+    if lower.contains("must be blocked") {
+        return Some(
+            StaticDefinition::new(StaticMode::Other("MustBeBlocked".into()))
+                .affected(TargetFilter::SelfRef)
+                .description(text.to_string()),
+        );
+    }
+
+    // --- "can't gain life" (CR 119.7) ---
+    if lower.contains("can't gain life") {
+        let affected = if lower.contains("your opponents") || lower.starts_with("opponents") {
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        } else if lower.starts_with("you ") || lower.contains("you can't") {
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You))
+        } else {
+            // "Players can't gain life" — affects all
+            TargetFilter::Typed(TypedFilter::default())
+        };
+        return Some(
+            StaticDefinition::new(StaticMode::CantGainLife)
+                .affected(affected)
+                .description(text.to_string()),
+        );
+    }
+
+    // --- "as though it/they had flash" (CR 702.8d) ---
+    if lower.contains("as though it had flash") || lower.contains("as though they had flash") {
+        return Some(
+            StaticDefinition::new(StaticMode::CastWithFlash).description(text.to_string()),
+        );
+    }
+
+    // --- "can block an additional creature" / "can block any number" ---
+    if lower.contains("can block an additional") || lower.contains("can block any number") {
+        return Some(
+            StaticDefinition::new(StaticMode::Other("ExtraBlockers".into()))
+                .affected(TargetFilter::SelfRef)
+                .description(text.to_string()),
+        );
+    }
+
+    // --- "play an additional land" / "play two additional lands" ---
+    if lower.contains("play an additional land") || lower.contains("play two additional lands") {
+        return Some(
+            StaticDefinition::new(StaticMode::Other("AdditionalLandDrop".into()))
+                .description(text.to_string()),
+        );
+    }
+
     // --- "As long as ..." (generic conditional static, no comma separator) ---
     if lower.starts_with("as long as ") {
         let condition_text = text
@@ -2511,6 +2561,94 @@ mod tests {
             .contains(&ContinuousModification::AddKeyword {
                 keyword: Keyword::Hexproof,
             }));
+    }
+
+    // ── New static routing tests (Steps 4-5) ─────────────────────────────
+
+    #[test]
+    fn static_must_be_blocked_if_able() {
+        // CR 509.1b: "must be blocked if able"
+        let def = parse_static_line("Darksteel Myr must be blocked if able.").unwrap();
+        assert_eq!(def.mode, StaticMode::Other("MustBeBlocked".to_string()));
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn static_opponents_cant_gain_life() {
+        // CR 119.7: Lifegain prevention — opponent scope
+        let def = parse_static_line("Your opponents can't gain life.").unwrap();
+        assert_eq!(def.mode, StaticMode::CantGainLife);
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::Opponent),
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn static_you_cant_gain_life() {
+        // CR 119.7: Lifegain prevention — self scope
+        let def = parse_static_line("You can't gain life.").unwrap();
+        assert_eq!(def.mode, StaticMode::CantGainLife);
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn static_players_cant_gain_life() {
+        // CR 119.7: Lifegain prevention — all players
+        let def = parse_static_line("Players can't gain life.").unwrap();
+        assert_eq!(def.mode, StaticMode::CantGainLife);
+        // No controller restriction — affects all
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: None,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn static_cast_as_though_flash() {
+        // CR 702.8d: Flash-granting static
+        let def =
+            parse_static_line("You may cast creature spells as though they had flash.").unwrap();
+        assert_eq!(def.mode, StaticMode::CastWithFlash);
+    }
+
+    #[test]
+    fn static_can_block_additional_creature() {
+        let def = parse_static_line("Palace Guard can block an additional creature each combat.")
+            .unwrap();
+        assert_eq!(def.mode, StaticMode::Other("ExtraBlockers".to_string()));
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn static_can_block_any_number() {
+        let def =
+            parse_static_line("Hundred-Handed One can block any number of creatures.").unwrap();
+        assert_eq!(def.mode, StaticMode::Other("ExtraBlockers".to_string()));
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn static_play_two_additional_lands() {
+        // "play two additional lands" — not handled by the subject-predicate parser
+        let def =
+            parse_static_line("You may play two additional lands on each of your turns.").unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::Other("AdditionalLandDrop".to_string())
+        );
     }
 
     #[test]

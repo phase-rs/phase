@@ -351,12 +351,12 @@ export function MyDecks({
         <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
           {filteredDeckNames.map((deckName) => {
           const isActive = deckName === activeDeckName;
-          const colors = getDeckColorIdentity(deckName);
+          const compatibility = compatibilities[deckName];
+          const colors = compatibility?.color_identity ?? getDeckColorIdentity(deckName);
           const count = getDeckCardCount(deckName);
           const representativeCard = getRepresentativeCard(deckName);
           const isPrecon = PRECON_NAMES.has(deckName);
           const displayName = isPrecon ? deckName.slice(PRECON_PREFIX.length) : deckName;
-          const compatibility = compatibilities[deckName];
 
             return (
               <button

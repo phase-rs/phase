@@ -8,6 +8,7 @@ use crate::types::zones::Zone;
 
 use super::mana_abilities;
 use super::mana_payment;
+use super::restrictions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ManaSourceOption {
@@ -81,7 +82,7 @@ fn land_mana_options(
         if !matches!(ability.cost, Some(AbilityCost::Tap)) {
             continue;
         }
-        if !activation_condition_satisfied(state, controller, ability) {
+        if !activation_condition_satisfied(state, controller, object_id, ability_index, ability) {
             continue;
         }
 
@@ -119,8 +120,24 @@ fn land_mana_options(
 fn activation_condition_satisfied(
     state: &GameState,
     controller: PlayerId,
+    object_id: ObjectId,
+    ability_index: usize,
     ability: &AbilityDefinition,
 ) -> bool {
+    // Check typed activation_restrictions (the primary path).
+    if restrictions::check_activation_restrictions(
+        state,
+        controller,
+        object_id,
+        ability_index,
+        &ability.activation_restrictions,
+    )
+    .is_err()
+    {
+        return false;
+    }
+
+    // Legacy: check sub_ability chain for Unimplemented condition markers.
     let Some(required_subtypes) = extract_land_subtype_activation_condition(ability) else {
         return true;
     };
@@ -381,6 +398,67 @@ mod tests {
         let colors = display_land_mana_colors(&state, verge, PlayerId(0));
         assert!(colors.contains(&ManaColor::Blue));
         assert!(colors.contains(&ManaColor::Black));
+    }
+
+    /// Riverpyre Verge-style land: activation restriction via `activation_restrictions`
+    /// field (not sub_ability chain). Without the fix, the mana source calculator
+    /// would ignore the restriction and report {U} as available.
+    fn add_riverpyre_verge(state: &mut GameState, controller: PlayerId) -> ObjectId {
+        use crate::types::ability::ActivationRestriction;
+
+        let verge = create_object(
+            state,
+            CardId(200),
+            controller,
+            "Riverpyre Verge".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&verge).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        // {T}: Add {R}. (unconditional)
+        obj.abilities.push(verge_ability(ManaColor::Red));
+        // {T}: Add {U}. Activate only if you control an Island or a Mountain.
+        obj.abilities.push(
+            verge_ability(ManaColor::Blue).activation_restrictions(vec![
+                ActivationRestriction::RequiresCondition {
+                    text: "you control an Island or a Mountain".to_string(),
+                },
+            ]),
+        );
+        verge
+    }
+
+    #[test]
+    fn activation_restrictions_block_conditional_mana_without_support() {
+        let mut state = GameState::new_two_player(42);
+        let verge = add_riverpyre_verge(&mut state, PlayerId(0));
+
+        let options = activatable_land_mana_options(&state, verge, PlayerId(0));
+        let types: Vec<_> = options.iter().map(|o| o.mana_type).collect();
+        assert!(types.contains(&ManaType::Red), "unconditional red should be available");
+        assert!(!types.contains(&ManaType::Blue), "blue should NOT be available without Island/Mountain");
+    }
+
+    #[test]
+    fn activation_restrictions_allow_conditional_mana_with_support() {
+        let mut state = GameState::new_two_player(42);
+        let verge = add_riverpyre_verge(&mut state, PlayerId(0));
+        // Add a Mountain to satisfy the condition.
+        let mountain = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&mountain).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes.push("Mountain".to_string());
+
+        let options = activatable_land_mana_options(&state, verge, PlayerId(0));
+        let types: Vec<_> = options.iter().map(|o| o.mana_type).collect();
+        assert!(types.contains(&ManaType::Red));
+        assert!(types.contains(&ManaType::Blue), "blue should be available with Mountain in play");
     }
 
     #[test]

@@ -48,6 +48,7 @@ describe("MyDecks", () => {
         unknown_cards: [],
         selected_format_compatible: true,
         selected_format_reasons: [],
+        color_identity: ["U"],
       },
       "Off Format": {
         standard: { compatible: true, reasons: [] },
@@ -56,6 +57,7 @@ describe("MyDecks", () => {
         unknown_cards: [],
         selected_format_compatible: false,
         selected_format_reasons: ["Not Commander legal"],
+        color_identity: ["R"],
       },
     });
 
@@ -91,6 +93,7 @@ describe("MyDecks", () => {
         unknown_cards: [],
         selected_format_compatible: true,
         selected_format_reasons: [],
+        color_identity: ["U"],
       },
       "Deck Beta": {
         standard: { compatible: false, reasons: [] },
@@ -99,6 +102,7 @@ describe("MyDecks", () => {
         unknown_cards: [],
         selected_format_compatible: true,
         selected_format_reasons: [],
+        color_identity: ["R"],
       },
     });
 
@@ -128,6 +132,7 @@ describe("MyDecks", () => {
         unknown_cards: ["Mystery Card"],
         selected_format_compatible: null,
         selected_format_reasons: [],
+        color_identity: ["U"],
       },
     });
 

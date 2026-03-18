@@ -200,6 +200,29 @@ pub enum Keyword {
     Graft(u32),
     Devour(u32),
 
+    /// CR 702.164: Toxic N — when this creature deals combat damage to a player,
+    /// that player gets N poison counters.
+    Toxic(u32),
+    /// CR 702.173: Saddle N — tap creatures with total power N+ to saddle this Mount.
+    Saddle(u32),
+    /// CR 702.46: Soulshift N — when this creature dies, return target Spirit card
+    /// with mana value N or less from your graveyard to your hand.
+    Soulshift(u32),
+    /// CR 702.165: Backup N — when this creature enters, put N +1/+1 counters
+    /// on target creature, which gains this creature's other abilities until EOT.
+    Backup(u32),
+
+    /// CR 702.157: Squad {cost} — as an additional cost to cast, you may pay {cost}
+    /// any number of times; ETB creates that many tokens.
+    Squad(ManaCost),
+
+    /// CR 702.29: Typecycling — "{subtype}cycling {cost}": discard this card and pay {cost}
+    /// to search your library for a card with the specified subtype.
+    Typecycling {
+        cost: ManaCost,
+        subtype: String,
+    },
+
     /// Fallback for unrecognized keywords.
     Unknown(String),
 }
@@ -381,6 +404,34 @@ impl FromStr for Keyword {
                 "amplify" => return Ok(Keyword::Amplify(p.parse().unwrap_or(1))),
                 "graft" => return Ok(Keyword::Graft(p.parse().unwrap_or(1))),
                 "devour" => return Ok(Keyword::Devour(p.parse().unwrap_or(1))),
+                // CR 702.164
+                "toxic" => return Ok(Keyword::Toxic(p.parse().unwrap_or(1))),
+                // CR 702.173
+                "saddle" => return Ok(Keyword::Saddle(p.parse().unwrap_or(1))),
+                // CR 702.46
+                "soulshift" => return Ok(Keyword::Soulshift(p.parse().unwrap_or(1))),
+                // CR 702.165
+                "backup" => return Ok(Keyword::Backup(p.parse().unwrap_or(1))),
+                // CR 702.157
+                "squad" => return Ok(Keyword::Squad(parse_keyword_mana_cost(p))),
+                // CR 702.29: Typecycling — "typecycling:{subtype}:{cost}"
+                "typecycling" => {
+                    if let Some(colon_pos) = p.find(':') {
+                        let subtype = {
+                            let s = &p[..colon_pos];
+                            let mut c = s.chars();
+                            c.next()
+                                .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                                .unwrap_or_default()
+                        };
+                        let cost_str = &p[colon_pos + 1..];
+                        return Ok(Keyword::Typecycling {
+                            cost: parse_keyword_mana_cost(cost_str),
+                            subtype,
+                        });
+                    }
+                    return Ok(Keyword::Unknown(s.to_string()));
+                }
                 "afflict" => return Ok(Keyword::Afflict),
                 "enchant" => return Ok(Keyword::Enchant(parse_enchant_target(p))),
                 "etbcounter" => {
@@ -474,6 +525,11 @@ impl FromStr for Keyword {
             "dethrone" => Ok(Keyword::Dethrone),
             "doubleteam" => Ok(Keyword::DoubleTeam),
             "livingmetal" => Ok(Keyword::LivingMetal),
+            "hideaway" => Ok(Keyword::Hideaway),
+            "cumulative" => Ok(Keyword::Cumulative),
+            "ripple" => Ok(Keyword::Ripple),
+            "totem" => Ok(Keyword::Totem),
+            "warp" => Ok(Keyword::Warp),
             _ => Ok(Keyword::Unknown(s.to_string())),
         }
     }
@@ -676,6 +732,26 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Amplify" => Ok(Keyword::Amplify(uint(data))),
         "Graft" => Ok(Keyword::Graft(uint(data))),
         "Devour" => Ok(Keyword::Devour(uint(data))),
+        // CR 702.164 / CR 702.173 / CR 702.46 / CR 702.165
+        "Toxic" => Ok(Keyword::Toxic(uint(data))),
+        "Saddle" => Ok(Keyword::Saddle(uint(data))),
+        "Soulshift" => Ok(Keyword::Soulshift(uint(data))),
+        "Backup" => Ok(Keyword::Backup(uint(data))),
+        // CR 702.157
+        "Squad" => Ok(Keyword::Squad(mana(data)?)),
+        // CR 702.29
+        "Typecycling" => {
+            let obj = data.as_object().ok_or("Typecycling: expected object")?;
+            let cost: ManaCost =
+                serde_json::from_value(obj.get("cost").cloned().unwrap_or_default())
+                    .map_err(|e| format!("Typecycling cost: {e}"))?;
+            let subtype = obj
+                .get("subtype")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Ok(Keyword::Typecycling { cost, subtype })
+        }
         // Parameterized: special
         "Protection" => {
             let pt: ProtectionTarget =
@@ -899,6 +975,62 @@ mod tests {
     }
 
     #[test]
+    fn parse_new_parameterized_keywords() {
+        // CR 702.164: Toxic
+        assert_eq!(Keyword::from_str("Toxic:2").unwrap(), Keyword::Toxic(2));
+        assert_eq!(Keyword::from_str("Toxic:1").unwrap(), Keyword::Toxic(1));
+
+        // CR 702.173: Saddle
+        assert_eq!(Keyword::from_str("Saddle:3").unwrap(), Keyword::Saddle(3));
+
+        // CR 702.46: Soulshift
+        assert_eq!(
+            Keyword::from_str("Soulshift:7").unwrap(),
+            Keyword::Soulshift(7)
+        );
+
+        // CR 702.165: Backup
+        assert_eq!(Keyword::from_str("Backup:1").unwrap(), Keyword::Backup(1));
+
+        // CR 702.157: Squad
+        let squad = Keyword::from_str("Squad:{2}").unwrap();
+        assert!(matches!(squad, Keyword::Squad(ManaCost::Cost { .. })));
+    }
+
+    #[test]
+    fn parse_typecycling() {
+        // CR 702.29: Typecycling colon-form
+        let kw = Keyword::from_str("Typecycling:plains:{2}").unwrap();
+        assert!(matches!(kw, Keyword::Typecycling { .. }));
+        if let Keyword::Typecycling { subtype, .. } = &kw {
+            assert_eq!(subtype, "Plains"); // capitalized
+        }
+
+        let kw2 = Keyword::from_str("Typecycling:forest:{1}{G}").unwrap();
+        if let Keyword::Typecycling { subtype, cost } = &kw2 {
+            assert_eq!(subtype, "Forest");
+            assert!(matches!(cost, ManaCost::Cost { .. }));
+        }
+
+        // Malformed (missing cost) falls through to Unknown
+        let kw3 = Keyword::from_str("Typecycling:plains").unwrap();
+        assert!(matches!(kw3, Keyword::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_previously_missing_fromstr_arms() {
+        // Step 0: These existed in enum + keyword_from_tagged but were missing from FromStr
+        assert_eq!(Keyword::from_str("Hideaway").unwrap(), Keyword::Hideaway);
+        assert_eq!(
+            Keyword::from_str("Cumulative").unwrap(),
+            Keyword::Cumulative
+        );
+        assert_eq!(Keyword::from_str("Ripple").unwrap(), Keyword::Ripple);
+        assert_eq!(Keyword::from_str("Totem").unwrap(), Keyword::Totem);
+        assert_eq!(Keyword::from_str("Warp").unwrap(), Keyword::Warp);
+    }
+
+    #[test]
     fn parse_unknown_keyword() {
         assert_eq!(
             Keyword::from_str("NotARealKeyword").unwrap(),
@@ -926,6 +1058,21 @@ mod tests {
             Keyword::EtbCounter {
                 counter_type: "P1P1".to_string(),
                 count: 2,
+            },
+            Keyword::Toxic(2),
+            Keyword::Saddle(3),
+            Keyword::Soulshift(5),
+            Keyword::Backup(1),
+            Keyword::Squad(ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            }),
+            Keyword::Typecycling {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 2,
+                },
+                subtype: "Plains".to_string(),
             },
         ];
         let json = serde_json::to_string(&keywords).unwrap();

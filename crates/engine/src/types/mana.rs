@@ -14,6 +14,17 @@ pub enum ManaColor {
     Green,
 }
 
+impl ManaColor {
+    /// All five colors in canonical WUBRG order.
+    pub const ALL: [ManaColor; 5] = [
+        ManaColor::White,
+        ManaColor::Blue,
+        ManaColor::Black,
+        ManaColor::Red,
+        ManaColor::Green,
+    ];
+}
+
 impl FromStr for ManaColor {
     type Err = ();
     fn from_str(s: &str) -> Result<Self, ()> {

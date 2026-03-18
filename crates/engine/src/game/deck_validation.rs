@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +8,7 @@ use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::format::GameFormat;
 use crate::types::keywords::Keyword;
+use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::match_config::MatchType;
 
 const BASIC_LANDS: [&str; 5] = ["Plains", "Island", "Swamp", "Mountain", "Forest"];
@@ -44,6 +45,10 @@ pub struct DeckCompatibilityResult {
     pub selected_format_compatible: Option<bool>,
     #[serde(default)]
     pub selected_format_reasons: Vec<String>,
+    /// Combined color identity of all cards in the deck, in WUBRG order.
+    /// Each entry is a single-letter color code: "W", "U", "B", "R", or "G".
+    #[serde(default)]
+    pub color_identity: Vec<String>,
 }
 
 pub fn evaluate_deck_compatibility(
@@ -54,6 +59,7 @@ pub fn evaluate_deck_compatibility(
     let standard = evaluate_standard(db, request, &unknown_cards);
     let commander = evaluate_commander(db, request, &unknown_cards);
     let bo3_ready = !request.sideboard.is_empty();
+    let color_identity = collect_color_identity(db, request);
 
     let (selected_format_compatible, selected_format_reasons) =
         evaluate_selected_format(request, &standard, &commander, bo3_ready);
@@ -65,6 +71,7 @@ pub fn evaluate_deck_compatibility(
         unknown_cards: unknown_cards.into_iter().collect(),
         selected_format_compatible,
         selected_format_reasons,
+        color_identity,
     }
 }
 
@@ -296,6 +303,55 @@ fn collect_unknown_cards(
         }
     }
     unknown
+}
+
+/// Collects the combined color identity of all cards in the deck from their mana costs
+/// and color overrides, returned as single-letter codes in WUBRG order.
+fn collect_color_identity(db: &CardDatabase, request: &DeckCompatibilityRequest) -> Vec<String> {
+    let mut colors = HashSet::new();
+
+    // Deduplicate card names — we only need each unique card once
+    let unique_names: HashSet<&str> = all_deck_cards(request).collect();
+
+    for name in unique_names {
+        let resolved = resolve_card_name(db, name);
+        if let Some(face) = db.get_face_by_name(resolved) {
+            // Colors from mana cost shards
+            if let ManaCost::Cost { shards, .. } = &face.mana_cost {
+                for shard in shards {
+                    for color in ManaColor::ALL {
+                        if shard.contributes_to(color) {
+                            colors.insert(color);
+                        }
+                    }
+                }
+            }
+            // Colors from color indicator/override (e.g. Ancestral Vision, DFC back faces)
+            if let Some(overrides) = &face.color_override {
+                for color in overrides {
+                    colors.insert(*color);
+                }
+            }
+        }
+    }
+
+    // Return in canonical WUBRG order
+    ManaColor::ALL
+        .iter()
+        .filter(|c| colors.contains(c))
+        .map(mana_color_letter)
+        .collect()
+}
+
+fn mana_color_letter(color: &ManaColor) -> String {
+    match color {
+        ManaColor::White => "W",
+        ManaColor::Blue => "U",
+        ManaColor::Black => "B",
+        ManaColor::Red => "R",
+        ManaColor::Green => "G",
+    }
+    .to_string()
 }
 
 /// Returns true if the card is in the database, handling DFC names like "Front // Back"
