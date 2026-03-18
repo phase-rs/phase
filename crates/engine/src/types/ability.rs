@@ -2134,6 +2134,10 @@ pub struct ReplacementDefinition {
     pub description: Option<String>,
     #[serde(default)]
     pub condition: Option<ReplacementCondition>,
+    /// CR 614.6: For Moved replacements, restricts which destination zone this replacement matches.
+    /// E.g., `Some(Graveyard)` means "only replace zone changes TO the graveyard."
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_zone: Option<Zone>,
 }
 
 impl ReplacementDefinition {
@@ -2147,6 +2151,7 @@ impl ReplacementDefinition {
             valid_card: None,
             description: None,
             condition: None,
+            destination_zone: None,
         }
     }
 
@@ -2172,6 +2177,11 @@ impl ReplacementDefinition {
 
     pub fn condition(mut self, condition: ReplacementCondition) -> Self {
         self.condition = Some(condition);
+        self
+    }
+
+    pub fn destination_zone(mut self, zone: Zone) -> Self {
+        self.destination_zone = Some(zone);
         self
     }
 }

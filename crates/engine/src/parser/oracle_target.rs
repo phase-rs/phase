@@ -238,6 +238,45 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         );
     }
 
+    // CR 205.3a: Oracle "and" between type words is set-union ("artifacts and creatures"
+    // = any object that is an artifact OR a creature), not set-intersection.
+    // TargetFilter::Or is correct here.
+    // Only recurse when the word after "and" is a recognized card type — prevents
+    // false matches on effect text like "destroy target creature and draw a card".
+    if let Some(after_and_kw) = rest_lower.strip_prefix("and ") {
+        let after_and = after_and_kw.trim_start();
+        let (next_type, _, _) = parse_core_type(after_and);
+        if next_type.is_some() {
+            let and_text = &text[pos + rest_offset + 4..];
+            let (other_filter, final_rest) = parse_type_phrase(and_text);
+            let mut left = typed(card_type.unwrap_or(TypeFilter::Any), subtype, properties);
+
+            // Distribute shared controller suffix from right branch to left
+            if let TargetFilter::Typed(TypedFilter {
+                controller: Some(ref ctrl),
+                ..
+            }) = other_filter
+            {
+                if let TargetFilter::Typed(TypedFilter {
+                    controller: ref mut left_ctrl,
+                    ..
+                }) = left
+                {
+                    if left_ctrl.is_none() {
+                        *left_ctrl = Some(ctrl.clone());
+                    }
+                }
+            }
+
+            return (
+                TargetFilter::Or {
+                    filters: vec![left, other_filter],
+                },
+                final_rest,
+            );
+        }
+    }
+
     // CR 108.3 + CR 110.2: Ownership and control are distinct; "you own and control" satisfies both.
     let mut controller = None;
     let own_ctrl = lower[pos..].trim_start();
@@ -254,11 +293,9 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         });
         pos += own_ctrl_offset + "you own".len();
     } else {
-        controller = parse_controller_suffix(&lower[pos..]);
-        let ctrl_len = controller.as_ref().map_or(0, |c| match c {
-            ControllerRef::You => " you control".len(),
-            ControllerRef::Opponent => " an opponent controls".len(),
-        });
+        let (ctrl, ctrl_len) =
+            parse_controller_suffix(&lower[pos..]).map_or((None, 0), |(c, len)| (Some(c), len));
+        controller = ctrl;
         pos += ctrl_len;
     }
 
@@ -363,12 +400,23 @@ fn parse_core_type(text: &str) -> (Option<TypeFilter>, Option<String>, usize) {
     (None, None, 0)
 }
 
-fn parse_controller_suffix(text: &str) -> Option<ControllerRef> {
+/// Parse a controller suffix like " you control", " an opponent controls", " your opponents control".
+/// Returns `(ControllerRef, bytes_consumed)` where consumed includes leading whitespace.
+fn parse_controller_suffix(text: &str) -> Option<(ControllerRef, usize)> {
     let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
     if trimmed.starts_with("you control") {
-        Some(ControllerRef::You)
+        Some((ControllerRef::You, leading_ws + "you control".len()))
+    } else if trimmed.starts_with("your opponents control") {
+        Some((
+            ControllerRef::Opponent,
+            leading_ws + "your opponents control".len(),
+        ))
     } else if trimmed.starts_with("an opponent controls") {
-        Some(ControllerRef::Opponent)
+        Some((
+            ControllerRef::Opponent,
+            leading_ws + "an opponent controls".len(),
+        ))
     } else {
         None
     }
@@ -1230,5 +1278,49 @@ mod tests {
             }
             other => panic!("Expected Typed, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn creatures_your_opponents_control() {
+        let (f, rest) = parse_type_phrase("creatures your opponents control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent))
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn artifacts_and_creatures_your_opponents_control() {
+        let (f, rest) = parse_type_phrase("artifacts and creatures your opponents control");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 2);
+                assert_eq!(
+                    filters[0],
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::Opponent)
+                    )
+                );
+                assert_eq!(
+                    filters[1],
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::Opponent)
+                    )
+                );
+            }
+            other => panic!("Expected Or filter, got {:?}", other),
+        }
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn creature_an_opponent_controls_still_works() {
+        let (f, rest) = parse_type_phrase("creature an opponent controls");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent))
+        );
+        assert_eq!(rest.trim(), "");
     }
 }

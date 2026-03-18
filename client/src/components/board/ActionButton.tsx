@@ -235,7 +235,7 @@ export function ActionButton() {
   // Read auto-pass state from engine
   const autoPass = gameState?.auto_pass?.[playerId];
   const isEndingTurn = autoPass?.type === "UntilEndOfTurn";
-  const isResolvingAll = autoPass?.type === "UntilStackEmpty";
+  const _isResolvingAll = autoPass?.type === "UntilStackEmpty";
 
   const visible = mode !== "hidden" || isEndingTurn;
   const panelClassName =

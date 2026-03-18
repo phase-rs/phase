@@ -792,6 +792,16 @@ pub fn find_applicable_replacements(
                             continue;
                         }
                     }
+                    // CR 614.6: Zone-change replacements may be scoped to a specific destination.
+                    if let Some(ref dest_zone) = repl_def.destination_zone {
+                        let matches_dest = match event {
+                            ProposedEvent::ZoneChange { to, .. } => to == dest_zone,
+                            _ => true,
+                        };
+                        if !matches_dest {
+                            continue;
+                        }
+                    }
                     // Evaluate replacement condition (e.g. "unless you control a Mountain")
                     if let Some(ref cond) = repl_def.condition {
                         if !evaluate_replacement_condition(cond, obj.controller, obj.id, state) {
@@ -845,7 +855,7 @@ fn apply_single_replacement(
     events: &mut Vec<GameEvent>,
 ) -> Result<ProposedEvent, ApplyResult> {
     // Extract replacement metadata before mutably borrowing state for the applier.
-    let (event_key, enters_tapped, etb_counters) = match state
+    let (event_key, enters_tapped, etb_counters, redirect_zone) = match state
         .objects
         .get(&rid.source)
         .and_then(|obj| obj.replacement_definitions.get(rid.index))
@@ -860,7 +870,15 @@ fn apply_single_replacement(
                 )
             });
             let counters = extract_etb_counters(repl_def.execute.as_deref());
-            (repl_def.event.clone(), tapped, counters)
+            // CR 614.6: Zone-change replacement — redirect destination.
+            let redirect_zone = repl_def
+                .execute
+                .as_ref()
+                .and_then(|exec| match &exec.effect {
+                    Effect::ChangeZone { destination, .. } => Some(*destination),
+                    _ => None,
+                });
+            (repl_def.event.clone(), tapped, counters, redirect_zone)
         }
         None => return Ok(proposed),
     };
@@ -877,6 +895,12 @@ fn apply_single_replacement(
                     } = new_event
                     {
                         *enter_tapped = true;
+                    }
+                }
+                // CR 614.6: Apply zone redirect (e.g., graveyard → exile for Rest in Peace).
+                if let Some(zone) = redirect_zone {
+                    if let ProposedEvent::ZoneChange { ref mut to, .. } = new_event {
+                        *to = zone;
                     }
                 }
                 // If the replacement carries counter data, add to the zone change.
@@ -1512,5 +1536,209 @@ mod tests {
             !candidates.is_empty(),
             "Non-prevention damage replacements should not be blocked"
         );
+    }
+
+    // ── destination_zone filter tests (CR 614.6) ──
+
+    fn rip_replacement() -> ReplacementDefinition {
+        use crate::types::ability::{AbilityKind, TargetFilter};
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    origin: None,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                },
+            ))
+            .destination_zone(Zone::Graveyard)
+    }
+
+    fn authority_replacement() -> ReplacementDefinition {
+        use crate::types::ability::{AbilityKind, ControllerRef, TargetFilter, TypedFilter};
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Tap {
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::Opponent),
+            ))
+            .destination_zone(Zone::Battlefield)
+    }
+
+    #[test]
+    fn destination_zone_rip_matches_graveyard() {
+        // Battlefield → Graveyard with RIP replacement → should be a candidate
+        let repl = rip_replacement();
+        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+
+        let proposed =
+            ProposedEvent::zone_change(ObjectId(99), Zone::Battlefield, Zone::Graveyard, None);
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(
+            !candidates.is_empty(),
+            "RIP should match zone change TO graveyard"
+        );
+    }
+
+    #[test]
+    fn destination_zone_rip_hand_to_graveyard() {
+        // Hand → Graveyard (discard) with RIP → should match
+        let repl = rip_replacement();
+        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+
+        let proposed = ProposedEvent::zone_change(ObjectId(99), Zone::Hand, Zone::Graveyard, None);
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(
+            !candidates.is_empty(),
+            "RIP should match discard (hand → graveyard)"
+        );
+    }
+
+    #[test]
+    fn destination_zone_rip_library_to_graveyard() {
+        // Library → Graveyard (mill) with RIP → should match
+        let repl = rip_replacement();
+        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+
+        let proposed =
+            ProposedEvent::zone_change(ObjectId(99), Zone::Library, Zone::Graveyard, None);
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(
+            !candidates.is_empty(),
+            "RIP should match mill (library → graveyard)"
+        );
+    }
+
+    #[test]
+    fn destination_zone_rip_stack_to_graveyard() {
+        // Stack → Graveyard (countered spell) with RIP → should match
+        let repl = rip_replacement();
+        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+
+        let proposed = ProposedEvent::zone_change(ObjectId(99), Zone::Stack, Zone::Graveyard, None);
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(
+            !candidates.is_empty(),
+            "RIP should match countered spell (stack → graveyard)"
+        );
+    }
+
+    #[test]
+    fn destination_zone_rip_does_not_match_exile() {
+        // Battlefield → Exile — RIP (destination_zone: Graveyard) should NOT match
+        let repl = rip_replacement();
+        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+
+        let proposed =
+            ProposedEvent::zone_change(ObjectId(99), Zone::Battlefield, Zone::Exile, None);
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(
+            candidates.is_empty(),
+            "RIP should NOT match zone change to exile"
+        );
+    }
+
+    #[test]
+    fn destination_zone_no_rip_passthrough() {
+        // Zone change to graveyard without RIP → no replacement
+        let state = GameState::new_two_player(42);
+        let proposed =
+            ProposedEvent::zone_change(ObjectId(99), Zone::Battlefield, Zone::Graveyard, None);
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(
+            candidates.is_empty(),
+            "No replacement should match without RIP on battlefield"
+        );
+    }
+
+    fn make_creature(id: ObjectId, owner: PlayerId, zone: Zone) -> GameObject {
+        use crate::types::card_type::{CardType, CoreType};
+        let mut obj = GameObject::new(id, CardId(3), owner, "Test Creature".to_string(), zone);
+        obj.card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec![],
+        };
+        obj
+    }
+
+    #[test]
+    fn destination_zone_authority_matches_battlefield() {
+        // Opponent creature entering battlefield with Authority → should match
+        let repl = authority_replacement();
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+
+        // Create the entering creature (owned/controlled by opponent = PlayerId(1))
+        let creature = make_creature(ObjectId(30), PlayerId(1), Zone::Hand);
+        state.objects.insert(ObjectId(30), creature);
+
+        let proposed =
+            ProposedEvent::zone_change(ObjectId(30), Zone::Hand, Zone::Battlefield, None);
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(
+            !candidates.is_empty(),
+            "Authority should match opponent creature entering battlefield"
+        );
+    }
+
+    #[test]
+    fn destination_zone_authority_own_creature_not_affected() {
+        // Own creature entering battlefield with Authority → should NOT match (controller filter)
+        let repl = authority_replacement();
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+
+        // Create own creature (PlayerId(0), same as Authority's controller)
+        let creature = make_creature(ObjectId(30), PlayerId(0), Zone::Hand);
+        state.objects.insert(ObjectId(30), creature);
+
+        let proposed =
+            ProposedEvent::zone_change(ObjectId(30), Zone::Hand, Zone::Battlefield, None);
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(
+            candidates.is_empty(),
+            "Authority should NOT match own creature entering battlefield"
+        );
+    }
+
+    #[test]
+    fn zone_redirect_applied_in_apply_single_replacement() {
+        // Test that the zone redirect in apply_single_replacement mutates the destination
+        let repl = rip_replacement();
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+
+        // Add the object being moved
+        let target = GameObject::new(
+            ObjectId(30),
+            CardId(3),
+            PlayerId(0),
+            "Dying Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(30), target);
+        state.battlefield.push(ObjectId(30));
+
+        let mut events = Vec::new();
+        let proposed =
+            ProposedEvent::zone_change(ObjectId(30), Zone::Battlefield, Zone::Graveyard, None);
+        let result = replace_event(&mut state, proposed, &mut events);
+        match result {
+            ReplacementResult::Execute(ProposedEvent::ZoneChange { to, .. }) => {
+                assert_eq!(to, Zone::Exile, "RIP should redirect graveyard → exile");
+            }
+            other => panic!("expected Execute with ZoneChange, got {:?}", other),
+        }
     }
 }

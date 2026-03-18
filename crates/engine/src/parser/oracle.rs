@@ -1121,7 +1121,8 @@ fn is_static_pattern(lower: &str) -> bool {
         || lower.starts_with("each creature ")
         || lower.starts_with("cards in ")
         || lower.starts_with("creatures you control ")
-        || lower.starts_with("creatures your opponents control ")
+        || (lower.starts_with("creatures your opponents control ")
+            && !lower.trim_end_matches('.').ends_with("enter tapped"))
         || lower.starts_with("each player ")
         || lower.starts_with("spells you cast ")
         || lower.starts_with("spells your opponents cast ")
@@ -1163,6 +1164,7 @@ fn is_replacement_pattern(lower: &str) -> bool {
         // not replacement parsing. It disables prevention rather than replacing events.
         || lower.contains("enters the battlefield tapped")
         || lower.contains("enters tapped")
+        || lower.trim_end_matches('.').ends_with(" enter tapped")
         || (lower.contains("as ") && lower.contains("enters") && lower.contains("choose a"))
         || (lower.contains("enters") && lower.contains("counter"))
 }

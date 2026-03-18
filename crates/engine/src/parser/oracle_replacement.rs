@@ -1,13 +1,14 @@
 use super::oracle_effect::{parse_effect_chain, try_parse_named_choice};
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{parse_number, strip_reminder_text};
+#[cfg(test)]
+use crate::types::ability::TypeFilter;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChoiceType, Effect, FilterProp, QuantityExpr,
+    AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, FilterProp, QuantityExpr,
     ReplacementCondition, ReplacementDefinition, ReplacementMode, TargetFilter, TypedFilter,
 };
-#[cfg(test)]
-use crate::types::ability::{ControllerRef, TypeFilter};
 use crate::types::replacements::ReplacementEvent;
+use crate::types::zones::Zone;
 
 /// Parse a replacement effect line into a ReplacementDefinition.
 /// Handles: "If ~ would die", "Prevent all combat damage",
@@ -36,6 +37,11 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
         return Some(def);
     }
 
+    // --- "[Type] your opponents control enter tapped" (external replacement) ---
+    if let Some(def) = parse_external_enters_tapped(&norm_lower, &text) {
+        return Some(def);
+    }
+
     // --- "~ enters the battlefield tapped" (unconditional) ---
     if norm_lower.contains("enters the battlefield tapped") || norm_lower.contains("enters tapped")
     {
@@ -50,6 +56,11 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
                 .valid_card(TargetFilter::SelfRef)
                 .description(text.to_string()),
         );
+    }
+
+    // --- "If a card/token would be put into a graveyard, exile it instead" ---
+    if let Some(def) = parse_graveyard_exile_replacement(&norm_lower, &text) {
+        return Some(def);
     }
 
     // --- "If ~ would die, {effect}" ---
@@ -369,6 +380,94 @@ fn parse_enters_with_counters(
 
     let mut def = ReplacementDefinition::new(ReplacementEvent::Moved)
         .execute(put_counter)
+        .description(original_text.to_string());
+    if let Some(filter) = valid_card {
+        def = def.valid_card(filter);
+    }
+    Some(def)
+}
+
+/// Parse "[Type] enter tapped" / "[Type] enters tapped" — external replacement effects.
+/// E.g., "Creatures your opponents control enter tapped." (Authority of the Consuls)
+/// E.g., "Artifacts and creatures your opponents control enter tapped." (Blind Obedience)
+fn parse_external_enters_tapped(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let stripped = norm_lower.trim_end_matches('.');
+    let subject = stripped
+        .strip_suffix(" enter tapped")
+        .or_else(|| stripped.strip_suffix(" enters tapped"))?;
+
+    // Must NOT be a self-reference (those are handled by the normal enters-tapped path)
+    if subject.contains('~') {
+        return None;
+    }
+
+    let (filter, rest) = parse_type_phrase(subject);
+    // Ensure the entire subject was consumed (no trailing unparsed text)
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    // CR 614.12: Only match zone changes TO the battlefield.
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Tap {
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .valid_card(filter)
+            .destination_zone(Zone::Battlefield)
+            .description(original_text.to_string()),
+    )
+}
+
+/// Parse "If a card/token would be put into a graveyard, exile it instead."
+/// Handles Rest in Peace ("from anywhere"), Leyline of the Void ("from anywhere" + opponent scope).
+fn parse_graveyard_exile_replacement(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    if !norm_lower.contains("would be put into") {
+        return None;
+    }
+    if !norm_lower.contains("graveyard") {
+        return None;
+    }
+    if !norm_lower.contains("exile") {
+        return None;
+    }
+
+    // Determine scope: "a card or token" / "a card" → None (matches everything)
+    // "an opponent's graveyard" → opponent-owned cards
+    // CR 400.3 + CR 108.3: Cards go to owner's graveyard, so "opponent's graveyard"
+    // means cards owned by an opponent.
+    let valid_card = if norm_lower.contains("an opponent's graveyard")
+        || norm_lower.contains("opponent's graveyard")
+    {
+        Some(TargetFilter::Typed(TypedFilter::default().properties(
+            vec![FilterProp::Owned {
+                controller: ControllerRef::Opponent,
+            }],
+        )))
+    } else {
+        None
+    };
+
+    let mut def = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                origin: None,
+                target: TargetFilter::Any,
+                owner_library: false,
+            },
+        ))
+        .destination_zone(Zone::Graveyard)
         .description(original_text.to_string());
     if let Some(filter) = valid_card {
         def = def.valid_card(filter);
@@ -730,6 +829,111 @@ mod tests {
                 }));
             }
             other => panic!("Expected Typed filter, got {other:?}"),
+        }
+    }
+
+    // ── External replacement effects ──
+
+    #[test]
+    fn rest_in_peace_graveyard_exile() {
+        let def = parse_replacement_line(
+            "If a card or token would be put into a graveyard from anywhere, exile it instead.",
+            "Rest in Peace",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
+        assert!(def.valid_card.is_none()); // matches all objects
+        assert!(matches!(
+            def.execute.as_ref().unwrap().effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn leyline_of_the_void_opponent_scoped() {
+        let def = parse_replacement_line(
+            "If a card would be put into an opponent's graveyard from anywhere, exile it instead.",
+            "Leyline of the Void",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
+        // valid_card should scope to opponent-owned cards
+        match &def.valid_card {
+            Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
+                assert!(properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::Opponent,
+                }));
+            }
+            other => panic!("Expected Typed filter with Owned, got {other:?}"),
+        }
+        assert!(matches!(
+            def.execute.as_ref().unwrap().effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn authority_of_the_consuls_enters_tapped() {
+        let def = parse_replacement_line(
+            "Creatures your opponents control enter tapped.",
+            "Authority of the Consuls",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        assert!(matches!(
+            def.execute.as_ref().unwrap().effect,
+            Effect::Tap {
+                target: TargetFilter::SelfRef
+            }
+        ));
+        match &def.valid_card {
+            Some(TargetFilter::Typed(TypedFilter {
+                card_type,
+                controller,
+                ..
+            })) => {
+                assert_eq!(*card_type, Some(TypeFilter::Creature));
+                assert_eq!(*controller, Some(ControllerRef::Opponent));
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn blind_obedience_compound_or_filter() {
+        let def = parse_replacement_line(
+            "Artifacts and creatures your opponents control enter tapped.",
+            "Blind Obedience",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        match &def.valid_card {
+            Some(TargetFilter::Or { filters }) => {
+                assert_eq!(filters.len(), 2);
+                assert_eq!(
+                    filters[0],
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::Opponent)
+                    )
+                );
+                assert_eq!(
+                    filters[1],
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::Opponent)
+                    )
+                );
+            }
+            other => panic!("Expected Or filter, got {other:?}"),
         }
     }
 }
