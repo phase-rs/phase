@@ -28,12 +28,13 @@ pub fn resolve_add(
         } => (counter_type.clone(), *count as u32),
         _ => ("P1P1".to_string(), 1),
     };
+    let ct = parse_counter_type(&counter_type_str);
 
     let targets = resolve_defined_or_targets(ability);
     for obj_id in targets {
         let proposed = ProposedEvent::AddCounter {
             object_id: obj_id,
-            counter_type: counter_type_str.clone(),
+            counter_type: ct.clone(),
             count: counter_num,
             applied: HashSet::new(),
         };
@@ -47,16 +48,18 @@ pub fn resolve_add(
                     ..
                 } = event
                 {
-                    let ct = parse_counter_type(&counter_type);
                     let obj = state
                         .objects
                         .get_mut(&object_id)
                         .ok_or(EffectError::ObjectNotFound(object_id))?;
-                    let entry = obj.counters.entry(ct.clone()).or_insert(0);
+                    let entry = obj.counters.entry(counter_type.clone()).or_insert(0);
                     *entry += count;
 
                     // Mark layers dirty for P/T counters
-                    if matches!(ct, CounterType::Plus1Plus1 | CounterType::Minus1Minus1) {
+                    if matches!(
+                        counter_type,
+                        CounterType::Plus1Plus1 | CounterType::Minus1Minus1
+                    ) {
                         state.layers_dirty = true;
                     }
 
@@ -118,7 +121,7 @@ pub fn resolve_multiply(
 
             events.push(GameEvent::CounterAdded {
                 object_id: obj_id,
-                counter_type: counter_type_str.clone(),
+                counter_type: ct.clone(),
                 count: to_add,
             });
         }
@@ -180,12 +183,13 @@ pub fn resolve_remove(
         } => (counter_type.clone(), *count as u32),
         _ => ("P1P1".to_string(), 1),
     };
+    let ct = parse_counter_type(&counter_type_str);
 
     let targets = resolve_defined_or_targets(ability);
     for obj_id in targets {
         let proposed = ProposedEvent::RemoveCounter {
             object_id: obj_id,
-            counter_type: counter_type_str.clone(),
+            counter_type: ct.clone(),
             count: counter_num,
             applied: HashSet::new(),
         };
@@ -199,15 +203,17 @@ pub fn resolve_remove(
                     ..
                 } = event
                 {
-                    let ct = parse_counter_type(&counter_type);
                     let obj = state
                         .objects
                         .get_mut(&object_id)
                         .ok_or(EffectError::ObjectNotFound(object_id))?;
-                    let entry = obj.counters.entry(ct.clone()).or_insert(0);
+                    let entry = obj.counters.entry(counter_type.clone()).or_insert(0);
                     *entry = entry.saturating_sub(count);
 
-                    if matches!(ct, CounterType::Plus1Plus1 | CounterType::Minus1Minus1) {
+                    if matches!(
+                        counter_type,
+                        CounterType::Plus1Plus1 | CounterType::Minus1Minus1
+                    ) {
                         state.layers_dirty = true;
                     }
 
@@ -375,7 +381,14 @@ mod tests {
         )
         .unwrap();
 
-        assert!(events.iter().any(|e| matches!(e, GameEvent::CounterAdded { counter_type, count: 1, .. } if counter_type == "P1P1")));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::CounterAdded {
+                counter_type: CounterType::Plus1Plus1,
+                count: 1,
+                ..
+            }
+        )));
     }
 
     /// Regression test: SelfRef PutCounter (Ajani's Pridemate trigger) must apply the counter

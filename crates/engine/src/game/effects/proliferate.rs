@@ -48,17 +48,9 @@ pub fn resolve(
                 state.layers_dirty = true;
             }
 
-            let counter_type_str = match &ct {
-                CounterType::Plus1Plus1 => "P1P1".to_string(),
-                CounterType::Minus1Minus1 => "M1M1".to_string(),
-                CounterType::Loyalty => "LOYALTY".to_string(),
-                CounterType::Stun => "stun".to_string(),
-                CounterType::Generic(s) => s.clone(),
-            };
-
             events.push(GameEvent::CounterAdded {
                 object_id: obj_id,
-                counter_type: counter_type_str,
+                counter_type: ct.clone(),
                 count: 1,
             });
         }
@@ -226,10 +218,10 @@ mod tests {
         assert!(events.iter().any(|e| matches!(
             e,
             GameEvent::CounterAdded {
-                counter_type,
+                counter_type: CounterType::Plus1Plus1,
                 count: 1,
                 ..
-            } if counter_type == "P1P1"
+            }
         )));
     }
 }

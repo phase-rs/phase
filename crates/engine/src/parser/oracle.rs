@@ -2,11 +2,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AdditionalCost,
-    CastingRestriction, Comparator, Effect, ModalChoice, ModalSelectionConstraint,
-    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
-    TypedFilter,
+    CastingRestriction, Comparator, CounterTriggerFilter, Effect, ModalChoice,
+    ModalSelectionConstraint, ReplacementDefinition, SolveCondition, SpellCastingOption,
+    StaticDefinition, TargetFilter, TriggerDefinition, TypedFilter,
 };
 use crate::types::keywords::Keyword;
+use crate::types::replacements::ReplacementEvent;
+use crate::types::triggers::TriggerMode;
+use crate::types::zones::Zone;
 
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_effect::parse_effect_chain;
@@ -107,8 +110,6 @@ pub fn parse_oracle_text(
     types: &[String],
     subtypes: &[String],
 ) -> ParsedAbilities {
-    let _ = subtypes; // reserved for future use
-
     let is_spell = types.iter().any(|t| t == "Instant" || t == "Sorcery");
 
     let mut result = ParsedAbilities {
@@ -125,6 +126,14 @@ pub fn parse_oracle_text(
     };
 
     let lines: Vec<&str> = oracle_text.split('\n').collect();
+
+    // CR 714: Pre-parse Saga chapter lines into triggers + ETB replacement.
+    if subtypes.iter().any(|s| s == "Saga") {
+        let (chapter_triggers, etb_replacement) = parse_saga_chapters(&lines, card_name);
+        result.triggers.extend(chapter_triggers);
+        result.replacements.push(etb_replacement);
+    }
+
     let mut i = 0;
 
     while i < lines.len() {
@@ -1169,18 +1178,103 @@ fn is_replacement_pattern(lower: &str) -> bool {
         || (lower.contains("enters") && lower.contains("counter"))
 }
 
-/// Check if a line is a saga chapter (e.g. "I —", "II —", "III —").
-fn is_saga_chapter(lower: &str) -> bool {
-    let trimmed = lower.trim();
-    // Saga chapter lines start with roman numerals followed by "—" or "-"
-    for prefix in &[
-        "i —", "ii —", "iii —", "iv —", "v —", "i -", "ii -", "iii -", "iv -", "v -",
-    ] {
-        if trimmed.starts_with(prefix) {
-            return true;
+/// Parse a roman numeral to u32. Handles I(1) through X(10) and beyond.
+fn parse_roman_numeral(s: &str) -> Option<u32> {
+    match s.to_uppercase().as_str() {
+        "I" => Some(1),
+        "II" => Some(2),
+        "III" => Some(3),
+        "IV" => Some(4),
+        "V" => Some(5),
+        "VI" => Some(6),
+        "VII" => Some(7),
+        "VIII" => Some(8),
+        "IX" => Some(9),
+        "X" => Some(10),
+        _ => None,
+    }
+}
+
+/// Parse a saga chapter line. Returns (chapter_numbers, effect_text).
+/// Handles "I — effect", "I, II — effect", "III, IV, V — effect" (arbitrary-length lists).
+fn parse_chapter_line(line: &str) -> Option<(Vec<u32>, String)> {
+    // Split on em dash or hyphen
+    let (prefix, effect) = line.split_once(" — ").or_else(|| line.split_once(" - "))?;
+
+    let nums: Vec<u32> = prefix
+        .split(',')
+        .filter_map(|part| parse_roman_numeral(part.trim()))
+        .collect();
+
+    if nums.is_empty() {
+        return None;
+    }
+
+    Some((nums, effect.trim().to_string()))
+}
+
+/// CR 714: Parse all chapter lines from a Saga's Oracle text.
+/// Returns (chapter_triggers, etb_replacement).
+fn parse_saga_chapters(
+    lines: &[&str],
+    _card_name: &str,
+) -> (Vec<TriggerDefinition>, ReplacementDefinition) {
+    let mut chapters: Vec<(Vec<u32>, String)> = Vec::new();
+
+    for &line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let stripped = strip_reminder_text(trimmed);
+        if stripped.is_empty() {
+            continue;
+        }
+
+        if let Some((nums, effect)) = parse_chapter_line(&stripped) {
+            chapters.push((nums, effect));
+        } else if let Some(last) = chapters.last_mut() {
+            // Multi-line chapter body: continuation of previous chapter
+            last.1.push(' ');
+            last.1.push_str(&stripped);
         }
     }
-    false
+
+    let mut triggers = Vec::new();
+    for (nums, effect_text) in &chapters {
+        for &n in nums {
+            let trigger = TriggerDefinition::new(TriggerMode::CounterAdded)
+                .valid_card(TargetFilter::SelfRef)
+                .counter_filter(CounterTriggerFilter {
+                    counter_type: crate::game::game_object::CounterType::Lore,
+                    threshold: Some(n),
+                })
+                .execute(parse_effect_chain(effect_text, AbilityKind::Spell))
+                .trigger_zones(vec![Zone::Battlefield])
+                .description(format!("Chapter {n}"));
+            triggers.push(trigger);
+        }
+    }
+
+    // CR 714.3a: As a Saga enters the battlefield, its controller puts a lore counter on it.
+    let etb_replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: "lore".to_string(),
+                count: 1,
+                target: TargetFilter::SelfRef,
+            },
+        ))
+        .valid_card(TargetFilter::SelfRef)
+        .description("Saga ETB lore counter".to_string());
+
+    (triggers, etb_replacement)
+}
+
+/// Check if a line is a saga chapter (e.g. "I —", "II —", "III —").
+fn is_saga_chapter(lower: &str) -> bool {
+    parse_chapter_line(lower).is_some()
 }
 
 /// Check if a line is a keyword with a cost (e.g., "Cycling {2}", "Flashback {3}{R}", "Crew 3").
@@ -3457,5 +3551,144 @@ mod tests {
         ];
         let modes = collect_mode_asts(&lines, 1);
         assert!(modes.is_empty());
+    }
+
+    // --- Saga parser tests ---
+
+    #[test]
+    fn parse_roman_numeral_range() {
+        assert_eq!(parse_roman_numeral("I"), Some(1));
+        assert_eq!(parse_roman_numeral("ii"), Some(2));
+        assert_eq!(parse_roman_numeral("III"), Some(3));
+        assert_eq!(parse_roman_numeral("IV"), Some(4));
+        assert_eq!(parse_roman_numeral("v"), Some(5));
+        assert_eq!(parse_roman_numeral("VI"), Some(6));
+        assert_eq!(parse_roman_numeral("VII"), Some(7));
+        assert_eq!(parse_roman_numeral("VIII"), Some(8));
+        assert_eq!(parse_roman_numeral("IX"), Some(9));
+        assert_eq!(parse_roman_numeral("X"), Some(10));
+        assert_eq!(parse_roman_numeral("XI"), None);
+    }
+
+    #[test]
+    fn parse_chapter_line_single() {
+        let (nums, effect) = parse_chapter_line("I — Draw a card.").unwrap();
+        assert_eq!(nums, vec![1]);
+        assert_eq!(effect, "Draw a card.");
+    }
+
+    #[test]
+    fn parse_chapter_line_multi() {
+        let (nums, effect) = parse_chapter_line("I, II — Target creature gets +2/+0.").unwrap();
+        assert_eq!(nums, vec![1, 2]);
+        assert_eq!(effect, "Target creature gets +2/+0.");
+    }
+
+    #[test]
+    fn parse_chapter_line_hyphen_fallback() {
+        let (nums, effect) = parse_chapter_line("III - Destroy target creature.").unwrap();
+        assert_eq!(nums, vec![3]);
+        assert_eq!(effect, "Destroy target creature.");
+    }
+
+    #[test]
+    fn is_saga_chapter_extended() {
+        assert!(is_saga_chapter("VI — Something"));
+        assert!(is_saga_chapter("VII — Something"));
+        assert!(is_saga_chapter("i — something"));
+        assert!(!is_saga_chapter("Draw a card."));
+    }
+
+    #[test]
+    fn parse_saga_the_eldest_reborn() {
+        let oracle = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — Each opponent discards a card.\nII — Put target creature card from a graveyard onto the battlefield under your control.\nIII — Return target nonland permanent card from your graveyard to the battlefield under your control.";
+        let result = parse_oracle_text(
+            oracle,
+            "The Eldest Reborn",
+            &[],
+            &["Enchantment".to_string()],
+            &["Saga".to_string()],
+        );
+
+        // 3 chapter triggers
+        assert_eq!(
+            result.triggers.len(),
+            3,
+            "Expected 3 chapter triggers, got: {:?}",
+            result.triggers.len()
+        );
+        for (i, trigger) in result.triggers.iter().enumerate() {
+            assert_eq!(trigger.mode, TriggerMode::CounterAdded);
+            let filter = trigger
+                .counter_filter
+                .as_ref()
+                .expect("should have counter_filter");
+            assert_eq!(
+                filter.counter_type,
+                crate::game::game_object::CounterType::Lore
+            );
+            assert_eq!(filter.threshold, Some((i + 1) as u32));
+            assert_eq!(trigger.trigger_zones, vec![Zone::Battlefield]);
+        }
+
+        // 1 ETB replacement for lore counter
+        assert!(
+            !result.replacements.is_empty(),
+            "Expected at least 1 replacement (ETB lore counter)"
+        );
+        let etb = &result.replacements[0];
+        assert_eq!(etb.event, ReplacementEvent::Moved);
+        assert_eq!(etb.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn parse_saga_multi_chapter_line() {
+        let oracle = "(Reminder text.)\nI, II — Draw a card.\nIII — Discard a card.";
+        let result = parse_oracle_text(
+            oracle,
+            "Test Saga",
+            &[],
+            &["Enchantment".to_string()],
+            &["Saga".to_string()],
+        );
+
+        // I and II share the same effect, III is separate = 3 triggers total
+        assert_eq!(result.triggers.len(), 3);
+        assert_eq!(
+            result.triggers[0]
+                .counter_filter
+                .as_ref()
+                .unwrap()
+                .threshold,
+            Some(1)
+        );
+        assert_eq!(
+            result.triggers[1]
+                .counter_filter
+                .as_ref()
+                .unwrap()
+                .threshold,
+            Some(2)
+        );
+        assert_eq!(
+            result.triggers[2]
+                .counter_filter
+                .as_ref()
+                .unwrap()
+                .threshold,
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn parse_saga_subtypes_detection() {
+        // Non-saga should NOT produce chapter triggers
+        let oracle = "I — Draw a card.";
+        let result =
+            parse_oracle_text(oracle, "Not A Saga", &[], &["Enchantment".to_string()], &[]);
+        assert!(
+            result.triggers.is_empty(),
+            "Non-saga subtypes should not produce chapter triggers"
+        );
     }
 }

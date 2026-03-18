@@ -65,6 +65,10 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         // CR 704.5i: If a planeswalker has loyalty 0, it is put into its owner's graveyard.
         check_zero_loyalty(state, events, &mut any_performed);
 
+        // CR 704.5s + CR 714.4: If a Saga has lore counters >= its final chapter number,
+        // and no chapter ability has triggered but not yet left the stack, sacrifice it.
+        check_saga_sacrifice(state, events, &mut any_performed);
+
         if !any_performed {
             break;
         }
@@ -341,6 +345,81 @@ fn check_zero_loyalty(
 
     for id in to_destroy {
         zones::move_to_zone(state, id, Zone::Graveyard, events);
+        *any_performed = true;
+    }
+}
+
+/// CR 704.5s + CR 714.4: Sacrifice Sagas that have reached their final chapter,
+/// unless a chapter ability from that Saga is still on the stack or a lore counter
+/// was just added (meaning process_triggers hasn't placed the chapter trigger yet).
+fn check_saga_sacrifice(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+) {
+    use crate::game::game_object::CounterType;
+    use crate::types::game_state::StackEntryKind;
+
+    let to_sacrifice: Vec<_> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            let obj = match state.objects.get(id) {
+                Some(o) => o,
+                None => return false,
+            };
+            let final_ch = match obj.final_chapter_number() {
+                Some(n) => n,
+                None => return false,
+            };
+            let lore_count = obj.counters.get(&CounterType::Lore).copied().unwrap_or(0);
+            if lore_count < final_ch {
+                return false;
+            }
+
+            // CR 714.4: Don't sacrifice while a chapter trigger from this Saga is on the stack.
+            let chapter_on_stack = state.stack.iter().any(|entry| {
+                matches!(
+                    &entry.kind,
+                    StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == *id
+                )
+            });
+            if chapter_on_stack {
+                return false;
+            }
+
+            // CR 714.4 deferral: A lore counter was just added in this SBA batch —
+            // process_triggers hasn't run yet, so defer sacrifice for one pass.
+            let pending_lore_event = events.iter().any(|e| {
+                matches!(
+                    e,
+                    GameEvent::CounterAdded {
+                        object_id,
+                        counter_type: CounterType::Lore,
+                        ..
+                    } if *object_id == *id
+                )
+            });
+            if pending_lore_event {
+                return false;
+            }
+
+            true
+        })
+        .collect();
+
+    for saga_id in to_sacrifice {
+        let owner = state
+            .objects
+            .get(&saga_id)
+            .map(|obj| obj.owner)
+            .unwrap_or(crate::types::player::PlayerId(0));
+        events.push(GameEvent::PermanentSacrificed {
+            object_id: saga_id,
+            player_id: owner,
+        });
+        zones::move_to_zone(state, saga_id, Zone::Graveyard, events);
         *any_performed = true;
     }
 }
@@ -860,5 +939,148 @@ mod tests {
             state.waiting_for,
             WaitingFor::GameOver { winner: Some(_) }
         ));
+    }
+
+    // --- Saga SBA tests ---
+
+    fn create_saga(
+        state: &mut GameState,
+        card_id: CardId,
+        owner: PlayerId,
+        name: &str,
+        final_chapter: u32,
+    ) -> ObjectId {
+        use crate::game::game_object::CounterType;
+        use crate::types::ability::{CounterTriggerFilter, TriggerDefinition};
+        use crate::types::triggers::TriggerMode;
+
+        let id = create_object(state, card_id, owner, name.to_string(), Zone::Battlefield);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Saga".to_string());
+        obj.entered_battlefield_turn = Some(state.turn_number);
+        // Add chapter triggers so final_chapter_number() works
+        for ch in 1..=final_chapter {
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
+                    CounterTriggerFilter {
+                        counter_type: CounterType::Lore,
+                        threshold: Some(ch),
+                    },
+                ),
+            );
+        }
+        id
+    }
+
+    #[test]
+    fn saga_sacrificed_at_final_chapter() {
+        use crate::game::game_object::CounterType;
+
+        let mut state = setup();
+        let id = create_saga(&mut state, CardId(1), PlayerId(0), "Saga", 3);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Lore, 3);
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.battlefield.contains(&id));
+        assert!(state.players[0].graveyard.contains(&id));
+        assert!(events.iter().any(
+            |e| matches!(e, GameEvent::PermanentSacrificed { object_id, .. } if *object_id == id)
+        ));
+    }
+
+    #[test]
+    fn saga_not_sacrificed_below_final() {
+        use crate::game::game_object::CounterType;
+
+        let mut state = setup();
+        let id = create_saga(&mut state, CardId(1), PlayerId(0), "Saga", 3);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Lore, 2);
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.battlefield.contains(&id));
+    }
+
+    #[test]
+    fn saga_not_sacrificed_with_chapter_on_stack() {
+        use crate::game::game_object::CounterType;
+        use crate::types::ability::{Effect, ResolvedAbility};
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+
+        let mut state = setup();
+        let id = create_saga(&mut state, CardId(1), PlayerId(0), "Saga", 3);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Lore, 3);
+
+        // Put a chapter trigger from this saga on the stack
+        state.stack.push(StackEntry {
+            id: ObjectId(999),
+            source_id: id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: id,
+                ability: ResolvedAbility::new(
+                    Effect::Unimplemented {
+                        name: "chapter".into(),
+                        description: None,
+                    },
+                    vec![],
+                    id,
+                    PlayerId(0),
+                ),
+                condition: None,
+                trigger_event: None,
+            },
+        });
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        // CR 714.4: Saga survives while chapter trigger is on the stack
+        assert!(state.battlefield.contains(&id));
+    }
+
+    #[test]
+    fn saga_not_sacrificed_with_pending_lore_event() {
+        use crate::game::game_object::CounterType;
+
+        let mut state = setup();
+        let id = create_saga(&mut state, CardId(1), PlayerId(0), "Saga", 3);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Lore, 3);
+
+        // Simulate a lore counter having just been added in this batch
+        let mut events = vec![GameEvent::CounterAdded {
+            object_id: id,
+            counter_type: CounterType::Lore,
+            count: 1,
+        }];
+
+        check_state_based_actions(&mut state, &mut events);
+
+        // CR 714.4 deferral: triggers haven't been placed yet
+        assert!(state.battlefield.contains(&id));
     }
 }

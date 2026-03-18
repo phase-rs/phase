@@ -108,13 +108,13 @@ pub fn handle_activate_loyalty(
     if loyalty_cost > 0 {
         events.push(GameEvent::CounterAdded {
             object_id: pw_id,
-            counter_type: "Loyalty".to_string(),
+            counter_type: crate::game::game_object::CounterType::Loyalty,
             count: loyalty_cost as u32,
         });
     } else if loyalty_cost < 0 {
         events.push(GameEvent::CounterRemoved {
             object_id: pw_id,
-            counter_type: "Loyalty".to_string(),
+            counter_type: crate::game::game_object::CounterType::Loyalty,
             count: (-loyalty_cost) as u32,
         });
     }

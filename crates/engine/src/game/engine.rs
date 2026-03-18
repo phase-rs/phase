@@ -1619,10 +1619,10 @@ fn apply_etb_counters(
 ) {
     for (counter_type_str, count) in counters {
         let ct = super::game_object::parse_counter_type(counter_type_str);
-        *obj.counters.entry(ct).or_insert(0) += count;
+        *obj.counters.entry(ct.clone()).or_insert(0) += count;
         events.push(GameEvent::CounterAdded {
             object_id: obj.id,
-            counter_type: counter_type_str.clone(),
+            counter_type: ct,
             count: *count,
         });
     }

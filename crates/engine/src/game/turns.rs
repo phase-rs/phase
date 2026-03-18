@@ -157,7 +157,7 @@ pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             }
                             events.push(GameEvent::CounterRemoved {
                                 object_id,
-                                counter_type: "stun".to_string(),
+                                counter_type: CounterType::Stun,
                                 count: 1,
                             });
                         } else {
@@ -317,6 +317,37 @@ pub fn should_skip_draw(state: &GameState) -> bool {
     state.turn_number == 1
 }
 
+/// CR 714.3b: As the precombat main phase begins, put a lore counter on each Saga
+/// the active player controls. This is a turn-based action, not a triggered ability.
+fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    let active = state.active_player;
+    let saga_ids: Vec<_> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .map(|obj| {
+                    obj.controller == active && obj.card_types.subtypes.iter().any(|s| s == "Saga")
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+
+    for saga_id in saga_ids {
+        if let Some(obj) = state.objects.get_mut(&saga_id) {
+            *obj.counters.entry(CounterType::Lore).or_insert(0) += 1;
+            events.push(GameEvent::CounterAdded {
+                object_id: saga_id,
+                counter_type: CounterType::Lore,
+                count: 1,
+            });
+        }
+    }
+}
+
 pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
     loop {
         if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
@@ -339,6 +370,11 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 advance_phase(state, events);
             }
             Phase::PreCombatMain | Phase::PostCombatMain => {
+                // CR 714.3b: As the precombat main phase begins, add a lore counter
+                // to each Saga the active player controls (turn-based action).
+                if state.phase == Phase::PreCombatMain {
+                    add_lore_counters_to_sagas(state, events);
+                }
                 return WaitingFor::Priority {
                     player: state.active_player,
                 };
@@ -929,8 +965,8 @@ mod tests {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                GameEvent::CounterRemoved { object_id, counter_type, count: 1 }
-                    if *object_id == obj_id && counter_type == "stun"
+                GameEvent::CounterRemoved { object_id, counter_type: CounterType::Stun, count: 1 }
+                    if *object_id == obj_id
             )),
             "CounterRemoved event should be emitted"
         );

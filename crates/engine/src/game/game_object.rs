@@ -40,7 +40,7 @@ pub struct BackFaceData {
     pub casting_options: Vec<SpellCastingOption>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum CounterType {
     Plus1Plus1,
     Minus1Minus1,
@@ -48,6 +48,8 @@ pub enum CounterType {
     /// CR 122.1g: When a permanent with a stun counter would become untapped during its
     /// controller's untap step, one stun counter is removed instead of untapping.
     Stun,
+    /// CR 714.1: Lore counters track Saga chapter progression.
+    Lore,
     Generic(String),
 }
 
@@ -57,6 +59,7 @@ pub fn parse_counter_type(text: &str) -> CounterType {
         "M1M1" | "-1/-1" | "minus1minus1" => CounterType::Minus1Minus1,
         "LOYALTY" | "loyalty" => CounterType::Loyalty,
         "stun" => CounterType::Stun,
+        "lore" | "LORE" => CounterType::Lore,
         other => CounterType::Generic(other.to_string()),
     }
 }
@@ -289,6 +292,18 @@ impl GameObject {
         })
     }
 
+    /// CR 714.1: Returns the final chapter number for a Saga, or None if not a Saga.
+    /// Derived at runtime from the maximum threshold in the trigger definitions' counter filters.
+    pub fn final_chapter_number(&self) -> Option<u32> {
+        if !self.card_types.subtypes.iter().any(|s| s == "Saga") {
+            return None;
+        }
+        self.trigger_definitions
+            .iter()
+            .filter_map(|t| t.counter_filter.as_ref().and_then(|f| f.threshold))
+            .max()
+    }
+
     /// Get the chosen subtype as a string, unified across creature types and basic land types.
     /// Used by the layer system's `AddChosenSubtype` modification.
     pub fn chosen_subtype_str(&self, kind: &ChosenSubtypeKind) -> Option<String> {
@@ -404,5 +419,60 @@ mod tests {
             Zone::Hand,
         );
         assert_eq!(obj.controller, obj.owner);
+    }
+
+    #[test]
+    fn parse_counter_type_lore() {
+        assert_eq!(parse_counter_type("lore"), CounterType::Lore);
+        assert_eq!(parse_counter_type("LORE"), CounterType::Lore);
+        assert_eq!(parse_counter_type("lore counter"), CounterType::Lore);
+    }
+
+    #[test]
+    fn final_chapter_number_returns_max() {
+        use crate::types::ability::{CounterTriggerFilter, TriggerDefinition};
+        use crate::types::triggers::TriggerMode;
+
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "The Eldest Reborn".to_string(),
+            Zone::Battlefield,
+        );
+        obj.card_types.subtypes.push("Saga".to_string());
+        obj.trigger_definitions = vec![
+            TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
+                CounterTriggerFilter {
+                    counter_type: CounterType::Lore,
+                    threshold: Some(1),
+                },
+            ),
+            TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
+                CounterTriggerFilter {
+                    counter_type: CounterType::Lore,
+                    threshold: Some(2),
+                },
+            ),
+            TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
+                CounterTriggerFilter {
+                    counter_type: CounterType::Lore,
+                    threshold: Some(3),
+                },
+            ),
+        ];
+        assert_eq!(obj.final_chapter_number(), Some(3));
+    }
+
+    #[test]
+    fn final_chapter_number_non_saga() {
+        let obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Lightning Bolt".to_string(),
+            Zone::Hand,
+        );
+        assert_eq!(obj.final_chapter_number(), None);
     }
 }

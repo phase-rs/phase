@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::game::game_object::CounterType;
+
 use super::ability::{EffectKind, TargetRef};
 use super::identifiers::{CardId, ObjectId};
 use super::mana::ManaType;
@@ -92,12 +94,12 @@ pub enum GameEvent {
     },
     CounterAdded {
         object_id: ObjectId,
-        counter_type: String,
+        counter_type: CounterType,
         count: u32,
     },
     CounterRemoved {
         object_id: ObjectId,
-        counter_type: String,
+        counter_type: CounterType,
         count: u32,
     },
     TokenCreated {

@@ -13,7 +13,7 @@ use crate::types::proposed_event::ProposedEvent;
 fn add_explore_counter(state: &mut GameState, explorer_id: ObjectId, events: &mut Vec<GameEvent>) {
     let proposed = ProposedEvent::AddCounter {
         object_id: explorer_id,
-        counter_type: "P1P1".to_string(),
+        counter_type: CounterType::Plus1Plus1,
         count: 1,
         applied: HashSet::new(),
     };
@@ -25,12 +25,8 @@ fn add_explore_counter(state: &mut GameState, explorer_id: ObjectId, events: &mu
         ..
     }) = replacement::replace_event(state, proposed, events)
     {
-        let ct = match counter_type.as_str() {
-            "P1P1" => CounterType::Plus1Plus1,
-            _ => CounterType::Generic(counter_type.clone()),
-        };
         if let Some(obj) = state.objects.get_mut(&object_id) {
-            let entry = obj.counters.entry(ct).or_insert(0);
+            let entry = obj.counters.entry(counter_type.clone()).or_insert(0);
             *entry += count;
             state.layers_dirty = true;
         }

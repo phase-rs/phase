@@ -1967,6 +1967,20 @@ pub enum TriggerConstraint {
     NthDrawThisTurn { n: u32 },
 }
 
+/// Filter for counter-related trigger modes (CounterAdded, CounterRemoved).
+/// When set, the trigger only matches events for the specified counter type,
+/// optionally requiring that the count crosses a threshold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CounterTriggerFilter {
+    /// Only match events for this counter type.
+    pub counter_type: crate::game::game_object::CounterType,
+    /// If set, only fire when the count crosses this threshold:
+    /// previous_count < threshold <= new_count.
+    /// Used by Saga chapter triggers (CR 714.2a).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<u32>,
+}
+
 /// Trigger definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TriggerDefinition {
@@ -1999,6 +2013,9 @@ pub struct TriggerDefinition {
     pub constraint: Option<TriggerConstraint>,
     #[serde(default)]
     pub condition: Option<TriggerCondition>,
+    /// Optional filter for counter-related trigger modes (CR 714.2a).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counter_filter: Option<CounterTriggerFilter>,
 }
 
 impl TriggerDefinition {
@@ -2019,6 +2036,7 @@ impl TriggerDefinition {
             description: None,
             constraint: None,
             condition: None,
+            counter_filter: None,
         }
     }
 
@@ -2089,6 +2107,11 @@ impl TriggerDefinition {
 
     pub fn condition(mut self, condition: TriggerCondition) -> Self {
         self.condition = Some(condition);
+        self
+    }
+
+    pub fn counter_filter(mut self, filter: CounterTriggerFilter) -> Self {
+        self.counter_filter = Some(filter);
         self
     }
 }
@@ -2568,6 +2591,7 @@ mod tests {
             description: Some("When ~ dies, draw a card.".to_string()),
             constraint: None,
             condition: None,
+            counter_filter: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: TriggerDefinition = serde_json::from_str(&json).unwrap();

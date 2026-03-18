@@ -1332,14 +1332,30 @@ fn match_counter_added(
 ) -> bool {
     if let GameEvent::CounterAdded {
         object_id,
-        counter_type: _,
-        ..
+        counter_type,
+        count,
     } = event
     {
-        // Counter type filtering would use typed fields in future
-        // Check valid_card filter
         if !valid_card_matches(trigger, state, *object_id, source_id) {
             return false;
+        }
+        // CR 714.2a: Apply counter filter (type + optional threshold crossing).
+        if let Some(ref filter) = trigger.counter_filter {
+            if filter.counter_type != *counter_type {
+                return false;
+            }
+            if let Some(threshold) = filter.threshold {
+                let current = state
+                    .objects
+                    .get(object_id)
+                    .and_then(|obj| obj.counters.get(&filter.counter_type).copied())
+                    .unwrap_or(0);
+                let previous = current.saturating_sub(*count);
+                // Fire only when the threshold is crossed: previous < threshold <= current
+                if !(previous < threshold && threshold <= current) {
+                    return false;
+                }
+            }
         }
         true
     } else {
@@ -3836,5 +3852,180 @@ pub mod tests {
 
         // No chosen type → always rejects
         assert!(!target_filter_matches_object(&state, elf, &filter, source));
+    }
+
+    // --- Counter filter tests ---
+
+    #[test]
+    fn counter_filter_threshold_crossing() {
+        use crate::types::ability::CounterTriggerFilter;
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+        let saga_id = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Saga".to_string(),
+            Zone::Battlefield,
+        );
+        // Saga now has 1 lore counter (counter was just added: 0 → 1)
+        state
+            .objects
+            .get_mut(&saga_id)
+            .unwrap()
+            .counters
+            .insert(crate::game::game_object::CounterType::Lore, 1);
+
+        let event = GameEvent::CounterAdded {
+            object_id: saga_id,
+            counter_type: crate::game::game_object::CounterType::Lore,
+            count: 1,
+        };
+
+        // Trigger for chapter 1 (threshold=1) should fire: 0 < 1 <= 1
+        let trigger_ch1 = TriggerDefinition::new(TriggerMode::CounterAdded)
+            .valid_card(TargetFilter::SelfRef)
+            .counter_filter(CounterTriggerFilter {
+                counter_type: crate::game::game_object::CounterType::Lore,
+                threshold: Some(1),
+            });
+        assert!(match_counter_added(&event, &trigger_ch1, saga_id, &state));
+
+        // Trigger for chapter 2 (threshold=2) should NOT fire: 0 < 2, but 2 > 1
+        let trigger_ch2 = TriggerDefinition::new(TriggerMode::CounterAdded)
+            .valid_card(TargetFilter::SelfRef)
+            .counter_filter(CounterTriggerFilter {
+                counter_type: crate::game::game_object::CounterType::Lore,
+                threshold: Some(2),
+            });
+        assert!(!match_counter_added(&event, &trigger_ch2, saga_id, &state));
+    }
+
+    #[test]
+    fn counter_filter_double_addition() {
+        use crate::types::ability::CounterTriggerFilter;
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+        let saga_id = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Saga".to_string(),
+            Zone::Battlefield,
+        );
+        // Saga now has 2 lore counters (added 2 at once, e.g., Vorinclex)
+        state
+            .objects
+            .get_mut(&saga_id)
+            .unwrap()
+            .counters
+            .insert(crate::game::game_object::CounterType::Lore, 2);
+
+        let event = GameEvent::CounterAdded {
+            object_id: saga_id,
+            counter_type: crate::game::game_object::CounterType::Lore,
+            count: 2, // Added 2 at once
+        };
+
+        // Both chapter 1 (threshold=1) and chapter 2 (threshold=2) should fire
+        // because previous=0, current=2, so 0 < 1 <= 2 and 0 < 2 <= 2
+        let trigger_ch1 = TriggerDefinition::new(TriggerMode::CounterAdded)
+            .valid_card(TargetFilter::SelfRef)
+            .counter_filter(CounterTriggerFilter {
+                counter_type: crate::game::game_object::CounterType::Lore,
+                threshold: Some(1),
+            });
+        assert!(match_counter_added(&event, &trigger_ch1, saga_id, &state));
+
+        let trigger_ch2 = TriggerDefinition::new(TriggerMode::CounterAdded)
+            .valid_card(TargetFilter::SelfRef)
+            .counter_filter(CounterTriggerFilter {
+                counter_type: crate::game::game_object::CounterType::Lore,
+                threshold: Some(2),
+            });
+        assert!(match_counter_added(&event, &trigger_ch2, saga_id, &state));
+
+        // Chapter 3 should NOT fire: 0 < 3 but 3 > 2
+        let trigger_ch3 = TriggerDefinition::new(TriggerMode::CounterAdded)
+            .valid_card(TargetFilter::SelfRef)
+            .counter_filter(CounterTriggerFilter {
+                counter_type: crate::game::game_object::CounterType::Lore,
+                threshold: Some(3),
+            });
+        assert!(!match_counter_added(&event, &trigger_ch3, saga_id, &state));
+    }
+
+    #[test]
+    fn counter_filter_ignores_wrong_type() {
+        use crate::types::ability::CounterTriggerFilter;
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+        let saga_id = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Saga".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&saga_id)
+            .unwrap()
+            .counters
+            .insert(crate::game::game_object::CounterType::Plus1Plus1, 1);
+
+        // +1/+1 counter added, but trigger filters for lore
+        let event = GameEvent::CounterAdded {
+            object_id: saga_id,
+            counter_type: crate::game::game_object::CounterType::Plus1Plus1,
+            count: 1,
+        };
+
+        let trigger = TriggerDefinition::new(TriggerMode::CounterAdded)
+            .valid_card(TargetFilter::SelfRef)
+            .counter_filter(CounterTriggerFilter {
+                counter_type: crate::game::game_object::CounterType::Lore,
+                threshold: Some(1),
+            });
+        assert!(!match_counter_added(&event, &trigger, saga_id, &state));
+    }
+
+    #[test]
+    fn counter_filter_no_threshold() {
+        use crate::types::ability::CounterTriggerFilter;
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+        let saga_id = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Saga".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&saga_id)
+            .unwrap()
+            .counters
+            .insert(crate::game::game_object::CounterType::Lore, 1);
+
+        let event = GameEvent::CounterAdded {
+            object_id: saga_id,
+            counter_type: crate::game::game_object::CounterType::Lore,
+            count: 1,
+        };
+
+        // Filter with no threshold fires on any addition of the matching type
+        let trigger = TriggerDefinition::new(TriggerMode::CounterAdded)
+            .valid_card(TargetFilter::SelfRef)
+            .counter_filter(CounterTriggerFilter {
+                counter_type: crate::game::game_object::CounterType::Lore,
+                threshold: None,
+            });
+        assert!(match_counter_added(&event, &trigger, saga_id, &state));
     }
 }

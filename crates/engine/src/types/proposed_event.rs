@@ -2,6 +2,8 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::game::game_object::CounterType;
+
 use super::ability::TargetRef;
 use super::identifiers::ObjectId;
 use super::player::PlayerId;
@@ -52,13 +54,13 @@ pub enum ProposedEvent {
     },
     AddCounter {
         object_id: ObjectId,
-        counter_type: String,
+        counter_type: CounterType,
         count: u32,
         applied: HashSet<ReplacementId>,
     },
     RemoveCounter {
         object_id: ObjectId,
-        counter_type: String,
+        counter_type: CounterType,
         count: u32,
         applied: HashSet<ReplacementId>,
     },
@@ -235,13 +237,13 @@ mod tests {
             },
             ProposedEvent::AddCounter {
                 object_id: ObjectId(1),
-                counter_type: "+1/+1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: 1,
                 applied: HashSet::new(),
             },
             ProposedEvent::RemoveCounter {
                 object_id: ObjectId(1),
-                counter_type: "+1/+1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: 1,
                 applied: HashSet::new(),
             },
