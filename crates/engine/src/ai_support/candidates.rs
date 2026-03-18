@@ -301,6 +301,21 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
                 ),
             ]
         }
+        // CR 118.12: "Counter unless pays" — opponent chooses pay or decline.
+        WaitingFor::UnlessPayment { player, .. } => {
+            vec![
+                candidate(
+                    GameAction::PayUnlessCost { pay: true },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ),
+                candidate(
+                    GameAction::PayUnlessCost { pay: false },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ),
+            ]
+        }
         WaitingFor::GameOver { .. } => Vec::new(),
     }
 }

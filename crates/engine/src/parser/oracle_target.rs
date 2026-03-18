@@ -277,7 +277,8 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
             let (other_filter, final_rest) = parse_type_phrase(comma_and_text);
             let left = typed(card_type.unwrap_or(TypeFilter::Any), subtype, properties);
             let combined = merge_or_filters(left, other_filter);
-            return (distribute_controller_to_or(combined), final_rest);
+            let combined = distribute_controller_to_or(combined);
+            return (distribute_properties_to_or(combined), final_rest);
         }
     }
 
@@ -289,7 +290,8 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
             let (other_filter, final_rest) = parse_type_phrase(comma_text);
             let left = typed(card_type.unwrap_or(TypeFilter::Any), subtype, properties);
             let combined = merge_or_filters(left, other_filter);
-            return (distribute_controller_to_or(combined), final_rest);
+            let combined = distribute_controller_to_or(combined);
+            return (distribute_properties_to_or(combined), final_rest);
         }
     }
 
@@ -317,6 +319,26 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
             }
         }
 
+        // Distribute shared properties from right branch to left:
+        // "artifacts or creatures with mana value 2 or less" → both get CmcLE(2)
+        if let TargetFilter::Typed(TypedFilter {
+            properties: ref right_props,
+            ..
+        }) = other_filter
+        {
+            if let TargetFilter::Typed(TypedFilter {
+                properties: ref mut left_props,
+                ..
+            }) = left
+            {
+                for prop in right_props {
+                    if !left_props.iter().any(|p| prop.same_kind(p)) {
+                        left_props.push(prop.clone());
+                    }
+                }
+            }
+        }
+
         return (
             TargetFilter::Or {
                 filters: vec![left, other_filter],
@@ -334,7 +356,8 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
             let (other_filter, final_rest) = parse_type_phrase(and_or_text);
             let left = typed(card_type.unwrap_or(TypeFilter::Any), subtype, properties);
             let combined = merge_or_filters(left, other_filter);
-            return (distribute_controller_to_or(combined), final_rest);
+            let combined = distribute_controller_to_or(combined);
+            return (distribute_properties_to_or(combined), final_rest);
         }
     }
 
@@ -363,6 +386,25 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
                 {
                     if left_ctrl.is_none() {
                         *left_ctrl = Some(ctrl.clone());
+                    }
+                }
+            }
+
+            // Distribute shared properties from right branch to left
+            if let TargetFilter::Typed(TypedFilter {
+                properties: ref right_props,
+                ..
+            }) = other_filter
+            {
+                if let TargetFilter::Typed(TypedFilter {
+                    properties: ref mut left_props,
+                    ..
+                }) = left
+                {
+                    for prop in right_props {
+                        if !left_props.iter().any(|p| prop.same_kind(p)) {
+                            left_props.push(prop.clone());
+                        }
                     }
                 }
             }
@@ -506,6 +548,48 @@ fn starts_with_type_word(text: &str) -> bool {
         }
     }
     false
+}
+
+/// Distribute trailing filter properties (CmcLE, CmcGE, PowerLE, PowerGE, etc.)
+/// from the last `Typed` element in an `Or` filter to all preceding `Typed`
+/// elements that lack a property of the same kind.
+/// Handles "artifacts and creatures with mana value 2 or less" where only the
+/// final type parses the "with mana value N or less/greater" suffix.
+fn distribute_properties_to_or(filter: TargetFilter) -> TargetFilter {
+    let TargetFilter::Or { mut filters } = filter else {
+        return filter;
+    };
+
+    // Collect properties from the last Typed element
+    let trailing_props: Vec<FilterProp> = filters
+        .iter()
+        .rev()
+        .find_map(|f| {
+            if let TargetFilter::Typed(TypedFilter { properties, .. }) = f {
+                if properties.is_empty() {
+                    None
+                } else {
+                    Some(properties.clone())
+                }
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+
+    if !trailing_props.is_empty() {
+        for f in &mut filters {
+            if let TargetFilter::Typed(ref mut typed) = f {
+                for prop in &trailing_props {
+                    if !typed.properties.iter().any(|p| prop.same_kind(p)) {
+                        typed.properties.push(prop.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    TargetFilter::Or { filters }
 }
 
 /// Distribute the controller from the last `Typed` element in an `Or` filter
@@ -1974,5 +2058,30 @@ mod tests {
         let (f, rest) = parse_type_phrase("creature and draw a card");
         assert_eq!(f, TargetFilter::Typed(TypedFilter::creature()));
         assert!(rest.contains("and draw"), "rest = {:?}", rest);
+    }
+
+    #[test]
+    fn distribute_properties_across_or_branches() {
+        // "artifacts and creatures with mana value 2 or less" → both branches get CmcLE(2)
+        let (f, _) = parse_type_phrase("artifacts and creatures with mana value 2 or less");
+        if let TargetFilter::Or { filters } = &f {
+            assert_eq!(filters.len(), 2, "should have 2 Or branches");
+            for branch in filters {
+                if let TargetFilter::Typed(typed) = branch {
+                    assert!(
+                        typed
+                            .properties
+                            .iter()
+                            .any(|p| matches!(p, FilterProp::CmcLE { value: 2 })),
+                        "branch {:?} should have CmcLE(2)",
+                        typed.card_type
+                    );
+                } else {
+                    panic!("expected Typed branch, got {branch:?}");
+                }
+            }
+        } else {
+            panic!("expected Or filter, got {f:?}");
+        }
     }
 }

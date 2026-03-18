@@ -729,6 +729,12 @@ function GamePageContent({
           <OptionalEffectModal />
         )}
 
+      {/* Unless payment choice ("Counter unless you pay {X}") */}
+      {waitingFor?.type === "UnlessPayment" &&
+        waitingFor.data.player === playerId && (
+          <UnlessPaymentModal />
+        )}
+
       {waitingFor?.type === "MulliganDecision" &&
         waitingFor.data.player === playerId && (
           <MulliganDecisionPrompt
@@ -1411,6 +1417,40 @@ function OptionalEffectModal() {
       ]}
       onChoose={(id) =>
         dispatch({ type: "DecideOptionalEffect", data: { accept: id === "accept" } })
+      }
+    />
+  );
+}
+
+// ── Unless Payment Modal (CR 118.12) ────────────────────────────────────
+
+function formatManaCost(cost: { type: string; shards?: string[]; generic?: number }): string {
+  if (cost.type === "NoCost") return "0";
+  const parts: string[] = [];
+  if (cost.generic && cost.generic > 0) parts.push(`{${cost.generic}}`);
+  for (const shard of cost.shards ?? []) {
+    parts.push(`{${shard}}`);
+  }
+  return parts.join("") || "0";
+}
+
+function UnlessPaymentModal() {
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+
+  if (waitingFor?.type !== "UnlessPayment") return null;
+
+  const costDisplay = formatManaCost(waitingFor.data.cost);
+
+  return (
+    <ChoiceModal
+      title="Counter Unless You Pay"
+      options={[
+        { id: "pay", label: `Pay ${costDisplay}` },
+        { id: "decline", label: "Don\u2019t Pay" },
+      ]}
+      onChoose={(id) =>
+        dispatch({ type: "PayUnlessCost", data: { pay: id === "pay" } })
       }
     />
   );

@@ -88,6 +88,10 @@ pub enum GameAction {
     DecideOptionalEffect {
         accept: bool,
     },
+    /// CR 118.12: Pay or decline an "unless pays" cost (e.g., Mana Leak, No More Lies).
+    PayUnlessCost {
+        pay: bool,
+    },
     /// Set auto-pass mode for the acting player (CR 117.4).
     SetAutoPass {
         mode: AutoPassRequest,

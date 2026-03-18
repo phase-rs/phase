@@ -1,5 +1,7 @@
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import type { TargetRef } from "../../adapter/types.ts";
 
 const EMPTY: readonly number[] = [];
 
@@ -39,6 +41,18 @@ export function GraveyardPile({ playerId, onClick }: GraveyardPileProps) {
     return state.objects[gy[gy.length - 1]]?.name ?? null;
   });
 
+  // Check if any graveyard card is a valid target during targeting
+  const currentPlayerId = usePlayerId();
+  const hasTargetableCards = useGameStore((s) => {
+    const wf = s.gameState?.waiting_for;
+    if (!wf) return false;
+    if (wf.type !== "TargetSelection" && wf.type !== "TriggerTargetSelection") return false;
+    if (wf.data.player !== currentPlayerId) return false;
+    const legalTargets: TargetRef[] = wf.data.selection.current_legal_targets;
+    const gy = s.gameState?.players[playerId]?.graveyard ?? [];
+    return gy.some((id) => legalTargets.some((t) => "Object" in t && t.Object === id));
+  });
+
   const count = graveyard.length;
   if (count === 0) return null;
 
@@ -47,7 +61,7 @@ export function GraveyardPile({ playerId, onClick }: GraveyardPileProps) {
   return (
     <button
       onClick={onClick}
-      className="group relative cursor-pointer"
+      className={`group relative cursor-pointer ${hasTargetableCards ? "ring-2 ring-amber-400/60 rounded-lg shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]" : ""}`}
       title={`Graveyard (${count})`}
       style={{
         width: "var(--card-w)",

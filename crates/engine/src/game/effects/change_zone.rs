@@ -3,10 +3,12 @@ use rand::seq::SliceRandom;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
+    Duration, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    TypedFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{ExileLink, GameState};
+use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
@@ -16,6 +18,63 @@ use crate::types::zones::Zone;
 pub fn shuffle_library(state: &mut GameState, player: PlayerId) {
     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
         p.library.shuffle(&mut state.rng);
+    }
+}
+
+/// Result of a single zone-move attempt through the replacement pipeline.
+enum ZoneMoveResult {
+    /// Object was moved (or prevented). Continue processing.
+    Done,
+    /// A replacement effect needs a player choice before continuing.
+    NeedsChoice(PlayerId),
+}
+
+/// Execute a single object zone-change through the full pipeline:
+/// ProposedEvent → replacement → move → ExileLink → shuffle → layers_dirty.
+///
+/// Shared by both `resolve()` (targeted) and `resolve_all()` (mass) to ensure
+/// identical behavior for replacement effects, exile tracking, and auto-shuffle.
+fn execute_zone_move(
+    state: &mut GameState,
+    obj_id: ObjectId,
+    from_zone: Zone,
+    dest_zone: Zone,
+    source_id: ObjectId,
+    duration: Option<&Duration>,
+    events: &mut Vec<GameEvent>,
+) -> ZoneMoveResult {
+    let proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
+
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) => {
+            if let ProposedEvent::ZoneChange { object_id, to, .. } = event {
+                zones::move_to_zone(state, object_id, to, events);
+                if to == Zone::Battlefield || from_zone == Zone::Battlefield {
+                    state.layers_dirty = true;
+                }
+                // CR 401.3: If an object is put into a library (not at a specific
+                // position), that library is shuffled afterward.
+                if to == Zone::Library {
+                    let owner = state.objects.get(&object_id).map(|o| o.owner);
+                    if let Some(owner) = owner {
+                        shuffle_library(state, owner);
+                    }
+                }
+                // CR 610.3a: Track exile-until-leaves links
+                if to == Zone::Exile {
+                    if let Some(Duration::UntilHostLeavesPlay) = duration {
+                        state.exile_links.push(ExileLink {
+                            exiled_id: object_id,
+                            source_id,
+                            return_zone: from_zone,
+                        });
+                    }
+                }
+            }
+            ZoneMoveResult::Done
+        }
+        ReplacementResult::Prevented => ZoneMoveResult::Done,
+        ReplacementResult::NeedsChoice(player) => ZoneMoveResult::NeedsChoice(player),
     }
 }
 
@@ -67,56 +126,23 @@ pub fn resolve(
                 .map(|o| o.zone)
                 .unwrap_or(Zone::Battlefield);
 
-            // CR 400.7: When owner_library is true, route to the object's owner's library
-            let effective_dest = if owner_library && dest_zone == Zone::Library {
-                // The actual owner routing is handled by zones::move_to_zone which uses
-                // the object's owner for player-owned zones. Library moves always go to
-                // the owner's library by default in move_to_zone.
-                dest_zone
-            } else {
-                dest_zone
-            };
+            // CR 400.7: When owner_library is true, route to the object's owner's library.
+            // The actual owner routing is handled by zones::move_to_zone which uses
+            // the object's owner for player-owned zones.
+            let effective_dest = dest_zone;
+            let _ = owner_library; // routing handled by move_to_zone
 
-            let proposed = ProposedEvent::zone_change(
+            match execute_zone_move(
+                state,
                 *obj_id,
                 from_zone,
                 effective_dest,
-                Some(ability.source_id),
-            );
-
-            match replacement::replace_event(state, proposed, events) {
-                ReplacementResult::Execute(event) => {
-                    if let ProposedEvent::ZoneChange { object_id, to, .. } = event {
-                        zones::move_to_zone(state, object_id, to, events);
-                        if to == Zone::Battlefield || from_zone == Zone::Battlefield {
-                            state.layers_dirty = true;
-                        }
-                        // CR 401.3: If an object is put into a library (not at a specific
-                        // position), that library is shuffled afterward.
-                        // Only fires when replacement didn't redirect away from Library (CR 614.6).
-                        if to == Zone::Library {
-                            let owner = state.objects.get(&object_id).map(|o| o.owner);
-                            if let Some(owner) = owner {
-                                shuffle_library(state, owner);
-                            }
-                        }
-                        // Track exile-until-leaves links
-                        if to == Zone::Exile {
-                            if let Some(crate::types::ability::Duration::UntilHostLeavesPlay) =
-                                &ability.duration
-                            {
-                                // CR 610.3a: Track origin zone so the card returns there
-                                state.exile_links.push(crate::types::game_state::ExileLink {
-                                    exiled_id: object_id,
-                                    source_id: ability.source_id,
-                                    return_zone: from_zone,
-                                });
-                            }
-                        }
-                    }
-                }
-                ReplacementResult::Prevented => {}
-                ReplacementResult::NeedsChoice(player) => {
+                ability.source_id,
+                ability.duration.as_ref(),
+                events,
+            ) {
+                ZoneMoveResult::Done => {}
+                ZoneMoveResult::NeedsChoice(player) => {
                     state.waiting_for =
                         crate::game::replacement::replacement_choice_waiting_for(player, state);
                     return Ok(());
@@ -186,9 +212,21 @@ pub fn resolve_all(
     }
 
     for obj_id in matching {
-        zones::move_to_zone(state, obj_id, dest_zone, events);
-        if dest_zone == Zone::Battlefield || origin_zone == Zone::Battlefield {
-            state.layers_dirty = true;
+        match execute_zone_move(
+            state,
+            obj_id,
+            origin_zone,
+            dest_zone,
+            ability.source_id,
+            ability.duration.as_ref(),
+            events,
+        ) {
+            ZoneMoveResult::Done => {}
+            ZoneMoveResult::NeedsChoice(player) => {
+                state.waiting_for =
+                    crate::game::replacement::replacement_choice_waiting_for(player, state);
+                return Ok(());
+            }
         }
     }
 
@@ -523,5 +561,95 @@ mod tests {
 
         // All permanents bounced (filter is "Permanent" by default)
         // ChangeZoneAll uses typed TargetFilter for filtering.
+    }
+
+    #[test]
+    fn resolve_all_exile_with_until_host_leaves_creates_links() {
+        // Phase 2 fix: resolve_all should create ExileLinks for UntilHostLeavesPlay
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Starcage".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let c1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&c1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let c2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Wolf".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&c2)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(TypedFilter {
+                    card_type: Some(crate::types::ability::TypeFilter::Creature),
+                    subtype: None,
+                    controller: Some(crate::types::ability::ControllerRef::Opponent),
+                    properties: vec![],
+                }),
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        ability.duration = Some(crate::types::ability::Duration::UntilHostLeavesPlay);
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        // Both creatures should be exiled
+        assert!(state.exile.contains(&c1), "c1 should be in exile");
+        assert!(state.exile.contains(&c2), "c2 should be in exile");
+
+        // CR 610.3a: ExileLinks should be created for each exiled object
+        assert_eq!(
+            state.exile_links.len(),
+            2,
+            "should have 2 exile links, got {}",
+            state.exile_links.len()
+        );
+        for link in &state.exile_links {
+            assert_eq!(link.source_id, source_id, "link source should be Starcage");
+            assert_eq!(
+                link.return_zone,
+                Zone::Battlefield,
+                "should return to battlefield"
+            );
+        }
     }
 }

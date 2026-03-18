@@ -1,3 +1,4 @@
+use crate::game::mana_payment;
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
 use crate::game::zones;
 use crate::types::ability::{
@@ -5,7 +6,7 @@ use crate::types::ability::{
     TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, StackEntryKind};
+use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -14,6 +15,10 @@ use crate::types::zones::Zone;
 /// Spells are removed from the stack and moved to graveyard.
 /// Abilities are simply removed from the stack (they aren't cards).
 /// Respects CantBeCountered static ability.
+///
+/// If the effect carries `unless_payment`, the spell's controller is given the
+/// choice to pay the cost. If they can and do pay, the spell is NOT countered.
+/// CR 118.12.
 ///
 /// If the effect carries a `source_static`, it is applied to the counter's source
 /// (e.g., Tidebinder) with `affected: SpecificObject(source_permanent_id)` after
@@ -24,10 +29,48 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let source_static = match &ability.effect {
-        Effect::Counter { source_static, .. } => source_static.clone(),
-        _ => None,
+    let (source_static, unless_payment) = match &ability.effect {
+        Effect::Counter {
+            source_static,
+            unless_payment,
+            ..
+        } => (source_static.clone(), unless_payment.clone()),
+        _ => (None, None),
     };
+
+    // CR 118.12: If "unless pays", check if the opponent can pay.
+    // If they can, present the choice. If they can't, counter immediately.
+    if let Some(ref cost) = unless_payment {
+        if let Some(TargetRef::Object(obj_id)) = ability.targets.first() {
+            // Find the controller of the targeted spell/ability
+            let target_controller = state
+                .stack
+                .iter()
+                .find(|e| e.id == *obj_id)
+                .map(|e| e.controller);
+
+            if let Some(controller) = target_controller {
+                let pool = &state
+                    .players
+                    .iter()
+                    .find(|p| p.id == controller)
+                    .map(|p| &p.mana_pool);
+
+                let can_pay = pool.is_some_and(|p| mana_payment::can_pay(p, cost));
+
+                if can_pay {
+                    // Present the choice to the opponent
+                    state.waiting_for = WaitingFor::UnlessPayment {
+                        player: controller,
+                        cost: cost.clone(),
+                        pending_counter: Box::new(ability.clone()),
+                    };
+                    return Ok(());
+                }
+                // Can't pay → fall through to counter immediately
+            }
+        }
+    }
 
     for target in &ability.targets {
         if let TargetRef::Object(obj_id) = target {
@@ -88,6 +131,26 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// Execute the counter unconditionally (used after opponent declines to pay
+/// an "unless pays" cost, or when they can't pay at all).
+/// Strips `unless_payment` to prevent re-entering the payment choice.
+pub fn resolve_unconditional(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let mut ability = ability.clone();
+    // Strip unless_payment to prevent re-prompting
+    if let Effect::Counter {
+        ref mut unless_payment,
+        ..
+    } = ability.effect
+    {
+        *unless_payment = None;
+    }
+    resolve(state, &ability, events)
 }
 
 /// Register a transient continuous effect for a counter's source_static.
@@ -174,6 +237,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::Any,
                 source_static: None,
+                unless_payment: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -227,6 +291,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::Any,
                 source_static: None,
+                unless_payment: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -288,6 +353,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::StackAbility,
                 source_static: Some(source_static),
+                unless_payment: None,
             },
             vec![TargetRef::Object(ability_on_stack)],
             tidebinder,
@@ -367,6 +433,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::Any,
                 source_static: Some(source_static),
+                unless_payment: None,
             },
             vec![TargetRef::Object(spell_id)],
             tidebinder,

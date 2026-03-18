@@ -1065,6 +1065,18 @@ pub fn pay_ability_cost(
     Ok(())
 }
 
+/// CR 118.12: Pay an "unless pays" cost. Auto-taps lands and deducts mana.
+/// Used when the opponent chooses to pay a counter-unless cost (e.g., Mana Leak).
+pub fn pay_unless_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    cost: &crate::types::mana::ManaCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    // Use ObjectId(0) as a dummy source since there's no specific object paying
+    pay_mana_cost(state, player, ObjectId(0), cost, events)
+}
+
 fn can_pay_ability_cost_now(
     state: &GameState,
     player: PlayerId,

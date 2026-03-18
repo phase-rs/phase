@@ -294,6 +294,14 @@ pub enum WaitingFor {
         player: PlayerId,
         source_id: ObjectId,
     },
+    /// CR 118.12: Opponent must decide whether to pay a cost to prevent a counter effect.
+    /// Used by "counter unless its controller pays {X}" spells (Mana Leak, No More Lies).
+    UnlessPayment {
+        player: PlayerId,
+        cost: ManaCost,
+        /// The counter ability to execute if the opponent declines to pay.
+        pending_counter: Box<ResolvedAbility>,
+    },
     /// CR 601.2b: Player must choose a card to discard as part of an additional casting cost.
     /// After selection, the card is discarded and casting continues via `pay_and_push`.
     DiscardForCost {
@@ -337,7 +345,8 @@ impl WaitingFor {
             | WaitingFor::AdventureCastChoice { player, .. }
             | WaitingFor::NinjutsuActivation { player, .. }
             | WaitingFor::DiscardForCost { player, .. }
-            | WaitingFor::OptionalEffectChoice { player, .. } => Some(*player),
+            | WaitingFor::OptionalEffectChoice { player, .. }
+            | WaitingFor::UnlessPayment { player, .. } => Some(*player),
             WaitingFor::GameOver { .. } => None,
         }
     }

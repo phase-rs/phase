@@ -387,6 +387,77 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             }
             state.waiting_for.clone()
         }
+        // CR 118.12: Player decided whether to pay an "unless pays" cost.
+        (
+            WaitingFor::UnlessPayment {
+                player,
+                cost,
+                pending_counter,
+            },
+            GameAction::PayUnlessCost { pay },
+        ) => {
+            if pay {
+                // Player pays the cost → spell is NOT countered
+                casting::pay_unless_cost(state, *player, cost, &mut events)?;
+                // Resume priority after the counter spell resolves (spell survives)
+                events.push(GameEvent::EffectResolved {
+                    kind: EffectKind::Counter,
+                    source_id: pending_counter.source_id,
+                });
+                state.waiting_for.clone()
+            } else {
+                // Player declines → execute the counter unconditionally
+                effects::counter::resolve_unconditional(state, pending_counter, &mut events)
+                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                state.waiting_for.clone()
+            }
+        }
+        // Allow mana abilities during unless-payment choice (CR 118.12)
+        (
+            WaitingFor::UnlessPayment {
+                player,
+                cost,
+                pending_counter,
+            },
+            GameAction::TapLandForMana { object_id },
+        ) => {
+            handle_tap_land_for_mana(state, object_id, &mut events)?;
+            WaitingFor::UnlessPayment {
+                player: *player,
+                cost: cost.clone(),
+                pending_counter: pending_counter.clone(),
+            }
+        }
+        // Allow mana abilities during unless-payment choice (CR 118.12)
+        (
+            WaitingFor::UnlessPayment { player, .. },
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+            },
+        ) => {
+            let obj = state
+                .objects
+                .get(&source_id)
+                .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
+            if ability_index < obj.abilities.len()
+                && mana_abilities::is_mana_ability(&obj.abilities[ability_index])
+            {
+                let ability_def = obj.abilities[ability_index].clone();
+                mana_abilities::resolve_mana_ability(
+                    state,
+                    source_id,
+                    *player,
+                    &ability_def,
+                    &mut events,
+                )?;
+                state.waiting_for.clone()
+            } else {
+                return Err(EngineError::ActionNotAllowed(
+                    "Only mana abilities can be activated during unless payment".to_string(),
+                ));
+            }
+        }
         (WaitingFor::ManaPayment { player }, GameAction::CancelCast) => {
             WaitingFor::Priority { player: *player }
         }
@@ -3152,6 +3223,7 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Typed(TypedFilter::card()),
                     source_static: None,
+                    unless_payment: None,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {

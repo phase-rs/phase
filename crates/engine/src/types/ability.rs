@@ -626,6 +626,14 @@ pub enum FilterProp {
     },
 }
 
+impl FilterProp {
+    /// Returns true if `self` and `other` are the same enum variant (ignoring inner values).
+    /// Used by `distribute_properties_to_or` to avoid duplicating property kinds.
+    pub fn same_kind(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+}
+
 /// Named fields for the `TargetFilter::Typed` variant, extracted for builder ergonomics.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TypedFilter {
@@ -1066,6 +1074,10 @@ pub enum Effect {
         /// Used by cards like Tishana's Tidebinder ("loses all abilities for as long as ~").
         #[serde(default)]
         source_static: Option<StaticDefinition>,
+        /// CR 118.12: "Counter target spell unless its controller pays {X}".
+        /// When present, the spell's controller may pay the cost to prevent the counter.
+        #[serde(default)]
+        unless_payment: Option<ManaCost>,
     },
     Token {
         name: String,

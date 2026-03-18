@@ -6,6 +6,7 @@ use super::oracle_util::{
     contains_object_pronoun, contains_possessive, parse_mana_production, parse_number,
     starts_with_possessive, strip_reminder_text,
 };
+use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, ChoiceType, CountValue, DamageAmount,
     DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer, ManaProduction,
@@ -13,7 +14,7 @@ use crate::types::ability::{
     StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::Keyword;
-use crate::types::mana::ManaColor;
+use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -300,6 +301,7 @@ enum ZoneCounterImperativeAst {
     Counter {
         target: TargetFilter,
         source_static: Option<Box<StaticDefinition>>,
+        unless_payment: Option<ManaCost>,
     },
     PutCounter {
         counter_type: String,
@@ -681,10 +683,12 @@ fn try_parse_verb_and_target<'a>(
     // Exile: infer origin zone from the full post-verb text (NOT the remainder,
     // since parse_zone_suffix inside parse_type_phrase consumes zone phrases).
     if lower.starts_with("exile all ") || lower.starts_with("exile each ") {
+        let rest_lower = &lower[6..]; // after "exile "
         let (target, rem) = parse_target(&text[6..]);
+        let origin = infer_origin_zone(rest_lower);
         return Some((
             TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Exile {
-                origin: None,
+                origin,
                 target,
                 all: true,
             })),
@@ -717,10 +721,13 @@ fn try_parse_verb_and_target<'a>(
         } else {
             parsed_target
         };
+        // CR 118.12: Parse "unless its controller pays {X}" for conditional counters
+        let unless_payment = parse_unless_payment(&lower[8..]);
         return Some((
             TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Counter {
                 target,
                 source_static: None,
+                unless_payment,
             })),
             rem,
         ));
@@ -1909,9 +1916,11 @@ fn parse_destroy_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst
 
 fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
     if lower.starts_with("exile all ") || lower.starts_with("exile each ") {
+        let rest_lower = &lower[6..]; // after "exile "
         let (target, _) = parse_target(&text[6..]);
+        let origin = infer_origin_zone(rest_lower);
         return Some(ZoneCounterImperativeAst::Exile {
-            origin: None,
+            origin,
             target,
             all: true,
         });
@@ -1933,6 +1942,7 @@ fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst
         return Some(ZoneCounterImperativeAst::Counter {
             target: TargetFilter::StackAbility,
             source_static: None,
+            unless_payment: None,
         });
     }
 
@@ -1942,9 +1952,12 @@ fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst
     } else {
         target
     };
+    // CR 118.12: Parse "unless its controller pays {X}" for conditional counters
+    let unless_payment = parse_unless_payment(rest);
     Some(ZoneCounterImperativeAst::Counter {
         target,
         source_static: None,
+        unless_payment,
     })
 }
 
@@ -2164,9 +2177,11 @@ fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
         ZoneCounterImperativeAst::Counter {
             target,
             source_static,
+            unless_payment,
         } => Effect::Counter {
             target,
             source_static: source_static.map(|s| *s),
+            unless_payment,
         },
         ZoneCounterImperativeAst::PutCounter {
             counter_type,
@@ -4156,6 +4171,32 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
     None
 }
 
+/// CR 118.12: Parse "unless its controller pays {X}" from counter text.
+/// Extracts the mana cost from patterns like:
+/// - "unless its controller pays {3}"
+/// - "unless that player pays {1}{U}"
+fn parse_unless_payment(lower: &str) -> Option<ManaCost> {
+    // Find "unless" followed by a subject and "pays {cost}"
+    let unless_pos = lower.find("unless ")?;
+    let after_unless = &lower[unless_pos + 7..];
+    // Skip the subject ("its controller", "that player", "he or she", etc.)
+    let pays_pos = after_unless.find("pays ")?;
+    let cost_str = &after_unless[pays_pos + 5..];
+    // Extract the mana cost (brace-delimited symbols)
+    let cost_end = cost_str
+        .find(|c: char| c != '{' && c != '}' && !c.is_alphanumeric())
+        .unwrap_or(cost_str.len());
+    let cost_text = cost_str[..cost_end].trim();
+    if cost_text.is_empty() || !cost_text.contains('{') {
+        return None;
+    }
+    let cost = parse_mtgjson_mana_cost(cost_text);
+    if cost == ManaCost::NoCost || cost == ManaCost::zero() {
+        return None;
+    }
+    Some(cost)
+}
+
 fn infer_origin_zone(lower: &str) -> Option<Zone> {
     if contains_possessive(lower, "from", "graveyard") || lower.contains("from a graveyard") {
         Some(Zone::Graveyard)
@@ -4165,6 +4206,10 @@ fn infer_origin_zone(lower: &str) -> Option<Zone> {
         Some(Zone::Hand)
     } else if contains_possessive(lower, "from", "library") {
         Some(Zone::Library)
+    } else if lower.contains("graveyard") && !lower.contains("from") {
+        // CR 404.1: Possessive graveyard references without "from" — e.g.,
+        // "exile each opponent's graveyard", "exile target player's graveyard"
+        Some(Zone::Graveyard)
     } else {
         None
     }
@@ -5090,6 +5135,64 @@ mod tests {
         } else {
             panic!("expected Counter effect");
         }
+    }
+
+    #[test]
+    fn effect_counter_unless_pays_parses_mana_cost() {
+        use crate::types::mana::ManaCost;
+        let e = parse_effect("Counter target spell unless its controller pays {3}");
+        if let Effect::Counter {
+            unless_payment,
+            target,
+            ..
+        } = &e
+        {
+            assert_eq!(
+                *unless_payment,
+                Some(ManaCost::Cost {
+                    shards: vec![],
+                    generic: 3
+                }),
+                "should parse {{3}} unless payment"
+            );
+            // Target should still be constrained to stack
+            assert!(
+                matches!(target, TargetFilter::Typed(TypedFilter { properties, .. })
+                    if properties.iter().any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))),
+                "target should be on stack"
+            );
+        } else {
+            panic!("expected Counter effect, got {e:?}");
+        }
+    }
+
+    #[test]
+    fn effect_counter_without_unless_has_none_payment() {
+        let e = parse_effect("Counter target spell");
+        if let Effect::Counter { unless_payment, .. } = &e {
+            assert_eq!(
+                *unless_payment, None,
+                "plain counter should have no unless_payment"
+            );
+        } else {
+            panic!("expected Counter effect");
+        }
+    }
+
+    #[test]
+    fn effect_exile_each_opponents_graveyard_has_origin() {
+        let e = parse_effect("Exile each opponent's graveyard");
+        assert!(
+            matches!(
+                e,
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Exile,
+                    ..
+                }
+            ),
+            "exile each graveyard should have origin=Graveyard, got {e:?}"
+        );
     }
 
     #[test]
