@@ -175,12 +175,28 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
             choice_type,
             ..
         } => named_choice_actions(state, *player, options, choice_type),
-        WaitingFor::ModeChoice { player, modal, .. } => mode_actions(
-            *player,
-            modal.mode_count,
-            modal.min_choices,
-            modal.max_choices,
-        ),
+        WaitingFor::ModeChoice { player, modal, .. } => {
+            if modal.allow_repeat_modes {
+                // CR 700.2d: Use sequence generation that allows repeated indices.
+                crate::game::ability_utils::generate_modal_index_sequences(modal)
+                    .into_iter()
+                    .map(|indices| {
+                        candidate(
+                            GameAction::SelectModes { indices },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            } else {
+                mode_actions(
+                    *player,
+                    modal.mode_count,
+                    modal.min_choices,
+                    modal.max_choices,
+                )
+            }
+        }
         WaitingFor::AbilityModeChoice {
             player,
             modal,
@@ -190,7 +206,35 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
             let available: Vec<usize> = (0..modal.mode_count)
                 .filter(|i| !unavailable_modes.contains(i))
                 .collect();
-            mode_actions_from_available(*player, &available, modal.min_choices, modal.max_choices)
+            if modal.allow_repeat_modes {
+                // Build a filtered ModalChoice for sequence generation with repeats.
+                let filtered = crate::types::ability::ModalChoice {
+                    mode_count: available.len(),
+                    min_choices: modal.min_choices,
+                    max_choices: modal.max_choices,
+                    allow_repeat_modes: true,
+                    ..modal.clone()
+                };
+                crate::game::ability_utils::generate_modal_index_sequences(&filtered)
+                    .into_iter()
+                    .map(|local_indices| {
+                        // Map local indices back to original mode indices.
+                        let indices = local_indices.into_iter().map(|i| available[i]).collect();
+                        candidate(
+                            GameAction::SelectModes { indices },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            } else {
+                mode_actions_from_available(
+                    *player,
+                    &available,
+                    modal.min_choices,
+                    modal.max_choices,
+                )
+            }
         }
         WaitingFor::DiscardToHandSize {
             player,

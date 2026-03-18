@@ -334,6 +334,8 @@ pub fn resolve_ability_chain(
             if sub_clone.targets.is_empty() && !ability.targets.is_empty() {
                 sub_clone.targets = ability.targets.clone();
             }
+            // Propagate SpellContext so kicker/optional flags survive continuations.
+            sub_clone.context = ability.context.clone();
             state.pending_continuation = Some(Box::new(sub_clone));
             return Ok(());
         }

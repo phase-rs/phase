@@ -93,19 +93,29 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         return (filter, rest);
     }
 
-    // CR 610.3: "each card exiled with ~" must be intercepted before generic "each"
-    // stripping, since it's a complete filter that shouldn't enter parse_type_phrase.
-    for prefix in [
-        "each card exiled with ~",
-        "cards exiled with ~",
-        "each card exiled with this artifact",
-        "each card exiled with this enchantment",
-        "each card exiled with this creature",
-        "each card exiled with this permanent",
-    ] {
-        if lower.starts_with(prefix) {
-            return (TargetFilter::ExiledBySource, &text[prefix.len()..]);
-        }
+    // CR 610.3: "each card exiled with ~" / "cards exiled with this <type>"
+    // must be intercepted before generic "each" stripping, since it's a complete
+    // filter that shouldn't enter parse_type_phrase.
+    if let Some(rest) = lower
+        .strip_prefix("each card exiled with ~")
+        .or_else(|| lower.strip_prefix("cards exiled with ~"))
+    {
+        return (
+            TargetFilter::ExiledBySource,
+            &text[text.len() - rest.len()..],
+        );
+    }
+    // Accept any type word after "this" (creature, artifact, enchantment, permanent, etc.)
+    if let Some(rest) = lower
+        .strip_prefix("each card exiled with this ")
+        .or_else(|| lower.strip_prefix("cards exiled with this "))
+    {
+        // Skip the trailing type word (e.g., "creature", "permanent", "planeswalker")
+        let after_type = rest.find(' ').map_or("", |i| &rest[i..]);
+        return (
+            TargetFilter::ExiledBySource,
+            &text[text.len() - after_type.len()..],
+        );
     }
 
     // "all" / "each" + type phrase (for *All effects)

@@ -1,4 +1,3 @@
-use crate::game::mana_payment;
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
 use crate::game::zones;
 use crate::types::ability::{
@@ -38,11 +37,10 @@ pub fn resolve(
         _ => (None, None),
     };
 
-    // CR 118.12: If "unless pays", check if the opponent can pay.
-    // If they can, present the choice. If they can't, counter immediately.
+    // CR 118.12: "Unless pays" — always present the choice to the spell's controller.
+    // The player may activate mana abilities before deciding whether to pay.
     if let Some(ref cost) = unless_payment {
         if let Some(TargetRef::Object(obj_id)) = ability.targets.first() {
-            // Find the controller of the targeted spell/ability
             let target_controller = state
                 .stack
                 .iter()
@@ -50,24 +48,12 @@ pub fn resolve(
                 .map(|e| e.controller);
 
             if let Some(controller) = target_controller {
-                let pool = &state
-                    .players
-                    .iter()
-                    .find(|p| p.id == controller)
-                    .map(|p| &p.mana_pool);
-
-                let can_pay = pool.is_some_and(|p| mana_payment::can_pay(p, cost));
-
-                if can_pay {
-                    // Present the choice to the opponent
-                    state.waiting_for = WaitingFor::UnlessPayment {
-                        player: controller,
-                        cost: cost.clone(),
-                        pending_counter: Box::new(ability.clone()),
-                    };
-                    return Ok(());
-                }
-                // Can't pay → fall through to counter immediately
+                state.waiting_for = WaitingFor::UnlessPayment {
+                    player: controller,
+                    cost: cost.clone(),
+                    pending_counter: Box::new(ability.clone()),
+                };
+                return Ok(());
             }
         }
     }

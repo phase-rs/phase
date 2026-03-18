@@ -1452,20 +1452,29 @@ fn is_replacement_pattern(lower: &str) -> bool {
         || (lower.contains("enters") && lower.contains("counter"))
 }
 
-/// Parse a roman numeral to u32. Handles I(1) through X(10) and beyond.
+/// Parse a roman numeral to u32. Handles I(1) through XX(20).
 fn parse_roman_numeral(s: &str) -> Option<u32> {
-    match s.to_uppercase().as_str() {
-        "I" => Some(1),
-        "II" => Some(2),
-        "III" => Some(3),
-        "IV" => Some(4),
-        "V" => Some(5),
-        "VI" => Some(6),
-        "VII" => Some(7),
-        "VIII" => Some(8),
-        "IX" => Some(9),
-        "X" => Some(10),
-        _ => None,
+    let upper = s.to_uppercase();
+    let mut total: u32 = 0;
+    let mut prev = 0u32;
+    for ch in upper.chars().rev() {
+        let val = match ch {
+            'I' => 1,
+            'V' => 5,
+            'X' => 10,
+            _ => return None,
+        };
+        if val < prev {
+            total = total.checked_sub(val)?;
+        } else {
+            total += val;
+        }
+        prev = val;
+    }
+    if total == 0 {
+        None
+    } else {
+        Some(total)
     }
 }
 
@@ -1541,6 +1550,7 @@ fn parse_saga_chapters(
             },
         ))
         .valid_card(TargetFilter::SelfRef)
+        .destination_zone(Zone::Battlefield)
         .description("Saga ETB lore counter".to_string());
 
     (triggers, etb_replacement)
@@ -3841,7 +3851,13 @@ mod tests {
         assert_eq!(parse_roman_numeral("VIII"), Some(8));
         assert_eq!(parse_roman_numeral("IX"), Some(9));
         assert_eq!(parse_roman_numeral("X"), Some(10));
-        assert_eq!(parse_roman_numeral("XI"), None);
+        assert_eq!(parse_roman_numeral("XI"), Some(11));
+        assert_eq!(parse_roman_numeral("XII"), Some(12));
+        assert_eq!(parse_roman_numeral("XIV"), Some(14));
+        assert_eq!(parse_roman_numeral("XV"), Some(15));
+        assert_eq!(parse_roman_numeral("XX"), Some(20));
+        // Non-roman characters return None
+        assert_eq!(parse_roman_numeral("ABC"), None);
     }
 
     #[test]

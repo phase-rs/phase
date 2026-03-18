@@ -126,6 +126,8 @@ export type CounterType =
   | "Plus1Plus1"
   | "Minus1Minus1"
   | "Loyalty"
+  | "Lore"
+  | "Stun"
   | { Generic: string };
 
 // ── Keywords ─────────────────────────────────────────────────────────────

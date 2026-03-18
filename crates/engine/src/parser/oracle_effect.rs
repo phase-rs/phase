@@ -1947,10 +1947,12 @@ fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> 
 fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
     let rest = lower.strip_prefix("counter ")?;
     if rest.contains("activated or triggered ability") {
+        // CR 118.12: Parse "unless pays" even for ability counters.
+        let unless_payment = parse_unless_payment(rest);
         return Some(ZoneCounterImperativeAst::Counter {
             target: TargetFilter::StackAbility,
             source_static: None,
-            unless_payment: None,
+            unless_payment,
         });
     }
 

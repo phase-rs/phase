@@ -9,6 +9,61 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::proposed_event::ProposedEvent;
 
+/// CR 614.1: Add a counter to an object through the replacement pipeline.
+///
+/// Handles Vorinclex-class doubling, prevention, and replacement effects.
+/// Used by both effect resolution (resolve_add) and turn-based actions
+/// (Saga lore counters at precombat main phase).
+pub fn add_counter_with_replacement(
+    state: &mut GameState,
+    object_id: crate::types::identifiers::ObjectId,
+    counter_type: CounterType,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) {
+    let proposed = ProposedEvent::AddCounter {
+        object_id,
+        counter_type,
+        count,
+        applied: HashSet::new(),
+    };
+
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) => {
+            if let ProposedEvent::AddCounter {
+                object_id,
+                counter_type,
+                count,
+                ..
+            } = event
+            {
+                if let Some(obj) = state.objects.get_mut(&object_id) {
+                    let entry = obj.counters.entry(counter_type.clone()).or_insert(0);
+                    *entry += count;
+
+                    if matches!(
+                        counter_type,
+                        CounterType::Plus1Plus1 | CounterType::Minus1Minus1
+                    ) {
+                        state.layers_dirty = true;
+                    }
+
+                    events.push(GameEvent::CounterAdded {
+                        object_id,
+                        counter_type,
+                        count,
+                    });
+                }
+            }
+        }
+        ReplacementResult::Prevented => {}
+        ReplacementResult::NeedsChoice(player) => {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(player, state);
+        }
+    }
+}
+
 /// Add counters to target objects.
 pub fn resolve_add(
     state: &mut GameState,
@@ -32,51 +87,7 @@ pub fn resolve_add(
 
     let targets = resolve_defined_or_targets(ability);
     for obj_id in targets {
-        let proposed = ProposedEvent::AddCounter {
-            object_id: obj_id,
-            counter_type: ct.clone(),
-            count: counter_num,
-            applied: HashSet::new(),
-        };
-
-        match replacement::replace_event(state, proposed, events) {
-            ReplacementResult::Execute(event) => {
-                if let ProposedEvent::AddCounter {
-                    object_id,
-                    counter_type,
-                    count,
-                    ..
-                } = event
-                {
-                    let obj = state
-                        .objects
-                        .get_mut(&object_id)
-                        .ok_or(EffectError::ObjectNotFound(object_id))?;
-                    let entry = obj.counters.entry(counter_type.clone()).or_insert(0);
-                    *entry += count;
-
-                    // Mark layers dirty for P/T counters
-                    if matches!(
-                        counter_type,
-                        CounterType::Plus1Plus1 | CounterType::Minus1Minus1
-                    ) {
-                        state.layers_dirty = true;
-                    }
-
-                    events.push(GameEvent::CounterAdded {
-                        object_id,
-                        counter_type,
-                        count,
-                    });
-                }
-            }
-            ReplacementResult::Prevented => {}
-            ReplacementResult::NeedsChoice(player) => {
-                state.waiting_for =
-                    crate::game::replacement::replacement_choice_waiting_for(player, state);
-                return Ok(());
-            }
-        }
+        add_counter_with_replacement(state, obj_id, ct.clone(), counter_num, events);
     }
 
     events.push(GameEvent::EffectResolved {

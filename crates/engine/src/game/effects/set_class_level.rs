@@ -215,4 +215,34 @@ mod tests {
             obj_id
         ));
     }
+
+    #[test]
+    fn class_resets_to_level_1_on_zone_reentry() {
+        // CR 400.7 + CR 716.3: A Class that leaves and re-enters the battlefield
+        // is a new object at level 1.
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Class".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&obj_id).unwrap().class_level = Some(3);
+
+        // Move to exile
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, obj_id, Zone::Exile, &mut events);
+        assert_eq!(state.objects.get(&obj_id).unwrap().zone, Zone::Exile);
+        // Level is preserved in exile (not on battlefield)
+        assert_eq!(state.objects.get(&obj_id).unwrap().class_level, Some(3));
+
+        // Move back to battlefield — should reset to level 1
+        crate::game::zones::move_to_zone(&mut state, obj_id, Zone::Battlefield, &mut events);
+        assert_eq!(
+            state.objects.get(&obj_id).unwrap().class_level,
+            Some(1),
+            "Class should reset to level 1 on re-entering the battlefield"
+        );
+    }
 }

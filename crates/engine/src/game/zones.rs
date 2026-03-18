@@ -76,6 +76,11 @@ pub fn move_to_zone(
     // CR 302.6: Track when objects enter the battlefield (for summoning sickness).
     if to == Zone::Battlefield {
         obj_mut.entered_battlefield_turn = Some(state.turn_number);
+
+        // CR 716.3 + CR 400.7: A Class that re-enters is a new object at level 1.
+        if obj_mut.class_level.is_some() {
+            obj_mut.class_level = Some(1);
+        }
     }
 
     // Track descended: a permanent card was put into its owner's graveyard

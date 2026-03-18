@@ -336,15 +336,15 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
         })
         .collect();
 
+    // CR 614.1: Route through replacement pipeline so Vorinclex-class effects apply.
     for saga_id in saga_ids {
-        if let Some(obj) = state.objects.get_mut(&saga_id) {
-            *obj.counters.entry(CounterType::Lore).or_insert(0) += 1;
-            events.push(GameEvent::CounterAdded {
-                object_id: saga_id,
-                counter_type: CounterType::Lore,
-                count: 1,
-            });
-        }
+        super::effects::counters::add_counter_with_replacement(
+            state,
+            saga_id,
+            CounterType::Lore,
+            1,
+            events,
+        );
     }
 }
 

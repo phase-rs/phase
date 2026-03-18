@@ -399,17 +399,24 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             if pay {
                 // Player pays the cost → spell is NOT countered
                 casting::pay_unless_cost(state, *player, cost, &mut events)?;
-                // Resume priority after the counter spell resolves (spell survives)
+                // CR 118.12: Payment satisfied — counter effect fizzles, spell survives.
                 events.push(GameEvent::EffectResolved {
                     kind: EffectKind::Counter,
                     source_id: pending_counter.source_id,
                 });
-                state.waiting_for.clone()
             } else {
                 // Player declines → execute the counter unconditionally
                 effects::counter::resolve_unconditional(state, pending_counter, &mut events)
                     .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-                state.waiting_for.clone()
+            }
+            // Resume with pending continuation if one was stashed.
+            if let Some(continuation) = state.pending_continuation.take() {
+                effects::resolve_ability_chain(state, &continuation, &mut events, 0)
+                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+            }
+            // CR 117.3b: After the counter spell finishes resolving, return to priority.
+            WaitingFor::Priority {
+                player: state.active_player,
             }
         }
         // Allow mana abilities during unless-payment choice (CR 118.12)
