@@ -749,6 +749,11 @@ fn starts_with_word_ci(text: &str, prefix: &str) -> bool {
     if text.len() < prefix.len() {
         return false;
     }
+    // prefix is always ASCII (subtypes/planeswalker names), but text may contain
+    // multi-byte UTF-8 (e.g. em dashes). Guard against slicing inside a character.
+    if !text.is_char_boundary(prefix.len()) {
+        return false;
+    }
     if !text[..prefix.len()].eq_ignore_ascii_case(prefix) {
         return false;
     }
@@ -777,6 +782,7 @@ pub fn parse_subtype(text: &str) -> Option<(String, usize)> {
         // Try regular plural: subtype + "s" — check subtype prefix + 's' at boundary
         let plural_len = subtype.len() + 1;
         if text.len() >= plural_len
+            && text.is_char_boundary(subtype.len())
             && text[..subtype.len()].eq_ignore_ascii_case(subtype)
             && text.as_bytes()[subtype.len()] == b's'
         {

@@ -1769,6 +1769,14 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
             def = def.multi_target(spec);
         }
 
+        // Kicker clauses referencing "that creature"/"it" inherit the parent's target.
+        // Scoped to conditional sub-abilities only — "it"/"its" appears in possessive
+        // forms on many cards and would incorrectly replace targets if applied generally.
+        if condition.is_some() && !defs.is_empty() && has_anaphoric_reference(&text.to_lowercase())
+        {
+            replace_target_with_parent(&mut def.effect);
+        }
+
         let mut current_defs = vec![def];
         if let Some(sub) = clause.sub_ability {
             current_defs.push(*sub);
@@ -3283,16 +3291,52 @@ fn split_leading_conditional(text: &str) -> Option<(String, String)> {
 /// the condition + remaining effect text. Called at the sentence level in
 /// parse_effect_chain BEFORE parse_effect_clause, so the condition is preserved
 /// rather than being discarded by strip_leading_conditional.
+/// Detect kicker / additional-cost conditionals. Uses a unified grammatical
+/// pattern — any "if [subject] was kicked, [body]" — rather than enumerating
+/// card-specific phrasings.
+///
+/// Returns `(condition, body_text)` where condition is `AdditionalCostPaid` or
+/// `AdditionalCostPaidInstead` depending on whether the body ends with "instead".
+///
+/// CR 702.32b + CR 608.2e
 fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
-    if let Some(rest) = lower.strip_prefix("if this spell's additional cost was paid, ") {
+
+    // Try the legacy phrasing first: "if this spell's additional cost was paid, ..."
+    let body = if let Some(rest) = lower.strip_prefix("if this spell's additional cost was paid, ")
+    {
         let offset = text.len() - rest.len();
-        (
-            Some(AbilityCondition::AdditionalCostPaid),
-            text[offset..].to_string(),
-        )
+        Some(text[offset..].to_string())
+    }
+    // Unified kicker pattern: "if <subject> was kicked, ..."
+    // Covers "if this spell was kicked", "if it was kicked", "if ~ was kicked"
+    else if lower.starts_with("if ") {
+        lower.split_once(" was kicked, ").map(|(_, rest)| {
+            let offset = text.len() - rest.len();
+            text[offset..].to_string()
+        })
     } else {
-        (None, text.to_string())
+        None
+    };
+
+    match body {
+        Some(body) => {
+            // CR 608.2e: Check for trailing "instead" — indicates replacement semantics.
+            let (body, condition) = if let Some(stripped) = body
+                .to_lowercase()
+                .strip_suffix(" instead")
+                .map(|_| &body[..body.len() - " instead".len()])
+            {
+                (
+                    stripped.to_string(),
+                    AbilityCondition::AdditionalCostPaidInstead,
+                )
+            } else {
+                (body, AbilityCondition::AdditionalCostPaid)
+            };
+            (Some(condition), body)
+        }
+        None => (None, text.to_string()),
     }
 }
 
@@ -7797,5 +7841,106 @@ mod tests {
             }
             other => panic!("expected GenericEffect, got {:?}", other),
         }
+    }
+
+    // --- Kicker "instead" tests ---
+
+    #[test]
+    fn strip_additional_cost_conditional_legacy_phrasing() {
+        let (cond, body) = strip_additional_cost_conditional(
+            "If this spell's additional cost was paid, draw a card",
+        );
+        assert_eq!(cond, Some(AbilityCondition::AdditionalCostPaid));
+        assert_eq!(body, "draw a card");
+    }
+
+    #[test]
+    fn strip_additional_cost_conditional_kicked_phrasing() {
+        let (cond, body) =
+            strip_additional_cost_conditional("If this spell was kicked, draw two cards");
+        assert_eq!(cond, Some(AbilityCondition::AdditionalCostPaid));
+        assert_eq!(body, "draw two cards");
+    }
+
+    #[test]
+    fn strip_additional_cost_conditional_kicked_instead() {
+        let (cond, body) = strip_additional_cost_conditional(
+            "If it was kicked, it deals 5 damage to that creature instead",
+        );
+        assert_eq!(cond, Some(AbilityCondition::AdditionalCostPaidInstead));
+        assert_eq!(body, "it deals 5 damage to that creature");
+    }
+
+    #[test]
+    fn strip_additional_cost_conditional_kicked_with_tilde() {
+        let (cond, body) = strip_additional_cost_conditional(
+            "If ~ was kicked, ~ deals 4 damage to that creature instead",
+        );
+        assert_eq!(cond, Some(AbilityCondition::AdditionalCostPaidInstead));
+        assert_eq!(body, "~ deals 4 damage to that creature");
+    }
+
+    #[test]
+    fn strip_additional_cost_conditional_no_match() {
+        let (cond, body) = strip_additional_cost_conditional("Deal 3 damage to any target");
+        assert_eq!(cond, None);
+        assert_eq!(body, "Deal 3 damage to any target");
+    }
+
+    #[test]
+    fn kicker_instead_chain_produces_correct_condition() {
+        // Simulates Firebending Lesson: "~ deals 2 damage to target creature. If it was kicked, ~ deals 5 damage to that creature instead"
+        let ability = parse_effect_chain(
+            "~ deals 2 damage to target creature. If it was kicked, ~ deals 5 damage to that creature instead",
+            AbilityKind::Spell,
+        );
+
+        // Base effect: DealDamage 2 to Typed(Creature)
+        assert!(
+            matches!(
+                &ability.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Typed(TypedFilter { .. }),
+                }
+            ),
+            "expected base DealDamage(2, Creature), got {:?}",
+            ability.effect
+        );
+
+        // Sub_ability: DealDamage 5 with condition AdditionalCostPaidInstead
+        let sub = ability.sub_ability.as_ref().expect("expected sub_ability");
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead),
+            "expected AdditionalCostPaidInstead condition"
+        );
+        assert!(
+            matches!(
+                &sub.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                    target: TargetFilter::ParentTarget,
+                }
+            ),
+            "expected sub DealDamage(5, ParentTarget), got {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
+    fn kicker_additive_chain_produces_additional_cost_paid() {
+        // "Draw a card. If this spell was kicked, draw two additional cards"
+        let ability = parse_effect_chain(
+            "Draw a card. If this spell was kicked, draw two additional cards",
+            AbilityKind::Spell,
+        );
+
+        let sub = ability.sub_ability.as_ref().expect("expected sub_ability");
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::AdditionalCostPaid),
+            "expected AdditionalCostPaid (not Instead) for additive kicker"
+        );
     }
 }

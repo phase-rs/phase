@@ -1860,8 +1860,11 @@ impl AbilityDefinition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum AbilityCondition {
-    /// This ability only fires if the spell's optional additional cost was paid.
+    /// CR 702.32b: Kicker — optional additional cost; paid/unpaid state stored in SpellContext.
     AdditionalCostPaid,
+    /// CR 608.2e: "Instead" clause — replaces the parent effect when the additional cost was paid.
+    /// The resolver swaps the override sub's effect in place of the parent before resolution.
+    AdditionalCostPaidInstead,
     /// CR 608.2c: "If you do" — sub_ability executes only if the parent optional effect was performed.
     IfYouDo,
 }

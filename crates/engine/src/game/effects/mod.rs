@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::types::ability::{AbilityCondition, AbilityKind, Effect, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -198,6 +200,31 @@ pub fn resolve_ability_chain(
         return Ok(());
     }
 
+    // CR 608.2e: "Instead" kicker — check if a sub overrides the parent.
+    // When condition is met, replace the current ability's effect with the sub's
+    // effect, preserving the full resolution flow (tracked sets, continuations).
+    let ability = if let Some(ref sub) = ability.sub_ability {
+        if matches!(
+            sub.condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead)
+        ) && ability.context.additional_cost_paid
+        {
+            let mut overridden = ability.clone();
+            overridden.effect = sub.effect.clone();
+            if let Some(ref sub_duration) = sub.duration {
+                overridden.duration = Some(sub_duration.clone());
+            }
+            // The override sub is consumed; its own sub_ability becomes the new chain tail.
+            overridden.sub_ability = sub.sub_ability.clone();
+            Cow::Owned(overridden)
+        } else {
+            Cow::Borrowed(ability)
+        }
+    } else {
+        Cow::Borrowed(ability)
+    };
+    let ability = ability.as_ref();
+
     // CR 603.7: Snapshot event count so we can detect objects moved by this effect.
     let events_before = events.len();
 
@@ -268,6 +295,13 @@ pub fn resolve_ability_chain(
         if let Some(ref condition) = sub.condition {
             let condition_met = match condition {
                 AbilityCondition::AdditionalCostPaid => ability.context.additional_cost_paid,
+                // CR 608.2e: "Instead" — when condition was met, the override effect was
+                // already swapped in place of the parent (see Cow swap above).
+                // If we reach here, the condition was NOT met (parent ran normally).
+                // Override subs are terminal — do not chain further.
+                AbilityCondition::AdditionalCostPaidInstead => {
+                    return Ok(());
+                }
                 AbilityCondition::IfYouDo => ability.context.optional_effect_performed,
             };
             if !condition_met {
@@ -314,8 +348,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, DelayedTriggerCondition, QuantityExpr, TargetFilter,
-        TargetRef,
+        AbilityDefinition, AbilityKind, DelayedTriggerCondition, QuantityExpr, SpellContext,
+        TargetFilter, TargetRef,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::phase::Phase;
@@ -603,6 +637,92 @@ mod tests {
         assert!(
             state.tracked_object_sets.is_empty(),
             "Should NOT record tracked set when no objects were moved"
+        );
+    }
+
+    #[test]
+    fn override_instead_condition_met_swaps_effect() {
+        // CR 608.2e: When AdditionalCostPaidInstead condition is met,
+        // the sub's effect replaces the parent's effect.
+        let mut state = GameState::new_two_player(42);
+
+        // Sub: deal 5 damage (override) with AdditionalCostPaidInstead
+        let sub = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target: TargetFilter::ParentTarget,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::AdditionalCostPaidInstead);
+
+        // Parent: deal 2 damage — should be REPLACED by the sub
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .context(SpellContext {
+            additional_cost_paid: true,
+            optional_effect_performed: false,
+        })
+        .sub_ability(sub);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Only the override effect (5 damage) should have fired, not the parent (2 damage)
+        assert_eq!(
+            state.players[1].life, 15,
+            "Expected 5 damage from override, not 2 from parent"
+        );
+    }
+
+    #[test]
+    fn override_instead_condition_not_met_runs_parent() {
+        // CR 608.2e: When AdditionalCostPaidInstead condition is NOT met,
+        // the parent runs normally and the override sub is skipped.
+        let mut state = GameState::new_two_player(42);
+
+        let sub = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target: TargetFilter::ParentTarget,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::AdditionalCostPaidInstead);
+
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .context(SpellContext {
+            additional_cost_paid: false,
+            optional_effect_performed: false,
+        })
+        .sub_ability(sub);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Only the parent effect (2 damage) should have fired
+        assert_eq!(
+            state.players[1].life, 18,
+            "Expected 2 damage from parent, override should be skipped"
         );
     }
 }
