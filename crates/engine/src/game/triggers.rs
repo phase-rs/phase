@@ -1078,8 +1078,8 @@ fn target_filter_matches_object(
         TargetFilter::And { filters } => filters
             .iter()
             .all(|f| target_filter_matches_object(state, object_id, f, source_id)),
-        // StackAbility targeting is handled directly in find_legal_targets
-        TargetFilter::StackAbility => false,
+        // StackAbility/StackSpell targeting is handled directly at call sites, not via object matching
+        TargetFilter::StackAbility | TargetFilter::StackSpell => false,
         TargetFilter::SpecificObject { id: target_id } => object_id == *target_id,
         TargetFilter::AttachedTo => {
             // The trigger source must have attached_to pointing at this object.
@@ -1557,20 +1557,37 @@ fn match_phase(
     }
 }
 
+// CR 114.1a / CR 603.4: Match when the trigger's source becomes the target of a spell or ability.
 fn match_becomes_target(
     event: &GameEvent,
     trigger: &TriggerDefinition,
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::BecomesTarget { object_id, .. } = event {
-        if trigger.valid_card.is_some() {
-            valid_card_matches(trigger, state, *object_id, source_id)
-        } else {
-            *object_id == source_id
+    let GameEvent::BecomesTarget {
+        object_id,
+        source_id: targeting_spell_id,
+    } = event
+    else {
+        return false;
+    };
+
+    // CR 114.1a: Check source filter — "of a spell" restricts to StackEntryKind::Spell
+    if let Some(TargetFilter::StackSpell) = &trigger.valid_source {
+        let is_spell = state
+            .stack
+            .iter()
+            .any(|e| e.id == *targeting_spell_id && matches!(e.kind, StackEntryKind::Spell { .. }));
+        if !is_spell {
+            return false;
         }
+    }
+
+    // Check if the targeted object matches the trigger's valid_card filter
+    if trigger.valid_card.is_some() {
+        valid_card_matches(trigger, state, *object_id, source_id)
     } else {
-        false
+        *object_id == source_id
     }
 }
 
@@ -4050,5 +4067,116 @@ pub mod tests {
                 threshold: None,
             });
         assert!(match_counter_added(&event, &trigger, saga_id, &state));
+    }
+
+    // -----------------------------------------------------------------------
+    // BecomesTarget + valid_source (spell-only filtering)
+    // -----------------------------------------------------------------------
+
+    fn setup_with_spell_on_stack() -> (GameState, ObjectId) {
+        let mut state = setup();
+        let spell_id = ObjectId(50);
+        state.stack.push(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(100),
+                ability: ResolvedAbility::new(
+                    crate::types::ability::Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    vec![],
+                    spell_id,
+                    PlayerId(0),
+                ),
+                cast_as_adventure: false,
+            },
+        });
+        (state, spell_id)
+    }
+
+    fn setup_with_ability_on_stack() -> (GameState, ObjectId) {
+        let mut state = setup();
+        let ability_id = ObjectId(60);
+        state.stack.push(StackEntry {
+            id: ability_id,
+            source_id: ObjectId(10),
+            controller: PlayerId(1),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(10),
+                ability: ResolvedAbility::new(
+                    crate::types::ability::Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    vec![],
+                    ObjectId(10),
+                    PlayerId(1),
+                ),
+            },
+        });
+        (state, ability_id)
+    }
+
+    #[test]
+    fn becomes_target_spell_only_matches_spell() {
+        let (state, spell_id) = setup_with_spell_on_stack();
+        // trigger_owner is the permanent with the trigger (e.g. Bonecrusher Giant)
+        let trigger_owner = ObjectId(5);
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(TargetFilter::StackSpell);
+
+        // Event: trigger_owner becomes the target of spell_id
+        let event = GameEvent::BecomesTarget {
+            object_id: trigger_owner,
+            source_id: spell_id,
+        };
+        // No valid_card, so fallback: event.object_id == source_id param
+        assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_spell_only_rejects_ability() {
+        let (state, ability_id) = setup_with_ability_on_stack();
+        let trigger_owner = ObjectId(5);
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(TargetFilter::StackSpell);
+
+        // Event: trigger_owner becomes the target of an activated ability
+        let event = GameEvent::BecomesTarget {
+            object_id: trigger_owner,
+            source_id: ability_id,
+        };
+        assert!(!match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_no_source_filter_matches_ability() {
+        let (state, ability_id) = setup_with_ability_on_stack();
+        let trigger_owner = ObjectId(5);
+        let trigger = make_trigger(TriggerMode::BecomesTarget);
+        // valid_source = None means "spell or ability"
+
+        // Event: trigger_owner becomes the target of an activated ability — should still fire
+        let event = GameEvent::BecomesTarget {
+            object_id: trigger_owner,
+            source_id: ability_id,
+        };
+        assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
     }
 }

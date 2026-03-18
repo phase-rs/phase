@@ -713,6 +713,9 @@ pub enum TargetFilter {
     /// Matches non-mana activated or triggered abilities on the stack.
     /// Used by "counter target activated or triggered ability" effects.
     StackAbility,
+    /// Matches spells on the stack (not activated/triggered abilities).
+    /// CR 114.1a: Used by "becomes the target of a spell" triggers to filter source type.
+    StackSpell,
     /// Matches a specific permanent by ObjectId.
     /// Used for duration-based statics that target a specific object
     /// (e.g., "that permanent loses all abilities for as long as ~").

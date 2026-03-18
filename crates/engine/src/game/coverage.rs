@@ -103,6 +103,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::Controller => "controller".into(),
         TargetFilter::SelfRef => "self".into(),
         TargetFilter::StackAbility => "ability on stack".into(),
+        TargetFilter::StackSpell => "spell on stack".into(),
         TargetFilter::AttachedTo => "attached permanent".into(),
         TargetFilter::LastCreated => "last created".into(),
         TargetFilter::TriggeringSpellController => "triggering spell's controller".into(),

@@ -569,6 +569,15 @@ fn try_parse_event(
         return Some((TriggerMode::BecomesTarget, def));
     }
 
+    // CR 114.1a: "becomes the target of a spell" (spell only, no abilities)
+    if rest.strip_prefix("becomes the target of a spell").is_some() {
+        let mut def = make_base();
+        def.mode = TriggerMode::BecomesTarget;
+        def.valid_card = Some(subject.clone());
+        def.valid_source = Some(TargetFilter::StackSpell);
+        return Some((TriggerMode::BecomesTarget, def));
+    }
+
     // "is dealt combat damage" / "is dealt damage"
     if rest.starts_with("is dealt combat damage") {
         let mut def = make_base();
@@ -2251,6 +2260,18 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::BecomesTarget);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(def.valid_source, None); // spell OR ability — no source filter
+    }
+
+    #[test]
+    fn trigger_becomes_target_of_spell_only() {
+        let def = parse_trigger_line(
+            "Whenever this creature becomes the target of a spell, this creature deals 2 damage to that spell's controller.",
+            "Bonecrusher Giant",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesTarget);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(def.valid_source, Some(TargetFilter::StackSpell));
     }
 
     #[test]
