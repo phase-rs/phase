@@ -197,6 +197,7 @@ export interface GameObject {
   has_summoning_sickness?: boolean;
   is_suspected?: boolean;
   case_state?: { is_solved: boolean; solve_condition: unknown } | null;
+  class_level?: number;
   devotion?: number;
   available_mana_colors?: ManaColor[];
   casting_permissions?: CastingPermission[];
@@ -440,7 +441,8 @@ export type GameEvent =
   | { type: "TurnedFaceUp"; data: { object_id: ObjectId } }
   | { type: "CardsRevealed"; data: { player: PlayerId; card_names: string[] } }
   | { type: "CreatureSuspected"; data: { object_id: ObjectId } }
-  | { type: "CaseSolved"; data: { object_id: ObjectId } };
+  | { type: "CaseSolved"; data: { object_id: ObjectId } }
+  | { type: "ClassLevelGained"; data: { object_id: ObjectId; level: number } };
 
 // ── Game State ───────────────────────────────────────────────────────────
 

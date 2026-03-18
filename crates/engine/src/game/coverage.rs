@@ -522,6 +522,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("target".into(), fmt_target(t)));
             }
         }
+        Effect::SetClassLevel { level } => {
+            d.push(("level".to_string(), level.to_string()));
+        }
         Effect::Unimplemented { .. }
         | Effect::Explore
         | Effect::Proliferate

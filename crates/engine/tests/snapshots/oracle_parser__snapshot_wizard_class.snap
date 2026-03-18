@@ -1,0 +1,193 @@
+---
+source: crates/engine/tests/oracle_parser.rs
+expression: result
+---
+{
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "SetClassLevel",
+        "level": 2
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": {
+          "Cost": {
+            "shards": [
+              "Blue"
+            ],
+            "generic": 2
+          }
+        }
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": "{2}{U}: Level 2",
+      "target_prompt": null,
+      "sorcery_speed": true,
+      "activation_restrictions": [
+        {
+          "type": "AsSorcery"
+        },
+        {
+          "type": "ClassLevelIs",
+          "data": {
+            "level": 1
+          }
+        }
+      ],
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "SetClassLevel",
+        "level": 3
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": {
+          "Cost": {
+            "shards": [
+              "Blue"
+            ],
+            "generic": 4
+          }
+        }
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": "{4}{U}: Level 3",
+      "target_prompt": null,
+      "sorcery_speed": true,
+      "activation_restrictions": [
+        {
+          "type": "AsSorcery"
+        },
+        {
+          "type": "ClassLevelIs",
+          "data": {
+            "level": 2
+          }
+        }
+      ],
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "ClassLevelGained",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "Draw",
+          "count": {
+            "type": "Fixed",
+            "value": 2
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "sorcery_speed": false,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "combat_damage": false,
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "When this Class becomes level 2",
+      "constraint": {
+        "type": "AtClassLevel",
+        "level": 2
+      },
+      "condition": null
+    },
+    {
+      "mode": "Drawn",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "PutCounter",
+          "counter_type": "P1P1",
+          "count": 1,
+          "target": {
+            "type": "Typed",
+            "card_type": "Creature",
+            "subtype": null,
+            "controller": "You",
+            "properties": []
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "sorcery_speed": false,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false
+      },
+      "valid_card": null,
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "combat_damage": false,
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "Whenever you draw a card, put a +1/+1 counter on target creature you control.",
+      "constraint": null,
+      "condition": {
+        "type": "ClassLevelGE",
+        "level": 3
+      }
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "Other": "NoMaximumHandSize"
+      },
+      "affected": {
+        "type": "Typed",
+        "card_type": null,
+        "subtype": null,
+        "controller": "You",
+        "properties": []
+      },
+      "modifications": [],
+      "condition": null,
+      "affected_zone": null,
+      "effect_zone": null,
+      "characteristic_defining": false,
+      "description": "You have no maximum hand size."
+    }
+  ],
+  "replacements": [],
+  "extractedKeywords": []
+}

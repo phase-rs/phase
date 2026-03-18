@@ -85,6 +85,8 @@ export function formatEvent(event: GameEvent): string {
       return `Creature ${event.data.object_id} suspected`;
     case "CaseSolved":
       return `Case ${event.data.object_id} solved`;
+    case "ClassLevelGained":
+      return `Class reached level ${event.data.level}`;
     default:
       return `Event: ${(event as GameEvent).type}`;
   }

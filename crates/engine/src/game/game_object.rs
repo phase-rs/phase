@@ -196,6 +196,11 @@ pub struct GameObject {
     /// CR 719.1: Case enchantment solve state. Present only on Case permanents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub case_state: Option<CaseState>,
+
+    /// CR 716.3: Class enchantment level. Present only on Class permanents.
+    /// Class level is NOT a counter (CR 716) — proliferate/counter manipulation must not interact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_level: Option<u8>,
 }
 
 impl GameObject {
@@ -255,6 +260,7 @@ impl GameObject {
             chosen_attributes: Vec::new(),
             is_suspected: false,
             case_state: None,
+            class_level: None,
         }
     }
 

@@ -405,6 +405,12 @@ fn check_trigger_constraint(
             .iter()
             .find(|p| p.id == controller)
             .is_some_and(|p| p.cards_drawn_this_turn == *n),
+        // CR 716.5: "When this Class becomes level N" — fire only at the specified level.
+        TriggerConstraint::AtClassLevel { level } => state
+            .objects
+            .get(&obj_id)
+            .and_then(|obj| obj.class_level)
+            .is_some_and(|current| current == *level),
     }
 }
 
@@ -448,6 +454,11 @@ pub(crate) fn check_trigger_condition(
             .and_then(|id| state.objects.get(&id))
             .and_then(|obj| obj.case_state.as_ref())
             .is_some_and(|cs| !cs.is_solved && evaluate_solve_condition(state, cs, controller)),
+        // CR 716.6: True when the source Class is at or above the specified level.
+        TriggerCondition::ClassLevelGE { level } => source_id
+            .and_then(|id| state.objects.get(&id))
+            .and_then(|obj| obj.class_level)
+            .is_some_and(|current| current >= *level),
         TriggerCondition::And { conditions } => conditions
             .iter()
             .all(|c| check_trigger_condition(state, c, controller, source_id)),
@@ -523,8 +534,9 @@ fn record_trigger_fired(
         }
         TriggerConstraint::OnlyDuringYourTurn
         | TriggerConstraint::NthSpellThisTurn { .. }
-        | TriggerConstraint::NthDrawThisTurn { .. } => {
-            // No tracking needed — checked at fire time via game/player state
+        | TriggerConstraint::NthDrawThisTurn { .. }
+        | TriggerConstraint::AtClassLevel { .. } => {
+            // No tracking needed — checked at fire time via game/object state
         }
     }
 }
@@ -734,6 +746,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // Promoted trigger matchers -- Case enchantments (MKM+)
     r.insert(TriggerMode::CaseSolved, match_case_solved);
 
+    // Promoted trigger matchers -- Class enchantments (AFR+)
+    r.insert(TriggerMode::ClassLevelGained, match_class_level_gained);
+
     // Remaining trigger modes: recognized but not yet matched against events.
     let unimplemented_modes = [
         TriggerMode::DamagePreventedOnce,
@@ -777,7 +792,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::RolledDieOnce,
         TriggerMode::FlippedCoin,
         TriggerMode::Clashed,
-        TriggerMode::ClassLevelGained,
         TriggerMode::Copied,
         TriggerMode::ConjureAll,
         TriggerMode::Vote,
@@ -1588,6 +1602,16 @@ fn match_case_solved(
     _state: &GameState,
 ) -> bool {
     matches!(event, GameEvent::CaseSolved { object_id } if *object_id == source_id)
+}
+
+/// CR 716.5: "When this Class becomes level N" triggers.
+fn match_class_level_gained(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    matches!(event, GameEvent::ClassLevelGained { object_id, .. } if *object_id == source_id)
 }
 
 fn match_land_played(

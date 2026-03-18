@@ -167,6 +167,11 @@ pub enum GameEvent {
     CaseSolved {
         object_id: ObjectId,
     },
+    /// CR 716.5: A Class enchantment gained a new level.
+    ClassLevelGained {
+        object_id: ObjectId,
+        level: u8,
+    },
 }
 
 #[cfg(test)]

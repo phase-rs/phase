@@ -62,6 +62,12 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     obj.casting_restrictions = card_face.casting_restrictions.clone();
     obj.casting_options = card_face.casting_options.clone();
 
+    // CR 716.3: Each Class enchantment enters the battlefield at level 1.
+    // CR 400.7: A Class that re-enters is a new object at level 1.
+    if card_face.card_type.subtypes.iter().any(|s| s == "Class") {
+        obj.class_level = Some(1);
+    }
+
     // CR 719.1: Initialize Case solve state from the card face.
     if card_face.card_type.subtypes.iter().any(|s| s == "Case") {
         if let Some(ref sc) = card_face.solve_condition {

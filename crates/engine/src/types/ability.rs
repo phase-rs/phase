@@ -879,6 +879,11 @@ pub enum StaticCondition {
         counter_type: String,
         minimum: u32,
     },
+    /// CR 716.6: True when the source Class enchantment is at or above the given level.
+    /// Class level is a dedicated field (not a counter), so proliferate does not interact.
+    ClassLevelGE {
+        level: u8,
+    },
     /// Condition text that the parser could not yet decompose into a typed variant.
     /// Evaluated permissively (always true) so the static effect still applies.
     Unrecognized {
@@ -1353,6 +1358,10 @@ pub enum Effect {
     },
     /// CR 719.2: Solve the source Case — it becomes solved.
     SolveCase,
+    /// CR 716.5: Set the class level on the source Class enchantment.
+    SetClassLevel {
+        level: u8,
+    },
     /// CR 603.7: Creates a delayed triggered ability during resolution.
     /// The delayed trigger fires once at the specified condition, then is removed.
     CreateDelayedTrigger {
@@ -1488,6 +1497,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Choose { .. } => "Choose",
         Effect::Suspect { .. } => "Suspect",
         Effect::SolveCase => "SolveCase",
+        Effect::SetClassLevel { .. } => "SetClassLevel",
         Effect::CreateDelayedTrigger { .. } => "CreateDelayedTrigger",
         Effect::AddRestriction { .. } => "AddRestriction",
         Effect::CreateEmblem { .. } => "CreateEmblem",
@@ -1550,6 +1560,7 @@ pub enum EffectKind {
     Choose,
     Suspect,
     SolveCase,
+    SetClassLevel,
     CreateDelayedTrigger,
     AddRestriction,
     CreateEmblem,
@@ -1613,6 +1624,7 @@ impl From<&Effect> for EffectKind {
             Effect::Choose { .. } => EffectKind::Choose,
             Effect::Suspect { .. } => EffectKind::Suspect,
             Effect::SolveCase => EffectKind::SolveCase,
+            Effect::SetClassLevel { .. } => EffectKind::SetClassLevel,
             Effect::CreateDelayedTrigger { .. } => EffectKind::CreateDelayedTrigger,
             Effect::AddRestriction { .. } => EffectKind::AddRestriction,
             Effect::CreateEmblem { .. } => EffectKind::CreateEmblem,
@@ -1705,6 +1717,10 @@ pub enum ActivationRestriction {
     },
     /// CR 719.4: This ability can only be activated while the source Case is solved.
     IsSolved,
+    /// CR 716.4: Level N+1 ability can only activate when the source Class is at exactly this level.
+    ClassLevelIs {
+        level: u8,
+    },
 }
 
 /// Structured spell-casting restrictions parsed from Oracle text.
@@ -1923,6 +1939,9 @@ pub enum TriggerCondition {
     /// CR 719.2: Intervening-if for Case auto-solve.
     /// True when the source Case is unsolved AND its solve condition is met.
     SolveConditionMet,
+    /// CR 716.6: True when the source Class enchantment is at or above the given level.
+    /// Used to gate continuous triggers that only become active at higher class levels.
+    ClassLevelGE { level: u8 },
 
     // -- Combinators --
     /// All conditions must be true ("if you gained and lost life this turn")
@@ -1965,6 +1984,8 @@ pub enum TriggerConstraint {
     /// "Whenever you draw your Nth card each turn" — fires exactly when
     /// the controller's `cards_drawn_this_turn` equals `n`.
     NthDrawThisTurn { n: u32 },
+    /// CR 716.5: "When this Class becomes level N" — fire only at the specified level.
+    AtClassLevel { level: u8 },
 }
 
 /// Filter for counter-related trigger modes (CounterAdded, CounterRemoved).
@@ -2869,6 +2890,7 @@ mod tests {
             StaticCondition::Unrecognized {
                 text: "some complex condition".to_string(),
             },
+            StaticCondition::ClassLevelGE { level: 2 },
             StaticCondition::None,
         ];
         let json = serde_json::to_string(&conditions).unwrap();

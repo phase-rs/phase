@@ -325,6 +325,12 @@ fn activation_restriction_applies(
             .get(&source_id)
             .and_then(|obj| obj.case_state.as_ref())
             .is_some_and(|cs| cs.is_solved),
+        // CR 716.4: Level N+1 ability can only activate when Class is at level N.
+        ActivationRestriction::ClassLevelIs { level } => state
+            .objects
+            .get(&source_id)
+            .and_then(|obj| obj.class_level)
+            .is_some_and(|current| current == *level),
     }
 }
 

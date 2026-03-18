@@ -39,6 +39,7 @@ pub mod reveal_top;
 pub mod sacrifice;
 pub mod scry;
 pub mod search_library;
+pub mod set_class_level;
 pub mod shuffle;
 pub mod solve_case;
 pub mod surveil;
@@ -101,6 +102,7 @@ pub fn resolve_effect(
         Effect::Choose { .. } => choose::resolve(state, ability, events),
         Effect::Suspect { .. } => suspect::resolve(state, ability, events),
         Effect::SolveCase => solve_case::resolve(state, ability, events),
+        Effect::SetClassLevel { .. } => set_class_level::resolve(state, ability, events),
         Effect::CreateDelayedTrigger { .. } => delayed_trigger::resolve(state, ability, events),
         Effect::AddRestriction { .. } => add_restriction::resolve(state, ability, events),
         Effect::CreateEmblem { .. } => create_emblem::resolve(state, ability, events),

@@ -133,10 +133,27 @@ fn evaluate_condition(
                 count >= *minimum
             })
             .unwrap_or(false),
+        // CR 716.6: Level abilities are active at or above the specified level.
+        StaticCondition::ClassLevelGE { level } => state
+            .objects
+            .get(&source_id)
+            .and_then(|obj| obj.class_level)
+            .is_some_and(|current| current >= *level),
         StaticCondition::Unrecognized { .. } => true,
         StaticCondition::DuringYourTurn => state.active_player == controller,
         StaticCondition::None => true,
     }
+}
+
+/// Test-only wrapper to expose `evaluate_condition` for unit tests in other modules.
+#[cfg(test)]
+pub fn evaluate_condition_for_test(
+    state: &GameState,
+    condition: &StaticCondition,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    evaluate_condition(state, condition, controller, source_id)
 }
 
 /// Evaluate all continuous effects through the seven-layer system.

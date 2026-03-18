@@ -139,3 +139,66 @@ fn snapshot_goblin_chainwhirler() {
     );
     insta::assert_json_snapshot!(result);
 }
+
+#[test]
+fn snapshot_wizard_class() {
+    // CR 716: Class enchantment with all three level patterns:
+    // Level 1 static, "When this Class becomes level 2" trigger, Level 3 continuous trigger
+    let result = parse(
+        "(Gain the next level as a sorcery to add its ability.)\nYou have no maximum hand size.\n{2}{U}: Level 2\nWhen this Class becomes level 2, draw two cards.\n{4}{U}: Level 3\nWhenever you draw a card, put a +1/+1 counter on target creature you control.",
+        "Wizard Class",
+        &[],
+        &["Enchantment"],
+        &["Class"],
+    );
+    insta::assert_json_snapshot!(result);
+}
+
+#[test]
+fn class_structural_correctness() {
+    // CR 716: Verify structural correctness of Class parsing
+    let result = parse(
+        "(Gain the next level as a sorcery to add its ability.)\nIf you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.\n{1}{R}: Level 2\nWhenever you roll one or more dice, target creature you control gets +2/+0 and gains menace until end of turn.\n{2}{R}: Level 3\nCreatures you control have haste.",
+        "Barbarian Class",
+        &[],
+        &["Enchantment"],
+        &["Class"],
+    );
+
+    // 2 SetClassLevel activated abilities (Level 2 and Level 3)
+    let set_class_levels: Vec<_> = result
+        .abilities
+        .iter()
+        .filter(|a| {
+            matches!(
+                a.effect,
+                engine::types::ability::Effect::SetClassLevel { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        set_class_levels.len(),
+        2,
+        "expected 2 SetClassLevel abilities"
+    );
+
+    // Level 2 ability has ClassLevelIs { level: 1 } restriction
+    let level2 = &set_class_levels[0];
+    assert!(
+        level2.activation_restrictions.iter().any(|r| matches!(
+            r,
+            engine::types::ability::ActivationRestriction::ClassLevelIs { level: 1 }
+        )),
+        "Level 2 ability should require ClassLevelIs {{ level: 1 }}"
+    );
+
+    // Level 3 ability has ClassLevelIs { level: 2 } restriction
+    let level3 = &set_class_levels[1];
+    assert!(
+        level3.activation_restrictions.iter().any(|r| matches!(
+            r,
+            engine::types::ability::ActivationRestriction::ClassLevelIs { level: 2 }
+        )),
+        "Level 3 ability should require ClassLevelIs {{ level: 2 }}"
+    );
+}
