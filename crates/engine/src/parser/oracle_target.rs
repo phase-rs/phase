@@ -5,7 +5,7 @@ use crate::types::identifiers::TrackedSetId;
 use crate::types::keywords::Keyword;
 use crate::types::zones::Zone;
 
-use super::oracle_util::contains_possessive;
+use super::oracle_util::{contains_possessive, merge_or_filters};
 
 /// Parse an event-context possessive reference from Oracle text.
 /// These resolve from the triggering event, not from player targeting.
@@ -204,9 +204,36 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         pos += consumed;
     }
 
-    // Check for "or" combinator: "artifact or enchantment", "creature or artifact you control"
+    // CR 205.3a: Comma-separated type lists ("artifacts, creatures, and lands") are
+    // syntactic sugar for set-union, same as "and" between two types.
     let rest_lower = lower[pos..].trim_start();
     let rest_offset = lower[pos..].len() - rest_lower.len();
+
+    // Check ", and " first (Oxford comma before final element) since it starts with ", "
+    if let Some(after_comma_and) = rest_lower.strip_prefix(", and ") {
+        let after_trimmed = after_comma_and.trim_start();
+        if parse_core_type(after_trimmed).0.is_some() {
+            let comma_and_text = &text[pos + rest_offset + ", and ".len()..];
+            let (other_filter, final_rest) = parse_type_phrase(comma_and_text);
+            let left = typed(card_type.unwrap_or(TypeFilter::Any), subtype, properties);
+            let combined = merge_or_filters(left, other_filter);
+            return (distribute_controller_to_or(combined), final_rest);
+        }
+    }
+
+    // CR 205.3a: Comma between non-final elements ("artifacts, creatures, ...")
+    if let Some(after_comma) = rest_lower.strip_prefix(", ") {
+        let after_trimmed = after_comma.trim_start();
+        if parse_core_type(after_trimmed).0.is_some() {
+            let comma_text = &text[pos + rest_offset + ", ".len()..];
+            let (other_filter, final_rest) = parse_type_phrase(comma_text);
+            let left = typed(card_type.unwrap_or(TypeFilter::Any), subtype, properties);
+            let combined = merge_or_filters(left, other_filter);
+            return (distribute_controller_to_or(combined), final_rest);
+        }
+    }
+
+    // Check for "or" combinator: "artifact or enchantment", "creature or artifact you control"
     if rest_lower.starts_with("or ") {
         let or_text = &text[pos + rest_offset + 3..];
         let (other_filter, final_rest) = parse_type_phrase(or_text);
@@ -365,6 +392,41 @@ fn parse_non_prefix(text: &str) -> (Option<String>, usize) {
     } else {
         (None, 0)
     }
+}
+
+/// Distribute the controller from the last `Typed` element in an `Or` filter
+/// to all preceding `Typed` elements that have `controller: None`.
+/// Handles "artifacts, creatures, and lands your opponents control" where only
+/// the final type parses the controller suffix.
+fn distribute_controller_to_or(filter: TargetFilter) -> TargetFilter {
+    let TargetFilter::Or { mut filters } = filter else {
+        return filter;
+    };
+
+    // Find the controller from the last Typed element (reverse search)
+    let controller = filters.iter().rev().find_map(|f| {
+        if let TargetFilter::Typed(TypedFilter {
+            controller: Some(ref ctrl),
+            ..
+        }) = f
+        {
+            Some(ctrl.clone())
+        } else {
+            None
+        }
+    });
+
+    if let Some(ctrl) = controller {
+        for f in &mut filters {
+            if let TargetFilter::Typed(ref mut typed) = f {
+                if typed.controller.is_none() {
+                    typed.controller = Some(ctrl.clone());
+                }
+            }
+        }
+    }
+
+    TargetFilter::Or { filters }
 }
 
 fn parse_core_type(text: &str) -> (Option<TypeFilter>, Option<String>, usize) {
@@ -1322,5 +1384,164 @@ mod tests {
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent))
         );
         assert_eq!(rest.trim(), "");
+    }
+
+    // CR 205.3a: Comma-separated type list tests
+
+    #[test]
+    fn comma_list_three_types_with_opponent_control() {
+        let (f, rest) =
+            parse_type_phrase("artifacts, creatures, and lands your opponents control");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 3);
+                assert_eq!(
+                    filters[0],
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::Opponent)
+                    )
+                );
+                assert_eq!(
+                    filters[1],
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::Opponent)
+                    )
+                );
+                assert_eq!(
+                    filters[2],
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Land).controller(ControllerRef::Opponent)
+                    )
+                );
+            }
+            other => panic!("Expected Or filter, got {:?}", other),
+        }
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn comma_list_three_types_no_controller() {
+        let (f, rest) = parse_type_phrase("artifacts, creatures, and enchantments");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 3);
+                assert_eq!(
+                    filters[0],
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact))
+                );
+                assert_eq!(
+                    filters[1],
+                    TargetFilter::Typed(TypedFilter::creature())
+                );
+                assert_eq!(
+                    filters[2],
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment))
+                );
+            }
+            other => panic!("Expected Or filter, got {:?}", other),
+        }
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn comma_list_you_control() {
+        let (f, rest) =
+            parse_type_phrase("creatures, artifacts, and enchantments you control");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 3);
+                assert_eq!(
+                    filters[0],
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+                );
+                assert_eq!(
+                    filters[1],
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You)
+                    )
+                );
+                assert_eq!(
+                    filters[2],
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Enchantment).controller(ControllerRef::You)
+                    )
+                );
+            }
+            other => panic!("Expected Or filter, got {:?}", other),
+        }
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn comma_list_four_elements() {
+        let (f, rest) =
+            parse_type_phrase("artifacts, creatures, enchantments, and lands");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 4);
+                assert_eq!(
+                    filters[0],
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact))
+                );
+                assert_eq!(
+                    filters[1],
+                    TargetFilter::Typed(TypedFilter::creature())
+                );
+                assert_eq!(
+                    filters[2],
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment))
+                );
+                assert_eq!(
+                    filters[3],
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Land))
+                );
+            }
+            other => panic!("Expected Or filter, got {:?}", other),
+        }
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn comma_list_no_oxford_comma() {
+        let (f, rest) =
+            parse_type_phrase("artifacts, creatures and lands your opponents control");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 3);
+                assert_eq!(
+                    filters[0],
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::Opponent)
+                    )
+                );
+                assert_eq!(
+                    filters[1],
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::Opponent)
+                    )
+                );
+                assert_eq!(
+                    filters[2],
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Land).controller(ControllerRef::Opponent)
+                    )
+                );
+            }
+            other => panic!("Expected Or filter, got {:?}", other),
+        }
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn comma_list_remainder() {
+        let (f, rest) =
+            parse_type_phrase("artifacts, creatures, and lands enter tapped");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 3);
+            }
+            other => panic!("Expected Or filter, got {:?}", other),
+        }
+        assert_eq!(rest, " enter tapped");
     }
 }

@@ -1,3 +1,4 @@
+use crate::types::ability::TargetFilter;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 
 /// Strip reminder text (parenthesized) from a line.
@@ -275,6 +276,20 @@ pub fn parse_mana_production(text: &str) -> Option<(Vec<ManaColor>, &str)> {
         return None;
     }
     Some((colors, &text[pos..]))
+}
+
+/// Merge two filters into an Or, flattening nested Or branches.
+pub fn merge_or_filters(a: TargetFilter, b: TargetFilter) -> TargetFilter {
+    let mut filters = Vec::new();
+    match a {
+        TargetFilter::Or { filters: af } => filters.extend(af),
+        other => filters.push(other),
+    }
+    match b {
+        TargetFilter::Or { filters: bf } => filters.extend(bf),
+        other => filters.push(other),
+    }
+    TargetFilter::Or { filters }
 }
 
 #[cfg(test)]

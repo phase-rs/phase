@@ -1,6 +1,6 @@
 use super::oracle_effect::parse_effect_chain;
 use super::oracle_target::parse_type_phrase;
-use super::oracle_util::{parse_number, parse_ordinal, strip_reminder_text};
+use super::oracle_util::{merge_or_filters, parse_number, parse_ordinal, strip_reminder_text};
 use crate::types::ability::{
     AbilityKind, ControllerRef, FilterProp, TargetFilter, TriggerCondition, TriggerConstraint,
     TriggerDefinition, TypeFilter, TypedFilter,
@@ -419,19 +419,6 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
     (TargetFilter::Any, text)
 }
 
-/// Merge two filters into an Or, flattening nested Or branches.
-fn merge_or_filters(a: TargetFilter, b: TargetFilter) -> TargetFilter {
-    let mut filters = Vec::new();
-    match a {
-        TargetFilter::Or { filters: af } => filters.extend(af),
-        other => filters.push(other),
-    }
-    match b {
-        TargetFilter::Or { filters: bf } => filters.extend(bf),
-        other => filters.push(other),
-    }
-    TargetFilter::Or { filters }
-}
 
 /// Add FilterProp::Another to a TargetFilter. Distributes into Or branches recursively.
 fn add_another_prop(filter: TargetFilter) -> TargetFilter {

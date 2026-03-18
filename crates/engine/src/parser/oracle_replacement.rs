@@ -936,4 +936,39 @@ mod tests {
             other => panic!("Expected Or filter, got {other:?}"),
         }
     }
+
+    #[test]
+    fn frozen_aether_comma_list() {
+        let def = parse_replacement_line(
+            "Artifacts, creatures, and lands your opponents control enter tapped.",
+            "Frozen Aether",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        match &def.valid_card {
+            Some(TargetFilter::Or { filters }) => {
+                assert_eq!(filters.len(), 3);
+                assert_eq!(
+                    filters[0],
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::Opponent)
+                    )
+                );
+                assert_eq!(
+                    filters[1],
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::Opponent)
+                    )
+                );
+                assert_eq!(
+                    filters[2],
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Land).controller(ControllerRef::Opponent)
+                    )
+                );
+            }
+            other => panic!("Expected Or filter with 3 elements, got {other:?}"),
+        }
+    }
 }
