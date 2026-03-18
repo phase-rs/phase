@@ -744,7 +744,13 @@ fn build_ability_item(def: &AbilityDefinition) -> ParsedItem {
     });
 
     let mut details = effect_details(&def.effect);
-    details.extend(ability_details(def));
+    let ability_dets = ability_details(def);
+    // Avoid duplicate keys (e.g. GenericEffect already emits "duration")
+    for pair in ability_dets {
+        if !details.iter().any(|(k, _)| k == &pair.0) {
+            details.push(pair);
+        }
+    }
 
     let mut children = Vec::new();
 

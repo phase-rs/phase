@@ -678,7 +678,13 @@ pub fn can_pay_cost_after_auto_tap(
         subtypes: obj.card_types.subtypes.clone(),
     });
 
-    auto_tap_lands(&mut simulated, player, cost, &mut Vec::new(), Some(source_id));
+    auto_tap_lands(
+        &mut simulated,
+        player,
+        cost,
+        &mut Vec::new(),
+        Some(source_id),
+    );
 
     simulated
         .players
@@ -720,10 +726,11 @@ pub fn handle_select_modes(
     let total_cost = if modal.mode_costs.is_empty() {
         pending.cost.clone()
     } else {
-        let spree_total = indices.iter().fold(
-            crate::types::mana::ManaCost::zero(),
-            |acc, &idx| restrictions::add_mana_cost(&acc, &modal.mode_costs[idx]),
-        );
+        let spree_total = indices
+            .iter()
+            .fold(crate::types::mana::ManaCost::zero(), |acc, &idx| {
+                restrictions::add_mana_cost(&acc, &modal.mode_costs[idx])
+            });
         restrictions::add_mana_cost(&pending.cost, &spree_total)
     };
 
@@ -1691,7 +1698,11 @@ fn auto_tap_lands(
             .objects
             .get(&option.object_id)
             .is_some_and(|obj| obj.card_types.core_types.contains(&CoreType::Creature));
-        if is_creature { 1 } else { 0 }
+        if is_creature {
+            1
+        } else {
+            0
+        }
     });
 
     let mut to_tap: Vec<ManaSourceOption> = Vec::new();

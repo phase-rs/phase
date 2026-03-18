@@ -3298,22 +3298,43 @@ mod tests {
         let text = "Spree (Choose one or more additional costs.)\n\
                      + {3} — Create a 2/2 white Spirit creature token with flying.\n\
                      + {1} — Counter target spell unless its controller pays {2}.";
-        let result = parse(text, "Phantom Interference", &[Keyword::Spree], &["Instant"], &[]);
+        let result = parse(
+            text,
+            "Phantom Interference",
+            &[Keyword::Spree],
+            &["Instant"],
+            &[],
+        );
         let modal = result.modal.expect("should have modal");
         assert_eq!(modal.min_choices, 1);
         assert_eq!(modal.max_choices, 2);
         assert_eq!(modal.mode_count, 2);
         assert_eq!(modal.mode_costs.len(), 2);
         // Mode 0: {3}
-        assert_eq!(modal.mode_costs[0], ManaCost::Cost { shards: vec![], generic: 3 });
+        assert_eq!(
+            modal.mode_costs[0],
+            ManaCost::Cost {
+                shards: vec![],
+                generic: 3
+            }
+        );
         // Mode 1: {1}
-        assert_eq!(modal.mode_costs[1], ManaCost::Cost { shards: vec![], generic: 1 });
+        assert_eq!(
+            modal.mode_costs[1],
+            ManaCost::Cost {
+                shards: vec![],
+                generic: 1
+            }
+        );
         // Mode descriptions are effect-text only (post-separator)
         assert!(modal.mode_descriptions[0].contains("Create a 2/2"));
         assert!(modal.mode_descriptions[1].contains("Counter target spell"));
         // Two mode abilities parsed (not Unimplemented)
         assert_eq!(result.abilities.len(), 2);
-        assert!(!matches!(result.abilities[0].effect, Effect::Unimplemented { .. }));
+        assert!(!matches!(
+            result.abilities[0].effect,
+            Effect::Unimplemented { .. }
+        ));
     }
 
     #[test]
@@ -3353,11 +3374,7 @@ mod tests {
 
     #[test]
     fn collect_mode_asts_standard_bullet_has_no_mode_cost() {
-        let lines = vec![
-            "Choose one —",
-            "• Draw a card.",
-            "• Gain 3 life.",
-        ];
+        let lines = vec!["Choose one —", "• Draw a card.", "• Gain 3 life."];
         let modes = collect_mode_asts(&lines, 1);
         assert_eq!(modes.len(), 2);
         assert!(modes[0].mode_cost.is_none());

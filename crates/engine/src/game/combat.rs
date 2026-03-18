@@ -200,9 +200,7 @@ pub fn validate_blockers(
                         blocker_id, attacker_id, color
                     ));
                 }
-                Keyword::Protection(ProtectionTarget::Multicolored)
-                    if blocker.color.len() > 1 =>
-                {
+                Keyword::Protection(ProtectionTarget::Multicolored) if blocker.color.len() > 1 => {
                     return Err(format!(
                         "{:?} cannot block {:?} (protection from multicolored)",
                         blocker_id, attacker_id

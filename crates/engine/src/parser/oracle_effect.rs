@@ -421,7 +421,9 @@ fn try_parse_still_a_type(text: &str) -> Option<ParsedEffectClause> {
     let rest = lower
         .strip_prefix("it's still ")
         .or_else(|| lower.strip_prefix("that's still "))?;
-    let type_name = rest.strip_prefix("a ").or_else(|| rest.strip_prefix("an "))?;
+    let type_name = rest
+        .strip_prefix("a ")
+        .or_else(|| rest.strip_prefix("an "))?;
     let core_type = CoreType::from_str(&capitalize(type_name)).ok()?;
 
     Some(ParsedEffectClause {
@@ -592,12 +594,158 @@ fn lower_imperative_clause(text: &str) -> ParsedEffectClause {
     clause
 }
 
-/// Split compound targeted actions like "tap target creature and put a stun counter on it"
-/// into a primary effect (Tap) with a sub_ability chain (PutCounter with ParentTarget).
+/// Parse a verb prefix and its target, returning the AST and `parse_target`'s unconsumed
+/// remainder. Used by `try_split_targeted_compound` to determine compound boundaries
+/// semantically — `parse_target` correctly consumes compound filter phrases like
+/// "you own and control", so its remainder reveals whether " and " is a true compound
+/// connector or part of the target filter.
 ///
-/// Handles two connector patterns:
-///   - " and " (most common): "destroy target creature and draw a card"
-///   - ", then " (sequential): "exile target creature, then gain 3 life"
+/// CR 608.2c: The instructions in a spell or ability are followed in order; this helper
+/// identifies the boundary between the first instruction and any subsequent compound action.
+fn try_parse_verb_and_target<'a>(
+    text: &'a str,
+    lower: &str,
+) -> Option<(TargetedImperativeAst, &'a str)> {
+    // Simple targeted verbs: parse_target on text after the verb prefix
+    if lower.starts_with("tap ") {
+        let (target, rem) = parse_target(&text[4..]);
+        return Some((TargetedImperativeAst::Tap { target }, rem));
+    }
+    if lower.starts_with("untap ") {
+        let (target, rem) = parse_target(&text[6..]);
+        return Some((TargetedImperativeAst::Untap { target }, rem));
+    }
+    if lower.starts_with("sacrifice ") {
+        let (target, rem) = parse_target(&text[10..]);
+        return Some((TargetedImperativeAst::Sacrifice { target }, rem));
+    }
+    if lower.starts_with("fight ") {
+        let (target, rem) = parse_target(&text[6..]);
+        return Some((TargetedImperativeAst::Fight { target }, rem));
+    }
+    if lower.starts_with("gain control of ") {
+        let (target, rem) = parse_target(&text[16..]);
+        return Some((TargetedImperativeAst::GainControl { target }, rem));
+    }
+
+    // Destroy: check "all"/"each" prefix for mass destruction
+    if lower.starts_with("destroy all ") || lower.starts_with("destroy each ") {
+        let (target, rem) = parse_target(&text[8..]);
+        return Some((
+            TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Destroy {
+                target,
+                all: true,
+            })),
+            rem,
+        ));
+    }
+    if lower.starts_with("destroy ") {
+        let (target, rem) = parse_target(&text[8..]);
+        return Some((
+            TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Destroy {
+                target,
+                all: false,
+            })),
+            rem,
+        ));
+    }
+
+    // Exile: infer origin zone from the full post-verb text (NOT the remainder,
+    // since parse_zone_suffix inside parse_type_phrase consumes zone phrases).
+    if lower.starts_with("exile all ") || lower.starts_with("exile each ") {
+        let (target, rem) = parse_target(&text[6..]);
+        return Some((
+            TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Exile {
+                origin: None,
+                target,
+                all: true,
+            })),
+            rem,
+        ));
+    }
+    if let Some(rest_lower) = lower.strip_prefix("exile ") {
+        let (target, rem) = parse_target(&text[6..]);
+        let origin = infer_origin_zone(rest_lower);
+        return Some((
+            TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Exile {
+                origin,
+                target,
+                all: false,
+            })),
+            rem,
+        ));
+    }
+
+    // CR 701.5a: Counter a spell or ability on the stack.
+    if let Some(rest_lower) = lower.strip_prefix("counter ") {
+        let (parsed_target, rem) = parse_target(&text[8..]);
+        let target = if rest_lower.contains("activated or triggered ability") {
+            // CR 701.5a: "activated or triggered ability" is a special-case target
+            // that maps to StackAbility. We still use parse_target's remainder to
+            // preserve the compound-detection contract.
+            TargetFilter::StackAbility
+        } else if rest_lower.contains("spell") {
+            constrain_filter_to_stack(parsed_target)
+        } else {
+            parsed_target
+        };
+        return Some((
+            TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Counter {
+                target,
+                source_static: None,
+            })),
+            rem,
+        ));
+    }
+
+    // Return: determine destination separately, use parse_target remainder for compound detection
+    if lower.starts_with("return ") {
+        let rest = &text[7..];
+        let (_, destination) = strip_return_destination(rest);
+        let (target, rem) = parse_target(rest);
+        return match destination {
+            Some(Zone::Battlefield) => {
+                Some((TargetedImperativeAst::ReturnToBattlefield { target }, rem))
+            }
+            _ => Some((TargetedImperativeAst::Return { target }, rem)),
+        };
+    }
+
+    // Put counter: use refactored try_parse_put_counter that returns remainder
+    if lower.starts_with("put ") && lower.contains("counter") {
+        if let Some((
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            },
+            rem,
+        )) = try_parse_put_counter(lower, text)
+        {
+            return Some((
+                TargetedImperativeAst::ZoneCounterProxy(Box::new(
+                    ZoneCounterImperativeAst::PutCounter {
+                        counter_type,
+                        count,
+                        target,
+                    },
+                )),
+                rem,
+            ));
+        }
+    }
+
+    None
+}
+
+/// CR 608.2c: Split compound targeted actions like "tap target creature and put a stun
+/// counter on it" into a primary effect (Tap) with a sub_ability chain (PutCounter with
+/// ParentTarget). Instructions in a spell are followed in order; each " and "-connected
+/// action becomes a chained sub_ability.
+///
+/// Uses `parse_target`'s unconsumed remainder as the compound boundary oracle — this correctly
+/// handles compound filter phrases like "you own and control" because `parse_target` consumes
+/// them as part of the target filter, leaving no " and " in the remainder.
 ///
 /// When the remainder references "it"/"that creature"/"them" (via `contains_object_pronoun`),
 /// the sub_ability's target is set to `TargetFilter::ParentTarget` so it inherits the
@@ -605,37 +753,42 @@ fn lower_imperative_clause(text: &str) -> ParsedEffectClause {
 fn try_split_targeted_compound(text: &str) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
 
-    // Find the connector: " and " or ", then "
-    let (connector_pos, connector_len) = find_compound_connector(&lower)?;
-
-    let primary_text = text[..connector_pos].trim();
-    let remainder_text = text[connector_pos + connector_len..].trim();
-
-    if primary_text.is_empty() || remainder_text.is_empty() {
+    // Quick bail: no " and " means no compound connector possible
+    if !lower.contains(" and ") {
         return None;
     }
 
-    // The primary must be a targeted action (tap/untap/destroy/exile/sacrifice/etc.)
-    let primary_lower = primary_text.to_lowercase();
-    let primary_ast = parse_targeted_action_ast(primary_text, &primary_lower).or_else(|| {
-        // Also try zone-counter family (destroy/exile/put counter)
-        parse_zone_counter_ast(primary_text, &primary_lower)
-            .map(|ast| TargetedImperativeAst::ZoneCounterProxy(Box::new(ast)))
-    })?;
+    // Use parse_target's remainder to determine the compound split point
+    let (primary_ast, remainder) = try_parse_verb_and_target(text, &lower)?;
 
-    // Lower the primary to an Effect
+    // If parse_target consumed everything, there's no compound action
+    // (e.g. "exile any number of other nonland permanents you own and control")
+    if remainder.is_empty() {
+        return None;
+    }
+
+    // The remainder must start with " and " to be a compound connector.
+    // Do NOT trim — the leading space is the boundary marker.
+    let after_and = remainder.strip_prefix(" and ")?;
+
+    let sub_text = after_and.trim();
+    if sub_text.is_empty() {
+        return None;
+    }
+
+    // Lower the primary AST to an Effect
     let primary_effect = match primary_ast {
         TargetedImperativeAst::ZoneCounterProxy(ast) => lower_zone_counter_ast(*ast),
         other => lower_targeted_action_ast(other),
     };
 
-    // Parse the remainder as an effect
-    let remainder_lower = remainder_text.to_lowercase();
-    let mut sub_effect = parse_imperative_effect(remainder_text);
+    // Parse the sub-effect
+    let sub_lower = sub_text.to_lowercase();
+    let mut sub_effect = parse_imperative_effect(sub_text);
 
     // If the remainder contains anaphoric references ("it", "that creature", "them"),
     // replace the sub_effect's target with ParentTarget so it inherits the parent's targets.
-    if has_anaphoric_reference(&remainder_lower) {
+    if has_anaphoric_reference(&sub_lower) {
         replace_target_with_parent(&mut sub_effect);
     }
 
@@ -646,34 +799,6 @@ fn try_split_targeted_compound(text: &str) -> Option<ParsedEffectClause> {
         duration: None,
         sub_ability: Some(Box::new(sub_ability)),
     })
-}
-
-/// Find the position and length of a compound connector in the text.
-/// Returns None if no connector is found.
-fn find_compound_connector(lower: &str) -> Option<(usize, usize)> {
-    // Try ", then " first (more specific)
-    if let Some(pos) = lower.find(", then ") {
-        return Some((pos, ", then ".len()));
-    }
-    // Try " and " — but avoid splitting inside "target X and Y" type combinations
-    // by requiring the part before " and " to contain a recognized verb
-    if let Some(pos) = lower.find(" and ") {
-        let before = &lower[..pos];
-        // Only split if the text before " and " starts with a targeted verb
-        let is_targeted_verb = before.starts_with("tap ")
-            || before.starts_with("untap ")
-            || before.starts_with("destroy ")
-            || before.starts_with("exile ")
-            || before.starts_with("sacrifice ")
-            || before.starts_with("return ")
-            || before.starts_with("fight ")
-            || before.starts_with("gain control of ")
-            || before.starts_with("put ");
-        if is_targeted_verb {
-            return Some((pos, " and ".len()));
-        }
-    }
-    None
 }
 
 /// Verb-agnostic compound subject splitter.
@@ -1937,11 +2062,14 @@ fn parse_zone_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterImperati
     }
     if lower.starts_with("put ") && lower.contains("counter") {
         return match try_parse_put_counter(lower, text) {
-            Some(Effect::PutCounter {
-                counter_type,
-                count,
-                target,
-            }) => Some(ZoneCounterImperativeAst::PutCounter {
+            Some((
+                Effect::PutCounter {
+                    counter_type,
+                    count,
+                    target,
+                },
+                _remainder,
+            )) => Some(ZoneCounterImperativeAst::PutCounter {
                 counter_type,
                 count,
                 target,
@@ -3815,7 +3943,7 @@ fn parse_signed_pt_component(text: &str) -> Option<PtValue> {
     Some(PtValue::Fixed(sign * value))
 }
 
-fn try_parse_put_counter(lower: &str, _text: &str) -> Option<Effect> {
+fn try_parse_put_counter<'a>(lower: &str, text: &'a str) -> Option<(Effect, &'a str)> {
     // "put N {type} counter(s) on {target}"
     let after_put = lower[4..].trim();
     let (count, rest) = parse_number(after_put)?;
@@ -3826,32 +3954,46 @@ fn try_parse_put_counter(lower: &str, _text: &str) -> Option<Effect> {
 
     // Skip "counter" or "counters" keyword, then parse target after "on"
     let after_type = rest[type_end..].trim_start();
-    let after_counter_word = after_type
-        .strip_prefix("counters")
-        .or_else(|| after_type.strip_prefix("counter"))
-        .map(|s| s.trim_start())
-        .unwrap_or(after_type);
-
-    let target = if let Some(target_text) = after_counter_word.strip_prefix("on ") {
-        if target_text.starts_with("this ")
-            || target_text.starts_with("~")
-            || target_text == "it"
-            || target_text.starts_with("it ")
-            || target_text.starts_with("itself")
-        {
-            TargetFilter::SelfRef
-        } else {
-            parse_target(target_text).0
-        }
+    let counter_word_len = if after_type.starts_with("counters") {
+        "counters".len()
+    } else if after_type.starts_with("counter") {
+        "counter".len()
     } else {
-        TargetFilter::SelfRef
+        0
+    };
+    let after_counter_word = if counter_word_len > 0 {
+        after_type[counter_word_len..].trim_start()
+    } else {
+        after_type
     };
 
-    Some(Effect::PutCounter {
-        counter_type,
-        count: count as i32,
-        target,
-    })
+    let (target, remainder) = if let Some(on_rest) = after_counter_word.strip_prefix("on ") {
+        if on_rest.starts_with("this ")
+            || on_rest.starts_with("~")
+            || on_rest == "it"
+            || on_rest.starts_with("it ")
+            || on_rest.starts_with("itself")
+        {
+            (TargetFilter::SelfRef, "")
+        } else {
+            // Compute the byte offset into `text` for the "on " target portion.
+            // Since Oracle text is ASCII, byte offsets between lower and text are identical.
+            let on_offset = lower.len() - on_rest.len();
+            let (target, rem) = parse_target(&text[on_offset..]);
+            (target, rem)
+        }
+    } else {
+        (TargetFilter::SelfRef, "")
+    };
+
+    Some((
+        Effect::PutCounter {
+            counter_type,
+            count: count as i32,
+            target,
+        },
+        remainder,
+    ))
 }
 
 fn try_parse_remove_counter(lower: &str) -> Option<Effect> {
@@ -7309,10 +7451,78 @@ mod tests {
     }
 
     #[test]
+    fn compound_exile_own_and_control_not_split() {
+        // "you own and control" is a compound filter phrase, not a compound connector.
+        // parse_target must consume it entirely, producing no sub_ability.
+        let clause =
+            parse_effect_clause("exile any number of other nonland permanents you own and control");
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            ),
+            "should be ChangeZone to Exile, got {:?}",
+            clause.effect
+        );
+        assert!(
+            clause.sub_ability.is_none(),
+            "'you own and control' should NOT produce a sub_ability, but got {:?}",
+            clause.sub_ability
+        );
+    }
+
+    #[test]
+    fn compound_return_own_and_control_not_split() {
+        // "you own and control" in a return clause must not be treated as a compound connector.
+        let clause =
+            parse_effect_clause("return target permanent you own and control to your hand");
+        assert!(
+            matches!(clause.effect, Effect::Bounce { .. }),
+            "should be Bounce, got {:?}",
+            clause.effect
+        );
+        assert!(
+            clause.sub_ability.is_none(),
+            "'you own and control' should NOT produce a sub_ability, but got {:?}",
+            clause.sub_ability
+        );
+    }
+
+    #[test]
+    fn compound_exile_from_zone_and_effect() {
+        // Exile from a specific zone with a compound sub-effect.
+        // infer_origin_zone must see the full post-verb text, not just the remainder.
+        let clause =
+            parse_effect_clause("exile target creature card from a graveyard and gain 3 life");
+        match &clause.effect {
+            Effect::ChangeZone {
+                origin,
+                destination: Zone::Exile,
+                ..
+            } => {
+                assert_eq!(*origin, Some(Zone::Graveyard), "origin should be Graveyard");
+            }
+            other => panic!("expected ChangeZone to Exile, got {:?}", other),
+        }
+        let sub = clause
+            .sub_ability
+            .expect("should have sub_ability for 'gain 3 life'");
+        assert!(
+            matches!(sub.effect, Effect::GainLife { .. }),
+            "sub should be GainLife, got {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
     fn becomes_clause_without_duration_is_permanent() {
         // CR 611.2b: "becomes" without explicit duration → Duration::Permanent
-        let clause =
-            parse_effect_clause("this land becomes a 3/3 creature with vigilance and all creature types");
+        let clause = parse_effect_clause(
+            "this land becomes a 3/3 creature with vigilance and all creature types",
+        );
         assert_eq!(
             clause.duration,
             Some(Duration::Permanent),
@@ -7322,8 +7532,9 @@ mod tests {
 
     #[test]
     fn becomes_clause_with_explicit_duration_preserves_it() {
-        let clause =
-            parse_effect_clause("target creature becomes a 0/1 blue Frog creature until end of turn");
+        let clause = parse_effect_clause(
+            "target creature becomes a 0/1 blue Frog creature until end of turn",
+        );
         assert_eq!(
             clause.duration,
             Some(Duration::UntilEndOfTurn),
