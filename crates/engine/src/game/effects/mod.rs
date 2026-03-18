@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 
-use crate::types::ability::{AbilityCondition, AbilityKind, Effect, EffectError, ResolvedAbility};
+use crate::types::ability::{
+    AbilityCondition, AbilityKind, CountValue, Effect, EffectError, ResolvedAbility,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
@@ -123,6 +125,9 @@ fn next_sub_needs_tracked_set(ability: &ResolvedAbility) -> bool {
             &sub.effect,
             Effect::CreateDelayedTrigger {
                 uses_tracked_set: true,
+                ..
+            } | Effect::Token {
+                count: CountValue::TrackedSetSize,
                 ..
             }
         )

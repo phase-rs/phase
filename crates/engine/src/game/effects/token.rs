@@ -294,7 +294,7 @@ pub fn resolve(
             colors.clone(),
             keywords.clone(),
             *tapped,
-            resolve_count_value(count),
+            resolve_count_value(count, state),
         ),
         _ => (
             "Token".to_string(),
@@ -400,6 +400,19 @@ pub fn resolve(
         }
     }
 
+    // CR 609.3: Consume the tracked set after reading its size for "this way" counting.
+    if matches!(
+        &ability.effect,
+        Effect::Token {
+            count: CountValue::TrackedSetSize,
+            ..
+        }
+    ) {
+        if let Some((&id, _)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0) {
+            state.tracked_object_sets.remove(&id);
+        }
+    }
+
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
@@ -468,10 +481,17 @@ fn resolve_pt_value(value: &PtValue) -> i32 {
     }
 }
 
-fn resolve_count_value(value: &CountValue) -> u32 {
+fn resolve_count_value(value: &CountValue, state: &GameState) -> u32 {
     match value {
         CountValue::Fixed(n) => *n,
         CountValue::Variable(_) => 0,
+        // CR 609.3: "for each [thing] this way" — read the most recent tracked set size.
+        CountValue::TrackedSetSize => state
+            .tracked_object_sets
+            .iter()
+            .max_by_key(|(id, _)| id.0)
+            .map(|(_, ids)| ids.len() as u32)
+            .unwrap_or(0),
     }
 }
 

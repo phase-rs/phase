@@ -127,7 +127,7 @@ pub(crate) fn resolve_mana_types(produced: &ManaProduction) -> Vec<ManaType> {
 fn resolve_count_value(value: &CountValue) -> u32 {
     match value {
         CountValue::Fixed(n) => *n,
-        CountValue::Variable(_) => 0,
+        CountValue::Variable(_) | CountValue::TrackedSetSize => 0,
     }
 }
 

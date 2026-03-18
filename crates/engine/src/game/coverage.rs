@@ -113,6 +113,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
         TargetFilter::TrackedSet { id } => format!("tracked set #{}", id.0),
+        TargetFilter::ExiledBySource => "cards exiled by source".into(),
         TargetFilter::Not { filter } => format!("not {}", fmt_target(filter)),
         TargetFilter::Or { filters } => filters
             .iter()

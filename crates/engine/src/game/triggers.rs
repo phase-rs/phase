@@ -1081,6 +1081,11 @@ fn target_filter_matches_object(
             .tracked_object_sets
             .get(id)
             .is_some_and(|set| set.contains(&object_id)),
+        // CR 610.3: Match cards exiled by source via exile-until-leaves links.
+        TargetFilter::ExiledBySource => state
+            .exile_links
+            .iter()
+            .any(|link| link.source_id == source_id && link.exiled_id == object_id),
         // CR 603.7c / CR 506.3d: Event-context references resolve to players, not objects.
         TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner

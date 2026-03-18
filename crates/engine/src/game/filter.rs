@@ -131,6 +131,11 @@ fn filter_inner(
             .tracked_object_sets
             .get(id)
             .is_some_and(|set| set.contains(&object_id)),
+        // CR 610.3: Match cards exiled by source via exile-until-leaves links.
+        TargetFilter::ExiledBySource => state
+            .exile_links
+            .iter()
+            .any(|link| link.source_id == source_id && link.exiled_id == object_id),
         // CR 603.7c: Event-context references resolve to players, not objects.
         TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
@@ -356,6 +361,7 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
@@ -731,5 +737,47 @@ mod tests {
 
         assert!(matches_target_filter(&state, attacker, &filter, attacker));
         assert!(!matches_target_filter(&state, bystander, &filter, attacker));
+    }
+
+    #[test]
+    fn exiled_by_source_matches_linked_objects() {
+        use crate::types::game_state::ExileLink;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let exiled = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Exiled Card".into(),
+            Zone::Exile,
+        );
+        let unlinked = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Other Card".into(),
+            Zone::Exile,
+        );
+
+        // CR 610.3: ExileLink records which objects were exiled by which source.
+        state.exile_links.push(ExileLink {
+            exiled_id: exiled,
+            source_id: source,
+            return_zone: Zone::Battlefield,
+        });
+
+        let filter = TargetFilter::ExiledBySource;
+        assert!(matches_target_filter(&state, exiled, &filter, source));
+        assert!(
+            !matches_target_filter(&state, unlinked, &filter, source),
+            "unlinked object should not match ExiledBySource"
+        );
     }
 }

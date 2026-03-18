@@ -93,6 +93,21 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         return (filter, rest);
     }
 
+    // CR 610.3: "each card exiled with ~" must be intercepted before generic "each"
+    // stripping, since it's a complete filter that shouldn't enter parse_type_phrase.
+    for prefix in [
+        "each card exiled with ~",
+        "cards exiled with ~",
+        "each card exiled with this artifact",
+        "each card exiled with this enchantment",
+        "each card exiled with this creature",
+        "each card exiled with this permanent",
+    ] {
+        if lower.starts_with(prefix) {
+            return (TargetFilter::ExiledBySource, &text[prefix.len()..]);
+        }
+    }
+
     // "all" / "each" + type phrase (for *All effects)
     if lower.starts_with("all ") {
         let (filter, rest) = parse_type_phrase(&text[4..]);
@@ -1410,6 +1425,28 @@ mod tests {
                 id: TrackedSetId(0)
             }
         );
+    }
+
+    // ── ExiledBySource ──
+
+    #[test]
+    fn each_card_exiled_with_tilde_produces_exiled_by_source() {
+        let (f, rest) = parse_target("each card exiled with ~ into its owner's graveyard");
+        assert_eq!(f, TargetFilter::ExiledBySource);
+        assert_eq!(rest, " into its owner's graveyard");
+    }
+
+    #[test]
+    fn each_card_exiled_with_this_artifact_produces_exiled_by_source() {
+        let (f, rest) = parse_target("each card exiled with this artifact");
+        assert_eq!(f, TargetFilter::ExiledBySource);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn cards_exiled_with_tilde_produces_exiled_by_source() {
+        let (f, _) = parse_target("cards exiled with ~");
+        assert_eq!(f, TargetFilter::ExiledBySource);
     }
 
     // ── Bare type phrase fallback ──

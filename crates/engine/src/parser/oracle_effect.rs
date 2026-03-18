@@ -2640,12 +2640,28 @@ fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             origin,
             destination,
             target,
-        } => Effect::ChangeZone {
-            origin,
-            destination,
-            target,
-            owner_library: false,
-        },
+        } => {
+            // CR 610.3: Mass filters (ExiledBySource, TrackedSet) act on all matching
+            // objects without individual targeting — use ChangeZoneAll.
+            // ExiledBySource always originates from Exile regardless of inferred zone.
+            if matches!(
+                target,
+                TargetFilter::ExiledBySource | TargetFilter::TrackedSet { .. }
+            ) {
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Exile),
+                    destination,
+                    target,
+                }
+            } else {
+                Effect::ChangeZone {
+                    origin,
+                    destination,
+                    target,
+                    owner_library: false,
+                }
+            }
+        }
         PutImperativeAst::TopOfLibrary => Effect::ChangeZone {
             origin: None,
             destination: Zone::Library,
@@ -4331,6 +4347,16 @@ fn parse_token_description(text: &str) -> Option<TokenDescription> {
         }
     }
 
+    // CR 609.3: "for each [thing] this way" — count from preceding zone moves.
+    // Matches "for each card put into a graveyard this way", "for each creature
+    // exiled this way", etc.
+    {
+        let suffix_lower = suffix.to_lowercase();
+        if suffix_lower.contains("for each") && suffix_lower.contains("this way") {
+            count = CountValue::TrackedSetSize;
+        }
+    }
+
     if power.is_none() || toughness.is_none() {
         if let Some(pt_expression) = extract_token_pt_expression(suffix) {
             power = Some(PtValue::Variable(pt_expression.clone()));
@@ -5237,6 +5263,39 @@ mod tests {
             ),
             "exile each graveyard should have origin=Graveyard, got {e:?}"
         );
+    }
+
+    #[test]
+    fn effect_put_exiled_with_this_artifact_into_graveyard() {
+        let e = parse_effect("Put each card exiled with this artifact into its owner's graveyard");
+        assert!(
+            matches!(
+                e,
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Exile),
+                    destination: Zone::Graveyard,
+                    target: TargetFilter::ExiledBySource,
+                }
+            ),
+            "should produce ChangeZoneAll from Exile to Graveyard with ExiledBySource, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_token_for_each_this_way_produces_tracked_set_size() {
+        let e = parse_effect(
+            "create a 2/2 colorless Robot artifact creature token for each card put into a graveyard this way",
+        );
+        match e {
+            Effect::Token { count, .. } => {
+                assert_eq!(
+                    count,
+                    CountValue::TrackedSetSize,
+                    "count should be TrackedSetSize"
+                );
+            }
+            other => panic!("expected Token, got {other:?}"),
+        }
     }
 
     #[test]

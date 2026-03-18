@@ -282,6 +282,9 @@ impl<'de> serde::Deserialize<'de> for PtValue {
 pub enum CountValue {
     Fixed(u32),
     Variable(String),
+    /// CR 609.3: Count of objects moved by the preceding effect in the sub_ability chain.
+    /// Resolves to the size of the most recent tracked set recorded by `resolve_ability_chain`.
+    TrackedSetSize,
 }
 
 impl<'de> serde::Deserialize<'de> for CountValue {
@@ -302,12 +305,14 @@ impl<'de> serde::Deserialize<'de> for CountValue {
                 enum CountValueHelper {
                     Fixed(u32),
                     Variable(String),
+                    TrackedSetSize,
                 }
                 let helper: CountValueHelper =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
                 match helper {
                     CountValueHelper::Fixed(n) => Ok(CountValue::Fixed(n)),
                     CountValueHelper::Variable(s) => Ok(CountValue::Variable(s)),
+                    CountValueHelper::TrackedSetSize => Ok(CountValue::TrackedSetSize),
                 }
             }
             _ => Err(serde::de::Error::custom(
@@ -725,6 +730,9 @@ pub enum TargetFilter {
     TrackedSet {
         id: super::identifiers::TrackedSetId,
     },
+    /// CR 610.3: Cards exiled by a specific source via "exile until ~ leaves" links.
+    /// Resolves via relational `state.exile_links` lookup, not intrinsic object properties.
+    ExiledBySource,
     /// CR 603.7c: Resolves to the controller of the spell/ability that triggered this.
     TriggeringSpellController,
     /// CR 603.7c: Resolves to the owner of the spell/ability that triggered this.
@@ -2869,6 +2877,7 @@ mod tests {
             CountValue::Fixed(3),
             CountValue::Variable("X".to_string()),
             CountValue::Variable("the number of creatures you control".to_string()),
+            CountValue::TrackedSetSize,
         ];
         let json = serde_json::to_string(&values).unwrap();
         let deserialized: Vec<CountValue> = serde_json::from_str(&json).unwrap();

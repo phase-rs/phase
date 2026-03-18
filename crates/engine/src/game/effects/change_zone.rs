@@ -221,7 +221,13 @@ pub fn resolve_all(
             ability.duration.as_ref(),
             events,
         ) {
-            ZoneMoveResult::Done => {}
+            ZoneMoveResult::Done => {
+                // CR 610.3: Consume ExileLink after successfully moving the object,
+                // so check_exile_returns won't try to return it again.
+                if matches!(effective_filter, TargetFilter::ExiledBySource) {
+                    state.exile_links.retain(|link| link.exiled_id != obj_id);
+                }
+            }
             ZoneMoveResult::NeedsChoice(player) => {
                 state.waiting_for =
                     crate::game::replacement::replacement_choice_waiting_for(player, state);
@@ -651,5 +657,84 @@ mod tests {
                 "should return to battlefield"
             );
         }
+    }
+
+    #[test]
+    fn resolve_all_exiled_by_source_moves_linked_and_consumes_links() {
+        use crate::types::game_state::ExileLink;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Starcage".into(),
+            Zone::Battlefield,
+        );
+
+        // Create two exiled objects linked to source
+        let exiled1 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Bear".into(),
+            Zone::Exile,
+        );
+        let exiled2 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Sol Ring".into(),
+            Zone::Exile,
+        );
+        // An unlinked exile card (shouldn't move)
+        let unlinked = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Swords Target".into(),
+            Zone::Exile,
+        );
+
+        state.exile_links.push(ExileLink {
+            exiled_id: exiled1,
+            source_id,
+            return_zone: Zone::Battlefield,
+        });
+        state.exile_links.push(ExileLink {
+            exiled_id: exiled2,
+            source_id,
+            return_zone: Zone::Battlefield,
+        });
+        // Link from a different source — should not be consumed
+        state.exile_links.push(ExileLink {
+            exiled_id: unlinked,
+            source_id: ObjectId(999),
+            return_zone: Zone::Battlefield,
+        });
+
+        // CR 610.3: ChangeZoneAll with ExiledBySource moves linked cards to graveyard.
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Graveyard,
+                target: TargetFilter::ExiledBySource,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        // Linked objects moved to graveyard
+        assert_eq!(state.objects[&exiled1].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&exiled2].zone, Zone::Graveyard);
+        // Unlinked object stayed in exile
+        assert_eq!(state.objects[&unlinked].zone, Zone::Exile);
+
+        // Consumed ExileLinks for source, kept unrelated link
+        assert_eq!(state.exile_links.len(), 1);
+        assert_eq!(state.exile_links[0].exiled_id, unlinked);
     }
 }
