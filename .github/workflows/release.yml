@@ -1,0 +1,202 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-wasm:
+    name: Build WASM + Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          targets: wasm32-unknown-unknown
+          cache-shared-key: rust-wasm
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.114
+
+      - name: Install binaryen
+        run: sudo apt-get install -y binaryen
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+
+      - name: Generate card data
+        run: |
+          mkdir -p data/mtgjson
+          curl -L -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
+          cargo run --release --bin oracle-gen -- data/ --stats > client/public/card-data.json
+
+      - name: Build WASM
+        run: ./scripts/build-wasm.sh release
+
+      - name: Build frontend
+        run: |
+          cd client
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: client/dist
+          retention-days: 90
+
+  build-server:
+    name: Build Server (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: rust-release
+
+      - name: Build phase-server
+        run: cargo build --release --bin phase-server
+
+      - name: Upload server binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-server-linux
+          path: target/release/phase-server
+          retention-days: 90
+
+  build-tauri:
+    name: Build Tauri (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-latest
+            artifact: phase-tauri-linux
+          - os: macos
+            runner: macos-latest
+            artifact: phase-tauri-macos
+          - os: windows
+            runner: windows-latest
+            artifact: phase-tauri-windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.114
+
+      - name: Install binaryen (Linux)
+        if: matrix.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y binaryen
+
+      - name: Install binaryen (macOS)
+        if: matrix.os == 'macos'
+        run: brew install binaryen
+
+      - name: Install binaryen (Windows)
+        if: matrix.os == 'windows'
+        run: choco install binaryen
+        shell: pwsh
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+
+      - name: Install system dependencies (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Generate card data
+        run: |
+          mkdir -p data/mtgjson
+          curl -L -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
+          cargo run --release --bin oracle-gen -- data/ --stats > client/public/card-data.json
+        shell: bash
+
+      - name: Build WASM for Tauri
+        run: ./scripts/build-wasm.sh release
+        shell: bash
+
+      - name: Install frontend dependencies
+        run: cd client && pnpm install --frozen-lockfile
+
+      - name: Build Tauri
+        run: cd client && pnpm tauri:build
+
+      - name: Upload Tauri artifact (Linux)
+        if: matrix.os == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: client/src-tauri/target/release/bundle/deb/*.deb
+          retention-days: 90
+
+      - name: Upload Tauri artifact (macOS)
+        if: matrix.os == 'macos'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: client/src-tauri/target/release/bundle/dmg/*.dmg
+          retention-days: 90
+
+      - name: Upload Tauri artifact (Windows)
+        if: matrix.os == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: client/src-tauri/target/release/bundle/msi/*.msi
+          retention-days: 90
+
+  release:
+    name: Create GitHub Release
+    needs: [build-wasm, build-server, build-tauri]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/phase-server-linux/phase-server
+            artifacts/phase-tauri-linux/*.deb
+            artifacts/phase-tauri-macos/*.dmg
+            artifacts/phase-tauri-windows/*.msi

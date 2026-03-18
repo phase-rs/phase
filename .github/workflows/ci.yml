@@ -6,43 +6,82 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
-  rust:
-    name: Rust (test, clippy, fmt, WASM)
+  rust-check:
+    name: Rust (fmt, clippy, test, coverage-gate)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: rust-debug
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Install cargo-nextest
-        run: cargo install cargo-nextest --locked
+        run: cargo clippy --workspace --exclude phase-tauri --all-targets -- -D warnings
 
       - name: Run tests
-        run: cargo nextest run --all
+        run: cargo nextest run --workspace --exclude phase-tauri
 
-      - name: Standard coverage gate
+      - name: Card support coverage gate
         run: cargo run --bin coverage-report -- data/ --ci
 
-      - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin --locked
+      - name: Cache MTGJSON data
+        id: cache-mtgjson
+        uses: actions/cache@v4
+        with:
+          path: data/mtgjson/AtomicCards.json
+          key: mtgjson-atomic-v5
 
-      - name: Run Rust coverage
-        run: cargo tarpaulin --workspace --out lcov --skip-clean --timeout 120
+      - name: Download MTGJSON data
+        if: steps.cache-mtgjson.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p data/mtgjson
+          curl -L -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
+
+      - name: Verify card data is fresh
+        if: steps.cache-mtgjson.outputs.cache-hit == 'true' || success()
+        run: |
+          cargo run --release --bin oracle-gen -- data/ > /tmp/card-data-check.json
+          diff -q client/public/card-data.json /tmp/card-data-check.json || \
+            (echo "::error::card-data.json is stale — run ./scripts/gen-card-data.sh and commit" && exit 1)
+
+  rust-wasm:
+    name: Rust (WASM build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          targets: wasm32-unknown-unknown
+          cache-shared-key: rust-wasm
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.114
+
+      - name: Install binaryen
+        run: sudo apt-get install -y binaryen
 
       - name: Build WASM (release)
         run: cargo build --package engine-wasm --target wasm32-unknown-unknown --release
-
-      - name: Install wasm-bindgen-cli
-        run: cargo install wasm-bindgen-cli@0.2.114 --locked
 
       - name: Generate WASM bindings
         run: |
@@ -50,9 +89,6 @@ jobs:
             --target web \
             --out-dir wasm-out \
             target/wasm32-unknown-unknown/release/engine_wasm.wasm
-
-      - name: Install binaryen
-        run: sudo apt-get install -y binaryen
 
       - name: Optimize WASM
         run: wasm-opt -Oz wasm-out/engine_wasm_bg.wasm -o wasm-out/engine_wasm_bg.wasm
@@ -70,9 +106,17 @@ jobs:
           echo "| Raw | ${RAW_KB} KB |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Gzipped | ${GZIP_KB} KB |" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-build
+          path: wasm-out/
+          retention-days: 7
+
   frontend:
     name: Frontend (lint, type-check, test)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
