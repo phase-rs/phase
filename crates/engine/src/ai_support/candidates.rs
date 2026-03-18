@@ -453,6 +453,10 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
         }
     }
 
+    // CR 605.3a: Mana abilities can be activated any time a player has priority.
+    // Generate TapLandForMana candidates for untapped lands with activatable mana.
+    actions.extend(mana_tap_actions(state, player));
+
     // CR 702.49a: Offer Ninjutsu activations during declare blockers step
     if matches!(state.phase, Phase::DeclareBlockers | Phase::CombatDamage)
         && state.active_player == player
@@ -757,9 +761,11 @@ fn bottom_card_actions(state: &GameState, player: PlayerId, count: u8) -> Vec<Ca
         .collect()
 }
 
+/// CR 605.3a: Generate TapLandForMana candidates for untapped lands with activatable mana.
+/// Shared by both priority and mana-payment contexts.
 // Note: UntapLandForMana is intentionally omitted — it is a human-only undo action.
 // AI never populates lands_tapped_for_mana, so the handler would reject it anyway.
-fn mana_payment_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction> {
+fn mana_tap_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction> {
     let mut actions = Vec::new();
     for &obj_id in &state.battlefield {
         if let Some(obj) = state.objects.get(&obj_id) {
@@ -777,6 +783,10 @@ fn mana_payment_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAct
         }
     }
     actions
+}
+
+fn mana_payment_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction> {
+    mana_tap_actions(state, player)
 }
 fn combinations(
     items: &[crate::types::identifiers::ObjectId],
