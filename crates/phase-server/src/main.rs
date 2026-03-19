@@ -10,9 +10,9 @@ use axum::routing::get;
 use axum::Router;
 use clap::Parser;
 use engine::ai_support::legal_actions as engine_legal_actions;
-use http::HeaderValue;
 use engine::database::CardDatabase;
 use engine::types::player::PlayerId;
+use http::HeaderValue;
 use server_core::lobby::LobbyManager;
 use server_core::protocol::{ClientMessage, ServerMessage};
 use server_core::resolve_deck;
@@ -31,7 +31,11 @@ type SharedPlayerCount = Arc<AtomicU32>;
 
 /// phase-server: multiplayer game server for phase.rs
 #[derive(Parser)]
-#[command(name = "phase-server", version, about = "Multiplayer game server for phase.rs")]
+#[command(
+    name = "phase-server",
+    version,
+    about = "Multiplayer game server for phase.rs"
+)]
 struct Cli {
     /// Port to listen on
     #[arg(short, long, default_value = "9374", env = "PORT")]
@@ -138,11 +142,8 @@ async fn main() {
 
     let cors = match cli.cors_origin.as_deref() {
         Some("*") | None => CorsLayer::permissive(),
-        Some(origin) => CorsLayer::new().allow_origin(
-            origin
-                .parse::<HeaderValue>()
-                .expect("invalid CORS origin"),
-        ),
+        Some(origin) => CorsLayer::new()
+            .allow_origin(origin.parse::<HeaderValue>().expect("invalid CORS origin")),
     };
 
     let app = Router::new()
@@ -172,9 +173,8 @@ async fn shutdown_signal() {
     let ctrl_c = tokio::signal::ctrl_c();
     #[cfg(unix)]
     {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to register SIGTERM handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
         tokio::select! {
             _ = ctrl_c => info!("received Ctrl+C, shutting down"),
             _ = sigterm.recv() => info!("received SIGTERM, shutting down"),
