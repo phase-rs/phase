@@ -10,7 +10,7 @@ use crate::types::ability::ChoiceType;
 use crate::types::ability::TargetRef;
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
-use crate::types::game_state::{GameState, TargetSelectionSlot, WaitingFor};
+use crate::types::game_state::{ConvokeMode, GameState, TargetSelectionSlot, WaitingFor};
 use crate::types::match_config::DeckCardCount;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -60,7 +60,10 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
         WaitingFor::MulliganBottomCards { player, count } => {
             bottom_card_actions(state, *player, *count)
         }
-        WaitingFor::ManaPayment { player, .. } => mana_payment_actions(state, *player),
+        WaitingFor::ManaPayment {
+            player,
+            convoke_mode,
+        } => mana_payment_actions(state, *player, *convoke_mode),
         WaitingFor::TargetSelection {
             player,
             target_slots,
@@ -834,8 +837,71 @@ fn mana_tap_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
     actions
 }
 
-fn mana_payment_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction> {
-    mana_tap_actions(state, player)
+fn mana_payment_actions(
+    state: &GameState,
+    player: PlayerId,
+    convoke_mode: Option<ConvokeMode>,
+) -> Vec<CandidateAction> {
+    let mut actions = mana_tap_actions(state, player);
+    // Always include PassPriority to finalize payment and CancelCast to back out
+    actions.push(candidate(
+        GameAction::PassPriority,
+        TacticalClass::Pass,
+        Some(player),
+    ));
+    actions.push(candidate(
+        GameAction::CancelCast,
+        TacticalClass::Pass,
+        Some(player),
+    ));
+    if let Some(mode) = convoke_mode {
+        // CR 702.6b: Summoning sickness does not restrict tapping for convoke.
+        for (obj_id, obj) in &state.objects {
+            if obj.controller == player
+                && obj.zone == crate::types::zones::Zone::Battlefield
+                && !obj.tapped
+                && (obj.card_types.core_types.contains(&CoreType::Creature)
+                    || obj.card_types.core_types.contains(&CoreType::Artifact))
+            {
+                match mode {
+                    ConvokeMode::Waterbend => {
+                        // Waterbend: always colorless
+                        actions.push(candidate(
+                            GameAction::TapForConvoke {
+                                object_id: *obj_id,
+                                mana_type: crate::types::mana::ManaType::Colorless,
+                            },
+                            TacticalClass::Mana,
+                            Some(player),
+                        ));
+                    }
+                    ConvokeMode::Convoke => {
+                        // CR 702.6a: Colorless (for generic) always available
+                        actions.push(candidate(
+                            GameAction::TapForConvoke {
+                                object_id: *obj_id,
+                                mana_type: crate::types::mana::ManaType::Colorless,
+                            },
+                            TacticalClass::Mana,
+                            Some(player),
+                        ));
+                        // Plus one per color the creature has
+                        for color in &obj.color {
+                            actions.push(candidate(
+                                GameAction::TapForConvoke {
+                                    object_id: *obj_id,
+                                    mana_type: mana_sources::mana_color_to_type(color),
+                                },
+                                TacticalClass::Mana,
+                                Some(player),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    actions
 }
 fn combinations(
     items: &[crate::types::identifiers::ObjectId],
@@ -1203,7 +1269,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),
-            convoke_eligible: false,
+            convoke_mode: None,
         };
 
         let blank_land = create_object(

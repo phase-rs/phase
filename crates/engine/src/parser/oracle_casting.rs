@@ -9,7 +9,7 @@ use super::oracle_util::parse_mana_symbols;
 /// - "you may blight N" → `Optional(Blight { count: N })`
 /// - "blight N or pay {M}" → `Choice(Blight { count: N }, Mana { cost: M })`
 /// - General "X or Y" → `Choice(X, Y)` using `parse_single_cost` for each fragment
-pub(crate) fn parse_additional_cost_line(lower: &str, _raw: &str) -> Option<AdditionalCost> {
+pub fn parse_additional_cost_line(lower: &str, _raw: &str) -> Option<AdditionalCost> {
     // Pattern: "you may blight N" → Optional
     if let Some(pos) = lower.find("you may blight ") {
         let after = &lower[pos + "you may blight ".len()..];
@@ -34,12 +34,22 @@ pub(crate) fn parse_additional_cost_line(lower: &str, _raw: &str) -> Option<Addi
         }
     }
 
-    // General "X or Y" choice pattern using parse_single_cost for each fragment.
     // Strip the standard additional-cost prefix and trailing period.
     let body = lower
         .strip_prefix("as an additional cost to cast this spell, ")
         .unwrap_or(lower)
         .trim_end_matches('.');
+
+    // "waterbend {N}" as mandatory additional cost
+    if let Some(rest) = body.strip_prefix("waterbend ") {
+        if let Some((mana_cost, _)) = parse_mana_symbols(rest.trim()) {
+            return Some(AdditionalCost::Required(AbilityCost::Waterbend {
+                cost: mana_cost,
+            }));
+        }
+    }
+
+    // General "X or Y" choice pattern using parse_single_cost for each fragment.
 
     if let Some((left, right)) = body.split_once(" or ") {
         let cost_a = super::oracle_cost::parse_single_cost(left.trim());

@@ -79,6 +79,8 @@ pub enum Keyword {
 
     // Cost reduction / alternative costs
     Convoke,
+    /// Waterbend: tap-to-pay keyword for Avatar waterbending abilities.
+    Waterbend,
     Delve,
     Devoid,
 
@@ -484,6 +486,7 @@ impl FromStr for Keyword {
             "persist" => Ok(Keyword::Persist),
             "cascade" => Ok(Keyword::Cascade),
             "convoke" => Ok(Keyword::Convoke),
+            "waterbend" => Ok(Keyword::Waterbend),
             "delve" => Ok(Keyword::Delve),
             "devoid" => Ok(Keyword::Devoid),
             "exalted" => Ok(Keyword::Exalted),
@@ -632,6 +635,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Persist" => Ok(Keyword::Persist),
         "Cascade" => Ok(Keyword::Cascade),
         "Convoke" => Ok(Keyword::Convoke),
+        "Waterbend" => Ok(Keyword::Waterbend),
         "Delve" => Ok(Keyword::Delve),
         "Devoid" => Ok(Keyword::Devoid),
         "Changeling" => Ok(Keyword::Changeling),
@@ -1134,6 +1138,7 @@ mod tests {
             "Persist",
             "Cascade",
             "Convoke",
+            "Waterbend",
             "Delve",
             "Devoid",
             "Exalted",

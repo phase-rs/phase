@@ -1,9 +1,13 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{AbilityCost, AdditionalCost, ResolvedAbility};
+use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor};
+use crate::types::game_state::{
+    ConvokeMode, GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor,
+};
 use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaCostShard, ManaType};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -48,6 +52,12 @@ pub(crate) fn handle_decide_additional_cost(
             } else {
                 Some(fallback.clone())
             }
+        }
+        AdditionalCost::Required(cost) => {
+            // Required costs are always paid — the choice prompt should not be reached,
+            // but handle defensively by always paying.
+            ability.context.additional_cost_paid = true;
+            Some(cost.clone())
         }
     };
 
@@ -234,19 +244,36 @@ pub(super) fn check_additional_cost_or_pay(
         .and_then(|obj| obj.additional_cost.clone());
 
     if let Some(additional_cost) = additional {
-        return Ok(WaitingFor::OptionalCostChoice {
-            player,
-            cost: additional_cost,
-            pending_cast: Box::new(PendingCast {
-                object_id,
-                card_id,
-                ability,
-                cost: cost.clone(),
-                activation_cost: None,
-                activation_ability_index: None,
-                target_constraints: Vec::new(),
-            }),
-        });
+        match &additional_cost {
+            AdditionalCost::Required(req_cost) => {
+                // Required additional costs bypass the choice prompt — pay directly.
+                let pending = PendingCast {
+                    object_id,
+                    card_id,
+                    ability,
+                    cost: cost.clone(),
+                    activation_cost: None,
+                    activation_ability_index: None,
+                    target_constraints: Vec::new(),
+                };
+                return pay_additional_cost(state, player, req_cost.clone(), pending, events);
+            }
+            AdditionalCost::Optional(_) | AdditionalCost::Choice(_, _) => {
+                return Ok(WaitingFor::OptionalCostChoice {
+                    player,
+                    cost: additional_cost,
+                    pending_cast: Box::new(PendingCast {
+                        object_id,
+                        card_id,
+                        ability,
+                        cost: cost.clone(),
+                        activation_cost: None,
+                        activation_ability_index: None,
+                        target_constraints: Vec::new(),
+                    }),
+                });
+            }
+        }
     }
 
     pay_and_push(state, player, object_id, card_id, ability, cost, events)
@@ -354,6 +381,18 @@ fn pay_additional_cost(
                 });
             }
         }
+        AbilityCost::Waterbend { cost: wb_cost } => {
+            // Waterbend: combine waterbend mana with spell mana, enter ManaPayment with Waterbend mode.
+            let combined = restrictions::add_mana_cost(&pending.cost, &wb_cost);
+            state.pending_cast = Some(Box::new(PendingCast {
+                cost: combined,
+                ..pending
+            }));
+            return Ok(WaitingFor::ManaPayment {
+                player,
+                convoke_mode: Some(ConvokeMode::Waterbend),
+            });
+        }
         _ => {
             // Other cost types (Exile, etc.) — not yet interactive
         }
@@ -395,16 +434,89 @@ pub(super) fn pay_and_push_adventure(
     cast_as_adventure: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 702.6a: Check for Convoke or Waterbend keyword on the spell.
+    let convoke_mode = state.objects.get(&object_id).and_then(|obj| {
+        if obj.keywords.iter().any(|k| matches!(k, Keyword::Convoke)) {
+            Some(ConvokeMode::Convoke)
+        } else if obj.keywords.iter().any(|k| matches!(k, Keyword::Waterbend)) {
+            Some(ConvokeMode::Waterbend)
+        } else {
+            None
+        }
+    });
+    // Gate on eligible creatures/artifacts being present.
+    let convoke_mode = convoke_mode.filter(|_| {
+        state.objects.values().any(|o| {
+            o.controller == player
+                && o.zone == Zone::Battlefield
+                && !o.tapped
+                && (o.card_types.core_types.contains(&CoreType::Creature)
+                    || o.card_types.core_types.contains(&CoreType::Artifact))
+        })
+    });
+
     // Check for X in cost -- if present, return ManaPayment for player input
     if let crate::types::mana::ManaCost::Cost { shards, .. } = cost {
         if shards.contains(&ManaCostShard::X) {
+            state.pending_cast = Some(Box::new(PendingCast {
+                object_id,
+                card_id,
+                ability,
+                cost: cost.clone(),
+                activation_cost: None,
+                activation_ability_index: None,
+                target_constraints: vec![],
+            }));
             return Ok(WaitingFor::ManaPayment {
                 player,
-                convoke_eligible: false,
+                convoke_mode,
             });
         }
     }
 
+    // CR 702.6a: If convoke/waterbend is available, enter ManaPayment so the player can tap creatures.
+    if convoke_mode.is_some() {
+        state.pending_cast = Some(Box::new(PendingCast {
+            object_id,
+            card_id,
+            ability,
+            cost: cost.clone(),
+            activation_cost: None,
+            activation_ability_index: None,
+            target_constraints: vec![],
+        }));
+        return Ok(WaitingFor::ManaPayment {
+            player,
+            convoke_mode,
+        });
+    }
+
+    finalize_cast(
+        state,
+        player,
+        object_id,
+        card_id,
+        ability,
+        cost,
+        cast_as_adventure,
+        events,
+    )
+}
+
+/// Pay mana, move spell to stack, and return Priority.
+/// Shared finalization path used by both `pay_and_push_adventure` (normal casting)
+/// and the `(ManaPayment, PassPriority)` handler (after interactive mana payment).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn finalize_cast(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    ability: ResolvedAbility,
+    cost: &crate::types::mana::ManaCost,
+    cast_as_adventure: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     super::casting::pay_mana_cost(state, player, object_id, cost, events)?;
 
     // Record commander cast before moving (need to check zone before move)

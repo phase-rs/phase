@@ -227,6 +227,13 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         }
     }
 
+    // Waterbend {N}: tap-to-pay cost for Avatar waterbending abilities.
+    if let Some(rest) = lower.strip_prefix("waterbend ") {
+        if let Some((mana_cost, _)) = parse_mana_symbols(rest.trim()) {
+            return AbilityCost::Waterbend { cost: mana_cost };
+        }
+    }
+
     // Mana cost: {N}{W}{U} etc.
     if text.starts_with('{') {
         if let Some((cost, rest)) = parse_mana_symbols(text) {

@@ -595,6 +595,9 @@ pub enum CastingPermission {
     /// Card may be cast from exile for the specified cost by its owner.
     /// Building block for Airbending, Foretell, Suspend, and similar "cast from exile" mechanics.
     ExileWithAltCost { cost: ManaCost },
+    /// CR 400.7i: Play from exile until duration expires (impulse draw).
+    /// Building block for "exile top N, choose one, you may play it this turn" patterns.
+    PlayFromExile { duration: Duration },
 }
 
 /// When a delayed triggered ability fires (CR 603.7).
@@ -889,6 +892,8 @@ pub enum QuantityRef {
     TargetPower,
     /// CR 119.3 + CR 107.2: The life total of the targeted player.
     TargetLifeTotal,
+    /// CR 700.5: Devotion to one or more colors.
+    Devotion { colors: Vec<ManaColor> },
 }
 
 /// CR 107.2: Rounding direction for "half X" expressions in Magic.
@@ -1105,6 +1110,10 @@ pub enum AbilityCost {
     Composite {
         costs: Vec<AbilityCost>,
     },
+    /// Waterbend {N}: pay N generic mana, allowing tap-to-pay with creatures/artifacts.
+    Waterbend {
+        cost: ManaCost,
+    },
     /// CR 702.49a: Ninjutsu compound cost — pay mana and return an unblocked attacker.
     /// The return-attacker part is implicit in the ActivateNinjutsu action (player selects which).
     Ninjutsu {
@@ -1132,6 +1141,8 @@ pub enum AdditionalCost {
     /// "[cost A] or [cost B]" — player must pay exactly one.
     /// Choosing the first cost sets `additional_cost_paid = true`.
     Choice(AbilityCost, AbilityCost),
+    /// Mandatory additional cost (e.g., "As an additional cost, waterbend {5}").
+    Required(AbilityCost),
 }
 
 /// Structured spell-casting options parsed from Oracle text.
@@ -1445,6 +1456,10 @@ pub enum Effect {
         /// Keywords to grant to the animated permanent (e.g., Haste for Earthbending).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         keywords: Vec<Keyword>,
+        /// Whether this animation is an earthbending effect (emits GameEvent::Earthbend).
+        /// Mirrors how grant_permission.rs uses ExileWithAltCost to detect airbending.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        is_earthbend: bool,
     },
     /// Generic continuous effect application at resolution.
     GenericEffect {
@@ -1514,6 +1529,9 @@ pub enum Effect {
         target: TargetFilter,
         #[serde(default = "default_target_filter_any")]
         card_filter: TargetFilter,
+        /// None = reveal entire hand. Some = reveal this many cards. CR 701.16a.
+        #[serde(default)]
+        count: Option<QuantityExpr>,
     },
     /// CR 701.16a: Reveal the top N card(s) of a player's library.
     RevealTop {
@@ -1645,6 +1663,16 @@ pub enum Effect {
         permission: CastingPermission,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+    },
+    /// Choose card(s) from a zone (typically exiled cards from a prior effect).
+    /// Building block for impulse draw, cascade, hideaway, and similar exile-then-select patterns.
+    /// The selection is from the tracked set of the parent effect's result.
+    ChooseFromZone {
+        /// How many cards to choose.
+        #[serde(default = "default_one")]
+        count: u32,
+        /// Which zone the cards are in (usually Exile).
+        zone: Zone,
     },
     /// Semantic marker for effects the engine has not yet implemented a handler for.
     /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.
@@ -1782,6 +1810,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::FlipCoinUntilLose { .. } => "FlipCoinUntilLose",
         Effect::RingTemptsYou => "RingTemptsYou",
         Effect::GrantCastingPermission { .. } => "GrantCastingPermission",
+        Effect::ChooseFromZone { .. } => "ChooseFromZone",
         Effect::Unimplemented { name, .. } => name,
     }
 }
@@ -1863,6 +1892,7 @@ pub enum EffectKind {
     FlipCoinUntilLose,
     RingTemptsYou,
     GrantCastingPermission,
+    ChooseFromZone,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
     Equip,
@@ -1945,6 +1975,7 @@ impl From<&Effect> for EffectKind {
             Effect::FlipCoinUntilLose { .. } => EffectKind::FlipCoinUntilLose,
             Effect::RingTemptsYou => EffectKind::RingTemptsYou,
             Effect::GrantCastingPermission { .. } => EffectKind::GrantCastingPermission,
+            Effect::ChooseFromZone { .. } => EffectKind::ChooseFromZone,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,
         }
     }

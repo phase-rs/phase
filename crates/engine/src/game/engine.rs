@@ -6,9 +6,10 @@ use crate::types::ability::{
     ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::actions::GameAction;
-use crate::types::events::GameEvent;
+use crate::types::events::{BendingType, GameEvent};
 use crate::types::game_state::{
-    ActionResult, AutoPassMode, AutoPassRequest, GameState, WaitingFor,
+    ActionResult, AutoPassMode, AutoPassRequest, ConvokeMode, GameState, StackEntry,
+    StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
@@ -23,6 +24,7 @@ use super::ability_utils::{
     validate_modal_indices, validate_selected_targets, TargetSelectionAdvance,
 };
 use super::casting;
+use super::casting_costs;
 use super::derived::derive_display_state;
 use super::effects;
 use super::mana_abilities;
@@ -34,6 +36,7 @@ use super::planeswalker;
 use super::priority;
 use super::restrictions;
 use super::sba;
+use super::stack;
 use super::triggers;
 use super::turns;
 use super::zones;
@@ -547,13 +550,74 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             }
         }
         (WaitingFor::ManaPayment { player, .. }, GameAction::CancelCast) => {
+            // Clean up any saved pending cast info
+            state.pending_cast = None;
             WaitingFor::Priority { player: *player }
+        }
+        // Finalize mana payment: pay cost from pool and push spell/ability to stack.
+        (WaitingFor::ManaPayment { player, .. }, GameAction::PassPriority) => {
+            let pending = state.pending_cast.take().ok_or_else(|| {
+                EngineError::InvalidAction("No pending cast to finalize".to_string())
+            })?;
+            if let Some(ability_index) = pending.activation_ability_index {
+                // Activated ability finalization: pay mana, pay remaining costs, push to stack.
+                casting::pay_mana_cost(
+                    state,
+                    *player,
+                    pending.object_id,
+                    &pending.cost,
+                    &mut events,
+                )?;
+                // Pay remaining non-waterbend costs from activation_cost
+                if let Some(ref act_cost) = pending.activation_cost {
+                    casting::pay_ability_cost(
+                        state,
+                        *player,
+                        pending.object_id,
+                        act_cost,
+                        &mut events,
+                    )?;
+                }
+                let entry_id = ObjectId(state.next_object_id);
+                state.next_object_id += 1;
+                stack::push_to_stack(
+                    state,
+                    StackEntry {
+                        id: entry_id,
+                        source_id: pending.object_id,
+                        controller: *player,
+                        kind: StackEntryKind::ActivatedAbility {
+                            source_id: pending.object_id,
+                            ability: pending.ability,
+                        },
+                    },
+                    &mut events,
+                );
+                restrictions::record_ability_activation(state, pending.object_id, ability_index);
+                events.push(GameEvent::AbilityActivated {
+                    source_id: pending.object_id,
+                });
+                state.priority_passes.clear();
+                state.priority_pass_count = 0;
+                WaitingFor::Priority { player: *player }
+            } else {
+                casting_costs::finalize_cast(
+                    state,
+                    *player,
+                    pending.object_id,
+                    pending.card_id,
+                    pending.ability,
+                    &pending.cost,
+                    false, // TODO: adventure support for ManaPayment path
+                    &mut events,
+                )?
+            }
         }
         // Allow mana abilities during mana payment (mid-cast)
         (
             WaitingFor::ManaPayment {
                 player,
-                convoke_eligible,
+                convoke_mode,
             },
             GameAction::ActivateAbility {
                 source_id,
@@ -577,7 +641,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 )?;
                 WaitingFor::ManaPayment {
                     player: *player,
-                    convoke_eligible: *convoke_eligible,
+                    convoke_mode: *convoke_mode,
                 }
             } else {
                 return Err(EngineError::ActionNotAllowed(
@@ -589,7 +653,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
         (
             WaitingFor::ManaPayment {
                 player,
-                convoke_eligible,
+                convoke_mode,
             },
             GameAction::TapLandForMana { object_id },
         ) => {
@@ -601,31 +665,35 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 .push(object_id);
             WaitingFor::ManaPayment {
                 player: *player,
-                convoke_eligible: *convoke_eligible,
+                convoke_mode: *convoke_mode,
             }
         }
         (
             WaitingFor::ManaPayment {
                 player,
-                convoke_eligible,
+                convoke_mode,
             },
             GameAction::UntapLandForMana { object_id },
         ) => {
             handle_untap_land_for_mana(state, *player, object_id, &mut events)?;
             WaitingFor::ManaPayment {
                 player: *player,
-                convoke_eligible: *convoke_eligible,
+                convoke_mode: *convoke_mode,
             }
         }
-        // Waterbend / Convoke: tap a creature or artifact to pay {1} generic mana.
+        // CR 702.6a / Waterbend: Tap a creature or artifact to pay mana.
         // CR 702.6b: Summoning sickness does not apply to tapping for convoke.
         (
             WaitingFor::ManaPayment {
                 player,
-                convoke_eligible: true,
+                convoke_mode: Some(mode @ (ConvokeMode::Convoke | ConvokeMode::Waterbend)),
             },
-            GameAction::TapForConvoke { object_id },
+            GameAction::TapForConvoke {
+                object_id,
+                mana_type,
+            },
         ) => {
+            let mode = *mode;
             let obj = state
                 .objects
                 .get(&object_id)
@@ -638,35 +706,65 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 .card_types
                 .core_types
                 .contains(&crate::types::card_type::CoreType::Creature);
-            if obj.controller != *player || obj.tapped || (!is_artifact && !is_creature) {
+            if obj.controller != *player
+                || obj.tapped
+                || obj.zone != crate::types::zones::Zone::Battlefield
+                || (!is_artifact && !is_creature)
+            {
                 return Err(EngineError::ActionNotAllowed(
                     "Can only tap untapped creatures or artifacts you control for convoke"
                         .to_string(),
                 ));
             }
+            // CR 702.6a: Validate color match for Convoke.
+            let resolved_mana_type = match mode {
+                ConvokeMode::Convoke => {
+                    if let Some(color) = mana_sources::mana_type_to_color(mana_type) {
+                        // Colored mana: creature must have that color
+                        if !obj.color.contains(&color) {
+                            return Err(EngineError::ActionNotAllowed(format!(
+                                "Creature does not have color {:?} for convoke",
+                                color
+                            )));
+                        }
+                        mana_type
+                    } else {
+                        // Colorless: any creature can pay generic
+                        crate::types::mana::ManaType::Colorless
+                    }
+                }
+                // Waterbend always produces colorless
+                ConvokeMode::Waterbend => crate::types::mana::ManaType::Colorless,
+            };
             // Tap the permanent (no summoning sickness check — CR 702.6b)
             if let Some(obj) = state.objects.get_mut(&object_id) {
                 obj.tapped = true;
             }
             events.push(GameEvent::PermanentTapped { object_id });
-            // Add one colorless mana to pool to represent the {1} generic payment
-            let unit = crate::types::mana::ManaUnit::new(
-                crate::types::mana::ManaType::Colorless,
-                object_id,
-                false,
-                Vec::new(),
-            );
+            // Add mana to pool
+            let unit =
+                crate::types::mana::ManaUnit::new(resolved_mana_type, object_id, false, Vec::new());
             if let Some(p) = state.players.iter_mut().find(|p| p.id == *player) {
                 p.mana_pool.add(unit);
             }
             events.push(GameEvent::ManaAdded {
                 player_id: *player,
-                mana_type: crate::types::mana::ManaType::Colorless,
+                mana_type: resolved_mana_type,
                 source_id: object_id,
             });
+            // Only emit waterbend event for Waterbend mode
+            if mode == ConvokeMode::Waterbend {
+                events.push(GameEvent::Waterbend {
+                    source_id: object_id,
+                    controller: *player,
+                });
+                if let Some(p) = state.players.iter_mut().find(|p| p.id == *player) {
+                    p.bending_types_this_turn.insert(BendingType::Water);
+                }
+            }
             WaitingFor::ManaPayment {
                 player: *player,
-                convoke_eligible: true,
+                convoke_mode: Some(mode),
             }
         }
         (
@@ -3832,7 +3930,7 @@ mod tests {
         // Set up ManaPayment state
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),
-            convoke_eligible: false,
+            convoke_mode: None,
         };
 
         // Create a creature with a mana ability on the battlefield

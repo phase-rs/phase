@@ -39,6 +39,15 @@ pub enum DayNight {
     Night,
 }
 
+/// CR 702.6a / Waterbend: Determines tap-to-pay behavior during mana payment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConvokeMode {
+    /// CR 702.6a: Creature's color determines mana produced.
+    Convoke,
+    /// Waterbend: always produces {1} colorless, emits Waterbend event.
+    Waterbend,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExileLink {
     pub exiled_id: ObjectId,
@@ -134,10 +143,10 @@ pub enum WaitingFor {
     },
     ManaPayment {
         player: PlayerId,
-        /// When true, the player can tap untapped creatures/artifacts to pay {1} generic
-        /// each (Waterbending, Convoke). Summoning sickness does not apply.
-        #[serde(default)]
-        convoke_eligible: bool,
+        /// CR 702.6a / Waterbend: When present, the player can tap untapped
+        /// creatures/artifacts to pay mana. Summoning sickness does not apply.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        convoke_mode: Option<ConvokeMode>,
     },
     TargetSelection {
         player: PlayerId,
@@ -672,6 +681,11 @@ pub struct GameState {
     #[serde(skip)]
     pub cost_payment_failed_flag: bool,
 
+    /// Pending cast info saved when entering ManaPayment state (X-cost or convoke).
+    /// Consumed by the (ManaPayment, PassPriority) handler to finalize the cast.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_cast: Option<Box<PendingCast>>,
+
     /// CR 701.52: Per-player ring level (0-3, 4 levels total).
     #[serde(default)]
     pub ring_level: HashMap<PlayerId, u8>,
@@ -804,6 +818,7 @@ impl GameState {
             restrictions: Vec::new(),
             current_trigger_event: None,
             cost_payment_failed_flag: false,
+            pending_cast: None,
             ring_level: HashMap::new(),
             ring_bearer: HashMap::new(),
         }
@@ -931,6 +946,7 @@ impl PartialEq for GameState {
             && self.modal_modes_chosen_this_turn == other.modal_modes_chosen_this_turn
             && self.modal_modes_chosen_this_game == other.modal_modes_chosen_this_game
             && self.pending_continuation == other.pending_continuation
+            && self.pending_cast == other.pending_cast
             && self.last_named_choice == other.last_named_choice
     }
 }
@@ -1047,7 +1063,7 @@ mod tests {
             },
             WaitingFor::ManaPayment {
                 player: PlayerId(0),
-                convoke_eligible: false,
+                convoke_mode: None,
             },
             WaitingFor::DeclareAttackers {
                 player: PlayerId(0),

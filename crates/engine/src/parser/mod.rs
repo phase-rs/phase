@@ -1,5 +1,5 @@
 pub mod oracle;
-pub(crate) mod oracle_casting;
+pub mod oracle_casting;
 pub(crate) mod oracle_class;
 pub mod oracle_cost;
 pub mod oracle_effect;

@@ -563,10 +563,14 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::RevealHand {
             target,
             card_filter,
+            count,
         } => {
             d.push(("player".into(), fmt_target(target)));
             if !matches!(card_filter, TargetFilter::Any) {
                 d.push(("card filter".into(), fmt_target(card_filter)));
+            }
+            if let Some(c) = count {
+                d.push(("count".into(), format!("{c:?}")));
             }
         }
         Effect::RevealTop { player, count } => {
@@ -662,7 +666,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::LoseTheGame
         | Effect::WinTheGame
         | Effect::RingTemptsYou
-        | Effect::GrantCastingPermission { .. } => {}
+        | Effect::GrantCastingPermission { .. }
+        | Effect::ChooseFromZone { .. } => {}
     }
     d
 }
@@ -947,7 +952,9 @@ fn build_cost_item(cost: &AbilityCost, items: &mut Vec<ParsedItem>) {
 /// Build `ParsedItem` nodes for additional costs (kicker, etc.).
 fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec<ParsedItem>) {
     match additional_cost {
-        AdditionalCost::Optional(cost) => build_cost_item(cost, items),
+        AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
+            build_cost_item(cost, items);
+        }
         AdditionalCost::Choice(first, second) => {
             build_cost_item(first, items);
             build_cost_item(second, items);
@@ -1591,7 +1598,9 @@ fn ability_definition_has_unimplemented_parts(def: &AbilityDefinition) -> bool {
 
 fn additional_cost_has_unimplemented_parts(additional_cost: &AdditionalCost) -> bool {
     match additional_cost {
-        AdditionalCost::Optional(cost) => ability_cost_has_unimplemented_parts(cost),
+        AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
+            ability_cost_has_unimplemented_parts(cost)
+        }
         AdditionalCost::Choice(first, second) => {
             ability_cost_has_unimplemented_parts(first)
                 || ability_cost_has_unimplemented_parts(second)
@@ -1633,7 +1642,9 @@ fn collect_additional_cost_missing_parts(
     missing: &mut Vec<String>,
 ) {
     match additional_cost {
-        AdditionalCost::Optional(cost) => collect_ability_cost_missing_parts(cost, missing),
+        AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
+            collect_ability_cost_missing_parts(cost, missing);
+        }
         AdditionalCost::Choice(first, second) => {
             collect_ability_cost_missing_parts(first, missing);
             collect_ability_cost_missing_parts(second, missing);

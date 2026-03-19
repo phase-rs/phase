@@ -175,7 +175,7 @@ fn mana_options_from_production(produced: &ManaProduction) -> Vec<ManaType> {
     }
 }
 
-fn mana_color_to_type(color: &ManaColor) -> ManaType {
+pub fn mana_color_to_type(color: &ManaColor) -> ManaType {
     match color {
         ManaColor::White => ManaType::White,
         ManaColor::Blue => ManaType::Blue,
@@ -185,7 +185,7 @@ fn mana_color_to_type(color: &ManaColor) -> ManaType {
     }
 }
 
-fn mana_type_to_color(mana_type: ManaType) -> Option<ManaColor> {
+pub fn mana_type_to_color(mana_type: ManaType) -> Option<ManaColor> {
     match mana_type {
         ManaType::White => Some(ManaColor::White),
         ManaType::Blue => Some(ManaColor::Blue),

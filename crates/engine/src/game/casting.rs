@@ -2,9 +2,11 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, Effect, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor};
+use crate::types::game_state::{
+    ConvokeMode, GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor,
+};
 use crate::types::identifiers::{CardId, ObjectId};
-use crate::types::mana::SpellMeta;
+use crate::types::mana::{ManaCost, SpellMeta};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -171,6 +173,7 @@ fn has_exile_cast_permission(obj: &crate::game::game_object::GameObject) -> bool
             p,
             crate::types::ability::CastingPermission::AdventureCreature
                 | crate::types::ability::CastingPermission::ExileWithAltCost { .. }
+                | crate::types::ability::CastingPermission::PlayFromExile { .. }
         )
     })
 }
@@ -841,6 +844,8 @@ pub fn pay_ability_cost(
                 // intercepted before reaching pay_ability_cost.
             }
         }
+        // Waterbend cost was already paid via ManaPayment before reaching pay_ability_cost.
+        AbilityCost::Waterbend { .. } => {}
         // Other cost types (Exile, PayLife, etc.) require interactive resolution
         // and are not yet auto-payable. Pass through to allow the ability to resolve.
         _ => {}
@@ -858,6 +863,15 @@ pub fn pay_unless_cost(
 ) -> Result<(), EngineError> {
     // Use ObjectId(0) as a dummy source since there's no specific object paying
     pay_mana_cost(state, player, ObjectId(0), cost, events)
+}
+
+/// Walk a cost tree and return the waterbend mana cost if present.
+fn find_waterbend_cost(cost: &AbilityCost) -> Option<&ManaCost> {
+    match cost {
+        AbilityCost::Waterbend { cost } => Some(cost),
+        AbilityCost::Composite { costs } => costs.iter().find_map(find_waterbend_cost),
+        _ => None,
+    }
 }
 
 /// Walk a cost tree and return the first non-SelfRef sacrifice filter found, if any.
@@ -1074,11 +1088,28 @@ pub fn handle_activate_ability(
                     object_id: source_id,
                     card_id: CardId(0),
                     ability: resolved,
-                    cost: crate::types::mana::ManaCost::NoCost,
+                    cost: ManaCost::NoCost,
                     activation_cost: Some(cost.clone()),
                     activation_ability_index: Some(ability_index),
                     target_constraints: Vec::new(),
                 }),
+            });
+        }
+
+        // Waterbend cost: detour to ManaPayment with Waterbend mode.
+        if let Some(wb_cost) = find_waterbend_cost(cost) {
+            state.pending_cast = Some(Box::new(PendingCast {
+                object_id: source_id,
+                card_id: CardId(0),
+                ability: resolved,
+                cost: wb_cost.clone(),
+                activation_cost: Some(cost.clone()),
+                activation_ability_index: Some(ability_index),
+                target_constraints: Vec::new(),
+            }));
+            return Ok(WaitingFor::ManaPayment {
+                player,
+                convoke_mode: Some(ConvokeMode::Waterbend),
             });
         }
     }
