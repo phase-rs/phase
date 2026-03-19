@@ -117,6 +117,12 @@ fn counterspell_score(ctx: &PolicyContext<'_>) -> f64 {
 }
 
 fn combat_trick_score(ctx: &PolicyContext<'_>) -> f64 {
+    // Pump effects expire at cleanup — casting during End/Cleanup has no lasting impact.
+    // Penalty must exceed max search continuation bonus to prevent selection.
+    if matches!(ctx.state.phase, Phase::End | Phase::Cleanup) {
+        return -2.0;
+    }
+
     let patience = ctx.config.profile.interaction_patience;
     let intent_bonus = match ctx.strategic_intent() {
         StrategicIntent::PushLethal => 0.2,
@@ -130,5 +136,53 @@ fn combat_trick_score(ctx: &PolicyContext<'_>) -> f64 {
         (0.8 * patience.max(0.5)) + intent_bonus
     } else {
         -0.5 * patience
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AiConfig;
+    use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::types::game_state::{GameState, WaitingFor};
+    use engine::types::identifiers::CardId;
+    use engine::types::player::PlayerId;
+
+    #[test]
+    fn combat_trick_strongly_penalized_end_step() {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::End;
+        state.active_player = PlayerId(0);
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                card_id: CardId(1),
+                targets: Vec::new(),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Spell,
+            },
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+        };
+
+        let score = combat_trick_score(&ctx);
+        assert!(
+            score < -1.5,
+            "Combat trick should be strongly penalized during End step, got {score}"
+        );
     }
 }

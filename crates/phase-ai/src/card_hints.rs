@@ -86,9 +86,16 @@ pub fn should_play_now(state: &GameState, action: &GameAction, player: PlayerId)
                 return (0.5 + (max_threat / 30.0).min(0.4)).min(0.9);
             }
 
-            // Combat tricks: highest during combat
+            // Combat tricks: highest during combat, near-zero during end/cleanup
+            // (pump effects expire at cleanup — casting then has no lasting impact)
             if has_pump {
-                return if is_combat { 0.9 } else { 0.3 };
+                return if is_combat {
+                    0.9
+                } else if matches!(state.phase, Phase::End | Phase::Cleanup) {
+                    0.05
+                } else {
+                    0.3
+                };
             }
 
             // Counterspells: only worth casting if there's something on the stack
@@ -120,7 +127,7 @@ pub fn should_play_now(state: &GameState, action: &GameAction, player: PlayerId)
 mod tests {
     use super::*;
     use engine::game::zones::create_object;
-    use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, TargetFilter};
+    use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, PtValue, TargetFilter};
     use engine::types::card_type::CoreType;
     use engine::types::identifiers::CardId;
     use engine::types::mana::ManaCost;
@@ -364,5 +371,92 @@ mod tests {
             score_pre > score_post,
             "Creatures should prefer pre-combat main"
         );
+    }
+
+    #[test]
+    fn pump_spell_near_zero_during_end_step() {
+        let mut state = make_state();
+        state.phase = Phase::End;
+        let card_id = add_spell_to_hand(
+            &mut state,
+            PlayerId(0),
+            "Giant Growth",
+            CoreType::Instant,
+            vec![make_ability(Effect::Pump {
+                power: PtValue::Fixed(3),
+                toughness: PtValue::Fixed(3),
+                target: TargetFilter::Any,
+            })],
+        );
+
+        let score = should_play_now(
+            &state,
+            &GameAction::CastSpell {
+                card_id,
+                targets: Vec::new(),
+            },
+            PlayerId(0),
+        );
+        assert!(
+            score <= 0.1,
+            "Pump spell should score near zero during End step, got {score}"
+        );
+    }
+
+    #[test]
+    fn pump_spell_near_zero_during_cleanup() {
+        let mut state = make_state();
+        state.phase = Phase::Cleanup;
+        let card_id = add_spell_to_hand(
+            &mut state,
+            PlayerId(0),
+            "Giant Growth",
+            CoreType::Instant,
+            vec![make_ability(Effect::Pump {
+                power: PtValue::Fixed(3),
+                toughness: PtValue::Fixed(3),
+                target: TargetFilter::Any,
+            })],
+        );
+
+        let score = should_play_now(
+            &state,
+            &GameAction::CastSpell {
+                card_id,
+                targets: Vec::new(),
+            },
+            PlayerId(0),
+        );
+        assert!(
+            score <= 0.1,
+            "Pump spell should score near zero during Cleanup, got {score}"
+        );
+    }
+
+    #[test]
+    fn pump_spells_high_during_combat() {
+        let mut state = make_state();
+        state.phase = Phase::DeclareBlockers;
+        let card_id = add_spell_to_hand(
+            &mut state,
+            PlayerId(0),
+            "Giant Growth",
+            CoreType::Instant,
+            vec![make_ability(Effect::Pump {
+                power: PtValue::Fixed(3),
+                toughness: PtValue::Fixed(3),
+                target: TargetFilter::Any,
+            })],
+        );
+
+        let score = should_play_now(
+            &state,
+            &GameAction::CastSpell {
+                card_id,
+                targets: Vec::new(),
+            },
+            PlayerId(0),
+        );
+        assert_eq!(score, 0.9, "Pump spell should score 0.9 during combat");
     }
 }
