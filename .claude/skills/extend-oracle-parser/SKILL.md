@@ -23,10 +23,10 @@ normalize_self_refs() — card name → ~
 parse_oracle_text() — classify line by priority
     ├─ Keywords-only → keyword extraction
     ├─ "When/Whenever/At" → parse_trigger_line()      [oracle_trigger.rs]
-    ├─ Contains ":" → parse activated ability           [oracle_cost.rs + oracle_effect.rs]
+    ├─ Contains ":" → parse activated ability           [oracle_cost.rs + oracle_effect/]
     ├─ is_static_pattern() → parse_static_line()       [oracle_static.rs]
     ├─ is_replacement_pattern() → parse_replacement()   [oracle_replacement.rs]
-    ├─ Imperative verb → parse_effect_chain()           [oracle_effect.rs]
+    ├─ Imperative verb → parse_effect_chain()           [oracle_effect/]
     └─ Fallback → Effect::Unimplemented
 ```
 
@@ -47,11 +47,11 @@ Lines are classified in this exact order. **The first match wins.** Understandin
 | 7 | Starts with `"When"` / `"Whenever"` / `"At"` | `parse_trigger_line()` | `oracle_trigger.rs` |
 | 8 | `is_static_pattern()` matches | `parse_static_line()` | `oracle_static.rs` |
 | 9 | `is_replacement_pattern()` matches | `parse_replacement()` | `oracle_replacement.rs` |
-| 10 | Card is Instant/Sorcery + looks like imperative | `parse_effect_chain()` | `oracle_effect.rs` |
+| 10 | Card is Instant/Sorcery + looks like imperative | `parse_effect_chain()` | `oracle_effect/` |
 | 11 | Roman numeral (saga chapter) | Skipped | — |
 | 12 | Keyword cost line (kicker, etc.) | Skipped (MTGJSON handles) | — |
 | 13 | Has ability word prefix (`"Landfall —"`) | Strip prefix, re-classify from priority 7 | `oracle.rs` |
-| 14 | Looks like effect sentence (non-spell) | `parse_effect_chain()` | `oracle_effect.rs` |
+| 14 | Looks like effect sentence (non-spell) | `parse_effect_chain()` | `oracle_effect/` |
 | 15 | Fallback | `Effect::Unimplemented` | — |
 
 ### `is_static_pattern()` — `oracle.rs`
@@ -75,7 +75,7 @@ Detects replacement effect text:
 
 ## The Effect Parsing Pipeline
 
-### `parse_effect_chain()` — `crates/engine/src/parser/oracle_effect.rs`
+### `parse_effect_chain()` — `crates/engine/src/parser/oracle_effect/mod.rs`
 
 Handles multi-sentence abilities by splitting on `. ` and `, then ` boundaries:
 
@@ -126,7 +126,7 @@ parse_effect_clause()
 
 When adding a pattern, first decide whether it belongs in an existing family. Only add a new family when the sentence shape is genuinely different.
 
-### `parse_effect_clause()` — same file
+### `parse_effect_clause()` — `oracle_effect/mod.rs`
 
 Current processing order:
 
@@ -136,11 +136,11 @@ Current processing order:
 4. Lower the AST
 5. For imperative clauses, strip trailing duration and lower through imperative-family parsing
 
-### `parse_imperative_effect()` — same file
+### `parse_imperative_effect()` — `oracle_effect/mod.rs`
 
-`parse_imperative_effect()` still owns the imperative fallback, but most work now belongs in the typed `parse_*_ast()` helpers under `parse_imperative_family_ast()`.
+`parse_imperative_effect()` still owns the imperative fallback, but most work now belongs in the typed `parse_*_ast()` helpers under `parse_imperative_family_ast()` in `oracle_effect/imperative.rs`.
 
-Use these registration points:
+Use these registration points (all in `oracle_effect/imperative.rs`):
 
 - `parse_numeric_imperative_ast()` — draw/gain-life/lose-life/pump/scry/surveil/mill
 - `parse_zone_counter_ast()` — destroy/exile/counter/put-counter
@@ -161,7 +161,7 @@ Use these registration points:
 
 ### What it does
 
-`strip_subject_clause()` is now a fallback helper, not the primary sentence model. The parser first tries to build a `SubjectPredicate` AST; only the fallback path strips the grammatical subject and lowers the remainder as an imperative.
+`strip_subject_clause()` (in `oracle_effect/subject.rs`) is now a fallback helper, not the primary sentence model. The parser first tries to build a `SubjectPredicate` AST via `try_parse_subject_predicate_ast()` (also in `subject.rs`); only the fallback path strips the grammatical subject and lowers the remainder as an imperative.
 
 ```
 "Target creature gets +2/+2"  →  "gets +2/+2"
@@ -235,12 +235,12 @@ Detects zone qualifiers after a type phrase. Handles possessive ("from your grav
 | `starts_with_possessive(text)` | Same, anchored at start | Subject detection |
 | `contains_object_pronoun(text)` | Matches "it"/"them"/"that card"/"those cards" | Anaphoric references in compound effects |
 
-### `oracle_phrase.rs` — Phrase Matching
+### `oracle_util.rs` — Phrase Matching
 
 **`match_phrase_variants(text, phrases) → bool`**
 Shared backbone for phrase helpers. Normalizes and checks against a list of patterns.
 
-All phrase helpers (`contains_possessive`, `contains_object_pronoun`, etc.) are built on this function. If you need a new phrase helper, implement it via `match_phrase_variants()` rather than duplicating normalization logic.
+All phrase helpers (`contains_possessive`, `contains_object_pronoun`, etc.) are built on this function. If you need a new phrase helper, implement it via `match_phrase_variants()` in `oracle_util.rs` rather than duplicating normalization logic.
 
 ---
 
@@ -269,8 +269,8 @@ Getting this wrong produces **silent** failures:
 
 Determine which parser module handles your text:
 
-- **Imperative verb/family** ("exile", "draw", "create", "choose", "put", "shuffle") → the relevant `parse_*_ast()` helper in `oracle_effect.rs`
-- **Subject + predicate** ("Target creature gets...") → `try_parse_*` or subject stripping in `oracle_effect.rs`
+- **Imperative verb/family** ("exile", "draw", "create", "choose", "put", "shuffle") → the relevant `parse_*_ast()` helper in `oracle_effect/`
+- **Subject + predicate** ("Target creature gets...") → `try_parse_*` or subject stripping in `oracle_effect/`
 - **Trigger** ("When/Whenever/At") → `parse_trigger_line()` in `oracle_trigger.rs`
 - **Static** ("has/gets/can't") → `parse_static_line()` in `oracle_static.rs`
 - **Replacement** ("As enters", "instead") → `parse_replacement()` in `oracle_replacement.rs`
@@ -328,7 +328,7 @@ Determine which parser module handles your text:
 If you need to detect a new recurring phrase pattern:
 
 1. Identify the phrase variants (e.g., "sacrifice a creature", "sacrifice a permanent", "sacrifices a")
-2. Implement via `match_phrase_variants()` in `oracle_phrase.rs`
+2. Implement via `match_phrase_variants()` in `oracle_util.rs`
 3. Export from the module and use in parsers
 4. Add tests for all variants
 
@@ -380,10 +380,10 @@ After completing work using this skill:
 rg -q "fn parse_oracle_text" crates/engine/src/parser/oracle.rs && \
 rg -q "fn is_static_pattern" crates/engine/src/parser/oracle.rs && \
 rg -q "fn is_replacement_pattern" crates/engine/src/parser/oracle.rs && \
-rg -q "fn parse_effect_chain" crates/engine/src/parser/oracle_effect.rs && \
-rg -q "fn parse_effect_clause" crates/engine/src/parser/oracle_effect.rs && \
-rg -q "fn parse_imperative_effect" crates/engine/src/parser/oracle_effect.rs && \
-rg -q "fn strip_subject_clause" crates/engine/src/parser/oracle_effect.rs && \
+rg -q "fn parse_effect_chain" crates/engine/src/parser/oracle_effect/ && \
+rg -q "fn parse_effect_clause" crates/engine/src/parser/oracle_effect/ && \
+rg -q "fn parse_imperative_effect" crates/engine/src/parser/oracle_effect/ && \
+rg -q "fn strip_subject_clause" crates/engine/src/parser/oracle_effect/ && \
 rg -q "fn parse_target" crates/engine/src/parser/oracle_target.rs && \
 rg -q "fn parse_type_phrase" crates/engine/src/parser/oracle_target.rs && \
 rg -q "fn parse_number" crates/engine/src/parser/oracle_util.rs && \

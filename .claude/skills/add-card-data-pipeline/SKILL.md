@@ -30,6 +30,7 @@ HashMap<String, Vec<AtomicCard>>
     │   ├─ parse_oracle_text() → ParsedAbilities { abilities, triggers, statics, replacements }
     │   ├─ synthesize_basic_land_mana()
     │   ├─ synthesize_equip()
+    │   ├─ synthesize_ninjutsu()
     │   ├─ synthesize_changeling_cda()
     │   └─ synthesize_kicker()
     ↓ export: crates/engine/src/bin/oracle_gen.rs
@@ -103,8 +104,9 @@ pub struct AtomicCard {
 2. `parse_oracle_text()` — runs Oracle parser → `ParsedAbilities`
 3. `synthesize_basic_land_mana()` — injects tap-for-mana for Plains/Island/Swamp/Mountain/Forest
 4. `synthesize_equip()` — converts `Keyword::Equip(cost)` → activated `Effect::Attach`
-5. `synthesize_changeling_cda()` — converts `Keyword::Changeling` → CDA static ability
-6. `synthesize_kicker()` — converts `Keyword::Kicker(cost)` into `additional_cost`
+5. `synthesize_ninjutsu()` — converts `Keyword::Ninjutsu(cost)` → activated ninjutsu ability
+6. `synthesize_changeling_cda()` — converts `Keyword::Changeling` → CDA static ability
+7. `synthesize_kicker()` — converts `Keyword::Kicker(cost)` into `additional_cost`
 
 ### Export Binary — `crates/engine/src/bin/oracle_gen.rs`
 

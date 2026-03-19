@@ -29,6 +29,7 @@ fn main() {
             coverage_by_format: Default::default(),
             cards: vec![],
             missing_handler_frequency: vec![],
+            top_gaps: vec![],
         };
         println!("{}", serde_json::to_string_pretty(&empty).unwrap());
         process::exit(0);
@@ -51,6 +52,7 @@ fn main() {
                 coverage_by_format: Default::default(),
                 cards: vec![],
                 missing_handler_frequency: vec![],
+                top_gaps: vec![],
             };
             println!("{}", serde_json::to_string_pretty(&empty).unwrap());
             process::exit(1);
@@ -75,5 +77,30 @@ fn main() {
             format_summary.total_cards,
             format_summary.coverage_pct
         );
+    }
+
+    // Print top gaps with format breakdown
+    if !summary.top_gaps.is_empty() {
+        eprintln!();
+        eprintln!("Top gaps by single-gap card unlock potential:");
+        for gap in summary.top_gaps.iter().take(15) {
+            if gap.single_gap_cards == 0 {
+                continue;
+            }
+            let format_str: String =
+                ["standard", "modern", "pioneer", "pauper", "commander"]
+                    .iter()
+                    .filter_map(|&f| {
+                        gap.single_gap_by_format
+                            .get(f)
+                            .map(|count| format!("{}:{}", &f[..3], count))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+            eprintln!(
+                "  {} — {} total, {} single-gap [{}]",
+                gap.handler, gap.total_count, gap.single_gap_cards, format_str
+            );
+        }
     }
 }

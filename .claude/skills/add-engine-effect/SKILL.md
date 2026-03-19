@@ -106,7 +106,7 @@ Only needed if the effect has a `target: TargetFilter` field that isn't `None`/`
 
 **Goal:** Oracle text for this effect produces the correct typed `Effect` variant.
 
-- [ ] **`crates/engine/src/parser/oracle_effect.rs` — the right `parse_*_ast()` helper**
+- [ ] **`crates/engine/src/parser/oracle_effect/` — the right `parse_*_ast()` helper**
   Most new effect parser work now belongs in a typed imperative-family helper, not directly in a flat verb list. Register the pattern in the smallest matching parser:
   - `parse_numeric_imperative_ast()`
   - `parse_zone_counter_ast()`
@@ -119,15 +119,15 @@ Only needed if the effect has a `target: TargetFilter` field that isn't `None`/`
   - `parse_shuffle_ast()`
   - `parse_utility_imperative_ast()`
 
-- [ ] **`crates/engine/src/parser/oracle_effect.rs` — subject-preserving helpers (if needed)**
+- [ ] **`crates/engine/src/parser/oracle_effect/` — subject-preserving helpers (if needed)**
   If the subject of the sentence carries game-relevant information (who does it, who it targets), preserve it before fallback subject stripping. The current pattern is `try_parse_targeted_controller_gain_life()` in `lower_imperative_clause()`. See `docs/parser-instructions.md` § "Subject Stripping" for the full rationale.
 
-- [ ] **`crates/engine/src/parser/oracle_effect.rs` — `parse_effect_chain()` integration**
+- [ ] **`crates/engine/src/parser/oracle_effect/` — `parse_effect_chain()` integration**
   If the effect commonly appears as part of a multi-sentence ability (e.g., "Look at target opponent's hand. You may choose a nonland card from it. Exile that card."), ensure the sentence splitting and `sub_ability` chaining produces the right structure. The engine composes effects via `sub_ability` chains — don't create mega-effects that do multiple things.
 
   **Absorption pattern:** Some sentences modify a preceding effect rather than creating a new sub_ability. Examples: RevealHand absorbs card filters, SearchLibrary absorbs destinations, `Effect::Mana` absorbs "Spend this mana only to cast..." clauses as `ManaSpendRestriction`, and `Effect::Counter` can absorb follow-up `source_static`. If your new effect has modifier sentences, add absorption logic in `parse_effect_chain()` — don't emit them as separate sub_abilities.
 
-- [ ] **`crates/engine/src/parser/oracle_effect.rs` — parser tests**
+- [ ] **`crates/engine/src/parser/oracle_effect/` — parser tests**
   Every new pattern **must** have a `#[test]` in the inline test module:
   ```rust
   #[test]
@@ -139,7 +139,7 @@ Only needed if the effect has a `target: TargetFilter` field that isn't `None`/`
 
 #### Parser Helpers Reference
 
-These helpers live in `oracle_effect.rs` / `oracle_phrase.rs`. Know them — they eliminate entire classes of edge cases.
+These helpers live in `oracle_effect/` and `oracle_util.rs`. Know them — they eliminate entire classes of edge cases.
 
 **Possessive helpers** — detect who "owns" something without requiring explicit targeting:
 
@@ -233,7 +233,7 @@ Only needed if the effect reveals or hides information (hands, face-down cards, 
   If the effect materially changes board evaluation (e.g., exile vs. destroy), ensure the AI's state evaluator accounts for it.
 
 - [ ] **`crates/engine/src/ai_support/candidates.rs` — action generation**
-  If the effect introduces a new `WaitingFor` / `GameAction` pair, the AI needs to generate legal responses. Legal action generation lives in `engine::ai_support::legal_actions()` → `validated_candidate_actions()`.
+  If the effect introduces a new `WaitingFor` / `GameAction` pair, the AI needs to generate legal responses. Legal action generation lives in `engine::ai_support::legal_actions()` → `candidate_actions()`.
 
 ### Phase 8 — Verification
 
@@ -272,7 +272,7 @@ Only needed if the effect reveals or hides information (hands, face-down cards, 
 Oracle text (MTGJSON)
   │
   ▼
-Parser (oracle_effect.rs) ──► Effect variant (types/ability.rs)
+Parser (oracle_effect/) ──► Effect variant (types/ability.rs)
   │                              │
   ▼                              ▼
 AbilityDefinition ──────► card-data.json (exported)

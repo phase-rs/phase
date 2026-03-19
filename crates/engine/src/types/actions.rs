@@ -105,6 +105,53 @@ pub enum GameAction {
     CancelAutoPass,
 }
 
+impl GameAction {
+    /// Whether this action should prevent auto-passing priority.
+    ///
+    /// Mana abilities (CR 605.3a) are always legal during priority but do not
+    /// represent meaningful decisions on their own — tapping a land with nothing
+    /// to spend the mana on should not hold up the game. Similarly, PassPriority
+    /// and UI-only actions (SetAutoPass, CancelAutoPass) are never meaningful.
+    ///
+    /// Uses exhaustive match so new variants must explicitly opt in or out.
+    pub fn is_priority_holding(&self) -> bool {
+        match self {
+            // Non-holding: pass, mana abilities, and UI-only controls
+            GameAction::PassPriority
+            | GameAction::TapLandForMana { .. }
+            | GameAction::UntapLandForMana { .. }
+            | GameAction::SetAutoPass { .. }
+            | GameAction::CancelAutoPass => false,
+
+            // Holding: any action that represents a meaningful game decision
+            GameAction::PlayLand { .. }
+            | GameAction::CastSpell { .. }
+            | GameAction::ActivateAbility { .. }
+            | GameAction::DeclareAttackers { .. }
+            | GameAction::DeclareBlockers { .. }
+            | GameAction::MulliganDecision { .. }
+            | GameAction::SelectCards { .. }
+            | GameAction::SelectTargets { .. }
+            | GameAction::ChooseTarget { .. }
+            | GameAction::ChooseReplacement { .. }
+            | GameAction::CancelCast
+            | GameAction::Equip { .. }
+            | GameAction::Transform { .. }
+            | GameAction::PlayFaceDown { .. }
+            | GameAction::TurnFaceUp { .. }
+            | GameAction::SubmitSideboard { .. }
+            | GameAction::ChoosePlayDraw { .. }
+            | GameAction::ChooseOption { .. }
+            | GameAction::SelectModes { .. }
+            | GameAction::DecideOptionalCost { .. }
+            | GameAction::ChooseAdventureFace { .. }
+            | GameAction::ActivateNinjutsu { .. }
+            | GameAction::DecideOptionalEffect { .. }
+            | GameAction::PayUnlessCost { .. } => true,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

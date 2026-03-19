@@ -65,6 +65,16 @@ pub struct CardCoverageResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GapFrequency {
+    pub handler: String,
+    pub total_count: usize,
+    /// How many unsupported cards have this as their ONLY gap (would be unlocked by fixing it)
+    pub single_gap_cards: usize,
+    /// Breakdown by format: how many single-gap cards are legal in each format
+    pub single_gap_by_format: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoverageSummary {
     pub total_cards: usize,
     pub supported_cards: usize,
@@ -73,6 +83,8 @@ pub struct CoverageSummary {
     pub coverage_by_format: BTreeMap<String, FormatCoverageSummary>,
     pub cards: Vec<CardCoverageResult>,
     pub missing_handler_frequency: Vec<(String, usize)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub top_gaps: Vec<GapFrequency>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -952,6 +964,43 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
     let mut missing_handler_frequency: Vec<(String, usize)> = freq.into_iter().collect();
     missing_handler_frequency.sort_by_key(|b| std::cmp::Reverse(b.1));
 
+    // Compute enriched top_gaps: single-gap card counts with format breakdown
+    let top_gaps = {
+        let mut gap_data: HashMap<String, (usize, BTreeMap<String, usize>)> = HashMap::new();
+
+        for card in &cards {
+            if card.missing_handlers.len() == 1 {
+                let handler = &card.missing_handlers[0];
+                let entry = gap_data.entry(handler.clone()).or_default();
+                entry.0 += 1;
+
+                for format in LegalityFormat::ALL {
+                    if card_db
+                        .legality_status(&card.card_name, format)
+                        .is_some_and(|status| status.is_legal())
+                    {
+                        *entry.1.entry(format.as_key().to_string()).or_default() += 1;
+                    }
+                }
+            }
+        }
+
+        missing_handler_frequency
+            .iter()
+            .take(50)
+            .map(|(handler, total_count)| {
+                let (single_gap_cards, single_gap_by_format) =
+                    gap_data.remove(handler).unwrap_or_default();
+                GapFrequency {
+                    handler: handler.clone(),
+                    total_count: *total_count,
+                    single_gap_cards,
+                    single_gap_by_format,
+                }
+            })
+            .collect()
+    };
+
     let coverage_by_format = coverage_by_format_accumulators
         .into_iter()
         .map(|(format, (total_cards, supported_cards))| {
@@ -978,6 +1027,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         coverage_by_format,
         cards,
         missing_handler_frequency,
+        top_gaps,
     }
 }
 

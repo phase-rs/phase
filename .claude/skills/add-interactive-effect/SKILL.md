@@ -167,7 +167,7 @@ When the continuation is created, parent targets propagate down if the sub-abili
 ### Phase 4 — AI Legal Actions
 
 - [ ] **`crates/engine/src/ai_support/candidates.rs` — candidate action generation**
-  Legal action generation now lives in the engine crate (`engine::ai_support`), not in `phase-ai`. The entry point is `engine::ai_support::legal_actions(state)` which calls `validated_candidate_actions()`. Add a match arm generating all legal responses for your `WaitingFor` variant:
+  Legal action generation now lives in the engine crate (`engine::ai_support`), not in `phase-ai`. The entry point is `engine::ai_support::legal_actions(state)` which calls `candidate_actions()`. Add a match arm generating all legal responses for your `WaitingFor` variant:
 
   ```rust
   WaitingFor::YourChoice { cards, .. } => {

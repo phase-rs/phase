@@ -133,10 +133,10 @@ Keywords are granted/removed via `ContinuousModification::AddKeyword` / `RemoveK
 - [ ] **`crates/engine/src/parser/oracle_static.rs` — `map_keyword()`**
   This delegates to `Keyword::from_str()`. No changes needed unless the keyword has non-standard Oracle text.
 
-- [ ] **`crates/engine/src/parser/oracle_effect.rs` — `parse_token_keyword_clause()`** (if applicable)
+- [ ] **`crates/engine/src/parser/oracle_effect/token.rs` — `parse_token_keyword_clause()`** (if applicable)
   If the keyword appears in token descriptions ("create a 1/1 white Spirit creature token with flying"), ensure it's recognized here.
 
-- [ ] **`crates/engine/src/parser/oracle_effect.rs` — `map_token_keyword()`** (if applicable)
+- [ ] **`crates/engine/src/parser/oracle_effect/token.rs` — `map_token_keyword()`** (if applicable)
   Maps token-description keywords to `Keyword` variants.
 
 ### Phase 5 — Synthesis (if applicable)

@@ -25,6 +25,12 @@ pub fn legal_actions(state: &GameState) -> Vec<GameAction> {
         .collect()
 }
 
+/// Returns true if the legal actions contain any action that should prevent
+/// auto-passing priority (i.e., a meaningful game decision beyond mana abilities).
+pub fn has_priority_holding_actions(actions: &[GameAction]) -> bool {
+    actions.iter().any(|a| a.is_priority_holding())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{candidate_actions, legal_actions, validated_candidate_actions};

@@ -118,7 +118,7 @@ ActivateAbility action
 
 ### Mana Abilities During Priority — `engine/src/ai_support/candidates.rs`
 
-Legal action generation (including priority actions) now lives in the engine crate at `engine::ai_support`. The entry point is `legal_actions(state)` → `validated_candidate_actions()`. It generates both:
+Legal action generation (including priority actions) now lives in the engine crate at `engine::ai_support`. The entry point is `legal_actions(state)` → `candidate_actions()`. It generates both:
 - `ActivateAbility` — for non-mana activated abilities
 - `TapLandForMana` — for untapped lands with mana options (MTG CR 605)
 
