@@ -360,6 +360,7 @@ export type WaitingFor =
   | { type: "AdventureCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
   | { type: "NinjutsuActivation"; data: { player: PlayerId; ninjutsu_cards: CardId[]; unblocked_attackers: ObjectId[] } }
   | { type: "DiscardForCost"; data: { player: PlayerId; count: number; cards: ObjectId[]; pending_cast: PendingCast } }
+  | { type: "SacrificeForCost"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_cast: PendingCast } }
   | { type: "OptionalEffectChoice"; data: { player: PlayerId; source_id: ObjectId } }
   | { type: "UnlessPayment"; data: { player: PlayerId; cost: ManaCost; pending_counter: unknown } };
 

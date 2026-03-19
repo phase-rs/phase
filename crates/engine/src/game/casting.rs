@@ -1,5 +1,5 @@
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, Effect, ResolvedAbility, TargetRef,
+    AbilityCost, AbilityDefinition, AbilityKind, Effect, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor};
@@ -803,7 +803,25 @@ pub fn pay_ability_cost(
                 pay_ability_cost(state, player, source_id, sub_cost, events)?;
             }
         }
-        // Other cost types (Sacrifice, PayLife, etc.) require interactive resolution
+        // CR 118.3: Sacrifice as a cost — sacrifice the source (SelfRef) or a chosen permanent.
+        AbilityCost::Sacrifice { target } => {
+            if matches!(target, TargetFilter::SelfRef) {
+                match super::sacrifice::sacrifice_permanent(state, source_id, player, events)? {
+                    super::sacrifice::SacrificeOutcome::Complete => {}
+                    super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(_) => {
+                        // CR 118.3: Replacement choice during cost payment is extremely rare.
+                        // TODO: Surface replacement choice to player during cost payment.
+                        // For now, proceed — the sacrifice was not completed, but the
+                        // replacement pipeline has already handled the event.
+                    }
+                }
+            } else {
+                // Non-self sacrifice costs (e.g., "Sacrifice a creature") are handled
+                // by the interactive WaitingFor::SacrificeForCost flow — they are
+                // intercepted before reaching pay_ability_cost.
+            }
+        }
+        // Other cost types (Exile, PayLife, etc.) require interactive resolution
         // and are not yet auto-payable. Pass through to allow the ability to resolve.
         _ => {}
     }
@@ -822,12 +840,58 @@ pub fn pay_unless_cost(
     pay_mana_cost(state, player, ObjectId(0), cost, events)
 }
 
+/// Walk a cost tree and return the first non-SelfRef sacrifice filter found, if any.
+fn find_non_self_sacrifice(cost: &AbilityCost) -> Option<&TargetFilter> {
+    match cost {
+        AbilityCost::Sacrifice { target } if !matches!(target, TargetFilter::SelfRef) => {
+            Some(target)
+        }
+        AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_sacrifice),
+        _ => None,
+    }
+}
+
+/// CR 118.3: Find permanents controlled by `player` matching `filter` on the battlefield.
+/// Excludes `source_id` so the source cannot be sacrificed as its own cost.
+pub(super) fn find_eligible_sacrifice_targets(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| {
+            if id == source_id {
+                return false;
+            }
+            let Some(obj) = state.objects.get(&id) else {
+                return false;
+            };
+            if obj.controller != player {
+                return false;
+            }
+            super::filter::matches_target_filter(state, id, filter, source_id)
+        })
+        .collect()
+}
+
 fn can_pay_ability_cost_now(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
 ) -> bool {
+    // CR 118.3: Pre-check non-self sacrifice eligibility before simulation.
+    // The simulation would give a false positive since pay_ability_cost's
+    // non-self Sacrifice arm is a no-op (it's handled interactively).
+    if let Some(sac_filter) = find_non_self_sacrifice(cost) {
+        if find_eligible_sacrifice_targets(state, player, source_id, sac_filter).is_empty() {
+            return false;
+        }
+    }
     let mut simulated = state.clone();
     pay_ability_cost(&mut simulated, player, source_id, cost, &mut Vec::new()).is_ok()
 }
@@ -972,6 +1036,33 @@ pub fn handle_activate_ability(
         r
     };
 
+    // CR 118.3: Pre-check for non-self sacrifice costs — must detour to WaitingFor
+    // before any cost payment, regardless of whether targets were auto-selected.
+    if let Some(ref cost) = ability_def.cost {
+        if let Some(sac_filter) = find_non_self_sacrifice(cost) {
+            let eligible = find_eligible_sacrifice_targets(state, player, source_id, sac_filter);
+            if eligible.is_empty() {
+                return Err(EngineError::ActionNotAllowed(
+                    "No eligible permanents to sacrifice".into(),
+                ));
+            }
+            return Ok(WaitingFor::SacrificeForCost {
+                player,
+                count: 1,
+                permanents: eligible,
+                pending_cast: Box::new(PendingCast {
+                    object_id: source_id,
+                    card_id: CardId(0),
+                    ability: resolved,
+                    cost: crate::types::mana::ManaCost::NoCost,
+                    activation_cost: Some(cost.clone()),
+                    activation_ability_index: Some(ability_index),
+                    target_constraints: Vec::new(),
+                }),
+            });
+        }
+    }
+
     let target_slots = build_target_slots(state, &resolved)?;
     if !target_slots.is_empty() {
         if let Some(targets) = auto_select_targets(&target_slots, &[])? {
@@ -1068,7 +1159,9 @@ pub fn handle_cancel_cast(
 }
 
 // Cost payment handlers are in casting_costs module.
-pub(crate) use super::casting_costs::{handle_decide_additional_cost, handle_discard_for_cost};
+pub(crate) use super::casting_costs::{
+    handle_decide_additional_cost, handle_discard_for_cost, handle_sacrifice_for_cost,
+};
 
 #[cfg(test)]
 mod tests {
@@ -2618,5 +2711,62 @@ mod tests {
             !matches!(result, WaitingFor::AdventureCastChoice { .. }),
             "Casting from exile should not prompt for face choice"
         );
+    }
+
+    #[test]
+    fn can_pay_sacrifice_cost_with_eligible() {
+        use crate::types::ability::TypedFilter;
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Viscera Seer".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(51),
+            PlayerId(0),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let cost = AbilityCost::Sacrifice {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        };
+        assert!(can_pay_ability_cost_now(&state, PlayerId(0), source, &cost));
+    }
+
+    #[test]
+    fn cannot_pay_sacrifice_cost_no_eligible() {
+        use crate::types::ability::TypedFilter;
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Viscera Seer".to_string(),
+            Zone::Battlefield,
+        );
+        // No other creatures on the battlefield
+        let cost = AbilityCost::Sacrifice {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        };
+        assert!(!can_pay_ability_cost_now(
+            &state,
+            PlayerId(0),
+            source,
+            &cost
+        ));
     }
 }

@@ -95,9 +95,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         let rest = &text[10..].trim();
         if rest.to_lowercase().starts_with('~')
             || rest.to_lowercase().starts_with("cardname")
-            || rest.to_lowercase() == "this creature"
-            || rest.to_lowercase() == "this artifact"
-            || rest.to_lowercase() == "this enchantment"
+            || rest.to_lowercase().starts_with("this ")
         {
             return AbilityCost::Sacrifice {
                 target: TargetFilter::SelfRef,

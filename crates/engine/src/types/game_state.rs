@@ -317,6 +317,16 @@ pub enum WaitingFor {
         /// The pending cast to resume after the discard is complete.
         pending_cast: Box<PendingCast>,
     },
+    /// CR 118.3 / CR 601.2b: Player must choose permanent(s) to sacrifice as cost.
+    SacrificeForCost {
+        player: PlayerId,
+        /// How many permanents to sacrifice (usually 1; covers "sacrifice two creatures").
+        count: usize,
+        /// Pre-filtered eligible permanents on the battlefield.
+        permanents: Vec<ObjectId>,
+        /// The pending cast to resume after the sacrifice is complete.
+        pending_cast: Box<PendingCast>,
+    },
 }
 
 impl WaitingFor {
@@ -349,6 +359,7 @@ impl WaitingFor {
             | WaitingFor::AdventureCastChoice { player, .. }
             | WaitingFor::NinjutsuActivation { player, .. }
             | WaitingFor::DiscardForCost { player, .. }
+            | WaitingFor::SacrificeForCost { player, .. }
             | WaitingFor::OptionalEffectChoice { player, .. }
             | WaitingFor::UnlessPayment { player, .. } => Some(*player),
             WaitingFor::GameOver { .. } => None,

@@ -1,11 +1,7 @@
-use std::collections::HashSet;
-
-use crate::game::replacement::{self, ReplacementResult};
-use crate::game::zones;
+use crate::game::sacrifice::{self, SacrificeOutcome};
 use crate::types::ability::{EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
 /// Sacrifice target permanents controlled by the ability's controller.
@@ -34,41 +30,17 @@ pub fn resolve(
 
             let player_id = obj.controller;
 
-            let proposed = ProposedEvent::Sacrifice {
-                object_id: *obj_id,
-                player_id,
-                applied: HashSet::new(),
-            };
-
-            match replacement::replace_event(state, proposed, events) {
-                ReplacementResult::Execute(event) => {
-                    match event {
-                        ProposedEvent::Sacrifice {
-                            object_id,
-                            player_id: pid,
-                            ..
-                        } => {
-                            zones::move_to_zone(state, object_id, Zone::Graveyard, events);
-                            state.layers_dirty = true;
-                            crate::game::restrictions::record_sacrifice(state, object_id, pid);
-                            events.push(GameEvent::PermanentSacrificed {
-                                object_id,
-                                player_id: pid,
-                            });
-                        }
-                        ProposedEvent::ZoneChange { object_id, to, .. } => {
-                            // Replacement redirected (e.g., exile instead of graveyard)
-                            zones::move_to_zone(state, object_id, to, events);
-                            state.layers_dirty = true;
-                        }
-                        _ => {}
-                    }
-                }
-                ReplacementResult::Prevented => {}
-                ReplacementResult::NeedsChoice(player) => {
+            match sacrifice::sacrifice_permanent(state, *obj_id, player_id, events) {
+                Ok(SacrificeOutcome::Complete) => {}
+                Ok(SacrificeOutcome::NeedsReplacementChoice(player)) => {
                     state.waiting_for =
                         crate::game::replacement::replacement_choice_waiting_for(player, state);
                     return Ok(());
+                }
+                Err(_) => {
+                    // Object may have left the battlefield between check and sacrifice;
+                    // skip silently (same as the zone check above).
+                    continue;
                 }
             }
         }

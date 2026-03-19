@@ -16,6 +16,7 @@ type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
 type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
 type SearchChoice = Extract<WaitingFor, { type: "SearchChoice" }>;
 type DiscardToHandSize = Extract<WaitingFor, { type: "DiscardToHandSize" }>;
+type SacrificeForCost = Extract<WaitingFor, { type: "SacrificeForCost" }>;
 const CHOICE_CARD_IMAGE_CLASS = "h-[clamp(136px,24vh,224px)] w-[clamp(97px,17vh,160px)]";
 const SCRY_CARD_IMAGE_CLASS =
   "!h-[220px] !w-[157px] sm:!h-[280px] sm:!w-[200px] lg:!h-[340px] lg:!w-[243px]";
@@ -57,6 +58,9 @@ export function CardChoiceModal() {
     case "DiscardForCost":
       if (waitingFor.data.player !== playerId) return null;
       return <DiscardModal data={waitingFor.data} title="Discard as additional cost" />;
+    case "SacrificeForCost":
+      if (waitingFor.data.player !== playerId) return null;
+      return <SacrificeModal data={waitingFor.data} />;
     default:
       return null;
   }
@@ -470,6 +474,91 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
       <ConfirmButton
         onClick={handleConfirm}
         disabled={selectedSet.size !== data.count}
+      />
+    </ChoiceOverlay>
+  );
+}
+
+// ── Sacrifice Modal ──────────────────────────────────────────────────────────
+
+function SacrificeModal({ data }: { data: SacrificeForCost["data"] }) {
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const inspectObject = useUiStore((s) => s.inspectObject);
+  const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
+
+  const toggleSelect = useCallback(
+    (id: ObjectId) => {
+      setSelected((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) {
+          next.delete(id);
+        } else if (next.size < data.count) {
+          next.add(id);
+        }
+        return next;
+      });
+    },
+    [data.count],
+  );
+
+  const handleConfirm = useCallback(() => {
+    dispatch({
+      type: "SelectCards",
+      data: { cards: Array.from(selected) },
+    });
+  }, [dispatch, selected]);
+
+  if (!objects) return null;
+
+  const isReady = selected.size === data.count;
+
+  return (
+    <ChoiceOverlay
+      title="Sacrifice"
+      subtitle={`Choose ${data.count} permanent${data.count > 1 ? "s" : ""} to sacrifice`}
+    >
+      <div className={CHOICE_CARD_ROW_CLASS}>
+        {data.permanents.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          const isSelected = selected.has(id);
+          return (
+            <motion.button
+              key={id}
+              className={`relative rounded-lg transition ${
+                isSelected
+                  ? "z-10 ring-2 ring-red-400/80"
+                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+              }`}
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6 }}
+              onClick={() => toggleSelect(id)}
+              onMouseEnter={() => inspectObject(id)}
+              onMouseLeave={() => inspectObject(null)}
+            >
+              <CardImage
+                cardName={obj.name}
+                size="normal"
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
+              {isSelected && (
+                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-red-500/20">
+                  <span className="rounded-full bg-red-500/90 px-3 py-1 text-xs font-bold text-white">
+                    Sacrifice
+                  </span>
+                </div>
+              )}
+            </motion.button>
+          );
+        })}
+      </div>
+      <ConfirmButton
+        onClick={handleConfirm}
+        disabled={!isReady}
+        label={`Sacrifice (${selected.size}/${data.count})`}
       />
     </ChoiceOverlay>
   );

@@ -400,6 +400,35 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             casting::handle_cancel_cast(state, pending_cast, &mut events);
             WaitingFor::Priority { player: *player }
         }
+        // CR 118.3: Player selected permanents to sacrifice as cost.
+        (
+            WaitingFor::SacrificeForCost {
+                player,
+                count,
+                permanents,
+                pending_cast,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => casting::handle_sacrifice_for_cost(
+            state,
+            *player,
+            *pending_cast.clone(),
+            *count,
+            permanents,
+            &chosen,
+            &mut events,
+        )?,
+        (
+            WaitingFor::SacrificeForCost {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => {
+            casting::handle_cancel_cast(state, pending_cast, &mut events);
+            WaitingFor::Priority { player: *player }
+        }
         // CR 609.3: Player decided whether to perform an optional effect ("You may X").
         (WaitingFor::OptionalEffectChoice { .. }, GameAction::DecideOptionalEffect { accept }) => {
             state.cost_payment_failed_flag = false; // Reset before resolution

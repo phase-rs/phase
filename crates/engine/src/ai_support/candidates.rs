@@ -277,6 +277,22 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        // CR 118.3: AI selects permanents to sacrifice as cost
+        WaitingFor::SacrificeForCost {
+            player,
+            count,
+            permanents,
+            ..
+        } => combinations(permanents, *count)
+            .into_iter()
+            .map(|combo| {
+                candidate(
+                    GameAction::SelectCards { cards: combo },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::MultiTargetSelection {
             player,
             legal_targets,

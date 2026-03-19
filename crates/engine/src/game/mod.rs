@@ -31,6 +31,7 @@ pub mod priority;
 pub mod quantity;
 pub mod replacement;
 pub mod restrictions;
+pub(crate) mod sacrifice;
 pub mod sba;
 pub mod scenario;
 pub mod scenario_db;
