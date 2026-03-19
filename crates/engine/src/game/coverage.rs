@@ -50,12 +50,26 @@ pub enum ParseCategory {
     Cost,
 }
 
+/// An enriched gap entry with the handler key and the Oracle text that produced it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GapDetail {
+    /// Handler key in "Category:label" format (e.g., "Effect:unknown", "Trigger:ChangesZone").
+    pub handler: String,
+    /// The Oracle text fragment that produced this gap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_text: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CardCoverageResult {
     pub card_name: String,
     pub set_code: String,
     pub supported: bool,
-    pub missing_handlers: Vec<String>,
+    /// Enriched gaps with Oracle text fragments — replaces the old `missing_handlers`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gap_details: Vec<GapDetail>,
+    /// Number of distinct gaps (`gap_details.len()`), a distance-to-supported metric.
+    pub gap_count: usize,
     /// Original Oracle text for the card face.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oracle_text: Option<String>,
@@ -64,14 +78,47 @@ pub struct CardCoverageResult {
     pub parse_details: Vec<ParsedItem>,
 }
 
+/// A normalized Oracle text pattern with frequency and example cards.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OraclePattern {
+    pub pattern: String,
+    pub count: usize,
+    pub example_cards: Vec<String>,
+}
+
+/// A co-occurring gap handler that appears alongside another gap.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoOccurrence {
+    pub handler: String,
+    pub shared_cards: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GapFrequency {
     pub handler: String,
     pub total_count: usize,
-    /// How many unsupported cards have this as their ONLY gap (would be unlocked by fixing it)
+    /// How many unsupported cards have this as their ONLY gap (would be unlocked by fixing it).
     pub single_gap_cards: usize,
-    /// Breakdown by format: how many single-gap cards are legal in each format
+    /// Breakdown by format: how many single-gap cards are legal in each format.
     pub single_gap_by_format: BTreeMap<String, usize>,
+    /// Top normalized Oracle text patterns within this gap, sorted by count.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oracle_patterns: Vec<OraclePattern>,
+    /// Ratio of single-gap cards to total count. `None` when `total_count < 5`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub independence_ratio: Option<f64>,
+    /// Top co-occurring gap handlers, sorted by shared card count.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub co_occurrences: Vec<CoOccurrence>,
+}
+
+/// A set of gap handlers that, if ALL implemented, would fully unlock cards.
+/// Only includes cards whose gap set is EXACTLY this set (not a superset).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GapBundle {
+    pub handlers: Vec<String>,
+    pub unlocked_cards: usize,
+    pub unlocked_by_format: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,9 +129,11 @@ pub struct CoverageSummary {
     #[serde(default)]
     pub coverage_by_format: BTreeMap<String, FormatCoverageSummary>,
     pub cards: Vec<CardCoverageResult>,
-    pub missing_handler_frequency: Vec<(String, usize)>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub top_gaps: Vec<GapFrequency>,
+    /// Top 2-gap and 3-gap exact-match bundles that would unlock cards if all handlers implemented.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gap_bundles: Vec<GapBundle>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -539,9 +588,22 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::SetClassLevel { level } => {
             d.push(("level".to_string(), level.to_string()));
         }
+        Effect::CastFromZone {
+            target,
+            without_paying_mana_cost,
+            ..
+        } => {
+            d.push(("target".into(), fmt_target(target)));
+            if *without_paying_mana_cost {
+                d.push(("free cast".into(), "yes".into()));
+            }
+        }
         Effect::Unimplemented { .. }
         | Effect::Explore
+        | Effect::Investigate
+        | Effect::BecomeMonarch
         | Effect::Proliferate
+        | Effect::PreventDamage { .. }
         | Effect::SolveCase
         | Effect::Cleanup { .. }
         | Effect::AddRestriction { .. }
@@ -759,7 +821,10 @@ pub fn build_parse_details(
 /// Build a `ParsedItem` for a single `AbilityDefinition`, recursing into
 /// sub-abilities and modal abilities.
 fn build_ability_item(def: &AbilityDefinition) -> ParsedItem {
-    let label = effect_type_name(&def.effect);
+    let label = match &def.effect {
+        Effect::Unimplemented { name, .. } => name.clone(),
+        _ => effect_type_name(&def.effect),
+    };
     let supported = !matches!(&def.effect, Effect::Unimplemented { .. });
     let source_text = def.description.clone().or_else(|| match &def.effect {
         Effect::Unimplemented { description, .. } => description.clone(),
@@ -833,6 +898,167 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
             build_cost_item(first, items);
             build_cost_item(second, items);
         }
+    }
+}
+
+/// Normalize Oracle text into a canonical pattern for clustering.
+///
+/// Replaces concrete numbers, mana symbols, and p/t modifiers with placeholders
+/// so that structurally identical Oracle phrases group together.
+fn normalize_oracle_pattern(text: &str) -> String {
+    let s = text.to_lowercase();
+    let s = s.trim_end_matches('.');
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.char_indices().peekable();
+
+    while let Some(&(i, ch)) = chars.peek() {
+        // Handle {X} mana symbols — content inside braces is always ASCII
+        if ch == '{' {
+            if let Some(close_offset) = s[i..].find('}') {
+                let inner = &s[i + 1..i + close_offset];
+                let replacement = match inner.as_bytes() {
+                    [c] if b"wubrgcsx".contains(c) => Some("{M}"),
+                    _ if !inner.is_empty() && inner.bytes().all(|b| b.is_ascii_digit()) => {
+                        Some("{N}")
+                    }
+                    [left, b'/', right]
+                        if b"wubrgc".contains(left) && b"wubrgcp".contains(right) =>
+                    {
+                        Some(if *right == b'p' { "{M/P}" } else { "{M/M}" })
+                    }
+                    _ => None,
+                };
+                if let Some(rep) = replacement {
+                    result.push_str(rep);
+                    // Advance past the closing brace
+                    let end = i + close_offset + 1;
+                    while chars.peek().is_some_and(|&(pos, _)| pos < end) {
+                        chars.next();
+                    }
+                    continue;
+                }
+            }
+            result.push('{');
+            chars.next();
+            continue;
+        }
+
+        // Handle +N/+N or -N/-N p/t patterns (must check before digit replacement)
+        if matches!(ch, '+' | '-') {
+            let rest = &s[i..];
+            if let Some(pt_len) = match_pt_pattern(rest) {
+                result.push_str("+N/+N");
+                let end = i + pt_len;
+                while chars.peek().is_some_and(|&(pos, _)| pos < end) {
+                    chars.next();
+                }
+                continue;
+            }
+        }
+
+        // Replace digit sequences with N
+        if ch.is_ascii_digit() {
+            result.push('N');
+            chars.next();
+            while chars.peek().is_some_and(|&(_, c)| c.is_ascii_digit()) {
+                chars.next();
+            }
+            continue;
+        }
+
+        // Collapse whitespace
+        if ch.is_whitespace() {
+            result.push(' ');
+            chars.next();
+            while chars.peek().is_some_and(|&(_, c)| c.is_whitespace()) {
+                chars.next();
+            }
+            continue;
+        }
+
+        result.push(ch);
+        chars.next();
+    }
+
+    result.trim().to_string()
+}
+
+/// Match a p/t pattern like `+3/+1` or `-2/-2` at the start of `s`.
+/// Returns the byte length consumed, or `None` if no match.
+fn match_pt_pattern(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    if b.len() < 5 || !matches!(b[0], b'+' | b'-') {
+        return None;
+    }
+    let mut i = 1;
+    if i >= b.len() || !b[i].is_ascii_digit() {
+        return None;
+    }
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i >= b.len() || b[i] != b'/' {
+        return None;
+    }
+    i += 1;
+    if i >= b.len() || !matches!(b[i], b'+' | b'-') {
+        return None;
+    }
+    i += 1;
+    let start = i;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i > start {
+        Some(i)
+    } else {
+        None
+    }
+}
+
+/// Walk a parse tree, collecting one `GapDetail` per unsupported item.
+///
+/// Deduplicates by `handler` key so each gap appears at most once per card.
+/// Replacement nodes are skipped for handler key generation (they don't produce
+/// handler keys in the `check_*` flow), but their children are always recursed.
+fn extract_gap_details(items: &[ParsedItem]) -> Vec<GapDetail> {
+    let mut seen = std::collections::HashSet::new();
+    let mut details = Vec::new();
+    extract_gap_details_inner(items, &mut seen, &mut details);
+    details
+}
+
+fn extract_gap_details_inner(
+    items: &[ParsedItem],
+    seen: &mut std::collections::HashSet<String>,
+    details: &mut Vec<GapDetail>,
+) {
+    for item in items {
+        if item.category == ParseCategory::Replacement {
+            // Replacements don't produce handler keys in check_*, but recurse into children
+            extract_gap_details_inner(&item.children, seen, details);
+            continue;
+        }
+
+        if !item.supported {
+            let handler = match item.category {
+                ParseCategory::Keyword => format!("Keyword:{}", item.label),
+                ParseCategory::Ability => format!("Effect:{}", item.label),
+                ParseCategory::Trigger => format!("Trigger:{}", item.label),
+                ParseCategory::Static => format!("Static:{}", item.label),
+                ParseCategory::Cost => format!("Cost:{}", item.label),
+                ParseCategory::Replacement => unreachable!(),
+            };
+            if seen.insert(handler.clone()) {
+                details.push(GapDetail {
+                    handler,
+                    source_text: item.source_text.clone(),
+                });
+            }
+        }
+
+        // Always recurse into children for nested unsupported items
+        extract_gap_details_inner(&item.children, seen, details);
     }
 }
 
@@ -942,12 +1168,15 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         }
 
         let parse_details = build_parse_details(face, &trigger_registry, &static_registry);
+        let gap_details = extract_gap_details(&parse_details);
+        let gap_count = gap_details.len();
 
         cards.push(CardCoverageResult {
             card_name: face.name.clone(),
             set_code: String::new(),
             supported,
-            missing_handlers: missing,
+            gap_details,
+            gap_count,
             oracle_text: face.oracle_text.clone(),
             parse_details,
         });
@@ -961,19 +1190,19 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         0.0
     };
 
-    let mut missing_handler_frequency: Vec<(String, usize)> = freq.into_iter().collect();
-    missing_handler_frequency.sort_by_key(|b| std::cmp::Reverse(b.1));
+    // Internal frequency list — used to seed top_gaps but not stored on output
+    let mut handler_frequency: Vec<(String, usize)> = freq.into_iter().collect();
+    handler_frequency.sort_by_key(|b| std::cmp::Reverse(b.1));
 
-    // Compute enriched top_gaps: single-gap card counts with format breakdown
+    // Compute enriched top_gaps: single-gap counts, oracle patterns, co-occurrence
     let top_gaps = {
+        // Single-gap card counts with format breakdown
         let mut gap_data: HashMap<String, (usize, BTreeMap<String, usize>)> = HashMap::new();
-
         for card in &cards {
-            if card.missing_handlers.len() == 1 {
-                let handler = &card.missing_handlers[0];
+            if card.gap_count == 1 {
+                let handler = &card.gap_details[0].handler;
                 let entry = gap_data.entry(handler.clone()).or_default();
                 entry.0 += 1;
-
                 for format in LegalityFormat::ALL {
                     if card_db
                         .legality_status(&card.card_name, format)
@@ -985,20 +1214,168 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
             }
         }
 
-        missing_handler_frequency
+        // Build per-handler oracle pattern and co-occurrence data from gap_details
+        let top_50_handlers: Vec<String> = handler_frequency
+            .iter()
+            .take(50)
+            .map(|(h, _)| h.clone())
+            .collect();
+        let top_50_set: std::collections::HashSet<&str> =
+            top_50_handlers.iter().map(|s| s.as_str()).collect();
+
+        // Collect oracle patterns and co-occurrences for top-50 handlers
+        let mut oracle_texts: HashMap<&str, HashMap<String, (usize, Vec<String>)>> = HashMap::new();
+        let mut co_occur: HashMap<&str, HashMap<&str, usize>> = HashMap::new();
+
+        for card in &cards {
+            if card.gap_details.is_empty() {
+                continue;
+            }
+            let card_handlers: Vec<&str> = card
+                .gap_details
+                .iter()
+                .map(|g| g.handler.as_str())
+                .collect();
+
+            for gap in &card.gap_details {
+                let handler = gap.handler.as_str();
+                if !top_50_set.contains(handler) {
+                    continue;
+                }
+
+                // Oracle pattern aggregation
+                if let Some(text) = &gap.source_text {
+                    let pattern = normalize_oracle_pattern(text);
+                    let pattern_entry = oracle_texts.entry(handler).or_default();
+                    let (count, examples) = pattern_entry
+                        .entry(pattern)
+                        .or_insert_with(|| (0, Vec::new()));
+                    *count += 1;
+                    if examples.len() < 3 {
+                        examples.push(card.card_name.clone());
+                    }
+                }
+
+                // Co-occurrence: count other handlers on this card
+                for other in &card_handlers {
+                    if *other != handler {
+                        *co_occur
+                            .entry(handler)
+                            .or_default()
+                            .entry(other)
+                            .or_default() += 1;
+                    }
+                }
+            }
+        }
+
+        handler_frequency
             .iter()
             .take(50)
             .map(|(handler, total_count)| {
                 let (single_gap_cards, single_gap_by_format) =
-                    gap_data.remove(handler).unwrap_or_default();
+                    gap_data.remove(handler.as_str()).unwrap_or_default();
+
+                // Oracle patterns: sort by count, keep top 20
+                let oracle_patterns = {
+                    let mut patterns: Vec<OraclePattern> = oracle_texts
+                        .remove(handler.as_str())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(pattern, (count, example_cards))| OraclePattern {
+                            pattern,
+                            count,
+                            example_cards,
+                        })
+                        .collect();
+                    patterns.sort_by_key(|p| std::cmp::Reverse(p.count));
+                    patterns.truncate(20);
+                    patterns
+                };
+
+                // Independence ratio
+                let independence_ratio = if *total_count >= 5 {
+                    Some(single_gap_cards as f64 / *total_count as f64)
+                } else {
+                    None
+                };
+
+                // Co-occurrences: sort by shared count, keep top 10
+                let co_occurrences = {
+                    let mut co: Vec<CoOccurrence> = co_occur
+                        .remove(handler.as_str())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(h, shared_cards)| CoOccurrence {
+                            handler: h.to_string(),
+                            shared_cards,
+                        })
+                        .collect();
+                    co.sort_by_key(|c| std::cmp::Reverse(c.shared_cards));
+                    co.truncate(10);
+                    co
+                };
+
                 GapFrequency {
                     handler: handler.clone(),
                     total_count: *total_count,
                     single_gap_cards,
                     single_gap_by_format,
+                    oracle_patterns,
+                    independence_ratio,
+                    co_occurrences,
                 }
             })
             .collect()
+    };
+
+    // Gap bundles: group unsupported cards by exact handler set (2-gap and 3-gap)
+    let gap_bundles = {
+        let mut bundle_map: HashMap<Vec<String>, (usize, BTreeMap<String, usize>)> = HashMap::new();
+
+        for card in &cards {
+            if card.gap_count == 2 || card.gap_count == 3 {
+                let mut handlers: Vec<String> =
+                    card.gap_details.iter().map(|g| g.handler.clone()).collect();
+                handlers.sort();
+
+                let entry = bundle_map.entry(handlers).or_default();
+                entry.0 += 1;
+                for format in LegalityFormat::ALL {
+                    if card_db
+                        .legality_status(&card.card_name, format)
+                        .is_some_and(|status| status.is_legal())
+                    {
+                        *entry.1.entry(format.as_key().to_string()).or_default() += 1;
+                    }
+                }
+            }
+        }
+
+        let mut two_gap: Vec<GapBundle> = Vec::new();
+        let mut three_gap: Vec<GapBundle> = Vec::new();
+
+        for (handlers, (unlocked_cards, unlocked_by_format)) in bundle_map {
+            let bundle = GapBundle {
+                handlers: handlers.clone(),
+                unlocked_cards,
+                unlocked_by_format,
+            };
+            if handlers.len() == 2 {
+                two_gap.push(bundle);
+            } else {
+                three_gap.push(bundle);
+            }
+        }
+
+        two_gap.sort_by_key(|b| std::cmp::Reverse(b.unlocked_cards));
+        three_gap.sort_by_key(|b| std::cmp::Reverse(b.unlocked_cards));
+
+        two_gap.truncate(30);
+        three_gap.truncate(20);
+
+        two_gap.extend(three_gap);
+        two_gap
     };
 
     let coverage_by_format = coverage_by_format_accumulators
@@ -1026,8 +1403,8 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         coverage_pct,
         coverage_by_format,
         cards,
-        missing_handler_frequency,
         top_gaps,
+        gap_bundles,
     }
 }
 
@@ -1486,5 +1863,198 @@ mod tests {
                 coverage_pct: 0.0,
             })
         );
+
+        // Verify gap_details on the unsupported card
+        let beta = summary
+            .cards
+            .iter()
+            .find(|c| c.card_name == "Beta")
+            .unwrap();
+        assert!(!beta.supported);
+        assert_eq!(beta.gap_count, 1);
+        assert_eq!(beta.gap_details[0].handler, "Effect:beta_gap");
+    }
+
+    // -----------------------------------------------------------------------
+    // normalize_oracle_pattern tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn normalize_replaces_digits_with_n() {
+        assert_eq!(normalize_oracle_pattern("deals 3 damage"), "deals N damage");
+    }
+
+    #[test]
+    fn normalize_replaces_mana_symbols() {
+        assert_eq!(normalize_oracle_pattern("{2}{W}{U}"), "{N}{M}{M}");
+    }
+
+    #[test]
+    fn normalize_replaces_hybrid_mana() {
+        assert_eq!(normalize_oracle_pattern("{G/W}{B/P}"), "{M/M}{M/P}");
+    }
+
+    #[test]
+    fn normalize_replaces_pt_modifiers() {
+        assert_eq!(
+            normalize_oracle_pattern("gets +2/+1 until"),
+            "gets +N/+N until"
+        );
+        assert_eq!(normalize_oracle_pattern("gets -1/-1"), "gets +N/+N");
+    }
+
+    #[test]
+    fn normalize_trims_trailing_period() {
+        assert_eq!(normalize_oracle_pattern("Draw a card."), "draw a card");
+    }
+
+    #[test]
+    fn normalize_collapses_whitespace() {
+        assert_eq!(
+            normalize_oracle_pattern("target   creature   gets"),
+            "target creature gets"
+        );
+    }
+
+    #[test]
+    fn normalize_complex_oracle_text() {
+        assert_eq!(
+            normalize_oracle_pattern("Target creature gets +3/+3 and deals 2 damage."),
+            "target creature gets +N/+N and deals N damage"
+        );
+    }
+
+    #[test]
+    fn normalize_preserves_non_mana_braces() {
+        // Generic brace content that isn't a recognized mana symbol
+        assert_eq!(normalize_oracle_pattern("{T}: Add {G}"), "{t}: add {M}");
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_gap_details tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_gap_details_from_unsupported_ability() {
+        let items = vec![ParsedItem {
+            category: ParseCategory::Ability,
+            label: "unknown".to_string(),
+            source_text: Some("exile target creature".to_string()),
+            supported: false,
+            details: vec![],
+            children: vec![],
+        }];
+        let gaps = extract_gap_details(&items);
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].handler, "Effect:unknown");
+        assert_eq!(
+            gaps[0].source_text.as_deref(),
+            Some("exile target creature")
+        );
+    }
+
+    #[test]
+    fn extract_gap_details_deduplicates_by_handler() {
+        let items = vec![
+            ParsedItem {
+                category: ParseCategory::Ability,
+                label: "unknown".to_string(),
+                source_text: Some("first line".to_string()),
+                supported: false,
+                details: vec![],
+                children: vec![],
+            },
+            ParsedItem {
+                category: ParseCategory::Ability,
+                label: "unknown".to_string(),
+                source_text: Some("second line".to_string()),
+                supported: false,
+                details: vec![],
+                children: vec![],
+            },
+        ];
+        let gaps = extract_gap_details(&items);
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].source_text.as_deref(), Some("first line"));
+    }
+
+    #[test]
+    fn extract_gap_details_recurses_into_replacement_children() {
+        let items = vec![ParsedItem {
+            category: ParseCategory::Replacement,
+            label: "EntersBattlefield".to_string(),
+            source_text: None,
+            supported: true,
+            details: vec![],
+            children: vec![ParsedItem {
+                category: ParseCategory::Ability,
+                label: "unknown".to_string(),
+                source_text: Some("do something".to_string()),
+                supported: false,
+                details: vec![],
+                children: vec![],
+            }],
+        }];
+        let gaps = extract_gap_details(&items);
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].handler, "Effect:unknown");
+    }
+
+    #[test]
+    fn extract_gap_details_skips_supported_items() {
+        let items = vec![ParsedItem {
+            category: ParseCategory::Keyword,
+            label: "Flying".to_string(),
+            source_text: None,
+            supported: true,
+            details: vec![],
+            children: vec![],
+        }];
+        let gaps = extract_gap_details(&items);
+        assert!(gaps.is_empty());
+    }
+
+    #[test]
+    fn extract_gap_details_categories() {
+        let items = vec![
+            ParsedItem {
+                category: ParseCategory::Keyword,
+                label: "Bogus".to_string(),
+                source_text: None,
+                supported: false,
+                details: vec![],
+                children: vec![],
+            },
+            ParsedItem {
+                category: ParseCategory::Trigger,
+                label: "ChangesZone".to_string(),
+                source_text: Some("when this enters".to_string()),
+                supported: false,
+                details: vec![],
+                children: vec![],
+            },
+            ParsedItem {
+                category: ParseCategory::Static,
+                label: "Prevention".to_string(),
+                source_text: None,
+                supported: false,
+                details: vec![],
+                children: vec![],
+            },
+            ParsedItem {
+                category: ParseCategory::Cost,
+                label: "sacrifice a creature".to_string(),
+                source_text: Some("sacrifice a creature".to_string()),
+                supported: false,
+                details: vec![],
+                children: vec![],
+            },
+        ];
+        let gaps = extract_gap_details(&items);
+        assert_eq!(gaps.len(), 4);
+        assert_eq!(gaps[0].handler, "Keyword:Bogus");
+        assert_eq!(gaps[1].handler, "Trigger:ChangesZone");
+        assert_eq!(gaps[2].handler, "Static:Prevention");
+        assert_eq!(gaps[3].handler, "Cost:sacrifice a creature");
     }
 }

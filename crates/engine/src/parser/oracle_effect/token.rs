@@ -378,6 +378,7 @@ fn known_named_token_identity(descriptor: &str) -> Option<(String, Vec<String>)>
         "powerstone" => "Powerstone",
         "junk" => "Junk",
         "shard" => "Shard",
+        "gold" => "Gold",
         _ => return None,
     };
 

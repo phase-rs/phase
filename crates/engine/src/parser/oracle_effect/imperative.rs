@@ -2,8 +2,10 @@ use super::counter::{try_parse_put_counter, try_parse_remove_counter};
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect};
 use super::token::try_parse_token;
 use super::types::*;
+use crate::parser::oracle_static::parse_continuous_modifications;
 use crate::types::ability::{
-    Effect, GainLifePlayer, PaymentCost, PtValue, QuantityExpr, TargetFilter,
+    ContinuousModification, Duration, Effect, GainLifePlayer, PaymentCost, PreventionAmount,
+    PreventionScope, PtValue, QuantityExpr, StaticDefinition, TargetFilter,
 };
 use crate::types::zones::Zone;
 
@@ -381,10 +383,7 @@ pub(super) fn parse_utility_imperative_ast(
 
 pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect {
     match ast {
-        UtilityImperativeAst::Prevent { text } => Effect::Unimplemented {
-            name: "prevent".to_string(),
-            description: Some(text),
-        },
+        UtilityImperativeAst::Prevent { text } => parse_prevent_effect(&text),
         UtilityImperativeAst::Regenerate { text } => {
             let lower = text.to_lowercase();
             let rest = lower.strip_prefix("regenerate ").unwrap_or(&lower);
@@ -395,6 +394,92 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
         UtilityImperativeAst::Transform { target } => Effect::Transform { target },
         UtilityImperativeAst::Attach { target } => Effect::Attach { target },
     }
+}
+
+/// CR 615: Parse "prevent" damage effects into `Effect::PreventDamage`.
+///
+/// Handles patterns like:
+/// - "prevent the next N damage that would be dealt to any target this turn"
+/// - "prevent all damage that would be dealt this turn"
+/// - "prevent all combat damage that would be dealt this turn"
+/// - "prevent the next N damage that would be dealt to target creature"
+fn parse_prevent_effect(text: &str) -> Effect {
+    let lower = text.to_lowercase();
+    let rest = lower.strip_prefix("prevent ").unwrap_or(&lower);
+
+    // Determine scope: combat damage only vs all damage
+    let scope = if rest.contains("combat damage") {
+        PreventionScope::CombatDamage
+    } else {
+        PreventionScope::AllDamage
+    };
+
+    // Determine amount: "all damage" vs "the next N damage"
+    let amount = if rest.starts_with("all ") {
+        PreventionAmount::All
+    } else if let Some(after_next) = rest.strip_prefix("the next ") {
+        let n = parse_number(after_next).map(|(n, _)| n).unwrap_or(1);
+        PreventionAmount::Next(n)
+    } else {
+        // Fallback: try to extract a number
+        let n = parse_number(rest).map(|(n, _)| n).unwrap_or(1);
+        PreventionAmount::Next(n)
+    };
+
+    // Determine target
+    let target = if rest.contains("any target") {
+        TargetFilter::Any
+    } else if rest.contains("target creature") || rest.contains("target permanent") {
+        // Extract the target from the text
+        if let Some(pos) = lower.find("target ") {
+            let (t, _) = parse_target(&text[pos..]);
+            t
+        } else {
+            TargetFilter::Any
+        }
+    } else if rest.contains("to you") || rest.contains("to its controller") {
+        TargetFilter::Controller
+    } else {
+        // Default: "that would be dealt" with no specific target → Any
+        TargetFilter::Any
+    };
+
+    Effect::PreventDamage {
+        amount,
+        target,
+        scope,
+    }
+}
+
+/// CR 702: Parse bare "gain [keyword]" / "gain [keyword] until end of turn"
+/// in the imperative path. Handles "gain haste", "gain trample and haste",
+/// "gain flying until end of turn", etc.
+///
+/// Reuses `parse_continuous_modifications` which already handles
+/// "gain/gains [keyword]" via `extract_keyword_clause`.
+fn try_parse_gain_keyword(text: &str) -> Option<Effect> {
+    let (text_without_duration, duration) = super::strip_trailing_duration(text);
+    let modifications = parse_continuous_modifications(text_without_duration);
+
+    // Only accept if we got at least one AddKeyword modification
+    let has_keyword = modifications
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::AddKeyword { .. }));
+    if !has_keyword {
+        return None;
+    }
+
+    // Default duration: UntilEndOfTurn for keyword granting sub-abilities
+    let duration = duration.or(Some(Duration::UntilEndOfTurn));
+
+    Some(Effect::GenericEffect {
+        static_abilities: vec![StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(modifications)
+            .description(text.to_string())],
+        duration,
+        target: None,
+    })
 }
 
 pub(super) fn lower_imperative_ast(ast: ImperativeAst) -> Effect {
@@ -489,6 +574,22 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
             target: TargetFilter::Controller,
         });
     }
+    // "shuffle ... and put that card on top" / "shuffle ... and put it on top"
+    // Compound pattern: shuffle library, then place the searched card on top.
+    if lower.starts_with("shuffle")
+        && (lower.contains("put that card on top")
+            || lower.contains("put it on top")
+            || lower.contains("put the card on top"))
+    {
+        return Some(ShuffleImperativeAst::ShuffleAndPutOnTop);
+    }
+    // "shuffle the rest into your library" — the "rest" are already in the library
+    // from a preceding dig/reveal effect; this is just a shuffle.
+    if lower.contains("shuffle the rest") || lower.contains("shuffle them") {
+        return Some(ShuffleImperativeAst::ShuffleLibrary {
+            target: TargetFilter::Controller,
+        });
+    }
     if matches!(lower, "that player shuffles" | "target player shuffles") {
         return Some(ShuffleImperativeAst::ShuffleLibrary {
             target: TargetFilter::Player,
@@ -536,6 +637,13 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
 pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> Effect {
     match ast {
         ShuffleImperativeAst::ShuffleLibrary { target } => Effect::Shuffle { target },
+        // "shuffle and put that card on top" — the shuffle itself. The "put on top"
+        // is handled via sub_ability chaining at the SearchLibrary destination level,
+        // so here we just emit a Shuffle. The parent SearchLibrary chain will place
+        // the found card via ChangeZone { destination: Library } in the sub_ability.
+        ShuffleImperativeAst::ShuffleAndPutOnTop => Effect::Shuffle {
+            target: TargetFilter::Controller,
+        },
         ShuffleImperativeAst::ChangeZoneToLibrary => Effect::ChangeZone {
             origin: None,
             destination: Zone::Library,
@@ -736,8 +844,24 @@ pub(super) fn parse_imperative_family_ast(text: &str, lower: &str) -> Option<Imp
     if lower == "explore" || lower.starts_with("explore.") {
         return Some(ImperativeFamilyAst::Explore);
     }
+    // CR 702.136: "investigate" — create a Clue token.
+    if lower == "investigate" || lower.starts_with("investigate.") {
+        return Some(ImperativeFamilyAst::Investigate);
+    }
+    // CR 722: "become the monarch" / "becomes the monarch"
+    if lower == "become the monarch" || lower == "becomes the monarch" {
+        return Some(ImperativeFamilyAst::BecomeMonarch);
+    }
     if lower == "proliferate" || lower.starts_with("proliferate.") {
         return Some(ImperativeFamilyAst::Proliferate);
+    }
+    // CR 702: "gain [keyword]" / "gain [keyword] until end of turn" — keyword granting
+    // in bare imperative form (subject-stripped sub-abilities like "it gains haste").
+    // Must come before shuffle/utility to intercept "gain" before it falls through.
+    if lower.starts_with("gain ") && !lower.contains("life") && !lower.contains("control") {
+        if let Some(effect) = try_parse_gain_keyword(text) {
+            return Some(ImperativeFamilyAst::GainKeyword(effect));
+        }
     }
     if let Some(ast) = parse_shuffle_ast(text, lower) {
         return Some(ImperativeFamilyAst::Shuffle(ast));
@@ -770,7 +894,10 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::CostResource(ast) => lower_cost_resource_ast(ast),
         ImperativeFamilyAst::ZoneCounter(ast) => lower_zone_counter_ast(ast),
         ImperativeFamilyAst::Explore => Effect::Explore,
+        ImperativeFamilyAst::Investigate => Effect::Investigate,
+        ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch,
         ImperativeFamilyAst::Proliferate => Effect::Proliferate,
+        ImperativeFamilyAst::GainKeyword(effect) => effect,
         ImperativeFamilyAst::Shuffle(ast) => lower_shuffle_ast(ast),
         ImperativeFamilyAst::Put(ast) => lower_put_ast(ast),
         ImperativeFamilyAst::YouMay { text } => super::parse_effect(&text),

@@ -103,7 +103,7 @@ mod tests {
 
         let obj = state.objects.get(&obj_id).unwrap();
         assert_eq!(obj.replacement_definitions.len(), 1);
-        assert!(obj.replacement_definitions[0].is_regeneration_shield);
+        assert!(obj.replacement_definitions[0].shield_kind.is_shield());
         assert!(!obj.replacement_definitions[0].is_consumed);
         assert_eq!(
             obj.replacement_definitions[0].event,
@@ -136,7 +136,7 @@ mod tests {
 
         let obj = state.objects.get(&target_id).unwrap();
         assert_eq!(obj.replacement_definitions.len(), 1);
-        assert!(obj.replacement_definitions[0].is_regeneration_shield);
+        assert!(obj.replacement_definitions[0].shield_kind.is_shield());
     }
 
     #[test]

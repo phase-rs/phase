@@ -2334,4 +2334,399 @@ mod tests {
             "Non-saga subtypes should not produce chapter triggers"
         );
     }
+
+    // ── Feature #1: Reflexive triggers ("when you do") ──────────────
+
+    #[test]
+    fn reflexive_trigger_when_you_do_sentence_split() {
+        // "you may pay {1}. When you do, draw a card" — sentence-split produces
+        // a chunk starting with "When you do, ..." that strip_if_you_do_conditional handles.
+        let r = parse(
+            "Whenever ~ attacks, you may pay {1}. When you do, draw a card.",
+            "Test Card",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert!(!r.triggers.is_empty(), "should parse the trigger");
+        let abilities = r.triggers[0]
+            .execute
+            .as_ref()
+            .expect("trigger should have execute");
+        // First ability is PayCost (optional), second is Draw with IfYouDo condition
+        assert!(
+            matches!(abilities.effect, Effect::PayCost { .. }),
+            "first effect should be PayCost, got {:?}",
+            abilities.effect,
+        );
+        let sub = abilities
+            .sub_ability
+            .as_ref()
+            .expect("should have sub_ability");
+        assert_eq!(
+            sub.condition,
+            Some(crate::types::ability::AbilityCondition::IfYouDo),
+            "sub-ability should have IfYouDo condition"
+        );
+        assert!(
+            matches!(sub.effect, Effect::Draw { .. }),
+            "sub effect should be Draw, got {:?}",
+            sub.effect,
+        );
+    }
+
+    #[test]
+    fn reflexive_trigger_when_you_do_comma_split() {
+        // "when you do, attach ~ to it" — comma-separated, starts_prefix_clause
+        // must prevent splitting at the comma boundary.
+        use crate::parser::oracle_effect::parse_effect_chain;
+        let def = parse_effect_chain(
+            "When you do, attach Ancestral Katana to it",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.condition,
+            Some(crate::types::ability::AbilityCondition::IfYouDo),
+            "should detect IfYouDo condition"
+        );
+        assert!(
+            matches!(def.effect, Effect::Attach { .. }),
+            "effect should be Attach, got {:?}",
+            def.effect,
+        );
+    }
+
+    // ── Feature #2: "Cast without paying" effects ───────────────────
+
+    #[test]
+    fn cast_without_paying_mana_cost() {
+        use crate::parser::oracle_effect::parse_effect;
+        let effect = parse_effect("cast it without paying its mana cost");
+        assert!(
+            matches!(
+                effect,
+                Effect::CastFromZone {
+                    target: TargetFilter::ParentTarget,
+                    without_paying_mana_cost: true,
+                    ..
+                }
+            ),
+            "expected CastFromZone with ParentTarget + without_paying, got {:?}",
+            effect,
+        );
+    }
+
+    #[test]
+    fn cast_that_card() {
+        use crate::parser::oracle_effect::parse_effect;
+        let effect = parse_effect("cast that card");
+        assert!(
+            matches!(
+                effect,
+                Effect::CastFromZone {
+                    target: TargetFilter::ParentTarget,
+                    without_paying_mana_cost: false,
+                    ..
+                }
+            ),
+            "expected CastFromZone with ParentTarget + paying, got {:?}",
+            effect,
+        );
+    }
+
+    #[test]
+    fn cast_clause_splits_correctly() {
+        // "exile the top card of your library, then cast it without paying its mana cost"
+        // "cast it..." should be a separate clause, not merged with "exile..."
+        use crate::parser::oracle_effect::parse_effect_chain;
+        let def = parse_effect_chain(
+            "exile the top card of your library, then cast it without paying its mana cost",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        // First effect is ChangeZone (exile), sub is CastFromZone
+        assert!(
+            matches!(def.effect, Effect::ChangeZone { .. }),
+            "first effect should be ChangeZone, got {:?}",
+            def.effect,
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("should have sub_ability for cast");
+        assert!(
+            matches!(
+                sub.effect,
+                Effect::CastFromZone {
+                    without_paying_mana_cost: true,
+                    ..
+                }
+            ),
+            "sub effect should be CastFromZone with without_paying, got {:?}",
+            sub.effect,
+        );
+    }
+
+    // ── Feature #3: "For each" iteration ────────────────────────────
+
+    #[test]
+    fn for_each_prefix_creates_token() {
+        // "for each opponent, create a 2/2 black Zombie creature token"
+        use crate::parser::oracle_effect::parse_effect_chain;
+        let def = parse_effect_chain(
+            "for each opponent, create a 2/2 black Zombie creature token",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        assert!(
+            def.repeat_for.is_some(),
+            "repeat_for should be set for 'for each opponent'"
+        );
+        assert!(
+            matches!(def.effect, Effect::Token { .. }),
+            "inner effect should be Token, got {:?}",
+            def.effect,
+        );
+    }
+
+    #[test]
+    fn for_each_prefix_exiles() {
+        // "for each opponent, exile up to one target nonland permanent"
+        use crate::parser::oracle_effect::parse_effect_chain;
+        let def = parse_effect_chain(
+            "for each opponent, exile up to one target nonland permanent",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        assert!(def.repeat_for.is_some(), "repeat_for should be set");
+        assert!(
+            matches!(def.effect, Effect::ChangeZone { .. }),
+            "inner effect should be ChangeZone (exile), got {:?}",
+            def.effect,
+        );
+    }
+
+    #[test]
+    fn for_each_trailing_still_works() {
+        // Existing "for each" trailing pattern should still work
+        use crate::parser::oracle_effect::parse_effect;
+        let effect = parse_effect("draw a card for each creature you control");
+        assert!(
+            matches!(
+                effect,
+                Effect::Draw {
+                    count: QuantityExpr::Ref { .. }
+                }
+            ),
+            "trailing 'for each' should produce dynamic Draw, got {:?}",
+            effect,
+        );
+    }
+
+    // ── Coverage batch: keyword granting ──────────────────────────────
+
+    #[test]
+    fn gain_haste_keyword_granting() {
+        use crate::parser::oracle_effect::parse_effect;
+        let effect = parse_effect("gain haste");
+        assert!(
+            matches!(effect, Effect::GenericEffect { .. }),
+            "expected GenericEffect for 'gain haste', got {:?}",
+            effect,
+        );
+    }
+
+    #[test]
+    fn gain_flying_until_end_of_turn() {
+        use crate::parser::oracle_effect::parse_effect;
+        let effect = parse_effect("gain flying until end of turn");
+        assert!(
+            matches!(effect, Effect::GenericEffect { .. }),
+            "expected GenericEffect for 'gain flying until end of turn', got {:?}",
+            effect,
+        );
+    }
+
+    #[test]
+    fn gain_trample_and_haste() {
+        use crate::parser::oracle_effect::parse_effect;
+        let effect = parse_effect("gain trample and haste");
+        assert!(
+            matches!(effect, Effect::GenericEffect { .. }),
+            "expected GenericEffect for 'gain trample and haste', got {:?}",
+            effect,
+        );
+    }
+
+    // ── Coverage batch: investigate ───────────────────────────────────
+
+    #[test]
+    fn investigate_parses() {
+        use crate::parser::oracle_effect::parse_effect;
+        let effect = parse_effect("investigate");
+        assert!(
+            matches!(effect, Effect::Investigate),
+            "expected Investigate, got {:?}",
+            effect,
+        );
+    }
+
+    #[test]
+    fn investigate_twice_chains() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        let def = parse_effect_chain("investigate twice", AbilityKind::Spell);
+        assert!(
+            matches!(def.effect, Effect::Investigate),
+            "first effect should be Investigate, got {:?}",
+            def.effect,
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("investigate twice should chain via sub_ability");
+        assert!(
+            matches!(sub.effect, Effect::Investigate),
+            "sub effect should be Investigate, got {:?}",
+            sub.effect,
+        );
+    }
+
+    #[test]
+    fn proliferate_twice_chains() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        let def = parse_effect_chain("proliferate twice", AbilityKind::Spell);
+        assert!(
+            matches!(def.effect, Effect::Proliferate),
+            "first effect should be Proliferate, got {:?}",
+            def.effect,
+        );
+        assert!(
+            def.sub_ability.is_some(),
+            "proliferate twice should chain via sub_ability"
+        );
+    }
+
+    #[test]
+    fn investigate_three_times_chains() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        let def = parse_effect_chain("investigate three times", AbilityKind::Spell);
+        assert!(matches!(def.effect, Effect::Investigate));
+        let sub1 = def.sub_ability.as_ref().expect("should have first sub");
+        assert!(matches!(sub1.effect, Effect::Investigate));
+        let sub2 = sub1.sub_ability.as_ref().expect("should have second sub");
+        assert!(matches!(sub2.effect, Effect::Investigate));
+    }
+
+    // ── Coverage batch: gold tokens ──────────────────────────────────
+
+    #[test]
+    fn create_gold_token() {
+        use crate::parser::oracle_effect::parse_effect;
+        let effect = parse_effect("create a Gold token");
+        assert!(
+            matches!(effect, Effect::Token { ref name, .. } if name == "Gold"),
+            "expected Gold Token, got {:?}",
+            effect,
+        );
+    }
+
+    // ── Coverage batch: become the monarch ────────────────────────────
+
+    #[test]
+    fn become_the_monarch_imperative() {
+        use crate::parser::oracle_effect::parse_effect;
+        let effect = parse_effect("become the monarch");
+        assert!(
+            matches!(effect, Effect::BecomeMonarch),
+            "expected BecomeMonarch, got {:?}",
+            effect,
+        );
+    }
+
+    #[test]
+    fn you_become_the_monarch_subject() {
+        use crate::parser::oracle_effect::parse_effect;
+        let effect = parse_effect("you become the monarch");
+        assert!(
+            matches!(effect, Effect::BecomeMonarch),
+            "expected BecomeMonarch, got {:?}",
+            effect,
+        );
+    }
+
+    // ── Coverage batch: prevent damage ────────────────────────────────
+
+    #[test]
+    fn prevent_next_3_damage() {
+        use crate::parser::oracle_effect::parse_effect;
+        use crate::types::ability::PreventionAmount;
+        let effect =
+            parse_effect("prevent the next 3 damage that would be dealt to any target this turn");
+        match effect {
+            Effect::PreventDamage {
+                amount: PreventionAmount::Next(3),
+                ..
+            } => {}
+            _ => panic!("expected PreventDamage with Next(3), got {:?}", effect),
+        }
+    }
+
+    #[test]
+    fn prevent_all_combat_damage() {
+        use crate::parser::oracle_effect::parse_effect;
+        use crate::types::ability::{PreventionAmount, PreventionScope};
+        let effect = parse_effect("prevent all combat damage that would be dealt this turn");
+        match effect {
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                scope: PreventionScope::CombatDamage,
+                ..
+            } => {}
+            _ => panic!(
+                "expected PreventDamage All + CombatDamage, got {:?}",
+                effect
+            ),
+        }
+    }
+
+    // ── Coverage batch: play from exile ────────────────────────────────
+
+    #[test]
+    fn play_that_card() {
+        use crate::parser::oracle_effect::parse_effect;
+        use crate::types::ability::CardPlayMode;
+        let effect = parse_effect("play that card");
+        match effect {
+            Effect::CastFromZone {
+                mode: CardPlayMode::Play,
+                target: TargetFilter::ParentTarget,
+                ..
+            } => {}
+            _ => panic!("expected CastFromZone with Play mode, got {:?}", effect),
+        }
+    }
+
+    #[test]
+    fn cast_uses_cast_mode() {
+        use crate::parser::oracle_effect::parse_effect;
+        use crate::types::ability::CardPlayMode;
+        let effect = parse_effect("cast that card");
+        match effect {
+            Effect::CastFromZone {
+                mode: CardPlayMode::Cast,
+                ..
+            } => {}
+            _ => panic!("expected CastFromZone with Cast mode, got {:?}", effect),
+        }
+    }
+
+    // ── Coverage batch: shuffle and put on top ─────────────────────────
+
+    #[test]
+    fn shuffle_and_put_on_top() {
+        use crate::parser::oracle_effect::parse_effect;
+        let effect = parse_effect("shuffle your library and put that card on top");
+        assert!(
+            matches!(effect, Effect::Shuffle { .. }),
+            "expected Shuffle for 'shuffle and put on top', got {:?}",
+            effect,
+        );
+    }
 }

@@ -105,6 +105,56 @@ impl std::str::FromStr for Parity {
     }
 }
 
+/// CR 615: Damage prevention scope.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum PreventionScope {
+    /// Prevent all damage (combat + noncombat).
+    #[default]
+    AllDamage,
+    /// Prevent only combat damage.
+    CombatDamage,
+}
+
+/// CR 615: How much damage to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum PreventionAmount {
+    /// "Prevent the next N damage"
+    Next(u32),
+    /// "Prevent all damage"
+    All,
+}
+
+/// Shield type for one-shot replacement effects that expire at cleanup.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum ShieldKind {
+    #[default]
+    None,
+    /// CR 701.15: Regeneration shield — consumed on use, expires at cleanup.
+    Regeneration,
+    /// CR 615: Prevention shield — absorbs/prevents damage, expires at cleanup.
+    Prevention { amount: PreventionAmount },
+}
+
+impl ShieldKind {
+    pub fn is_none(&self) -> bool {
+        matches!(self, ShieldKind::None)
+    }
+
+    pub fn is_shield(&self) -> bool {
+        !self.is_none()
+    }
+}
+
+/// CR 601.2 vs CR 305.1: Distinguishes "cast" (spells only) from "play" (spells + lands).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum CardPlayMode {
+    /// CR 601.2: Cast a spell (cannot play lands this way).
+    #[default]
+    Cast,
+    /// CR 305.1: Play a card — cast if it's a spell, play as a land if it's a land.
+    Play,
+}
+
 /// A typed choice stored on a permanent (e.g., "choose a color" → Color(Red)).
 /// The variant discriminant serves as the category key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1253,6 +1303,10 @@ pub enum Effect {
         destination: Option<Zone>,
     },
     Explore,
+    /// CR 702.136: Investigate — create a Clue artifact token.
+    Investigate,
+    /// CR 722: Become the monarch. Sets GameState::monarch to the controller.
+    BecomeMonarch,
     Proliferate,
     CopySpell {
         #[serde(default = "default_target_filter_any")]
@@ -1414,6 +1468,25 @@ pub enum Effect {
     PayCost {
         cost: PaymentCost,
     },
+    /// CR 601.2a + CR 118.9: Cast or play a card from a zone.
+    /// Stub: parsed but not resolved. Runtime behavior is future work.
+    CastFromZone {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+        #[serde(default)]
+        without_paying_mana_cost: bool,
+        /// CR 601.2 vs CR 305.1: Cast (spells only) vs Play (spells + lands).
+        #[serde(default)]
+        mode: CardPlayMode,
+    },
+    /// CR 615: Prevent damage to a target.
+    PreventDamage {
+        amount: PreventionAmount,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+        #[serde(default)]
+        scope: PreventionScope,
+    },
     /// Semantic marker for effects the engine has not yet implemented a handler for.
     /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.
     Unimplemented {
@@ -1510,6 +1583,8 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Fight { .. } => "Fight",
         Effect::Bounce { .. } => "Bounce",
         Effect::Explore => "Explore",
+        Effect::Investigate => "Investigate",
+        Effect::BecomeMonarch => "BecomeMonarch",
         Effect::Proliferate => "Proliferate",
         Effect::CopySpell { .. } => "CopySpell",
         Effect::ChooseCard { .. } => "ChooseCard",
@@ -1534,6 +1609,8 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::AddRestriction { .. } => "AddRestriction",
         Effect::CreateEmblem { .. } => "CreateEmblem",
         Effect::PayCost { .. } => "PayCost",
+        Effect::CastFromZone { .. } => "CastFromZone",
+        Effect::PreventDamage { .. } => "PreventDamage",
         Effect::Unimplemented { name, .. } => name,
     }
 }
@@ -1577,6 +1654,8 @@ pub enum EffectKind {
     Fight,
     Bounce,
     Explore,
+    Investigate,
+    BecomeMonarch,
     Proliferate,
     CopySpell,
     ChooseCard,
@@ -1598,6 +1677,8 @@ pub enum EffectKind {
     AddRestriction,
     CreateEmblem,
     PayCost,
+    CastFromZone,
+    PreventDamage,
     Regenerate,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
@@ -1641,6 +1722,8 @@ impl From<&Effect> for EffectKind {
             Effect::Fight { .. } => EffectKind::Fight,
             Effect::Bounce { .. } => EffectKind::Bounce,
             Effect::Explore => EffectKind::Explore,
+            Effect::Investigate => EffectKind::Investigate,
+            Effect::BecomeMonarch => EffectKind::BecomeMonarch,
             Effect::Proliferate => EffectKind::Proliferate,
             Effect::CopySpell { .. } => EffectKind::CopySpell,
             Effect::ChooseCard { .. } => EffectKind::ChooseCard,
@@ -1665,6 +1748,8 @@ impl From<&Effect> for EffectKind {
             Effect::AddRestriction { .. } => EffectKind::AddRestriction,
             Effect::CreateEmblem { .. } => EffectKind::CreateEmblem,
             Effect::PayCost { .. } => EffectKind::PayCost,
+            Effect::CastFromZone { .. } => EffectKind::CastFromZone,
+            Effect::PreventDamage { .. } => EffectKind::PreventDamage,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,
         }
     }
@@ -1829,6 +1914,10 @@ pub struct AbilityDefinition {
     /// Each entry is one selectable mode. Only meaningful when `modal` is Some.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mode_abilities: Vec<AbilityDefinition>,
+    /// CR 609.3: Repeat this ability N times, where N = resolve_quantity(repeat_for).
+    /// Produced by "for each [X], [effect]" leading patterns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_for: Option<QuantityExpr>,
 }
 
 impl AbilityDefinition {
@@ -1851,6 +1940,7 @@ impl AbilityDefinition {
             multi_target: None,
             modal: None,
             mode_abilities: Vec::new(),
+            repeat_for: None,
         }
     }
 
@@ -2330,9 +2420,9 @@ pub struct ReplacementDefinition {
     /// None = all damage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combat_scope: Option<CombatDamageScope>,
-    /// CR 701.15: True for regeneration shields — consumed on use, expire at cleanup.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_regeneration_shield: bool,
+    /// Shield type for one-shot replacement effects that expire at cleanup.
+    #[serde(default, skip_serializing_if = "ShieldKind::is_none")]
+    pub shield_kind: ShieldKind,
     /// Marks this replacement as consumed (one-shot). Skipped by find_applicable_replacements.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_consumed: bool,
@@ -2354,7 +2444,7 @@ impl ReplacementDefinition {
             damage_source_filter: None,
             damage_target_filter: None,
             combat_scope: None,
-            is_regeneration_shield: false,
+            shield_kind: ShieldKind::None,
             is_consumed: false,
         }
     }
@@ -2411,7 +2501,7 @@ impl ReplacementDefinition {
 
     /// CR 701.15: Mark this replacement as a regeneration shield (one-shot, expires at cleanup).
     pub fn regeneration_shield(mut self) -> Self {
-        self.is_regeneration_shield = true;
+        self.shield_kind = ShieldKind::Regeneration;
         self
     }
 }
@@ -2526,6 +2616,9 @@ pub struct ResolvedAbility {
     /// CR 609.3: Optional effect — controller prompted before execution.
     #[serde(default)]
     pub optional: bool,
+    /// CR 609.3: Repeat this ability N times (from "for each [X], [effect]").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_for: Option<QuantityExpr>,
 }
 
 impl ResolvedAbility {
@@ -2548,6 +2641,7 @@ impl ResolvedAbility {
             context: SpellContext::default(),
             optional_targeting: false,
             optional: false,
+            repeat_for: None,
         }
     }
 

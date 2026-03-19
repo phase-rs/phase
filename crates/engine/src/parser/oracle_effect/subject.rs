@@ -339,6 +339,10 @@ fn build_become_clause(
 ) -> Option<ParsedEffectClause> {
     let normalized = deconjugate_verb(predicate);
     let (predicate, duration) = super::strip_trailing_duration(&normalized);
+    // CR 722: "become the monarch" — special keyword action, not an animation.
+    if predicate.strip_prefix("become ")?.trim() == "the monarch" {
+        return Some(super::parsed_clause(Effect::BecomeMonarch));
+    }
     // CR 611.2b: "Becomes" effects without explicit duration are permanent
     let duration = duration.or(Some(Duration::Permanent));
     let become_text = predicate.strip_prefix("become ")?.trim();

@@ -76,6 +76,31 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
 
     state.auto_pass.remove(&player);
 
+    // CR 722.2: If the monarch leaves the game, the active player becomes the monarch.
+    // If the active player is also leaving, the next living player in turn order gets it.
+    if state.monarch == Some(player) {
+        let any_alive = state
+            .players
+            .iter()
+            .any(|p| !p.is_eliminated && p.id != player);
+
+        if !any_alive {
+            state.monarch = None;
+        } else {
+            // Prefer active player; fall back to next living in turn order.
+            let new_monarch =
+                if players::is_alive(state, state.active_player) && state.active_player != player {
+                    state.active_player
+                } else {
+                    players::next_player(state, player)
+                };
+            state.monarch = Some(new_monarch);
+            events.push(GameEvent::MonarchChanged {
+                player_id: new_monarch,
+            });
+        }
+    }
+
     events.push(GameEvent::PlayerEliminated { player_id: player });
 }
 

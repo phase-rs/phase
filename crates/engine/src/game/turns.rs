@@ -207,11 +207,11 @@ pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) {
 /// choose which cards to discard down to maximum hand size, or `None` if
 /// cleanup completes immediately.
 pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
-    // CR 701.15c: Regeneration shields expire at cleanup.
+    // CR 701.15c + CR 615: Shields (regeneration, prevention) expire at cleanup.
     // Also prune any consumed shields from earlier this turn.
     for obj in state.objects.values_mut() {
         obj.replacement_definitions
-            .retain(|r| !r.is_regeneration_shield);
+            .retain(|r| !r.shield_kind.is_shield());
     }
 
     // CR 514.2: Prune "until end of turn" transient continuous effects.
@@ -1133,8 +1133,8 @@ mod tests {
             "Only non-regen replacement should survive cleanup"
         );
         assert!(
-            !obj.replacement_definitions[0].is_regeneration_shield,
-            "Surviving replacement should not be a regen shield"
+            !obj.replacement_definitions[0].shield_kind.is_shield(),
+            "Surviving replacement should not be a shield"
         );
     }
 }

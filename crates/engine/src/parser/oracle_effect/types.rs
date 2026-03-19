@@ -146,7 +146,10 @@ pub(super) enum ImperativeFamilyAst {
     CostResource(CostResourceImperativeAst),
     ZoneCounter(ZoneCounterImperativeAst),
     Explore,
+    Investigate,
+    BecomeMonarch,
     Proliferate,
+    GainKeyword(Effect),
     Shuffle(ShuffleImperativeAst),
     Put(PutImperativeAst),
     YouMay { text: String },
@@ -276,10 +279,18 @@ pub(super) enum PutImperativeAst {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ShuffleImperativeAst {
-    ShuffleLibrary { target: TargetFilter },
+    ShuffleLibrary {
+        target: TargetFilter,
+    },
+    /// "shuffle and put that card on top" — shuffle, then place the parent target on top.
+    ShuffleAndPutOnTop,
     ChangeZoneToLibrary,
-    ChangeZoneAllToLibrary { origin: Zone },
-    Unimplemented { text: String },
+    ChangeZoneAllToLibrary {
+        origin: Zone,
+    },
+    Unimplemented {
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

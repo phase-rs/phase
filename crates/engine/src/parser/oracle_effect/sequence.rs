@@ -93,7 +93,10 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
 }
 
 fn starts_prefix_clause(current_lower: &str) -> bool {
-    current_lower.starts_with("until ") || current_lower.starts_with("if ")
+    current_lower.starts_with("until ")
+        || current_lower.starts_with("if ")
+        || current_lower.starts_with("when you do")
+        || current_lower.starts_with("for each ")
 }
 
 pub(super) fn starts_clause_text(text: &str) -> bool {
@@ -102,6 +105,7 @@ pub(super) fn starts_clause_text(text: &str) -> bool {
         "add ",
         "all ",
         "attach ",
+        "cast ",
         "counter ",
         "create ",
         "deal ",
@@ -114,6 +118,7 @@ pub(super) fn starts_clause_text(text: &str) -> bool {
         "exile ",
         "explore",
         "fight ",
+        "investigate",
         "gain control ",
         "gain ",
         "look at ",

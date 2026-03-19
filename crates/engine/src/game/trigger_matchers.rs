@@ -130,6 +130,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // Promoted trigger matchers -- Class enchantments (AFR+)
     r.insert(TriggerMode::ClassLevelGained, match_class_level_gained);
 
+    // CR 722: Monarch triggers
+    r.insert(TriggerMode::BecomeMonarch, match_become_monarch);
+
     // Remaining trigger modes: recognized but not yet matched against events.
     let unimplemented_modes = [
         TriggerMode::DamagePreventedOnce,
@@ -149,7 +152,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::PhaseOut,
         TriggerMode::PhaseOutAll,
         TriggerMode::NewGame,
-        TriggerMode::BecomeMonarch,
         TriggerMode::TakesInitiative,
         TriggerMode::LosesGame,
         TriggerMode::Championed,
@@ -1451,6 +1453,21 @@ pub(super) fn match_you_attack(
                 .map(|o| Some(o.controller) == source_controller)
                 .unwrap_or(false)
         })
+    } else {
+        false
+    }
+}
+
+/// CR 722: Matches when a player becomes the monarch.
+/// Fires for "when you become the monarch" / "whenever a player becomes the monarch".
+pub(super) fn match_become_monarch(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::MonarchChanged { player_id } = event {
+        valid_player_matches(trigger, state, *player_id, source_id)
     } else {
         false
     }

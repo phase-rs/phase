@@ -13,7 +13,7 @@ use super::oracle_target::{parse_event_context_ref, parse_target};
 use super::oracle_util::{contains_possessive, parse_number};
 use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, ChoiceType, DamageAmount,
+    AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, ChoiceType, DamageAmount,
     DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer, MultiTargetSpec,
     PlayerFilter, PtValue, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TypeFilter,
     TypedFilter,
@@ -138,6 +138,49 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
 /// type is retained as a permanent continuous effect.
 ///
 /// CR 205.1a: An object retains types explicitly stated by the effect.
+/// Parse "{keyword_action} {multiplier}" patterns like "investigate twice",
+/// "proliferate twice", "investigate three times", "investigate four times".
+///
+/// Returns a sub_ability chain of N copies of the keyword action effect.
+/// The multiplier is stripped from the text and the base action is parsed
+/// through the normal imperative pipeline.
+fn try_parse_repeated_keyword_action(text: &str) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+
+    // Map multiplier suffixes to repeat counts
+    let (base, count) = if let Some(base) = lower.strip_suffix(" twice") {
+        (base, 2u32)
+    } else if let Some(base) = lower.strip_suffix(" three times") {
+        (base, 3)
+    } else if let Some(base) = lower.strip_suffix(" four times") {
+        (base, 4)
+    } else if let Some(base) = lower.strip_suffix(" five times") {
+        (base, 5)
+    } else {
+        return None;
+    };
+
+    // Parse the base action (e.g., "investigate", "proliferate")
+    let base_effect = parse_imperative_effect(base);
+    if matches!(base_effect, Effect::Unimplemented { .. }) {
+        return None;
+    }
+
+    // Chain N-1 sub_abilities after the first effect
+    let mut sub: Option<Box<AbilityDefinition>> = None;
+    for _ in 1..count {
+        let mut def = AbilityDefinition::new(AbilityKind::Spell, base_effect.clone());
+        def.sub_ability = sub;
+        sub = Some(Box::new(def));
+    }
+
+    Some(ParsedEffectClause {
+        effect: base_effect,
+        duration: None,
+        sub_ability: sub,
+    })
+}
+
 fn try_parse_still_a_type(text: &str) -> Option<ParsedEffectClause> {
     use crate::types::ability::ContinuousModification;
     use crate::types::card_type::CoreType;
@@ -317,6 +360,12 @@ fn lower_clause_ast(ast: ClauseAst) -> ParsedEffectClause {
 }
 
 fn lower_imperative_clause(text: &str) -> ParsedEffectClause {
+    // "{keyword_action} twice/three times/N times" → chain N copies via sub_ability.
+    // Handles "investigate twice", "proliferate twice", "investigate three times", etc.
+    if let Some(clause) = try_parse_repeated_keyword_action(text) {
+        return clause;
+    }
+
     // "Its controller gains life equal to its power/toughness" — subject must be preserved
     // because the life recipient is not the caster but the targeted permanent's controller.
     if let Some(clause) = try_parse_targeted_controller_gain_life(text) {
@@ -828,6 +877,41 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
     }
 }
 
+/// CR 601.2a + CR 118.9: Parse "cast it/that card [without paying its mana cost]".
+fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
+    let (rest, mode) = if let Some(rest) = lower.strip_prefix("cast ") {
+        (rest, CardPlayMode::Cast)
+    } else if let Some(rest) = lower.strip_prefix("play ") {
+        // CR 305.1: "play" means cast if spell, play as land if land.
+        (rest, CardPlayMode::Play)
+    } else {
+        return None;
+    };
+
+    let without_paying = rest.contains("without paying its mana cost")
+        || rest.contains("without paying their mana cost");
+
+    let target = if rest.starts_with("it")
+        || rest.starts_with("that card")
+        || rest.starts_with("that spell")
+        || rest.starts_with("the copy")
+        || rest.starts_with("the exiled card")
+        || rest.starts_with("them")
+        || rest.starts_with("those cards")
+        || rest.starts_with("cards exiled")
+    {
+        TargetFilter::ParentTarget
+    } else {
+        TargetFilter::Any
+    };
+
+    Some(Effect::CastFromZone {
+        target,
+        without_paying_mana_cost: without_paying,
+        mode,
+    })
+}
+
 fn parse_imperative_effect(text: &str) -> Effect {
     let lower = text.to_lowercase();
     if let Some(ast) = parse_imperative_family_ast(text, &lower) {
@@ -836,6 +920,11 @@ fn parse_imperative_effect(text: &str) -> Effect {
 
     // CR 114.1: "you get an emblem with "[static text]""
     if let Some(effect) = try_parse_emblem_creation(&lower, text) {
+        return effect;
+    }
+
+    // CR 601.2a + CR 118.9: "cast it/that card without paying its mana cost"
+    if let Some(effect) = try_parse_cast_effect(&lower) {
         return effect;
     }
 
@@ -1125,12 +1214,16 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
         };
         let condition = condition.or(if_you_do);
         let (is_optional, text) = strip_optional_effect_prefix(&text);
+        let (repeat_for, text) = strip_for_each_prefix(&text);
         let (text_no_temporal, delayed_condition) = strip_temporal_suffix(&text);
         let (text_no_qty, multi_target) = strip_any_number_quantifier(text_no_temporal);
         let clause = parse_effect_clause(&text_no_qty);
         let mut def = AbilityDefinition::new(kind, clause.effect);
         if is_optional {
             def.optional = true;
+        }
+        if let Some(qty) = repeat_for {
+            def.repeat_for = Some(qty);
         }
         if let Some(duration) = clause.duration {
             def = def.duration(duration);
@@ -1477,9 +1570,17 @@ fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCondition>, S
     }
 }
 
-/// CR 608.2c: Detect "if you do, {effect}" conditional connector.
+/// CR 608.2c + CR 603.12: Detect "if you do, {effect}" and "when you do, {effect}" conditionals.
+/// Both forms gate the sub-effect on the parent's optional_effect_performed flag.
+/// "When you do" is a reflexive trigger (CR 603.12) but in this engine's atomic resolution
+/// model it is semantically identical to "if you do" (CR 608.2c).
 fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
+    // CR 603.12: "when you do, {effect}" — reflexive trigger, treated as IfYouDo
+    if let Some(rest) = lower.strip_prefix("when you do, ") {
+        let offset = text.len() - rest.len();
+        return (Some(AbilityCondition::IfYouDo), text[offset..].to_string());
+    }
     if let Some(rest) = lower.strip_prefix("if you do, ") {
         let offset = text.len() - rest.len();
         (Some(AbilityCondition::IfYouDo), text[offset..].to_string())
@@ -1497,6 +1598,22 @@ fn strip_optional_effect_prefix(text: &str) -> (bool, String) {
     } else {
         (false, text.to_string())
     }
+}
+
+/// CR 609.3: Strip "for each [X], " prefix from effect text.
+/// Returns the QuantityExpr for the iteration count and the remaining text.
+/// "For as long as" is NOT matched (different construct — duration, not iteration).
+fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
+    let lower = text.to_lowercase();
+    if let Some(rest) = lower.strip_prefix("for each ") {
+        if let Some((clause, remainder)) = rest.split_once(", ") {
+            if let Some(qty) = parse_for_each_clause(clause) {
+                let offset = text.len() - remainder.len();
+                return (Some(QuantityExpr::Ref { qty }), text[offset..].to_string());
+            }
+        }
+    }
+    (None, text.to_string())
 }
 
 fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {

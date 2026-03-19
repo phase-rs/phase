@@ -176,6 +176,10 @@ pub enum GameEvent {
         object_id: ObjectId,
         level: u8,
     },
+    /// CR 722: A player became the monarch.
+    MonarchChanged {
+        player_id: PlayerId,
+    },
 }
 
 #[cfg(test)]

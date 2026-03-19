@@ -186,7 +186,12 @@ fn destroy_applier(
         .objects
         .get(&rid.source)
         .and_then(|obj| obj.replacement_definitions.get(rid.index))
-        .is_some_and(|repl| repl.is_regeneration_shield);
+        .is_some_and(|repl| {
+            matches!(
+                repl.shield_kind,
+                crate::types::ability::ShieldKind::Regeneration
+            )
+        });
 
     if !is_regen {
         return ApplyResult::Modified(event);
@@ -2379,7 +2384,7 @@ mod tests {
         let active_count = obj
             .replacement_definitions
             .iter()
-            .filter(|r| r.is_regeneration_shield && !r.is_consumed)
+            .filter(|r| r.shield_kind.is_shield() && !r.is_consumed)
             .count();
         assert_eq!(consumed_count, 1, "One shield should be consumed");
         assert_eq!(active_count, 1, "One shield should remain active");
@@ -2398,7 +2403,7 @@ mod tests {
         let all_consumed = obj
             .replacement_definitions
             .iter()
-            .filter(|r| r.is_regeneration_shield)
+            .filter(|r| r.shield_kind.is_shield())
             .all(|r| r.is_consumed);
         assert!(all_consumed, "Both shields should be consumed now");
     }

@@ -10,7 +10,9 @@ use crate::types::identifiers::{ObjectId, TrackedSetId};
 pub mod add_restriction;
 pub mod animate;
 pub mod attach;
+pub mod become_monarch;
 pub mod bounce;
+pub mod cast_from_zone;
 pub mod change_zone;
 pub mod choose;
 pub mod choose_card;
@@ -29,10 +31,12 @@ pub mod effect;
 pub mod explore;
 pub mod fight;
 pub mod gain_control;
+pub mod investigate;
 pub mod life;
 pub mod mana;
 pub mod mill;
 pub mod pay;
+pub mod prevent_damage;
 pub mod proliferate;
 pub mod pump;
 pub mod regenerate;
@@ -86,6 +90,8 @@ pub fn resolve_effect(
         Effect::Fight { .. } => fight::resolve(state, ability, events),
         Effect::Bounce { .. } => bounce::resolve(state, ability, events),
         Effect::Explore => explore::resolve(state, ability, events),
+        Effect::Investigate => investigate::resolve(state, ability, events),
+        Effect::BecomeMonarch => become_monarch::resolve(state, ability, events),
         Effect::Proliferate => proliferate::resolve(state, ability, events),
         Effect::CopySpell { .. } => copy_spell::resolve(state, ability, events),
         Effect::ChooseCard { .. } => choose_card::resolve(state, ability, events),
@@ -110,6 +116,8 @@ pub fn resolve_effect(
         Effect::AddRestriction { .. } => add_restriction::resolve(state, ability, events),
         Effect::CreateEmblem { .. } => create_emblem::resolve(state, ability, events),
         Effect::PayCost { .. } => pay::resolve(state, ability, events),
+        Effect::CastFromZone { .. } => cast_from_zone::resolve(state, ability, events),
+        Effect::PreventDamage { .. } => prevent_damage::resolve(state, ability, events),
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);
@@ -165,7 +173,9 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&crate::types::abilit
         | Effect::Fight { target, .. }
         | Effect::Attach { target, .. }
         | Effect::Transform { target, .. }
-        | Effect::CopySpell { target, .. } => target,
+        | Effect::CopySpell { target, .. }
+        | Effect::CastFromZone { target, .. }
+        | Effect::PreventDamage { target, .. } => target,
         Effect::RevealTop { player, .. } => player,
         _ => return None,
     };
@@ -265,7 +275,29 @@ pub fn resolve_ability_chain(
             None
         };
         let effective = resolved_ability.as_ref().unwrap_or(ability);
-        let _ = resolve_effect(state, effective, events);
+
+        // CR 609.3: Execute the effect N times when repeat_for is set.
+        let iterations = if let Some(ref qty) = ability.repeat_for {
+            crate::game::quantity::resolve_quantity(
+                state,
+                qty,
+                ability.controller,
+                ability.source_id,
+            )
+            .max(0) as usize
+        } else {
+            1
+        };
+
+        let initial_waiting_for = state.waiting_for.clone();
+        for _ in 0..iterations {
+            let _ = resolve_effect(state, effective, events);
+            // Break if inner effect entered a player-choice state — avoid
+            // executing subsequent iterations against state awaiting input.
+            if state.waiting_for != initial_waiting_for {
+                break;
+            }
+        }
     }
 
     // CR 603.7: Record moved objects as a tracked set for delayed trigger pronouns.
@@ -739,6 +771,40 @@ mod tests {
         assert_eq!(
             state.players[1].life, 18,
             "Expected 2 damage from parent, override should be skipped"
+        );
+    }
+
+    #[test]
+    fn repeat_for_draws_multiple_cards() {
+        // CR 609.3: repeat_for = Fixed(3) with Draw(1) should draw 3 cards
+        let mut state = GameState::new_two_player(42);
+        for i in 0..5 {
+            crate::game::zones::create_object(
+                &mut state,
+                CardId(i + 10),
+                PlayerId(0),
+                format!("Card {}", i),
+                Zone::Library,
+            );
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.repeat_for = Some(QuantityExpr::Fixed { value: 3 });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.players[0].hand.len(),
+            3,
+            "repeat_for=3 with Draw(1) should draw 3 cards"
         );
     }
 }

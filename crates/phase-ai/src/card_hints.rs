@@ -181,6 +181,7 @@ mod tests {
             CoreType::Instant,
             vec![make_ability(Effect::Destroy {
                 target: TargetFilter::Any,
+                cant_regenerate: false,
             })],
         );
 

@@ -620,6 +620,12 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_created_token_ids: Vec<ObjectId>,
 
+    /// CR 722: The current monarch, if any. At the beginning of the monarch's end step,
+    /// the monarch draws a card. When a creature deals combat damage to the monarch,
+    /// the creature's controller becomes the monarch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monarch: Option<PlayerId>,
+
     /// Active game-level restrictions (e.g., damage prevention disabled).
     /// Checked by relevant game systems; expired entries cleaned up at phase transitions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -756,6 +762,7 @@ impl GameState {
             all_creature_types: Vec::new(),
             all_card_names: Vec::new(),
             last_created_token_ids: Vec::new(),
+            monarch: None,
             restrictions: Vec::new(),
             current_trigger_event: None,
             cost_payment_failed_flag: false,

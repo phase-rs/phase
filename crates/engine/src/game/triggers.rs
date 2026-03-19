@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    AbilityDefinition, Effect, ModalChoice, ResolvedAbility, TargetFilter, TriggerCondition,
-    TriggerDefinition,
+    AbilityDefinition, Effect, ModalChoice, ResolvedAbility, TargetFilter, TargetRef,
+    TriggerCondition, TriggerDefinition,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind, TargetSelectionConstraint};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
+use crate::types::phase::Phase;
 use crate::types::player::{Player, PlayerId};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -208,6 +209,72 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 Some(Zone::Graveyard),
                 &mut pending,
             );
+        }
+
+        // CR 722.3: At the beginning of the monarch's end step, the monarch draws a card.
+        // Synthetic game-rule trigger — not attached to any permanent.
+        if let GameEvent::PhaseChanged { phase: Phase::End } = event {
+            if let Some(monarch_id) = state.monarch {
+                if monarch_id == state.active_player {
+                    let draw_effect = Effect::Draw {
+                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    };
+                    let draw_ability =
+                        ResolvedAbility::new(draw_effect, Vec::new(), ObjectId(0), monarch_id);
+                    let trig_def = TriggerDefinition::new(TriggerMode::Phase)
+                        .description("Monarch draw (CR 722.3)".to_string());
+                    pending.push(PendingTrigger {
+                        source_id: ObjectId(0),
+                        controller: monarch_id,
+                        condition: trig_def.condition,
+                        ability: draw_ability,
+                        timestamp: 0,
+                        target_constraints: Vec::new(),
+                        trigger_event: Some(event.clone()),
+                        modal: None,
+                        mode_abilities: vec![],
+                    });
+                }
+            }
+        }
+
+        // CR 722.4: When a creature deals combat damage to the monarch, that creature's
+        // controller becomes the monarch. Synthetic game-rule trigger.
+        if let GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Player(target_player),
+            is_combat: true,
+            ..
+        } = event
+        {
+            if state.monarch == Some(*target_player) {
+                // The attacking creature's controller becomes the monarch
+                if let Some(attacker) = state.objects.get(source_id) {
+                    let new_monarch = attacker.controller;
+                    if new_monarch != *target_player {
+                        let become_effect = Effect::BecomeMonarch;
+                        let become_ability = ResolvedAbility::new(
+                            become_effect,
+                            Vec::new(),
+                            *source_id,
+                            new_monarch,
+                        );
+                        let trig_def = TriggerDefinition::new(TriggerMode::DamageDone)
+                            .description("Monarch steal (CR 722.4)".to_string());
+                        pending.push(PendingTrigger {
+                            source_id: *source_id,
+                            controller: new_monarch,
+                            condition: trig_def.condition,
+                            ability: become_ability,
+                            timestamp: 0,
+                            target_constraints: Vec::new(),
+                            trigger_event: Some(event.clone()),
+                            modal: None,
+                            mode_abilities: vec![],
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -593,7 +660,8 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
         | Effect::RemoveCounter { target, .. }
         | Effect::PutCounter { target, .. }
         | Effect::Transform { target, .. }
-        | Effect::RevealHand { target, .. } => {
+        | Effect::RevealHand { target, .. }
+        | Effect::PreventDamage { target, .. } => {
             if matches!(
                 target,
                 TargetFilter::None
