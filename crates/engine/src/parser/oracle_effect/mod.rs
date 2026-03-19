@@ -44,6 +44,60 @@ pub fn parse_effect(text: &str) -> Effect {
     parse_effect_clause(text).effect
 }
 
+/// CR 603.7c: Parse inline delayed triggers like "when that creature dies, draw a card".
+/// Returns a `CreateDelayedTrigger` wrapping the parsed inner effect.
+fn try_parse_inline_delayed_trigger(text: &str) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    if !lower.starts_with("when ") {
+        return None;
+    }
+
+    // Find the comma separator between condition and effect
+    let comma = lower.find(", ")?;
+    let condition_text = &lower[5..comma];
+    let effect_text = &text[comma + 2..];
+
+    let condition = if condition_text.contains("dies") || condition_text.contains("die") {
+        DelayedTriggerCondition::WhenDies {
+            filter: parse_delayed_subject_filter(condition_text),
+        }
+    } else if condition_text.contains("leaves the battlefield") {
+        DelayedTriggerCondition::WhenLeavesPlayFiltered {
+            filter: parse_delayed_subject_filter(condition_text),
+        }
+    } else {
+        return None;
+    };
+
+    // "that creature/permanent" references the parent spell's target
+    let uses_tracked_set = condition_text.contains("that ");
+
+    let inner = parse_effect_chain(effect_text, AbilityKind::Spell);
+
+    Some(ParsedEffectClause {
+        effect: Effect::CreateDelayedTrigger {
+            condition,
+            effect: Box::new(inner),
+            uses_tracked_set,
+        },
+        duration: None,
+        sub_ability: None,
+    })
+}
+
+/// Map delayed trigger condition subjects to TargetFilter.
+/// "that creature"/"that permanent" → ParentTarget (references the parent spell's target).
+/// "it"/"this creature" → SelfRef.
+fn parse_delayed_subject_filter(condition_text: &str) -> TargetFilter {
+    if condition_text.contains("that ") {
+        TargetFilter::ParentTarget
+    } else if condition_text.contains("it ") || condition_text.starts_with("it") {
+        TargetFilter::SelfRef
+    } else {
+        TargetFilter::Any
+    }
+}
+
 /// CR 614.16: Parse "Damage can't be prevented [this turn]" into Effect::AddRestriction.
 /// Handles variants:
 ///   - "Damage can't be prevented this turn"
@@ -100,6 +154,11 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
             name: "empty".to_string(),
             description: None,
         });
+    }
+
+    // CR 603.7c: "When that creature dies, ..." — inline delayed trigger creation.
+    if let Some(clause) = try_parse_inline_delayed_trigger(text) {
+        return clause;
     }
 
     // CR 614.16: "Damage can't be prevented [this turn]" → Effect::AddRestriction
@@ -759,7 +818,10 @@ fn replace_target_with_parent(effect: &mut Effect) {
         | Effect::Pump { target, .. }
         | Effect::Attach { target, .. }
         | Effect::Counter { target, .. }
-        | Effect::Transform { target, .. } => {
+        | Effect::Transform { target, .. }
+        | Effect::Connive { target }
+        | Effect::PhaseOut { target }
+        | Effect::ForceBlock { target } => {
             *target = TargetFilter::ParentTarget;
         }
         Effect::PutCounter { target, .. }
@@ -827,8 +889,31 @@ fn lower_subject_predicate_ast(
                     count,
                 });
             }
-            lower_imperative_clause(&text)
+            let mut clause = lower_imperative_clause(&text);
+            // CR 608.2c: Inject the subject's target into targeted effects that were
+            // parsed via the imperative path (connive, phase out, force block, suspect).
+            inject_subject_target(&mut clause.effect, &subject);
+            clause
         }
+    }
+}
+
+/// Inject a subject phrase's target filter into an effect that was parsed through
+/// the imperative fallback path, where the subject was stripped before parsing.
+/// Only applies to effects with a sentinel `TargetFilter::Any` that should inherit
+/// the subject's targeting information.
+fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
+    let subject_filter = subject.target.as_ref().unwrap_or(&subject.affected).clone();
+    match effect {
+        Effect::Connive { target }
+        | Effect::PhaseOut { target }
+        | Effect::ForceBlock { target }
+        | Effect::Suspect { target }
+            if *target == TargetFilter::Any =>
+        {
+            *target = subject_filter;
+        }
+        _ => {}
     }
 }
 
@@ -2810,6 +2895,212 @@ mod tests {
         assert!(
             clause.sub_ability.is_some(),
             "should have sub_ability for second subject"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Item 1: "It can't be regenerated" continuation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cant_regenerate_destroy_target() {
+        let def = parse_effect_chain(
+            "Destroy target creature. It can't be regenerated.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                def.effect,
+                Effect::Destroy {
+                    cant_regenerate: true,
+                    ..
+                }
+            ),
+            "Expected Destroy {{ cant_regenerate: true }}, got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn cant_regenerate_destroy_all() {
+        let def = parse_effect_chain(
+            "Destroy all creatures. They can't be regenerated.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                def.effect,
+                Effect::DestroyAll {
+                    cant_regenerate: true,
+                    ..
+                }
+            ),
+            "Expected DestroyAll {{ cant_regenerate: true }}, got {:?}",
+            def.effect
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Item 2: Restriction predicates
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn restriction_cant_attack() {
+        let e = parse_effect("Target creature can't attack");
+        assert!(
+            matches!(&e, Effect::GenericEffect { static_abilities, .. }
+                if static_abilities.iter().any(|s| s.mode == StaticMode::CantAttack)),
+            "Expected CantAttack restriction, got {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn restriction_cant_attack_or_block() {
+        let e = parse_effect("Target creature can't attack or block");
+        match &e {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                let modes: Vec<_> = static_abilities.iter().map(|s| &s.mode).collect();
+                assert!(
+                    modes.contains(&&StaticMode::CantAttack),
+                    "Missing CantAttack"
+                );
+                assert!(modes.contains(&&StaticMode::CantBlock), "Missing CantBlock");
+            }
+            other => panic!("Expected GenericEffect, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Item 3: Connive, PhaseOut, ForceBlock verbs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn connive_imperative() {
+        let e = parse_effect("it connives");
+        assert!(
+            matches!(
+                e,
+                Effect::Connive {
+                    target: TargetFilter::SelfRef
+                }
+            ),
+            "Expected Connive {{ SelfRef }}, got {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn phase_out_targeted() {
+        let e = parse_effect("Target creature phases out");
+        assert!(
+            matches!(
+                e,
+                Effect::PhaseOut {
+                    target: TargetFilter::Typed(_)
+                }
+            ),
+            "Expected PhaseOut with typed target, got {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn force_block_targeted() {
+        let e = parse_effect("Target creature blocks this turn if able");
+        assert!(
+            matches!(
+                e,
+                Effect::ForceBlock {
+                    target: TargetFilter::Typed(_)
+                }
+            ),
+            "Expected ForceBlock with typed target, got {:?}",
+            e
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Item 4: Inline delayed triggers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn inline_delayed_trigger_when_dies() {
+        let e = parse_effect("When that creature dies, draw a card");
+        assert!(
+            matches!(
+                e,
+                Effect::CreateDelayedTrigger {
+                    condition: DelayedTriggerCondition::WhenDies {
+                        filter: TargetFilter::ParentTarget,
+                    },
+                    uses_tracked_set: true,
+                    ..
+                }
+            ),
+            "Expected CreateDelayedTrigger with WhenDies, got {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn inline_delayed_trigger_when_leaves() {
+        let e = parse_effect("When that creature leaves the battlefield, return it to the battlefield under its owner's control");
+        assert!(
+            matches!(
+                e,
+                Effect::CreateDelayedTrigger {
+                    condition: DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                        filter: TargetFilter::ParentTarget,
+                    },
+                    uses_tracked_set: true,
+                    ..
+                }
+            ),
+            "Expected CreateDelayedTrigger with WhenLeavesPlayFiltered, got {:?}",
+            e
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Item 5: "Become the [type] of your choice"
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn become_creature_type_of_choice() {
+        let e = parse_effect(
+            "Target creature becomes the creature type of your choice until end of turn",
+        );
+        assert!(
+            matches!(
+                e,
+                Effect::Choose {
+                    choice_type: ChoiceType::CreatureType,
+                    ..
+                }
+            ),
+            "Expected Choose {{ CreatureType }}, got {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn become_basic_land_type_of_choice() {
+        let e = parse_effect(
+            "Target land becomes the basic land type of your choice until end of turn",
+        );
+        assert!(
+            matches!(
+                e,
+                Effect::Choose {
+                    choice_type: ChoiceType::BasicLandType,
+                    ..
+                }
+            ),
+            "Expected Choose {{ BasicLandType }}, got {:?}",
+            e
         );
     }
 }

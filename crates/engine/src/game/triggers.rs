@@ -445,6 +445,27 @@ fn delayed_trigger_matches(
                 if *id == *object_id
             )
         }),
+        // CR 603.7c: "when [object] dies" — zone change to graveyard from battlefield
+        DelayedTriggerCondition::WhenDies { .. } => events.iter().any(|e| {
+            matches!(
+                e,
+                GameEvent::ZoneChanged {
+                    from: Zone::Battlefield,
+                    to: Zone::Graveyard,
+                    ..
+                }
+            )
+        }),
+        // CR 603.7c: "when [object] leaves the battlefield" — any zone change from battlefield
+        DelayedTriggerCondition::WhenLeavesPlayFiltered { .. } => events.iter().any(|e| {
+            matches!(
+                e,
+                GameEvent::ZoneChanged {
+                    from: Zone::Battlefield,
+                    ..
+                }
+            )
+        }),
     }
 }
 

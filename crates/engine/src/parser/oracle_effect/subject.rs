@@ -141,6 +141,14 @@ fn parse_subject_application(subject: &str) -> Option<SubjectApplication> {
         let (filter, _) = parse_target(subject);
         return subject_filter_application(filter, true);
     }
+    // "up to N target X" — the quantifier count is handled by strip_any_number_quantifier()
+    // in parse_effect_chain; here we just need to route to parse_target for the filter.
+    if lower.starts_with("up to ") {
+        if let Some(target_pos) = lower.find("target ") {
+            let (filter, _) = parse_target(&subject[target_pos..]);
+            return subject_filter_application(filter, true);
+        }
+    }
     if lower.starts_with("all ") || lower.starts_with("each ") {
         let (filter, _) = parse_target(subject);
         return subject_filter_application(filter, false);
@@ -346,6 +354,13 @@ fn build_become_clause(
     // CR 611.2b: "Becomes" effects without explicit duration are permanent
     let duration = duration.or(Some(Duration::Permanent));
     let become_text = predicate.strip_prefix("become ")?.trim();
+
+    // CR 205.3 / CR 305.7: "become the [type] of your choice" — player chooses a subtype.
+    // Must intercept before parse_animation_spec which rejects "of your choice" patterns.
+    if let Some(clause) = try_parse_become_choice(become_text, &application, duration.clone()) {
+        return Some(clause);
+    }
+
     let animation = parse_animation_spec(become_text)?;
     let modifications = animation_modifications(&animation);
     if modifications.is_empty() {
@@ -366,6 +381,64 @@ fn build_become_clause(
     })
 }
 
+/// CR 205.3 / CR 305.7: Parse "become the creature type of your choice" and similar
+/// patterns into a Choose → GenericEffect(AddChosenSubtype) chain.
+fn try_parse_become_choice(
+    become_text: &str,
+    application: &SubjectApplication,
+    duration: Option<Duration>,
+) -> Option<ParsedEffectClause> {
+    use crate::types::ability::{ChoiceType, ChosenSubtypeKind, ContinuousModification};
+
+    let lower = become_text.to_lowercase();
+    if !lower.ends_with("of your choice") {
+        return None;
+    }
+
+    let (choice_type, modification) = if lower.contains("creature type") {
+        (
+            ChoiceType::CreatureType,
+            ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::CreatureType,
+            },
+        )
+    } else if lower.contains("basic land type") {
+        (
+            ChoiceType::BasicLandType,
+            ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::BasicLandType,
+            },
+        )
+    } else {
+        // Color-based choices ("become the color of your choice") deferred —
+        // the engine doesn't have SetChosenColor as a ContinuousModification yet.
+        return None;
+    };
+
+    // Two-step: Choose (prompts player) → GenericEffect (applies chosen subtype).
+    let apply_effect = Effect::GenericEffect {
+        static_abilities: vec![StaticDefinition::continuous()
+            .affected(application.affected.clone())
+            .modifications(vec![modification])
+            .description(become_text.to_string())],
+        duration: duration.clone(),
+        target: application.target.clone(),
+    };
+    let sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        apply_effect,
+    )));
+
+    Some(ParsedEffectClause {
+        effect: Effect::Choose {
+            choice_type,
+            persist: false,
+        },
+        duration,
+        sub_ability,
+    })
+}
+
 fn build_restriction_clause(
     application: SubjectApplication,
     predicate: &str,
@@ -374,25 +447,74 @@ fn build_restriction_clause(
     let (predicate, duration) = super::strip_trailing_duration(&normalized);
     let lower = predicate.to_lowercase();
 
-    let mode = if matches!(lower.as_str(), "can't block" | "cannot block") {
-        StaticMode::CantBlock
-    } else if matches!(lower.as_str(), "can't be blocked" | "cannot be blocked") {
-        StaticMode::Other("CantBeBlocked".to_string())
-    } else {
-        return None;
-    };
+    // CR 508.1d / CR 509.1a: Restriction predicates for attack/block/target.
+    // Compound restrictions ("can't attack or block") produce multiple StaticDefinition entries.
+    let modes = parse_restriction_modes(&lower)?;
+
+    let static_abilities = modes
+        .into_iter()
+        .map(|mode| {
+            StaticDefinition::new(mode)
+                .affected(application.affected.clone())
+                .description(predicate.to_string())
+        })
+        .collect();
 
     Some(ParsedEffectClause {
         effect: Effect::GenericEffect {
-            static_abilities: vec![StaticDefinition::new(mode)
-                .affected(application.affected)
-                .description(predicate.to_string())],
+            static_abilities,
             duration: duration.clone(),
             target: application.target,
         },
         duration,
         sub_ability: None,
     })
+}
+
+/// Parse restriction predicates into one or more `StaticMode` variants.
+/// Handles simple ("can't block") and compound ("can't attack or block") patterns.
+fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
+    // Simple restrictions
+    if lower == "can't block" || lower == "cannot block" {
+        return Some(vec![StaticMode::CantBlock]);
+    }
+    if lower == "can't attack" || lower == "cannot attack" {
+        return Some(vec![StaticMode::CantAttack]);
+    }
+    if lower == "can't be blocked" || lower == "cannot be blocked" {
+        return Some(vec![StaticMode::Other("CantBeBlocked".to_string())]);
+    }
+    // CR 508.1d + CR 509.1a: Compound "can't attack or block"
+    if lower == "can't attack or block" || lower == "cannot attack or block" {
+        return Some(vec![StaticMode::CantAttack, StaticMode::CantBlock]);
+    }
+    // CR 509.1a + "can't be blocked": Compound "can't block or be blocked"
+    if lower == "can't block or be blocked" || lower == "cannot block or be blocked" {
+        return Some(vec![
+            StaticMode::CantBlock,
+            StaticMode::Other("CantBeBlocked".to_string()),
+        ]);
+    }
+    // CR 509.1c: "can't be blocked except by ..." — evasion restriction
+    if lower.starts_with("can't be blocked except by ")
+        || lower.starts_with("cannot be blocked except by ")
+    {
+        let except_text = lower
+            .strip_prefix("can't be blocked except by ")
+            .or_else(|| lower.strip_prefix("cannot be blocked except by "))
+            .unwrap_or("");
+        return Some(vec![StaticMode::Other(format!(
+            "CantBeBlockedExceptBy:{}",
+            except_text
+        ))]);
+    }
+    // CR 115.4: "can't be the target of ..." — hexproof variant
+    if lower.starts_with("can't be the target of ") || lower.starts_with("cannot be the target of ")
+    {
+        return Some(vec![StaticMode::CantBeTargeted]);
+    }
+
+    None
 }
 
 fn extract_pump_modifiers(
@@ -488,6 +610,7 @@ pub(super) fn starts_with_subject_prefix(lower: &str) -> bool {
         "they ",
         "this ",
         "those ",
+        "up to ",
         "you ",
     ]
     .iter()
@@ -499,9 +622,11 @@ pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
         "add",
         "attack",
         "become",
+        "block",
         "can",
         "cast",
         "choose",
+        "connive",
         "copy",
         "counter",
         "create",
@@ -518,6 +643,7 @@ pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
         "lose",
         "mill",
         "pay",
+        "phase",
         "put",
         "regenerate",
         "reveal",

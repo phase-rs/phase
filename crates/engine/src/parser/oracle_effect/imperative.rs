@@ -844,6 +844,18 @@ pub(super) fn parse_imperative_family_ast(text: &str, lower: &str) -> Option<Imp
     if lower == "explore" || lower.starts_with("explore.") {
         return Some(ImperativeFamilyAst::Explore);
     }
+    // CR 702.162a: "connive" / "connives"
+    if lower == "connive" || lower == "connives" {
+        return Some(ImperativeFamilyAst::Connive);
+    }
+    // CR 702.26a: "phase out" / "phases out"
+    if lower == "phase out" || lower == "phases out" {
+        return Some(ImperativeFamilyAst::PhaseOut);
+    }
+    // CR 509.1g: "block this turn if able" / "blocks this turn if able"
+    if lower == "block this turn if able" || lower == "blocks this turn if able" {
+        return Some(ImperativeFamilyAst::ForceBlock);
+    }
     // CR 702.136: "investigate" — create a Clue token.
     if lower == "investigate" || lower.starts_with("investigate.") {
         return Some(ImperativeFamilyAst::Investigate);
@@ -894,6 +906,15 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::CostResource(ast) => lower_cost_resource_ast(ast),
         ImperativeFamilyAst::ZoneCounter(ast) => lower_zone_counter_ast(ast),
         ImperativeFamilyAst::Explore => Effect::Explore,
+        ImperativeFamilyAst::Connive => Effect::Connive {
+            target: TargetFilter::Any,
+        },
+        ImperativeFamilyAst::PhaseOut => Effect::PhaseOut {
+            target: TargetFilter::Any,
+        },
+        ImperativeFamilyAst::ForceBlock => Effect::ForceBlock {
+            target: TargetFilter::Any,
+        },
         ImperativeFamilyAst::Investigate => Effect::Investigate,
         ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch,
         ImperativeFamilyAst::Proliferate => Effect::Proliferate,

@@ -17,6 +17,7 @@ pub mod change_zone;
 pub mod choose;
 pub mod choose_card;
 pub mod cleanup;
+pub mod connive;
 pub mod copy_spell;
 pub mod counter;
 pub mod counters;
@@ -30,12 +31,14 @@ pub mod draw;
 pub mod effect;
 pub mod explore;
 pub mod fight;
+pub mod force_block;
 pub mod gain_control;
 pub mod investigate;
 pub mod life;
 pub mod mana;
 pub mod mill;
 pub mod pay;
+pub mod phase_out;
 pub mod prevent_damage;
 pub mod proliferate;
 pub mod pump;
@@ -110,6 +113,9 @@ pub fn resolve_effect(
         Effect::TargetOnly { .. } => Ok(()), // no-op: targeting is established at cast time
         Effect::Choose { .. } => choose::resolve(state, ability, events),
         Effect::Suspect { .. } => suspect::resolve(state, ability, events),
+        Effect::Connive { .. } => connive::resolve(state, ability, events),
+        Effect::PhaseOut { .. } => phase_out::resolve(state, ability, events),
+        Effect::ForceBlock { .. } => force_block::resolve(state, ability, events),
         Effect::SolveCase => solve_case::resolve(state, ability, events),
         Effect::SetClassLevel { .. } => set_class_level::resolve(state, ability, events),
         Effect::CreateDelayedTrigger { .. } => delayed_trigger::resolve(state, ability, events),
@@ -175,7 +181,10 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&crate::types::abilit
         | Effect::Transform { target, .. }
         | Effect::CopySpell { target, .. }
         | Effect::CastFromZone { target, .. }
-        | Effect::PreventDamage { target, .. } => target,
+        | Effect::PreventDamage { target, .. }
+        | Effect::Connive { target, .. }
+        | Effect::PhaseOut { target, .. }
+        | Effect::ForceBlock { target, .. } => target,
         Effect::RevealTop { player, .. } => player,
         _ => return None,
     };

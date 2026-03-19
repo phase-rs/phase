@@ -357,6 +357,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Fight { target }
         | Effect::CopySpell { target }
         | Effect::Suspect { target }
+        | Effect::Connive { target }
+        | Effect::PhaseOut { target }
+        | Effect::ForceBlock { target }
         | Effect::Transform { target }
         | Effect::Shuffle { target }
         | Effect::Regenerate { target } => {

@@ -128,6 +128,9 @@ pub(super) enum ContinuationAst {
     },
     /// "create a ... token and suspect it" → chain Suspect { target: LastCreated }
     SuspectLastCreated,
+    /// CR 701.15: "It can't be regenerated" / "They can't be regenerated" — sets
+    /// `cant_regenerate: true` on the preceding Destroy/DestroyAll effect.
+    CantRegenerate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,13 +149,21 @@ pub(super) enum ImperativeFamilyAst {
     CostResource(CostResourceImperativeAst),
     ZoneCounter(ZoneCounterImperativeAst),
     Explore,
+    /// CR 702.162a: Connive.
+    Connive,
+    /// CR 702.26a: Phase out.
+    PhaseOut,
+    /// CR 509.1g: Block this turn if able.
+    ForceBlock,
     Investigate,
     BecomeMonarch,
     Proliferate,
     GainKeyword(Effect),
     Shuffle(ShuffleImperativeAst),
     Put(PutImperativeAst),
-    YouMay { text: String },
+    YouMay {
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

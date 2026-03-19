@@ -228,6 +228,22 @@ pub(super) fn apply_clause_continuation(
                 },
             ));
         }
+        ContinuationAst::CantRegenerate => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            match &mut previous.effect {
+                Effect::Destroy {
+                    cant_regenerate, ..
+                }
+                | Effect::DestroyAll {
+                    cant_regenerate, ..
+                } => {
+                    *cant_regenerate = true;
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -244,6 +260,7 @@ pub(super) fn continuation_absorbs_current(
         }
         ContinuationAst::SearchDestination { .. } => false,
         ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
+        ContinuationAst::CantRegenerate => true,
     }
 }
 
@@ -290,6 +307,13 @@ pub(super) fn parse_followup_continuation_ast(
         // "create a ... token and suspect it" → chain suspect on last created token
         Effect::Token { .. } if lower.starts_with("suspect ") => {
             Some(ContinuationAst::SuspectLastCreated)
+        }
+        // CR 701.15: "It can't be regenerated" / "They can't be regenerated" after Destroy/DestroyAll
+        Effect::Destroy { .. } | Effect::DestroyAll { .. }
+            if lower.contains("can't be regenerated")
+                || lower.contains("cannot be regenerated") =>
+        {
+            Some(ContinuationAst::CantRegenerate)
         }
         _ => None,
     }

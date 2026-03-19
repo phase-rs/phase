@@ -571,6 +571,13 @@ pub enum DelayedTriggerCondition {
     WhenLeavesPlay {
         object_id: super::identifiers::ObjectId,
     },
+    /// CR 603.7c: "when [object] dies" — fires on zone change to graveyard.
+    /// Filter-based variant resolved at trigger check time (unlike WhenLeavesPlay
+    /// which uses a specific object_id).
+    WhenDies { filter: TargetFilter },
+    /// CR 603.7c: "when [object] leaves the battlefield" — filter-based variant
+    /// that fires on any zone change from battlefield.
+    WhenLeavesPlayFiltered { filter: TargetFilter },
 }
 
 /// Specifies variable-count targeting for "any number of" effects.
@@ -1437,6 +1444,23 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 702.162a: Target creature connives (draw a card, then discard a card;
+    /// if a nonland card is discarded, put a +1/+1 counter on it).
+    Connive {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
+    /// CR 702.26a: Target permanent phases out (treated as though it doesn't exist
+    /// until its controller's next untap step).
+    PhaseOut {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
+    /// CR 509.1g: Target creature must block this turn if able.
+    ForceBlock {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
     /// CR 719.2: Solve the source Case — it becomes solved.
     SolveCase,
     /// CR 716.5: Set the class level on the source Class enchantment.
@@ -1603,6 +1627,9 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::TargetOnly { .. } => "TargetOnly",
         Effect::Choose { .. } => "Choose",
         Effect::Suspect { .. } => "Suspect",
+        Effect::Connive { .. } => "Connive",
+        Effect::PhaseOut { .. } => "PhaseOut",
+        Effect::ForceBlock { .. } => "ForceBlock",
         Effect::SolveCase => "SolveCase",
         Effect::SetClassLevel { .. } => "SetClassLevel",
         Effect::CreateDelayedTrigger { .. } => "CreateDelayedTrigger",
@@ -1671,6 +1698,9 @@ pub enum EffectKind {
     TargetOnly,
     Choose,
     Suspect,
+    Connive,
+    PhaseOut,
+    ForceBlock,
     SolveCase,
     SetClassLevel,
     CreateDelayedTrigger,
@@ -1742,6 +1772,9 @@ impl From<&Effect> for EffectKind {
             Effect::TargetOnly { .. } => EffectKind::TargetOnly,
             Effect::Choose { .. } => EffectKind::Choose,
             Effect::Suspect { .. } => EffectKind::Suspect,
+            Effect::Connive { .. } => EffectKind::Connive,
+            Effect::PhaseOut { .. } => EffectKind::PhaseOut,
+            Effect::ForceBlock { .. } => EffectKind::ForceBlock,
             Effect::SolveCase => EffectKind::SolveCase,
             Effect::SetClassLevel { .. } => EffectKind::SetClassLevel,
             Effect::CreateDelayedTrigger { .. } => EffectKind::CreateDelayedTrigger,
