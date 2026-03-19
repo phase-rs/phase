@@ -1,8 +1,12 @@
+use std::collections::HashSet;
+
 use crate::game::layers;
+use crate::game::replacement::{self, ReplacementResult};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
 use super::zones;
@@ -50,6 +54,11 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
 
         // CR 704.5g: A creature with lethal damage marked on it is destroyed.
         check_lethal_damage(state, events, &mut any_performed);
+
+        // CR 701.15: A replacement choice (e.g., regeneration) may be pending after lethal damage.
+        if state.pending_replacement.is_some() {
+            return;
+        }
 
         // CR 704.5j: If a player controls two or more legendary permanents with the same name,
         // that player chooses one and the rest are put into their owners' graveyards.
@@ -190,9 +199,57 @@ fn check_lethal_damage(
         })
         .collect();
 
+    // CR 701.15: Route each destruction through the replacement pipeline
+    // so regeneration shields can intercept.
     for id in to_destroy {
-        zones::move_to_zone(state, id, Zone::Graveyard, events);
-        *any_performed = true;
+        let proposed = ProposedEvent::Destroy {
+            object_id: id,
+            source: None,
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+
+        match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(event) => {
+                if let ProposedEvent::Destroy {
+                    object_id, source, ..
+                } = event
+                {
+                    let zone_proposed = ProposedEvent::zone_change(
+                        object_id,
+                        Zone::Battlefield,
+                        Zone::Graveyard,
+                        source,
+                    );
+                    match replacement::replace_event(state, zone_proposed, events) {
+                        ReplacementResult::Execute(zone_event) => {
+                            if let ProposedEvent::ZoneChange {
+                                object_id: oid, to, ..
+                            } = zone_event
+                            {
+                                zones::move_to_zone(state, oid, to, events);
+                            }
+                        }
+                        ReplacementResult::Prevented => {}
+                        ReplacementResult::NeedsChoice(player) => {
+                            state.waiting_for =
+                                replacement::replacement_choice_waiting_for(player, state);
+                            return;
+                        }
+                    }
+                    events.push(GameEvent::CreatureDestroyed { object_id });
+                }
+                *any_performed = true;
+            }
+            ReplacementResult::Prevented => {
+                // CR 701.15: Regeneration prevented destruction — still counts as SBA performed.
+                *any_performed = true;
+            }
+            ReplacementResult::NeedsChoice(player) => {
+                state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+                return;
+            }
+        }
     }
 }
 
@@ -1082,5 +1139,53 @@ mod tests {
 
         // CR 714.4 deferral: triggers haven't been placed yet
         assert!(state.battlefield.contains(&id));
+    }
+
+    #[test]
+    fn lethal_damage_prevented_by_regen_shield() {
+        use crate::types::ability::{ReplacementDefinition, TargetFilter};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.damage_marked = 3; // lethal
+
+            // Add regeneration shield
+            let shield = ReplacementDefinition::new(ReplacementEvent::Destroy)
+                .valid_card(TargetFilter::SelfRef)
+                .description("Regenerate".to_string())
+                .regeneration_shield();
+            obj.replacement_definitions.push(shield);
+        }
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        // CR 701.15: Creature survives lethal damage via regeneration
+        assert!(
+            state.battlefield.contains(&id),
+            "Creature with regen shield should survive lethal damage SBA"
+        );
+        // Damage cleared by regeneration
+        let obj = state.objects.get(&id).unwrap();
+        assert_eq!(obj.damage_marked, 0, "Regeneration should remove damage");
+        assert!(obj.tapped, "Regeneration should tap the creature");
+        // Shield consumed
+        assert!(obj.replacement_definitions[0].is_consumed);
+        // Regenerated event emitted
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::Regenerated { object_id } if *object_id == id)));
     }
 }

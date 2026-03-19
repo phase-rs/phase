@@ -4,8 +4,9 @@ use super::oracle_util::{parse_number, strip_reminder_text};
 #[cfg(test)]
 use crate::types::ability::TypeFilter;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, FilterProp, QuantityExpr,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, TargetFilter, TypedFilter,
+    AbilityDefinition, AbilityKind, ChoiceType, CombatDamageScope, ControllerRef,
+    DamageModification, DamageTargetFilter, Effect, FilterProp, QuantityExpr, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, TargetFilter, TypedFilter,
 };
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -120,8 +121,12 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
     }
 
     // --- "If [source] would deal [noncombat] damage ... it deals that much damage plus N instead" ---
-    // CR 614.1a: Damage boost replacement effects. Parsed as Unimplemented for now.
+    // CR 614.1a: Damage boost/reduction replacement effects.
     if lower.contains("would deal") && lower.contains("damage") && lower.contains("instead") {
+        if let Some(def) = parse_damage_modification_replacement(&norm_lower, &text) {
+            return Some(def);
+        }
+        // Exotic pattern (coin-flip, redirection, etc.) — keep as no-op stub
         return Some(
             ReplacementDefinition::new(ReplacementEvent::DamageDone).description(text.to_string()),
         );
@@ -534,6 +539,173 @@ fn parse_graveyard_exile_replacement(
         def = def.valid_card(filter);
     }
     Some(def)
+}
+
+/// CR 614.1a: Parse damage boost/reduction replacement effects.
+/// Extracts modification formula, source filter, target filter, and combat scope.
+fn parse_damage_modification_replacement(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    // --- 1. Extract modification formula from the result clause ---
+    let modification = if norm_lower.contains("double that damage")
+        || norm_lower.contains("deals double that damage")
+    {
+        DamageModification::Double
+    } else if norm_lower.contains("triple that damage")
+        || norm_lower.contains("deals triple that damage")
+    {
+        DamageModification::Triple
+    } else if let Some(rest) = norm_lower
+        .find("that much damage plus ")
+        .map(|i| &norm_lower[i + "that much damage plus ".len()..])
+    {
+        let (value, _) = parse_number(rest)?;
+        DamageModification::Plus { value }
+    } else if let Some(rest) = norm_lower
+        .find("that much damage minus ")
+        .map(|i| &norm_lower[i + "that much damage minus ".len()..])
+    {
+        let (value, _) = parse_number(rest)?;
+        DamageModification::Minus { value }
+    } else {
+        return None; // Exotic pattern — fall through to stub
+    };
+
+    // --- 2. Extract source filter from the subject clause (before "would deal") ---
+    let source_filter = parse_damage_source_filter(norm_lower);
+
+    // --- 3. Extract combat scope ---
+    let combat_scope = if norm_lower.contains("would deal noncombat damage") {
+        Some(CombatDamageScope::NoncombatOnly)
+    } else if norm_lower.contains("would deal combat damage") {
+        Some(CombatDamageScope::CombatOnly)
+    } else {
+        None
+    };
+
+    // --- 4. Extract target filter ---
+    let target_filter = parse_damage_target_filter(norm_lower);
+
+    let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+        .damage_modification(modification)
+        .description(original_text.to_string());
+    if let Some(sf) = source_filter {
+        def = def.damage_source_filter(sf);
+    }
+    if let Some(tf) = target_filter {
+        def = def.damage_target_filter(tf);
+    }
+    if let Some(cs) = combat_scope {
+        def = def.combat_scope(cs);
+    }
+    Some(def)
+}
+
+/// Parse the damage source filter from the subject clause before "would deal".
+fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
+    let subject = norm_lower.split("would deal").next()?.trim();
+
+    // Handle ability word prefixes ("Revolt — ..., if a source you control")
+    // by finding the last "if " clause, which contains the actual replacement condition.
+    let subject = subject.rsplit("if ").next().unwrap_or(subject).trim();
+
+    // Self-reference: "~" after stripping "if"
+    if subject == "~" {
+        return Some(TargetFilter::SelfRef);
+    }
+
+    // Strip leading "a " or "an "
+    let subject = subject
+        .strip_prefix("a ")
+        .or_else(|| subject.strip_prefix("an "))
+        .unwrap_or(subject)
+        .trim();
+
+    // "source you control" with optional qualifiers
+    if let Some(prefix) = subject.strip_suffix("source you control") {
+        let prefix = prefix.trim();
+        let mut filter = TypedFilter::default().controller(ControllerRef::You);
+        let mut props = Vec::new();
+
+        if !prefix.is_empty() {
+            // Check for "another" prefix — may appear alone or before a qualifier
+            let qualifier = if prefix == "another" {
+                props.push(FilterProp::Another);
+                ""
+            } else if let Some(rest) = prefix.strip_prefix("another ") {
+                props.push(FilterProp::Another);
+                rest.trim()
+            } else {
+                prefix
+            };
+
+            // Check for color qualifier (e.g. "red")
+            if is_color_word(qualifier) {
+                props.push(FilterProp::HasColor {
+                    color: capitalize_first(qualifier),
+                });
+            }
+            // Check for "noncreature" qualifier
+            else if let Some(rest) = qualifier.strip_prefix("non") {
+                props.push(FilterProp::NonType {
+                    value: capitalize_first(rest),
+                });
+            }
+            // Check for creature type qualifier (e.g. "giant")
+            else if !qualifier.is_empty() {
+                filter = filter.subtype(capitalize_first(qualifier));
+            }
+        }
+
+        if !props.is_empty() {
+            filter.properties = props;
+        }
+        return Some(TargetFilter::Typed(filter));
+    }
+
+    // "source you control" without explicit "source" word
+    if subject.ends_with("you control") {
+        return Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You),
+        ));
+    }
+
+    // "a source" with no qualifier — no filter needed (matches any source)
+    if subject == "source" {
+        return None;
+    }
+
+    // "a spell" — no source filter (handled as general case for now)
+    None
+}
+
+/// Parse the damage target filter from the clause after "damage".
+fn parse_damage_target_filter(norm_lower: &str) -> Option<DamageTargetFilter> {
+    if norm_lower.contains("to an opponent or a permanent an opponent controls") {
+        return Some(DamageTargetFilter::OpponentOrTheirPermanents);
+    }
+    if norm_lower.contains("to a creature") || norm_lower.contains("to that creature") {
+        return Some(DamageTargetFilter::CreatureOnly);
+    }
+    if (norm_lower.contains("to a player") || norm_lower.contains("to that player"))
+        && !norm_lower.contains("permanent")
+    {
+        return Some(DamageTargetFilter::PlayerOnly);
+    }
+    None
+}
+
+fn is_color_word(word: &str) -> bool {
+    matches!(word, "white" | "blue" | "black" | "red" | "green")
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 fn extract_replacement_effect(text: &str) -> Option<String> {
@@ -1097,5 +1269,133 @@ mod tests {
         // Plain "enters tapped" must still work (no condition)
         let def = parse_replacement_line("This land enters tapped.", "Some Tapland").unwrap();
         assert!(def.condition.is_none());
+    }
+
+    // ── Damage modification replacement tests ──
+
+    #[test]
+    fn damage_furnace_of_rath_double() {
+        let def = parse_replacement_line(
+            "If a source would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.",
+            "Furnace of Rath",
+        ).unwrap();
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.damage_modification, Some(DamageModification::Double));
+        assert_eq!(def.damage_source_filter, None); // any source
+        assert_eq!(def.damage_target_filter, None); // any target
+        assert_eq!(def.combat_scope, None); // all damage
+    }
+
+    #[test]
+    fn damage_torbran_plus_2_red_source() {
+        let def = parse_replacement_line(
+            "If a red source you control would deal damage to an opponent or a permanent an opponent controls, it deals that much damage plus 2 instead.",
+            "Torbran, Thane of Red Fell",
+        ).unwrap();
+        assert_eq!(
+            def.damage_modification,
+            Some(DamageModification::Plus { value: 2 })
+        );
+        assert_eq!(
+            def.damage_target_filter,
+            Some(DamageTargetFilter::OpponentOrTheirPermanents)
+        );
+        // Source filter: red source you control
+        let sf = def.damage_source_filter.unwrap();
+        match sf {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.contains(&FilterProp::HasColor {
+                    color: "Red".to_string()
+                }));
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_artists_talent_noncombat_plus_2() {
+        let def = parse_replacement_line(
+            "If a source you control would deal noncombat damage to an opponent or a permanent an opponent controls, it deals that much damage plus 2 instead.",
+            "Artist's Talent",
+        ).unwrap();
+        assert_eq!(
+            def.damage_modification,
+            Some(DamageModification::Plus { value: 2 })
+        );
+        assert_eq!(def.combat_scope, Some(CombatDamageScope::NoncombatOnly));
+        assert_eq!(
+            def.damage_target_filter,
+            Some(DamageTargetFilter::OpponentOrTheirPermanents)
+        );
+        // Source filter: source you control (no color qualifier)
+        match def.damage_source_filter.unwrap() {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.is_empty());
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_fiery_emancipation_triple() {
+        let def = parse_replacement_line(
+            "If a source you control would deal damage to a permanent or player, it deals triple that damage to that permanent or player instead.",
+            "Fiery Emancipation",
+        ).unwrap();
+        assert_eq!(def.damage_modification, Some(DamageModification::Triple));
+        match def.damage_source_filter.unwrap() {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
+        }
+        assert_eq!(def.damage_target_filter, None); // "permanent or player" = any
+    }
+
+    #[test]
+    fn damage_benevolent_unicorn_minus_1() {
+        let def = parse_replacement_line(
+            "If a spell would deal damage to a permanent or player, it deals that much damage minus 1 to that permanent or player instead.",
+            "Benevolent Unicorn",
+        ).unwrap();
+        assert_eq!(
+            def.damage_modification,
+            Some(DamageModification::Minus { value: 1 })
+        );
+        assert_eq!(def.damage_source_filter, None); // "a spell" → no source filter
+        assert_eq!(def.damage_target_filter, None); // "permanent or player" = any
+    }
+
+    #[test]
+    fn damage_calamity_bearer_giant_double() {
+        let def = parse_replacement_line(
+            "If a Giant source you control would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.",
+            "Calamity Bearer",
+        ).unwrap();
+        assert_eq!(def.damage_modification, Some(DamageModification::Double));
+        match def.damage_source_filter.unwrap() {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert_eq!(tf.subtype, Some("Giant".to_string()));
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_charging_tuskodon_self_combat_player() {
+        let def = parse_replacement_line(
+            "If this creature would deal combat damage to a player, it deals double that damage to that player instead.",
+            "Charging Tuskodon",
+        ).unwrap();
+        assert_eq!(def.damage_modification, Some(DamageModification::Double));
+        assert_eq!(def.damage_source_filter, Some(TargetFilter::SelfRef));
+        assert_eq!(def.combat_scope, Some(CombatDamageScope::CombatOnly));
+        assert_eq!(
+            def.damage_target_filter,
+            Some(DamageTargetFilter::PlayerOnly)
+        );
     }
 }

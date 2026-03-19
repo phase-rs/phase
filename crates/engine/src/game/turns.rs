@@ -207,6 +207,13 @@ pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) {
 /// choose which cards to discard down to maximum hand size, or `None` if
 /// cleanup completes immediately.
 pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
+    // CR 701.15c: Regeneration shields expire at cleanup.
+    // Also prune any consumed shields from earlier this turn.
+    for obj in state.objects.values_mut() {
+        obj.replacement_definitions
+            .retain(|r| !r.is_regeneration_shield);
+    }
+
     // CR 514.2: Prune "until end of turn" transient continuous effects.
     super::layers::prune_end_of_turn_effects(state);
 
@@ -1077,5 +1084,57 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn cleanup_expires_regeneration_shields() {
+        use crate::types::ability::{ReplacementDefinition, TargetFilter};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Add two regen shields: one consumed, one active
+        let consumed = ReplacementDefinition::new(ReplacementEvent::Destroy)
+            .valid_card(TargetFilter::SelfRef)
+            .description("Used".to_string())
+            .regeneration_shield();
+        let active = ReplacementDefinition::new(ReplacementEvent::Destroy)
+            .valid_card(TargetFilter::SelfRef)
+            .description("Fresh".to_string())
+            .regeneration_shield();
+        // Also add a non-regen replacement that should survive
+        let normal = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .description("Normal repl".to_string());
+
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            let mut c = consumed;
+            c.is_consumed = true;
+            obj.replacement_definitions.push(c);
+            obj.replacement_definitions.push(active);
+            obj.replacement_definitions.push(normal);
+        }
+
+        let mut events = Vec::new();
+        execute_cleanup(&mut state, &mut events);
+
+        let obj = state.objects.get(&id).unwrap();
+        // Both regen shields removed (consumed and active), normal survives
+        assert_eq!(
+            obj.replacement_definitions.len(),
+            1,
+            "Only non-regen replacement should survive cleanup"
+        );
+        assert!(
+            !obj.replacement_definitions[0].is_regeneration_shield,
+            "Surviving replacement should not be a regen shield"
+        );
     }
 }

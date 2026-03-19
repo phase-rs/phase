@@ -1,8 +1,10 @@
 use indexmap::IndexMap;
 
 use crate::types::ability::{
-    AbilityDefinition, Effect, QuantityExpr, ReplacementCondition, ReplacementMode, TargetFilter,
+    AbilityDefinition, CombatDamageScope, DamageModification, DamageTargetFilter, Effect,
+    QuantityExpr, ReplacementCondition, ReplacementMode, TargetFilter, TargetRef,
 };
+use crate::types::card_type::CoreType;
 
 use super::filter::matches_target_filter;
 use crate::types::events::GameEvent;
@@ -112,13 +114,55 @@ fn damage_done_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameSt
     matches!(event, ProposedEvent::Damage { .. })
 }
 
+/// CR 614.1a: Extract the damage modification formula from a replacement definition.
+fn damage_modification_for_rid(
+    state: &GameState,
+    rid: ReplacementId,
+) -> Option<DamageModification> {
+    state
+        .objects
+        .get(&rid.source)?
+        .replacement_definitions
+        .get(rid.index)?
+        .damage_modification
+        .clone()
+}
+
+/// CR 614.1a: Apply damage modification from the replacement definition.
 fn damage_done_applier(
     event: ProposedEvent,
-    _rid: ReplacementId,
-    _state: &mut GameState,
+    rid: ReplacementId,
+    state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    ApplyResult::Modified(event)
+    let Some(modification) = damage_modification_for_rid(state, rid) else {
+        return ApplyResult::Modified(event); // No modification (prevention-only or stub)
+    };
+
+    if let ProposedEvent::Damage {
+        source_id,
+        target,
+        amount,
+        is_combat,
+        applied,
+    } = event
+    {
+        let new_amount = match modification {
+            DamageModification::Double => amount.saturating_mul(2),
+            DamageModification::Triple => amount.saturating_mul(3),
+            DamageModification::Plus { value } => amount.saturating_add(value),
+            DamageModification::Minus { value } => amount.saturating_sub(value),
+        };
+        ApplyResult::Modified(ProposedEvent::Damage {
+            source_id,
+            target,
+            amount: new_amount,
+            is_combat,
+            applied,
+        })
+    } else {
+        ApplyResult::Modified(event)
+    }
 }
 
 // --- 3. Destroy ---
@@ -127,13 +171,68 @@ fn destroy_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState)
     matches!(event, ProposedEvent::Destroy { .. })
 }
 
+/// CR 701.15: Regeneration shield applier for Destroy events.
+/// If the replacement definition is a regeneration shield and the destruction allows
+/// regeneration, removes damage, taps the permanent, removes it from combat,
+/// consumes the shield, and prevents the destruction.
 fn destroy_applier(
     event: ProposedEvent,
-    _rid: ReplacementId,
-    _state: &mut GameState,
-    _events: &mut Vec<GameEvent>,
+    rid: ReplacementId,
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    ApplyResult::Modified(event)
+    // Check if this replacement is a regeneration shield
+    let is_regen = state
+        .objects
+        .get(&rid.source)
+        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .is_some_and(|repl| repl.is_regeneration_shield);
+
+    if !is_regen {
+        return ApplyResult::Modified(event);
+    }
+
+    // CR 701.15: "It can't be regenerated" bypasses regeneration shields.
+    if let ProposedEvent::Destroy {
+        cant_regenerate: true,
+        ..
+    } = &event
+    {
+        return ApplyResult::Modified(event);
+    }
+
+    let ProposedEvent::Destroy { object_id, .. } = &event else {
+        return ApplyResult::Modified(event);
+    };
+    let oid = *object_id;
+
+    // CR 701.15a: Remove all damage marked on it.
+    if let Some(obj) = state.objects.get_mut(&oid) {
+        obj.damage_marked = 0;
+        obj.dealt_deathtouch_damage = false;
+        // CR 701.15b: Tap it.
+        obj.tapped = true;
+    }
+
+    // CR 701.15c: Remove it from combat if it's attacking or blocking.
+    if let Some(ref mut combat) = state.combat {
+        combat.attackers.retain(|a| a.object_id != oid);
+        combat.blocker_assignments.retain(|_, blockers| {
+            blockers.retain(|b| *b != oid);
+            true
+        });
+        combat.blocker_to_attacker.remove(&oid);
+    }
+
+    // Mark the shield as consumed (one-shot).
+    if let Some(obj) = state.objects.get_mut(&rid.source) {
+        if let Some(repl) = obj.replacement_definitions.get_mut(rid.index) {
+            repl.is_consumed = true;
+        }
+    }
+
+    events.push(GameEvent::Regenerated { object_id: oid });
+    ApplyResult::Prevented
 }
 
 // --- 4. Draw ---
@@ -690,6 +789,16 @@ fn is_damage_prevention_replacement(
         return false;
     }
 
+    // CR 614.1a: Damage boost/reduction replacements are definitively not prevention effects
+    let is_boost = state
+        .objects
+        .get(&rid.source)
+        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .is_some_and(|repl| repl.damage_modification.is_some());
+    if is_boost {
+        return false;
+    }
+
     // Check the replacement definition description for prevention keywords
     state
         .objects
@@ -701,6 +810,32 @@ fn is_damage_prevention_replacement(
                 lower.contains("prevent") && lower.contains("damage")
             })
         })
+}
+
+/// CR 614.1a: Check if a damage target matches the replacement's target filter.
+fn matches_damage_target_filter(
+    filter: &DamageTargetFilter,
+    target: &TargetRef,
+    repl_controller: PlayerId,
+    state: &GameState,
+) -> bool {
+    match filter {
+        DamageTargetFilter::OpponentOrTheirPermanents => match target {
+            TargetRef::Player(pid) => *pid != repl_controller,
+            TargetRef::Object(oid) => state
+                .objects
+                .get(oid)
+                .is_some_and(|obj| obj.controller != repl_controller),
+        },
+        DamageTargetFilter::CreatureOnly => match target {
+            TargetRef::Player(_) => false,
+            TargetRef::Object(oid) => state
+                .objects
+                .get(oid)
+                .is_some_and(|obj| obj.card_types.core_types.contains(&CoreType::Creature)),
+        },
+        DamageTargetFilter::PlayerOnly => matches!(target, TargetRef::Player(_)),
+    }
 }
 
 // --- Pipeline functions ---
@@ -778,6 +913,11 @@ pub fn find_applicable_replacements(
         }
 
         for (index, repl_def) in obj.replacement_definitions.iter().enumerate() {
+            // CR 701.15: Skip consumed one-shot replacements (e.g., used regeneration shields).
+            if repl_def.is_consumed {
+                continue;
+            }
+
             // Cards not yet on battlefield can only apply self-replacement effects
             if is_entering
                 && !in_scanned_zone
@@ -824,6 +964,33 @@ pub fn find_applicable_replacements(
                     if let Some(ref cond) = repl_def.condition {
                         if !evaluate_replacement_condition(cond, obj.controller, obj.id, state) {
                             continue;
+                        }
+                    }
+                    // CR 614.1a: Damage source filter — matches the damage *source* object against the filter.
+                    if let Some(ref sf) = repl_def.damage_source_filter {
+                        if let ProposedEvent::Damage { source_id, .. } = event {
+                            if !super::filter::matches_target_filter(state, *source_id, sf, obj.id)
+                            {
+                                continue;
+                            }
+                        }
+                    }
+                    // CR 614.1a: Combat/noncombat damage scope restriction.
+                    if let Some(ref scope) = repl_def.combat_scope {
+                        if let ProposedEvent::Damage { is_combat, .. } = event {
+                            match scope {
+                                CombatDamageScope::CombatOnly if !is_combat => continue,
+                                CombatDamageScope::NoncombatOnly if *is_combat => continue,
+                                _ => {}
+                            }
+                        }
+                    }
+                    // CR 614.1a: Damage target filter — restricts which damage recipients trigger this replacement.
+                    if let Some(ref tf) = repl_def.damage_target_filter {
+                        if let ProposedEvent::Damage { target, .. } = event {
+                            if !matches_damage_target_filter(tf, target, obj.controller, state) {
+                                continue;
+                            }
                         }
                     }
                     // CR 614.16: Skip damage prevention replacements when prevention is disabled
@@ -1758,5 +1925,617 @@ mod tests {
             }
             other => panic!("expected Execute with ZoneChange, got {:?}", other),
         }
+    }
+
+    // ── Damage modification applier tests ──
+
+    fn damage_event(amount: u32) -> ProposedEvent {
+        ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(1)),
+            amount,
+            is_combat: false,
+            applied: HashSet::new(),
+        }
+    }
+
+    fn damage_repl(modification: DamageModification) -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::DamageDone).damage_modification(modification)
+    }
+
+    fn test_state_with_damage_repl(
+        obj_id: ObjectId,
+        controller: PlayerId,
+        repls: Vec<ReplacementDefinition>,
+    ) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        let mut obj = GameObject::new(
+            obj_id,
+            CardId(1),
+            controller,
+            "Test".to_string(),
+            Zone::Battlefield,
+        );
+        obj.replacement_definitions = repls;
+        state.objects.insert(obj_id, obj);
+        state.battlefield.push(obj_id);
+        state
+    }
+
+    #[test]
+    fn damage_applier_double() {
+        let repl = damage_repl(DamageModification::Double);
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        let mut events = Vec::new();
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+        let result = damage_done_applier(damage_event(3), rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 6);
+            }
+            other => panic!("Expected Modified Damage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_applier_triple() {
+        let repl = damage_repl(DamageModification::Triple);
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        let mut events = Vec::new();
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+        let result = damage_done_applier(damage_event(3), rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 9);
+            }
+            other => panic!("Expected Modified Damage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_applier_plus() {
+        let repl = damage_repl(DamageModification::Plus { value: 2 });
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        let mut events = Vec::new();
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+        let result = damage_done_applier(damage_event(3), rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 5);
+            }
+            other => panic!("Expected Modified Damage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_applier_minus() {
+        let repl = damage_repl(DamageModification::Minus { value: 1 });
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        let mut events = Vec::new();
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+        let result = damage_done_applier(damage_event(3), rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 2);
+            }
+            other => panic!("Expected Modified Damage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_applier_minus_saturates_at_zero() {
+        let repl = damage_repl(DamageModification::Minus { value: 5 });
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        let mut events = Vec::new();
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+        let result = damage_done_applier(damage_event(1), rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 0);
+            }
+            other => panic!("Expected Modified Damage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_double_chaining_two_doublers() {
+        // Two Double replacements → 3 * 2 * 2 = 12
+        let repl1 = damage_repl(DamageModification::Double);
+        let repl2 = damage_repl(DamageModification::Double);
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl1, repl2]);
+        let mut events = Vec::new();
+        let proposed = damage_event(3);
+        let result = replace_event(&mut state, proposed, &mut events);
+        match result {
+            ReplacementResult::Execute(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 12, "Two doublers should quadruple: 3 * 2 * 2 = 12");
+            }
+            other => panic!("Expected Execute with Damage, got {other:?}"),
+        }
+    }
+
+    // ── Damage pipeline filter tests ──
+
+    #[test]
+    fn damage_source_filter_blocks_wrong_controller() {
+        // Replacement on P0's object requires "source you control" but damage source is P1's
+        use crate::types::ability::{ControllerRef, TypedFilter};
+        let repl = damage_repl(DamageModification::Double).damage_source_filter(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+        );
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+
+        // Add a damage source owned by P1
+        let mut source_obj = GameObject::new(
+            ObjectId(50),
+            CardId(2),
+            PlayerId(1),
+            "Enemy Source".to_string(),
+            Zone::Battlefield,
+        );
+        source_obj.controller = PlayerId(1);
+        state.objects.insert(ObjectId(50), source_obj);
+        state.battlefield.push(ObjectId(50));
+
+        let proposed = damage_event(3);
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(
+            candidates.is_empty(),
+            "Should not match: source controller differs"
+        );
+    }
+
+    #[test]
+    fn damage_source_filter_allows_correct_controller() {
+        use crate::types::ability::{ControllerRef, TypedFilter};
+        let repl = damage_repl(DamageModification::Double).damage_source_filter(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+        );
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+
+        // Damage source owned by P0 (same as replacement controller)
+        let source_obj = GameObject::new(
+            ObjectId(50),
+            CardId(2),
+            PlayerId(0),
+            "Own Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(50), source_obj);
+        state.battlefield.push(ObjectId(50));
+
+        let proposed = damage_event(3);
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(
+            !candidates.is_empty(),
+            "Should match: source controller matches"
+        );
+    }
+
+    #[test]
+    fn damage_target_filter_opponent_blocks_self() {
+        let repl = damage_repl(DamageModification::Plus { value: 2 })
+            .damage_target_filter(DamageTargetFilter::OpponentOrTheirPermanents);
+        // Replacement on P0's object
+        let state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+
+        // Damage targets P0 (self) — should not match
+        let proposed = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(candidates.is_empty(), "Should not match damage to self");
+    }
+
+    #[test]
+    fn damage_target_filter_opponent_allows_opponent() {
+        let repl = damage_repl(DamageModification::Plus { value: 2 })
+            .damage_target_filter(DamageTargetFilter::OpponentOrTheirPermanents);
+        let state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+
+        // Damage targets P1 (opponent) — should match
+        let proposed = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(!candidates.is_empty(), "Should match damage to opponent");
+    }
+
+    #[test]
+    fn damage_target_filter_opponent_allows_opponents_permanent() {
+        use crate::types::card_type::CoreType;
+        let repl = damage_repl(DamageModification::Plus { value: 2 })
+            .damage_target_filter(DamageTargetFilter::OpponentOrTheirPermanents);
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+
+        // Add opponent's creature
+        let mut opp_creature = GameObject::new(
+            ObjectId(60),
+            CardId(3),
+            PlayerId(1),
+            "Opp Creature".to_string(),
+            Zone::Battlefield,
+        );
+        opp_creature.card_types.core_types.push(CoreType::Creature);
+        state.objects.insert(ObjectId(60), opp_creature);
+        state.battlefield.push(ObjectId(60));
+
+        let proposed = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Object(ObjectId(60)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(
+            !candidates.is_empty(),
+            "Should match damage to opponent's permanent"
+        );
+    }
+
+    #[test]
+    fn damage_boost_not_blocked_by_prevention_disabled() {
+        use crate::types::ability::{GameRestriction, RestrictionExpiry};
+        // Damage boost with damage_modification should still apply even when prevention is disabled
+        let repl = damage_repl(DamageModification::Double);
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state
+            .restrictions
+            .push(GameRestriction::DamagePreventionDisabled {
+                source: ObjectId(99),
+                expiry: RestrictionExpiry::EndOfTurn,
+                scope: None,
+            });
+
+        let proposed = damage_event(3);
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(
+            !candidates.is_empty(),
+            "Damage boost should not be blocked by prevention disabled"
+        );
+    }
+
+    // ── Regeneration shield tests ──
+
+    /// Helper: create a creature on the battlefield with a regeneration shield.
+    fn create_creature_with_regen_shield(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+    ) -> ObjectId {
+        let id = crate::game::zones::create_object(
+            state,
+            CardId(1),
+            owner,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+
+            let shield = ReplacementDefinition::new(ReplacementEvent::Destroy)
+                .valid_card(TargetFilter::SelfRef)
+                .description("Regenerate".to_string())
+                .regeneration_shield();
+            obj.replacement_definitions.push(shield);
+        }
+        id
+    }
+
+    #[test]
+    fn regen_shield_prevents_targeted_destruction() {
+        let mut state = GameState::new_two_player(42);
+        let bear_id = create_creature_with_regen_shield(&mut state, PlayerId(0), "Bear");
+
+        let proposed = ProposedEvent::Destroy {
+            object_id: bear_id,
+            source: Some(ObjectId(100)),
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        assert_eq!(result, ReplacementResult::Prevented);
+        // CR 701.15: Creature stays on battlefield
+        assert!(state.battlefield.contains(&bear_id));
+        // CR 701.15: Damage removed and tapped
+        let obj = state.objects.get(&bear_id).unwrap();
+        assert_eq!(obj.damage_marked, 0);
+        assert!(obj.tapped);
+        // Shield consumed
+        assert!(obj.replacement_definitions[0].is_consumed);
+        // Regenerated event emitted
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::Regenerated { object_id } if *object_id == bear_id)));
+    }
+
+    #[test]
+    fn regen_shield_removes_damage_and_deathtouch() {
+        let mut state = GameState::new_two_player(42);
+        let bear_id = create_creature_with_regen_shield(&mut state, PlayerId(0), "Bear");
+
+        // Mark damage including deathtouch
+        {
+            let obj = state.objects.get_mut(&bear_id).unwrap();
+            obj.damage_marked = 3;
+            obj.dealt_deathtouch_damage = true;
+        }
+
+        let proposed = ProposedEvent::Destroy {
+            object_id: bear_id,
+            source: None,
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        replace_event(&mut state, proposed, &mut events);
+
+        let obj = state.objects.get(&bear_id).unwrap();
+        assert_eq!(obj.damage_marked, 0);
+        assert!(!obj.dealt_deathtouch_damage);
+    }
+
+    #[test]
+    fn cant_regenerate_bypasses_shield() {
+        let mut state = GameState::new_two_player(42);
+        let bear_id = create_creature_with_regen_shield(&mut state, PlayerId(0), "Bear");
+
+        let proposed = ProposedEvent::Destroy {
+            object_id: bear_id,
+            source: Some(ObjectId(100)),
+            cant_regenerate: true,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        // Should pass through — not prevented
+        assert!(
+            matches!(
+                result,
+                ReplacementResult::Execute(ProposedEvent::Destroy { .. })
+            ),
+            "cant_regenerate should bypass shield, got {:?}",
+            result
+        );
+        // Shield not consumed
+        let obj = state.objects.get(&bear_id).unwrap();
+        assert!(!obj.replacement_definitions[0].is_consumed);
+    }
+
+    #[test]
+    fn regen_shield_consumption_one_of_two() {
+        let mut state = GameState::new_two_player(42);
+        let bear_id = create_creature_with_regen_shield(&mut state, PlayerId(0), "Bear");
+
+        // Add a second shield
+        {
+            let shield = ReplacementDefinition::new(ReplacementEvent::Destroy)
+                .valid_card(TargetFilter::SelfRef)
+                .description("Regenerate 2".to_string())
+                .regeneration_shield();
+            state
+                .objects
+                .get_mut(&bear_id)
+                .unwrap()
+                .replacement_definitions
+                .push(shield);
+        }
+
+        // First destruction — one shield consumed
+        let proposed = ProposedEvent::Destroy {
+            object_id: bear_id,
+            source: None,
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+        assert_eq!(result, ReplacementResult::Prevented);
+
+        let obj = state.objects.get(&bear_id).unwrap();
+        let consumed_count = obj
+            .replacement_definitions
+            .iter()
+            .filter(|r| r.is_consumed)
+            .count();
+        let active_count = obj
+            .replacement_definitions
+            .iter()
+            .filter(|r| r.is_regeneration_shield && !r.is_consumed)
+            .count();
+        assert_eq!(consumed_count, 1, "One shield should be consumed");
+        assert_eq!(active_count, 1, "One shield should remain active");
+
+        // Second destruction — second shield consumed
+        let proposed2 = ProposedEvent::Destroy {
+            object_id: bear_id,
+            source: None,
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let result2 = replace_event(&mut state, proposed2, &mut events);
+        assert_eq!(result2, ReplacementResult::Prevented);
+
+        let obj = state.objects.get(&bear_id).unwrap();
+        let all_consumed = obj
+            .replacement_definitions
+            .iter()
+            .filter(|r| r.is_regeneration_shield)
+            .all(|r| r.is_consumed);
+        assert!(all_consumed, "Both shields should be consumed now");
+    }
+
+    #[test]
+    fn regen_shield_removes_from_combat_attacker() {
+        use crate::game::combat::{AttackerInfo, CombatState};
+
+        let mut state = GameState::new_two_player(42);
+        let attacker_id = create_creature_with_regen_shield(&mut state, PlayerId(0), "Attacker");
+
+        // Set up combat with the creature as an attacker
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo {
+                object_id: attacker_id,
+                defending_player: PlayerId(1),
+            }],
+            ..Default::default()
+        });
+
+        let proposed = ProposedEvent::Destroy {
+            object_id: attacker_id,
+            source: None,
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        replace_event(&mut state, proposed, &mut events);
+
+        // CR 701.15c: Removed from combat
+        let combat = state.combat.as_ref().unwrap();
+        assert!(
+            combat.attackers.is_empty(),
+            "Regenerated attacker should be removed from combat"
+        );
+    }
+
+    #[test]
+    fn regen_shield_removes_from_combat_blocker() {
+        use crate::game::combat::{AttackerInfo, CombatState};
+        use std::collections::HashMap;
+
+        let mut state = GameState::new_two_player(42);
+        let blocker_id = create_creature_with_regen_shield(&mut state, PlayerId(1), "Blocker");
+        let attacker_id = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Set up combat with the creature as a blocker
+        let mut blocker_assignments = HashMap::new();
+        blocker_assignments.insert(attacker_id, vec![blocker_id]);
+        let mut blocker_to_attacker = HashMap::new();
+        blocker_to_attacker.insert(blocker_id, attacker_id);
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo {
+                object_id: attacker_id,
+                defending_player: PlayerId(1),
+            }],
+            blocker_assignments,
+            blocker_to_attacker,
+            ..Default::default()
+        });
+
+        let proposed = ProposedEvent::Destroy {
+            object_id: blocker_id,
+            source: None,
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        replace_event(&mut state, proposed, &mut events);
+
+        let combat = state.combat.as_ref().unwrap();
+        assert!(
+            !combat.blocker_to_attacker.contains_key(&blocker_id),
+            "Regenerated blocker should be removed from blocker_to_attacker"
+        );
+        // Blocker removed from the attacker's blocker list
+        let blockers = combat.blocker_assignments.get(&attacker_id).unwrap();
+        assert!(
+            !blockers.contains(&blocker_id),
+            "Regenerated blocker should be removed from blocker list"
+        );
+    }
+
+    #[test]
+    fn regen_shield_taps_already_tapped_creature() {
+        let mut state = GameState::new_two_player(42);
+        let bear_id = create_creature_with_regen_shield(&mut state, PlayerId(0), "Bear");
+
+        // Already tapped
+        state.objects.get_mut(&bear_id).unwrap().tapped = true;
+
+        let proposed = ProposedEvent::Destroy {
+            object_id: bear_id,
+            source: None,
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        assert_eq!(result, ReplacementResult::Prevented);
+        // Still tapped (no-op on already-tapped)
+        assert!(state.objects.get(&bear_id).unwrap().tapped);
+    }
+
+    #[test]
+    fn consumed_shield_skipped_by_find_applicable() {
+        let mut state = GameState::new_two_player(42);
+        let bear_id = create_creature_with_regen_shield(&mut state, PlayerId(0), "Bear");
+
+        // Pre-consume the shield
+        state
+            .objects
+            .get_mut(&bear_id)
+            .unwrap()
+            .replacement_definitions[0]
+            .is_consumed = true;
+
+        let proposed = ProposedEvent::Destroy {
+            object_id: bear_id,
+            source: None,
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+
+        assert!(
+            candidates.is_empty(),
+            "Consumed shield should not be a candidate"
+        );
     }
 }

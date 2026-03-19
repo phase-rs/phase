@@ -1451,8 +1451,8 @@ fn is_static_pattern(lower: &str) -> bool {
         || lower.contains("must be blocked")
         // CR 119.7: Lifegain prevention
         || lower.contains("can't gain life")
-        // CR 702.8d: Flash-granting statics
-        || lower.contains("as though it had flash")
+        // CR 702.8d: Flash-granting statics (exclude self-cast options like "you may cast this spell as though it had flash")
+        || (lower.contains("as though it had flash") && !lower.starts_with("you may cast"))
         || lower.contains("as though they had flash")
         // Blocking rules
         || lower.contains("can block an additional")

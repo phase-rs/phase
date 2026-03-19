@@ -35,6 +35,7 @@ pub mod mill;
 pub mod pay;
 pub mod proliferate;
 pub mod pump;
+pub mod regenerate;
 pub mod reveal_hand;
 pub mod reveal_top;
 pub mod sacrifice;
@@ -60,6 +61,7 @@ pub fn resolve_effect(
         Effect::Draw { .. } => draw::resolve(state, ability, events),
         Effect::Pump { .. } => pump::resolve(state, ability, events),
         Effect::Destroy { .. } => destroy::resolve(state, ability, events),
+        Effect::Regenerate { .. } => regenerate::resolve(state, ability, events),
         Effect::Counter { .. } => counter::resolve(state, ability, events),
         Effect::Token { .. } => token::resolve(state, ability, events),
         Effect::GainLife { .. } => life::resolve_gain(state, ability, events),
@@ -148,6 +150,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&crate::types::abilit
         Effect::DealDamage { target, .. }
         | Effect::Pump { target, .. }
         | Effect::Destroy { target, .. }
+        | Effect::Regenerate { target, .. }
         | Effect::Tap { target, .. }
         | Effect::Untap { target, .. }
         | Effect::Bounce { target, .. }

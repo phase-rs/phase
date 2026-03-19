@@ -758,6 +758,7 @@ mod tests {
             AbilityKind::Activated,
             Effect::Destroy {
                 target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
             },
         )
         .optional_targeting();
@@ -1030,6 +1031,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::Destroy {
                 target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
             },
             vec![],
             ObjectId(10),

@@ -67,6 +67,8 @@ export function formatEvent(event: GameEvent): string {
       return `Token "${event.data.name}" created`;
     case "CreatureDestroyed":
       return `Creature ${event.data.object_id} destroyed`;
+    case "Regenerated":
+      return `Creature ${event.data.object_id} regenerates`;
     case "PermanentSacrificed":
       return `Player ${event.data.player_id + 1} sacrificed ${event.data.object_id}`;
     case "EffectResolved":

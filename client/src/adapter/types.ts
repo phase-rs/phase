@@ -443,6 +443,7 @@ export type GameEvent =
   | { type: "DayNightChanged"; data: { new_state: string } }
   | { type: "TurnedFaceUp"; data: { object_id: ObjectId } }
   | { type: "CardsRevealed"; data: { player: PlayerId; card_names: string[] } }
+  | { type: "Regenerated"; data: { object_id: ObjectId } }
   | { type: "CreatureSuspected"; data: { object_id: ObjectId } }
   | { type: "CaseSolved"; data: { object_id: ObjectId } }
   | { type: "ClassLevelGained"; data: { object_id: ObjectId; level: number } };

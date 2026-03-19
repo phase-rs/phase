@@ -25,6 +25,7 @@ const NON_VISUAL_EVENTS = new Set([
   "StackPushed",
   "StackResolved",
   "ReplacementApplied",
+  "Regenerated",
   "AttackersDeclared",
 ]);
 

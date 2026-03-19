@@ -259,6 +259,7 @@ mod tests {
                 -3,
                 Effect::Destroy {
                     target: TargetFilter::Typed(TypedFilter::creature()),
+                    cant_regenerate: false,
                 },
             )],
         );
@@ -396,6 +397,7 @@ mod tests {
                 -3,
                 Effect::Destroy {
                     target: TargetFilter::Typed(TypedFilter::creature()),
+                    cant_regenerate: false,
                 },
             )],
         );
@@ -448,6 +450,7 @@ mod tests {
                 -3,
                 Effect::Destroy {
                     target: crate::types::ability::TargetFilter::Any,
+                    cant_regenerate: false,
                 }
             )),
             -3

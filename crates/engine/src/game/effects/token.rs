@@ -177,7 +177,6 @@ const IGNORED_SUFFIXES: &[&str] = &[
     "burn",
     "snipe",
     "pwdestroy",
-    "regenerate",
     "exile",
     "counter",
     "illusory",

@@ -1,5 +1,6 @@
 ---
 source: crates/engine/tests/oracle_parser.rs
+assertion_line: 32
 expression: result
 ---
 {
@@ -14,7 +15,8 @@ expression: result
           "subtype": null,
           "controller": null,
           "properties": []
-        }
+        },
+        "cant_regenerate": false
       },
       "cost": null,
       "sub_ability": null,

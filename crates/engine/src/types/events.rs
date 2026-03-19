@@ -159,6 +159,10 @@ pub enum GameEvent {
         player_id: PlayerId,
         object_id: ObjectId,
     },
+    /// CR 701.15: A permanent's regeneration shield was consumed, preventing destruction.
+    Regenerated {
+        object_id: ObjectId,
+    },
     /// CR 702.157a: A creature was suspected.
     CreatureSuspected {
         object_id: ObjectId,

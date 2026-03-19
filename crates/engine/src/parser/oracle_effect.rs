@@ -986,7 +986,7 @@ fn replace_target_with_parent(effect: &mut Effect) {
     match effect {
         Effect::Tap { target }
         | Effect::Untap { target }
-        | Effect::Destroy { target }
+        | Effect::Destroy { target, .. }
         | Effect::Sacrifice { target }
         | Effect::GainControl { target }
         | Effect::Fight { target }
@@ -2182,9 +2182,15 @@ fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
     match ast {
         ZoneCounterImperativeAst::Destroy { target, all } => {
             if all {
-                Effect::DestroyAll { target }
+                Effect::DestroyAll {
+                    target,
+                    cant_regenerate: false,
+                }
             } else {
-                Effect::Destroy { target }
+                Effect::Destroy {
+                    target,
+                    cant_regenerate: false,
+                }
             }
         }
         ZoneCounterImperativeAst::Exile {
@@ -2600,10 +2606,12 @@ fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect {
             name: "prevent".to_string(),
             description: Some(text),
         },
-        UtilityImperativeAst::Regenerate { text } => Effect::Unimplemented {
-            name: "regenerate".to_string(),
-            description: Some(text),
-        },
+        UtilityImperativeAst::Regenerate { text } => {
+            let lower = text.to_lowercase();
+            let rest = lower.strip_prefix("regenerate ").unwrap_or(&lower);
+            let (target, _) = parse_target(rest);
+            Effect::Regenerate { target }
+        }
         UtilityImperativeAst::Copy { target } => Effect::CopySpell { target },
         UtilityImperativeAst::Transform { target } => Effect::Transform { target },
         UtilityImperativeAst::Attach { target } => Effect::Attach { target },
@@ -5142,7 +5150,8 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter {
                     card_type: Some(TypeFilter::Creature),
                     ..
-                })
+                }),
+                ..
             }
         ));
     }
@@ -5375,7 +5384,8 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Destroy {
-                target: TargetFilter::Or { .. }
+                target: TargetFilter::Or { .. },
+                ..
             }
         ));
     }
@@ -5706,9 +5716,17 @@ mod tests {
     #[test]
     fn effect_regenerate() {
         let e = parse_effect("Regenerate target creature");
+        assert!(matches!(e, Effect::Regenerate { .. }));
+    }
+
+    #[test]
+    fn effect_regenerate_self() {
+        let e = parse_effect("Regenerate ~");
         assert!(matches!(
             e,
-            Effect::Unimplemented { ref name, .. } if name == "regenerate"
+            Effect::Regenerate {
+                target: TargetFilter::SelfRef
+            }
         ));
     }
 
@@ -6272,7 +6290,8 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Destroy {
-                target: TargetFilter::Typed(TypedFilter { .. })
+                target: TargetFilter::Typed(TypedFilter { .. }),
+                ..
             }
         ));
     }

@@ -137,6 +137,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Destroy {
                 target: TargetFilter::Any,
+                cant_regenerate: false,
             },
             vec![crate::types::ability::TargetRef::Object(emblem_id)],
             ObjectId(200),

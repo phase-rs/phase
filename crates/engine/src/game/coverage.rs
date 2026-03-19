@@ -287,7 +287,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("filter".into(), fmt_target(target)));
             }
         }
-        Effect::Destroy { target }
+        Effect::Destroy { target, .. }
         | Effect::Tap { target }
         | Effect::Untap { target }
         | Effect::Sacrifice { target }
@@ -297,10 +297,11 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::CopySpell { target }
         | Effect::Suspect { target }
         | Effect::Transform { target }
-        | Effect::Shuffle { target } => {
+        | Effect::Shuffle { target }
+        | Effect::Regenerate { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::DestroyAll { target } | Effect::DamageAll { amount: _, target } => {
+        Effect::DestroyAll { target, .. } | Effect::DamageAll { amount: _, target } => {
             if !matches!(target, TargetFilter::None) {
                 d.push(("filter".into(), fmt_target(target)));
             }

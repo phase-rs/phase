@@ -44,6 +44,12 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
         if has_up_to {
             ability.optional_targeting = true;
         }
+        // CR 609.3: "You may" applies to the effect during resolution, not to whether
+        // the trigger fires. Propagate to the execute ability so the resolver prompts
+        // the controller via WaitingFor::OptionalEffectChoice.
+        if optional {
+            ability.optional = true;
+        }
         Some(Box::new(ability))
     } else {
         None

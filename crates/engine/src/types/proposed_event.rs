@@ -85,6 +85,8 @@ pub enum ProposedEvent {
     Destroy {
         object_id: ObjectId,
         source: Option<ObjectId>,
+        /// CR 701.15: When true, regeneration shields cannot prevent this destruction.
+        cant_regenerate: bool,
         applied: HashSet<ReplacementId>,
     },
     Sacrifice {
@@ -268,6 +270,7 @@ mod tests {
             ProposedEvent::Destroy {
                 object_id: ObjectId(1),
                 source: None,
+                cant_regenerate: false,
                 applied: HashSet::new(),
             },
             ProposedEvent::Sacrifice {

@@ -1094,6 +1094,14 @@ pub enum Effect {
     Destroy {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        /// CR 701.15: When true, the destroyed permanent cannot be regenerated.
+        #[serde(default)]
+        cant_regenerate: bool,
+    },
+    /// CR 701.15: Create a regeneration shield on the target permanent.
+    Regenerate {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     Counter {
         #[serde(default = "default_target_filter_any")]
@@ -1194,6 +1202,9 @@ pub enum Effect {
     DestroyAll {
         #[serde(default = "default_target_filter_none")]
         target: TargetFilter,
+        /// CR 701.15: When true, destroyed permanents cannot be regenerated.
+        #[serde(default)]
+        cant_regenerate: bool,
     },
     ChangeZone {
         #[serde(default)]
@@ -1474,6 +1485,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Draw { .. } => "Draw",
         Effect::Pump { .. } => "Pump",
         Effect::Destroy { .. } => "Destroy",
+        Effect::Regenerate { .. } => "Regenerate",
         Effect::Counter { .. } => "Counter",
         Effect::Token { .. } => "Token",
         Effect::GainLife { .. } => "GainLife",
@@ -1586,6 +1598,7 @@ pub enum EffectKind {
     AddRestriction,
     CreateEmblem,
     PayCost,
+    Regenerate,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
     Equip,
@@ -1603,6 +1616,7 @@ impl From<&Effect> for EffectKind {
             Effect::Draw { .. } => EffectKind::Draw,
             Effect::Pump { .. } => EffectKind::Pump,
             Effect::Destroy { .. } => EffectKind::Destroy,
+            Effect::Regenerate { .. } => EffectKind::Regenerate,
             Effect::Counter { .. } => EffectKind::Counter,
             Effect::Token { .. } => EffectKind::Token,
             Effect::GainLife { .. } => EffectKind::GainLife,
@@ -2234,6 +2248,39 @@ impl StaticDefinition {
     }
 }
 
+/// CR 614.1a: Damage modification formula for replacement effects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum DamageModification {
+    /// amount * 2 (e.g. Furnace of Rath)
+    Double,
+    /// amount * 3 (e.g. Fiery Emancipation)
+    Triple,
+    /// amount + value (e.g. Torbran, +2)
+    Plus { value: u32 },
+    /// amount.saturating_sub(value) (e.g. Benevolent Unicorn, -1)
+    Minus { value: u32 },
+}
+
+/// CR 614.1a: Restricts which damage targets a replacement applies to.
+/// Dedicated enum because `TargetRef` can be `Player` (not handled by `matches_target_filter`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum DamageTargetFilter {
+    /// "to an opponent or a permanent an opponent controls"
+    OpponentOrTheirPermanents,
+    /// "to a creature" / "to that creature"
+    CreatureOnly,
+    /// "to a player" / "to that player"
+    PlayerOnly,
+}
+
+/// CR 614.1a: Restricts whether a damage replacement applies to combat, noncombat, or all damage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum CombatDamageScope {
+    CombatOnly,
+    NoncombatOnly,
+}
+
 /// Whether a replacement effect is mandatory or offers the affected player a choice.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
@@ -2266,6 +2313,29 @@ pub struct ReplacementDefinition {
     /// E.g., `Some(Graveyard)` means "only replace zone changes TO the graveyard."
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_zone: Option<Zone>,
+    /// CR 614.1a: Damage modification formula (Double, Triple, Plus, Minus).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage_modification: Option<DamageModification>,
+    /// CR 614.1a: Restricts which damage source this replacement matches.
+    /// Reuses existing TargetFilter infrastructure (SelfRef, Typed with ControllerRef/FilterProp).
+    /// None = any source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage_source_filter: Option<TargetFilter>,
+    /// CR 614.1a: Restricts which damage target this replacement matches.
+    /// Dedicated enum because TargetRef can be Player (not handled by matches_target_filter).
+    /// None = any target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage_target_filter: Option<DamageTargetFilter>,
+    /// CR 614.1a: Restricts to combat-only or noncombat-only damage.
+    /// None = all damage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combat_scope: Option<CombatDamageScope>,
+    /// CR 701.15: True for regeneration shields — consumed on use, expire at cleanup.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_regeneration_shield: bool,
+    /// Marks this replacement as consumed (one-shot). Skipped by find_applicable_replacements.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_consumed: bool,
 }
 
 impl ReplacementDefinition {
@@ -2280,6 +2350,12 @@ impl ReplacementDefinition {
             description: None,
             condition: None,
             destination_zone: None,
+            damage_modification: None,
+            damage_source_filter: None,
+            damage_target_filter: None,
+            combat_scope: None,
+            is_regeneration_shield: false,
+            is_consumed: false,
         }
     }
 
@@ -2310,6 +2386,32 @@ impl ReplacementDefinition {
 
     pub fn destination_zone(mut self, zone: Zone) -> Self {
         self.destination_zone = Some(zone);
+        self
+    }
+
+    pub fn damage_modification(mut self, modification: DamageModification) -> Self {
+        self.damage_modification = Some(modification);
+        self
+    }
+
+    pub fn damage_source_filter(mut self, filter: TargetFilter) -> Self {
+        self.damage_source_filter = Some(filter);
+        self
+    }
+
+    pub fn damage_target_filter(mut self, filter: DamageTargetFilter) -> Self {
+        self.damage_target_filter = Some(filter);
+        self
+    }
+
+    pub fn combat_scope(mut self, scope: CombatDamageScope) -> Self {
+        self.combat_scope = Some(scope);
+        self
+    }
+
+    /// CR 701.15: Mark this replacement as a regeneration shield (one-shot, expires at cleanup).
+    pub fn regeneration_shield(mut self) -> Self {
+        self.is_regeneration_shield = true;
         self
     }
 }

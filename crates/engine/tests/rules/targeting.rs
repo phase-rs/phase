@@ -131,6 +131,7 @@ fn no_legal_targets_prevents_casting() {
                 engine::types::ability::AbilityKind::Spell,
                 Effect::Destroy {
                     target: TargetFilter::Typed(TypedFilter::creature()),
+                    cant_regenerate: false,
                 },
             ));
     }

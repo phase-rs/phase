@@ -40,9 +40,17 @@ pub fn resolve(
                 continue;
             }
 
+            let cant_regenerate = matches!(
+                &ability.effect,
+                Effect::Destroy {
+                    cant_regenerate: true,
+                    ..
+                }
+            );
             let proposed = ProposedEvent::Destroy {
                 object_id: *obj_id,
                 source: Some(ability.source_id),
+                cant_regenerate,
                 applied: HashSet::new(),
             };
 
@@ -108,14 +116,19 @@ pub fn resolve(
 }
 
 /// Destroy all permanents matching the filter.
+/// CR 701.15: Routes each destruction through the replacement pipeline
+/// so regeneration shields and other replacements can intercept.
 pub fn resolve_all(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let target_filter = match &ability.effect {
-        Effect::DestroyAll { target } => target.clone(),
-        _ => crate::types::ability::TargetFilter::Any,
+    let (target_filter, cant_regenerate) = match &ability.effect {
+        Effect::DestroyAll {
+            target,
+            cant_regenerate,
+        } => (target.clone(), *cant_regenerate),
+        _ => (crate::types::ability::TargetFilter::Any, false),
     };
 
     // Use a creature filter as default if the effect's target is None
@@ -153,9 +166,55 @@ pub fn resolve_all(
         .collect();
 
     for obj_id in matching {
-        zones::move_to_zone(state, obj_id, Zone::Graveyard, events);
-        state.layers_dirty = true;
-        events.push(GameEvent::CreatureDestroyed { object_id: obj_id });
+        let proposed = ProposedEvent::Destroy {
+            object_id: obj_id,
+            source: Some(ability.source_id),
+            cant_regenerate,
+            applied: HashSet::new(),
+        };
+
+        match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(event) => match event {
+                ProposedEvent::Destroy {
+                    object_id, source, ..
+                } => {
+                    let zone_proposed = ProposedEvent::zone_change(
+                        object_id,
+                        Zone::Battlefield,
+                        Zone::Graveyard,
+                        source,
+                    );
+                    match replacement::replace_event(state, zone_proposed, events) {
+                        ReplacementResult::Execute(zone_event) => {
+                            if let ProposedEvent::ZoneChange {
+                                object_id: oid, to, ..
+                            } = zone_event
+                            {
+                                zones::move_to_zone(state, oid, to, events);
+                                state.layers_dirty = true;
+                            }
+                        }
+                        ReplacementResult::Prevented => {}
+                        ReplacementResult::NeedsChoice(player) => {
+                            state.waiting_for =
+                                replacement::replacement_choice_waiting_for(player, state);
+                            return Ok(());
+                        }
+                    }
+                    events.push(GameEvent::CreatureDestroyed { object_id });
+                }
+                ProposedEvent::ZoneChange { object_id, to, .. } => {
+                    zones::move_to_zone(state, object_id, to, events);
+                    state.layers_dirty = true;
+                }
+                _ => {}
+            },
+            ReplacementResult::Prevented => {} // Regenerated or other replacement
+            ReplacementResult::NeedsChoice(player) => {
+                state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+                return Ok(());
+            }
+        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -188,6 +247,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Destroy {
                 target: TargetFilter::Any,
+                cant_regenerate: false,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -221,6 +281,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Destroy {
                 target: TargetFilter::Any,
+                cant_regenerate: false,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -246,6 +307,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Destroy {
                 target: TargetFilter::Any,
+                cant_regenerate: false,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -305,6 +367,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::DestroyAll {
                 target: TargetFilter::None,
+                cant_regenerate: false,
             },
             vec![],
             ObjectId(100),
@@ -318,5 +381,183 @@ mod tests {
         assert!(!state.battlefield.contains(&bear2));
         // Land survives
         assert_eq!(state.battlefield.len(), 1);
+    }
+
+    #[test]
+    fn destroy_prevented_by_regen_shield() {
+        use crate::types::ability::ReplacementDefinition;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let bear_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Add regeneration shield
+        let shield = ReplacementDefinition::new(ReplacementEvent::Destroy)
+            .valid_card(TargetFilter::SelfRef)
+            .description("Regenerate".to_string())
+            .regeneration_shield();
+        state
+            .objects
+            .get_mut(&bear_id)
+            .unwrap()
+            .replacement_definitions
+            .push(shield);
+
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(bear_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Creature survived
+        assert!(
+            state.battlefield.contains(&bear_id),
+            "Creature with regen shield should survive Destroy"
+        );
+        // No CreatureDestroyed event
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, GameEvent::CreatureDestroyed { .. })));
+        // Regenerated event emitted
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::Regenerated { .. })));
+    }
+
+    #[test]
+    fn destroy_all_prevented_by_regen_shield() {
+        use crate::types::ability::ReplacementDefinition;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Protected creature
+        let protected_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Shielded".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&protected_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let shield = ReplacementDefinition::new(ReplacementEvent::Destroy)
+            .valid_card(TargetFilter::SelfRef)
+            .description("Regenerate".to_string())
+            .regeneration_shield();
+        state
+            .objects
+            .get_mut(&protected_id)
+            .unwrap()
+            .replacement_definitions
+            .push(shield);
+
+        // Unprotected creature
+        let unprotected_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Unshielded".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&unprotected_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = ResolvedAbility::new(
+            Effect::DestroyAll {
+                target: TargetFilter::None,
+                cant_regenerate: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        // Protected creature survives
+        assert!(
+            state.battlefield.contains(&protected_id),
+            "Creature with regen shield should survive DestroyAll"
+        );
+        // Unprotected creature destroyed
+        assert!(
+            !state.battlefield.contains(&unprotected_id),
+            "Unshielded creature should be destroyed by DestroyAll"
+        );
+    }
+
+    #[test]
+    fn destroy_all_cant_regenerate_bypasses_shield() {
+        use crate::types::ability::ReplacementDefinition;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let bear_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&bear_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let shield = ReplacementDefinition::new(ReplacementEvent::Destroy)
+            .valid_card(TargetFilter::SelfRef)
+            .description("Regenerate".to_string())
+            .regeneration_shield();
+        state
+            .objects
+            .get_mut(&bear_id)
+            .unwrap()
+            .replacement_definitions
+            .push(shield);
+
+        let ability = ResolvedAbility::new(
+            Effect::DestroyAll {
+                target: TargetFilter::None,
+                cant_regenerate: true,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !state.battlefield.contains(&bear_id),
+            "cant_regenerate should bypass regen shield in DestroyAll"
+        );
     }
 }

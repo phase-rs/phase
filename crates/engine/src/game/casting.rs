@@ -1932,13 +1932,11 @@ mod tests {
                 },
             )
             .cost(crate::types::ability::AbilityCost::Tap)
-            .sub_ability(AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::Unimplemented {
-                    name: "activate_only_if_controls_land_subtype_any".to_string(),
-                    description: Some("Island|Swamp".to_string()),
+            .activation_restrictions(vec![
+                crate::types::ability::ActivationRestriction::RequiresCondition {
+                    text: "you control an Island or a Swamp".to_string(),
                 },
-            )),
+            ]),
         );
         obj_id
     }
@@ -2847,6 +2845,7 @@ mod tests {
         .sub_ability(ResolvedAbility::new(
             Effect::Destroy {
                 target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
             },
             vec![TargetRef::Object(creature)],
             object_id,
