@@ -2714,6 +2714,11 @@ pub enum ContinuousModification {
     AddColor {
         color: ManaColor,
     },
+    /// Grants a rule-modification static mode (e.g. MustBeBlocked, CantBeBlocked)
+    /// to the affected object. Applied at layer 6 (ability-modifying).
+    AddStaticMode {
+        mode: StaticMode,
+    },
 }
 
 // ---------------------------------------------------------------------------

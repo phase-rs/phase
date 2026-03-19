@@ -68,7 +68,8 @@ impl ContinuousModification {
             ContinuousModification::AddKeyword { .. }
             | ContinuousModification::RemoveKeyword { .. }
             | ContinuousModification::GrantAbility { .. }
-            | ContinuousModification::RemoveAllAbilities => Layer::Ability,
+            | ContinuousModification::RemoveAllAbilities
+            | ContinuousModification::AddStaticMode { .. } => Layer::Ability,
             ContinuousModification::AddType { .. }
             | ContinuousModification::RemoveType { .. }
             | ContinuousModification::AddSubtype { .. }

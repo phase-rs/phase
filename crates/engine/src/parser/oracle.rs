@@ -882,7 +882,14 @@ fn strip_activated_constraints(text: &str) -> (String, ActivatedConstraintAst) {
 }
 
 /// Check if a line looks like a static/continuous ability.
+/// Lines starting with "target" are spell effects, not statics — skip early.
 pub(super) fn is_static_pattern(lower: &str) -> bool {
+    // Spell effects targeting creatures/players are never static abilities.
+    // They must reach the effect parser (Priority 9) for proper handling.
+    if lower.starts_with("target") {
+        return false;
+    }
+
     lower.contains("gets +")
         || lower.contains("gets -")
         || lower.contains("get +")
@@ -2937,6 +2944,30 @@ mod tests {
             matches!(effect, Effect::Shuffle { .. }),
             "expected Shuffle for 'shuffle and put on top', got {:?}",
             effect,
+        );
+    }
+
+    #[test]
+    fn emergent_growth_routes_to_spell_not_static() {
+        // Emergent Growth: compound pump + must-be-blocked should route to spell
+        // effect parsing, not static parsing.
+        let parsed = parse(
+            "Target creature gets +5/+5 until end of turn and must be blocked this turn if able.",
+            "Emergent Growth",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert!(
+            !parsed.abilities.is_empty(),
+            "Emergent Growth should produce a spell ability, got abilities={:?}, statics={:?}",
+            parsed.abilities,
+            parsed.statics,
+        );
+        assert!(
+            parsed.statics.is_empty(),
+            "Emergent Growth should NOT produce static abilities, got {:?}",
+            parsed.statics,
         );
     }
 }

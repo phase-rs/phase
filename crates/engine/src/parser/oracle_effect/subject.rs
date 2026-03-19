@@ -1,8 +1,8 @@
 use super::animation::{animation_modifications, parse_animation_spec};
 use super::types::*;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Duration, Effect, GainLifePlayer, PtValue, QuantityExpr,
-    QuantityRef, StaticDefinition, TargetFilter,
+    AbilityDefinition, AbilityKind, ContinuousModification, Duration, Effect, GainLifePlayer,
+    PtValue, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
 };
 use crate::types::statics::StaticMode;
 
@@ -123,6 +123,30 @@ fn try_parse_subject_become_clause(text: &str) -> Option<ParsedEffectClause> {
 
 fn try_parse_subject_restriction_clause(text: &str) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
+
+    // CR 509.1c: "Target creature must be blocked [this turn] [if able]"
+    // Handled separately because "must be blocked" isn't a "can't X" restriction pattern
+    // and needs AddStaticMode for transient effect propagation through the layer system.
+    if let Some(pos) = lower.find(" must be blocked") {
+        let subject = text[..pos].trim();
+        let application = parse_subject_application(subject)?;
+        return Some(ParsedEffectClause {
+            effect: Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::new(StaticMode::Other(
+                    "MustBeBlocked".into(),
+                ))
+                .affected(application.affected)
+                .modifications(vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::Other("MustBeBlocked".into()),
+                }])],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: application.target,
+            },
+            duration: Some(Duration::UntilEndOfTurn),
+            sub_ability: None,
+        });
+    }
+
     let (subject, predicate) = if let Some(pos) = lower.find(" can't ") {
         (text[..pos].trim(), text[pos + 1..].trim())
     } else if let Some(pos) = lower.find(" cannot ") {

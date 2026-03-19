@@ -302,6 +302,62 @@ pub fn validate_blockers(
         }
     }
 
+    // CR 509.1c: MustBeBlocked — if a creature with "must be blocked if able" is attacking,
+    // the defending player must assign at least one blocker to it, provided a legal blocker
+    // exists that isn't already required elsewhere.
+    if let Some(combat) = &state.combat {
+        // Collect all assigned blocker IDs for quick lookup
+        let assigned_blockers: std::collections::HashSet<ObjectId> = assignments
+            .iter()
+            .map(|&(blocker_id, _)| blocker_id)
+            .collect();
+
+        for attacker_info in &combat.attackers {
+            let attacker_id = attacker_info.object_id;
+            let attacker = match state.objects.get(&attacker_id) {
+                Some(obj) => obj,
+                None => continue,
+            };
+
+            // Check if this attacker has MustBeBlocked
+            let has_must_be_blocked = attacker
+                .static_definitions
+                .iter()
+                .any(|sd| sd.mode == StaticMode::Other("MustBeBlocked".into()));
+            if !has_must_be_blocked {
+                continue;
+            }
+
+            // Already has at least one blocker assigned — constraint satisfied
+            if blockers_per_attacker.contains_key(&attacker_id) {
+                continue;
+            }
+
+            // Check if any unassigned defending creature could legally block this attacker.
+            // If so, the assignment is invalid because that creature should have been assigned.
+            let defending_player = attacker_info.defending_player;
+            let has_available_blocker = state.battlefield.iter().any(|id| {
+                if assigned_blockers.contains(id) {
+                    return false;
+                }
+                let Some(obj) = state.objects.get(id) else {
+                    return false;
+                };
+                obj.controller == defending_player
+                    && obj.card_types.core_types.contains(&CoreType::Creature)
+                    && !obj.tapped
+                    && can_block_pair(obj, attacker)
+            });
+
+            if has_available_blocker {
+                return Err(format!(
+                    "{:?} must be blocked if able (CR 509.1c)",
+                    attacker_id
+                ));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -692,6 +748,7 @@ pub fn has_potential_attackers(state: &GameState) -> bool {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::StaticDefinition;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
 
@@ -1281,5 +1338,158 @@ mod tests {
             .push(Keyword::Horsemanship);
 
         assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // MustBeBlocked (CR 509.1c) tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: add MustBeBlocked static to a creature's base definitions.
+    fn add_must_be_blocked(state: &mut GameState, id: ObjectId) {
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::Other(
+                "MustBeBlocked".into(),
+            )));
+    }
+
+    #[test]
+    fn must_be_blocked_requires_blocker_assignment() {
+        // CR 509.1c: If a MustBeBlocked creature attacks and a legal blocker exists,
+        // the defending player must assign at least one blocker to it.
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Lure Beast", 3, 3);
+        add_must_be_blocked(&mut state, attacker);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo {
+                object_id: attacker,
+                defending_player: PlayerId(1),
+            }],
+            ..Default::default()
+        });
+
+        // Empty blockers: illegal because blocker exists
+        assert!(validate_blockers(&state, &[]).is_err());
+        // Assigning the blocker: legal
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
+    }
+
+    #[test]
+    fn must_be_blocked_ok_when_no_legal_blockers() {
+        // CR 509.1c "if able": no legal blockers means empty assignment is fine.
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Lure Beast", 3, 3);
+        add_must_be_blocked(&mut state, attacker);
+
+        // Defender has only tapped creatures
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        state.objects.get_mut(&blocker).unwrap().tapped = true;
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo {
+                object_id: attacker,
+                defending_player: PlayerId(1),
+            }],
+            ..Default::default()
+        });
+
+        // No untapped blockers available — constraint satisfied
+        assert!(validate_blockers(&state, &[]).is_ok());
+    }
+
+    #[test]
+    fn must_be_blocked_respects_flying_evasion() {
+        // MustBeBlocked doesn't force illegal blocks: flying attacker can't be
+        // blocked by ground creature.
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Flying Lure", 3, 3);
+        add_must_be_blocked(&mut state, attacker);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+
+        // Defender has only ground creatures
+        let _ground = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo {
+                object_id: attacker,
+                defending_player: PlayerId(1),
+            }],
+            ..Default::default()
+        });
+
+        // No legal blocker (ground can't block flying) — empty is OK
+        assert!(validate_blockers(&state, &[]).is_ok());
+    }
+
+    #[test]
+    fn must_be_blocked_with_menace_needs_two() {
+        // CR 509.1c + CR 702.110b: MustBeBlocked + Menace still needs 2+ blockers.
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Menace Lure", 3, 3);
+        add_must_be_blocked(&mut state, attacker);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Menace);
+
+        let blocker1 = create_creature(&mut state, PlayerId(1), "Bear1", 2, 2);
+        let blocker2 = create_creature(&mut state, PlayerId(1), "Bear2", 2, 2);
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo {
+                object_id: attacker,
+                defending_player: PlayerId(1),
+            }],
+            ..Default::default()
+        });
+
+        // One blocker: fails menace even though must-be-blocked
+        assert!(validate_blockers(&state, &[(blocker1, attacker)]).is_err());
+        // Two blockers: satisfies both menace and must-be-blocked
+        assert!(validate_blockers(&state, &[(blocker1, attacker), (blocker2, attacker)]).is_ok());
+    }
+
+    #[test]
+    fn two_must_be_blocked_one_available_blocker() {
+        // CR 509.1c "if able": two MustBeBlocked attackers but only one blocker —
+        // assigning the blocker to either satisfies the constraint.
+        let mut state = setup();
+        let attacker1 = create_creature(&mut state, PlayerId(0), "Lure1", 3, 3);
+        add_must_be_blocked(&mut state, attacker1);
+        let attacker2 = create_creature(&mut state, PlayerId(0), "Lure2", 2, 2);
+        add_must_be_blocked(&mut state, attacker2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo {
+                    object_id: attacker1,
+                    defending_player: PlayerId(1),
+                },
+                AttackerInfo {
+                    object_id: attacker2,
+                    defending_player: PlayerId(1),
+                },
+            ],
+            ..Default::default()
+        });
+
+        // Blocking either one is fine — can't block both with one creature
+        assert!(validate_blockers(&state, &[(blocker, attacker1)]).is_ok());
+        assert!(validate_blockers(&state, &[(blocker, attacker2)]).is_ok());
+        // Blocking neither is illegal — the blocker could have blocked one
+        assert!(validate_blockers(&state, &[]).is_err());
     }
 }

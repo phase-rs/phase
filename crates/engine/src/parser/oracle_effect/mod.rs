@@ -3235,6 +3235,79 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Item 3b: MustBeBlocked imperative (CR 509.1c)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn must_be_blocked_imperative() {
+        // CR 509.1c: "must be blocked this turn if able" as sub-ability
+        let e = parse_effect("must be blocked this turn if able");
+        assert!(
+            matches!(&e, Effect::GenericEffect { static_abilities, .. }
+                if static_abilities.iter().any(|sd|
+                    sd.mode == crate::types::statics::StaticMode::Other("MustBeBlocked".into())
+                )
+            ),
+            "Expected GenericEffect with MustBeBlocked, got {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn must_be_blocked_if_able_variant() {
+        // "must be blocked if able" without "this turn"
+        let e = parse_effect("must be blocked if able");
+        assert!(
+            matches!(&e, Effect::GenericEffect { static_abilities, .. }
+                if static_abilities.iter().any(|sd|
+                    sd.mode == crate::types::statics::StaticMode::Other("MustBeBlocked".into())
+                )
+            ),
+            "Expected GenericEffect with MustBeBlocked, got {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn pump_compound_with_must_be_blocked() {
+        // Emergent Growth: "+5/+5 until end of turn and must be blocked this turn if able"
+        let def = parse_effect_chain(
+            "Target creature gets +5/+5 until end of turn and must be blocked this turn if able",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        // Primary effect should be Pump
+        assert!(
+            matches!(&def.effect, Effect::Pump { .. }),
+            "Expected Pump as primary effect, got {:?}",
+            def.effect
+        );
+        // Sub-ability should carry MustBeBlocked
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("Expected sub_ability for MustBeBlocked");
+        assert!(
+            matches!(&sub.effect, Effect::GenericEffect { static_abilities, .. }
+                if static_abilities.iter().any(|sd|
+                    sd.mode == crate::types::statics::StaticMode::Other("MustBeBlocked".into())
+                )
+            ),
+            "Expected sub_ability GenericEffect with MustBeBlocked, got {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
+    fn static_must_be_blocked_still_routes_to_static_parser() {
+        // Regression: self-referential "CARDNAME must be blocked if able" should
+        // still route to the static parser, not the effect parser.
+        let result = crate::parser::oracle_static::parse_static_line(
+            "Darksteel Myr must be blocked if able.",
+        );
+        assert!(result.is_some(), "Should still parse as static ability");
+    }
+
+    // -----------------------------------------------------------------------
     // Item 4: Inline delayed triggers
     // -----------------------------------------------------------------------
 

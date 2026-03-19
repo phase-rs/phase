@@ -157,6 +157,8 @@ pub(super) enum ImperativeFamilyAst {
     PhaseOut,
     /// CR 509.1g: Block this turn if able.
     ForceBlock,
+    /// CR 509.1c: Must be blocked this turn if able.
+    MustBeBlocked,
     Investigate,
     BecomeMonarch,
     Proliferate,

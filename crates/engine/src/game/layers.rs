@@ -5,8 +5,8 @@ use crate::game::devotion::count_devotion;
 use crate::game::filter::matches_target_filter;
 use crate::game::game_object::CounterType;
 use crate::types::ability::{
-    ContinuousModification, Duration, DynamicPTValue, QuantityExpr, StaticCondition, TargetFilter,
-    TypedFilter,
+    ContinuousModification, Duration, DynamicPTValue, QuantityExpr, StaticCondition,
+    StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -465,7 +465,9 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
     // If b adds/removes abilities and a's filter checks for abilities
     let b_changes_abilities = matches!(
         &b.modification,
-        ContinuousModification::GrantAbility { .. } | ContinuousModification::RemoveAllAbilities
+        ContinuousModification::GrantAbility { .. }
+            | ContinuousModification::RemoveAllAbilities
+            | ContinuousModification::AddStaticMode { .. }
     );
 
     if b_changes_abilities && filter_references_ability(&a.affected_filter) {
@@ -669,6 +671,12 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             }
             ContinuousModification::GrantAbility { definition } => {
                 obj.abilities.push(*definition.clone());
+            }
+            ContinuousModification::AddStaticMode { mode } => {
+                let def = StaticDefinition::new(mode.clone()).affected(TargetFilter::SelfRef);
+                if !obj.static_definitions.iter().any(|sd| sd.mode == *mode) {
+                    obj.static_definitions.push(def);
+                }
             }
         }
     }

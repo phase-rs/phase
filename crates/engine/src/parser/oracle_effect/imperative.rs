@@ -8,6 +8,7 @@ use crate::types::ability::{
     PreventionScope, PtValue, QuantityExpr, QuantityRef, RoundingMode, StaticDefinition,
     TargetFilter,
 };
+use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 use super::super::oracle_target::parse_target;
@@ -903,6 +904,17 @@ pub(super) fn parse_imperative_family_ast(text: &str, lower: &str) -> Option<Imp
     if lower == "block this turn if able" || lower == "blocks this turn if able" {
         return Some(ImperativeFamilyAst::ForceBlock);
     }
+    // CR 509.1c: "must be blocked [this turn] [if able]"
+    if let Some(rest) = lower.strip_prefix("must be blocked") {
+        let rest = rest.trim();
+        if rest.is_empty()
+            || rest == "this turn if able"
+            || rest == "if able"
+            || rest == "this turn"
+        {
+            return Some(ImperativeFamilyAst::MustBeBlocked);
+        }
+    }
     // CR 702.136: "investigate" — create a Clue token.
     if lower == "investigate" || lower.starts_with("investigate.") {
         return Some(ImperativeFamilyAst::Investigate);
@@ -1050,6 +1062,19 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> Effect {
         },
         ImperativeFamilyAst::ForceBlock => Effect::ForceBlock {
             target: TargetFilter::Any,
+        },
+        // CR 509.1c: Must be blocked — grant transient MustBeBlocked static via GenericEffect.
+        // Uses AddStaticMode so the mode propagates through the layer system to
+        // static_definitions, where combat.rs checks it.
+        ImperativeFamilyAst::MustBeBlocked => Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::new(StaticMode::Other(
+                "MustBeBlocked".into(),
+            ))
+            .modifications(vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::Other("MustBeBlocked".into()),
+            }])],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: None,
         },
         ImperativeFamilyAst::Investigate => Effect::Investigate,
         ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch,
