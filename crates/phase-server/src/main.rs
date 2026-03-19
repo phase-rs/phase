@@ -8,7 +8,9 @@ use axum::extract::{State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
+use clap::Parser;
 use engine::ai_support::legal_actions as engine_legal_actions;
+use http::HeaderValue;
 use engine::database::CardDatabase;
 use engine::types::player::PlayerId;
 use server_core::lobby::LobbyManager;
@@ -27,6 +29,23 @@ type SharedLobby = Arc<Mutex<LobbyManager>>;
 type SharedLobbySubscribers = Arc<Mutex<Vec<mpsc::UnboundedSender<ServerMessage>>>>;
 type SharedPlayerCount = Arc<AtomicU32>;
 
+/// phase-server: multiplayer game server for phase.rs
+#[derive(Parser)]
+#[command(name = "phase-server", version, about = "Multiplayer game server for phase.rs")]
+struct Cli {
+    /// Port to listen on
+    #[arg(short, long, default_value = "9374", env = "PORT")]
+    port: u16,
+
+    /// Path to card data directory (must contain card-data.json)
+    #[arg(short, long, default_value = "data", env = "PHASE_DATA_DIR")]
+    data_dir: String,
+
+    /// Allowed CORS origin (use '*' for permissive, or a specific URL)
+    #[arg(long, env = "PHASE_CORS_ORIGIN")]
+    cors_origin: Option<String>,
+}
+
 /// Per-socket state tracking which game/player this connection belongs to.
 struct SocketIdentity {
     game_code: Option<String>,
@@ -44,9 +63,8 @@ async fn main() {
         )
         .init();
 
-    let port = std::env::var("PORT").unwrap_or_else(|_| "9374".to_string());
-    let data_root = std::env::var("PHASE_DATA_DIR").unwrap_or_else(|_| "data".to_string());
-    let data_path = Path::new(&data_root);
+    let cli = Cli::parse();
+    let data_path = Path::new(&cli.data_dir);
     let export_path = data_path.join("card-data.json");
     let card_db = if export_path.exists() {
         CardDatabase::from_export(&export_path).expect("Failed to load card-data.json")
@@ -118,10 +136,19 @@ async fn main() {
         }
     });
 
+    let cors = match cli.cors_origin.as_deref() {
+        Some("*") | None => CorsLayer::permissive(),
+        Some(origin) => CorsLayer::new().allow_origin(
+            origin
+                .parse::<HeaderValue>()
+                .expect("invalid CORS origin"),
+        ),
+    };
+
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(health))
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .with_state((
             state,
             connections,
@@ -131,11 +158,33 @@ async fn main() {
             player_count,
         ));
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", cli.port))
         .await
         .expect("failed to bind");
-    info!(port = %port, "phase-server listening");
-    axum::serve(listener, app).await.expect("server error");
+    info!(port = %cli.port, "phase-server listening");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("server error");
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to register SIGTERM handler");
+        tokio::select! {
+            _ = ctrl_c => info!("received Ctrl+C, shutting down"),
+            _ = sigterm.recv() => info!("received SIGTERM, shutting down"),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await.expect("failed to listen for Ctrl+C");
+        info!("received Ctrl+C, shutting down");
+    }
 }
 
 async fn health() -> &'static str {

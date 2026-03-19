@@ -108,24 +108,82 @@ jobs:
           command: pages deploy dist --project-name=phase-rs --commit-dirty=true
 
   build-server:
-    name: Build Server (Linux)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    name: Build Server (${{ matrix.os }})
+    needs: [build-wasm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-latest
+            triple: x86_64-unknown-linux-gnu
+            artifact: phase-server-linux-x86_64
+            archive_ext: tar.gz
+          - os: macos
+            runner: macos-latest
+            triple: aarch64-apple-darwin
+            artifact: phase-server-macos-arm64
+            archive_ext: tar.gz
+          - os: windows
+            runner: windows-latest
+            triple: x86_64-pc-windows-msvc
+            artifact: phase-server-windows-x86_64
+            archive_ext: zip
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          cache-shared-key: rust-release
+          cache-shared-key: rust-server-${{ matrix.os }}
 
       - name: Build phase-server
-        run: cargo build --release --bin phase-server
+        run: cargo build --profile server-release --bin phase-server
 
-      - name: Upload server binary
+      - name: Download card data
+        uses: actions/download-artifact@v4
+        with:
+          name: card-data
+          path: staging/data
+
+      - name: Package server archive (Unix)
+        if: matrix.os != 'windows'
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          mkdir -p staging
+          cp target/server-release/phase-server staging/
+          chmod +x staging/phase-server
+          cd staging
+          tar czf ../${{ matrix.artifact }}.tar.gz phase-server data/card-data.json
+        shell: bash
+
+      - name: Package server archive (Windows)
+        if: matrix.os == 'windows'
+        run: |
+          $Tag = $env:GITHUB_REF -replace 'refs/tags/',''
+          Copy-Item "target/server-release/phase-server.exe" "staging/"
+          Compress-Archive -Path "staging/phase-server.exe","staging/data/card-data.json" -DestinationPath "${{ matrix.artifact }}.zip"
+        shell: pwsh
+
+      - name: Generate checksum (Unix)
+        if: matrix.os != 'windows'
+        run: shasum -a 256 ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256
+
+      - name: Generate checksum (Windows)
+        if: matrix.os == 'windows'
+        run: |
+          $hash = (Get-FileHash "${{ matrix.artifact }}.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  ${{ matrix.artifact }}.zip" | Out-File -Encoding utf8 "${{ matrix.artifact }}.zip.sha256"
+        shell: pwsh
+
+      - name: Upload server archive
         uses: actions/upload-artifact@v4
         with:
-          name: phase-server-linux
-          path: target/release/phase-server
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.${{ matrix.archive_ext }}
+            ${{ matrix.artifact }}.${{ matrix.archive_ext }}.sha256
           retention-days: 90
 
   build-tauri:
@@ -140,12 +198,15 @@ jobs:
           - os: linux
             runner: ubuntu-latest
             artifact: phase-tauri-linux
+            sidecar_triple: x86_64-unknown-linux-gnu
           - os: macos
             runner: macos-latest
             artifact: phase-tauri-macos
+            sidecar_triple: aarch64-apple-darwin
           - os: windows
             runner: windows-latest
             artifact: phase-tauri-windows
+            sidecar_triple: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
 
@@ -192,6 +253,21 @@ jobs:
         with:
           name: card-data
           path: client/public
+
+      - name: Build phase-server sidecar
+        run: |
+          cargo build --profile server-release --bin phase-server
+          mkdir -p client/src-tauri/binaries
+        shell: bash
+
+      - name: Place sidecar binary (Unix)
+        if: matrix.os != 'windows'
+        run: cp target/server-release/phase-server client/src-tauri/binaries/phase-server-${{ matrix.sidecar_triple }}
+
+      - name: Place sidecar binary (Windows)
+        if: matrix.os == 'windows'
+        run: Copy-Item "target/server-release/phase-server.exe" "client/src-tauri/binaries/phase-server-${{ matrix.sidecar_triple }}.exe"
+        shell: pwsh
 
       - name: Build WASM for Tauri
         run: ./scripts/build-wasm.sh release
@@ -301,7 +377,12 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            artifacts/phase-server-linux/phase-server
+            artifacts/phase-server-linux-x86_64/*.tar.gz
+            artifacts/phase-server-linux-x86_64/*.sha256
+            artifacts/phase-server-macos-arm64/*.tar.gz
+            artifacts/phase-server-macos-arm64/*.sha256
+            artifacts/phase-server-windows-x86_64/*.zip
+            artifacts/phase-server-windows-x86_64/*.sha256
             artifacts/phase-tauri-linux/*.deb
             artifacts/phase-tauri-linux/*.AppImage
             artifacts/phase-tauri-macos/*.dmg

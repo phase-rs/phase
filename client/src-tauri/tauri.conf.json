@@ -19,7 +19,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https://cards.scryfall.io https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev; connect-src 'self' ws://localhost:* wss: https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev; font-src 'self' data:; worker-src 'self' blob:"
     }
   },
   "bundle": {
@@ -32,6 +32,9 @@
       "icons/icon.icns"
     ],
     "externalBin": ["binaries/phase-server"],
+    "resources": [
+      { "src": "../public/card-data.json", "target": "data/card-data.json" }
+    ],
     "createUpdaterArtifacts": true
   },
   "plugins": {

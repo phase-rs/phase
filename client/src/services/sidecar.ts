@@ -1,10 +1,11 @@
 // Sidecar lifecycle management for Tauri desktop builds.
 //
 // To set up the sidecar binary for development:
-// cargo build -p phase-server
-// cp target/debug/phase-server client/src-tauri/binaries/phase-server-$(rustc --print host-tuple)
+// cargo build --profile server-release -p phase-server
+// cp target/server-release/phase-server client/src-tauri/binaries/phase-server-$(rustc --print host-tuple)
 
 import { Command } from "@tauri-apps/plugin-shell";
+import { resolveResource } from "@tauri-apps/api/path";
 
 /** Check whether we are running inside a Tauri webview. */
 export function isTauri(): boolean {
@@ -59,9 +60,13 @@ export async function spawnSidecar(port = 9374): Promise<SidecarHandle> {
 }
 
 async function trySpawnOnPort(port: number): Promise<SidecarHandle> {
+  // Resolve the bundled data directory so the server can load card-data.json
+  const dataDir = await resolveResource("data");
+
   const command = Command.sidecar("binaries/phase-server", [], {
     env: {
       PORT: String(port),
+      PHASE_DATA_DIR: dataDir,
     },
   });
 

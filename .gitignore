@@ -21,6 +21,9 @@ data/mtgjson/AtomicCards.json
 !data/abilities/
 !data/precons/
 
+# Tauri sidecar binaries (built by CI)
+client/src-tauri/binaries/
+
 # OS
 .DS_Store
 Thumbs.db
