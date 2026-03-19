@@ -18,6 +18,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
         return Some(Effect::Mana {
             produced,
             restrictions: vec![],
+            expiry: None,
         });
     }
 
@@ -35,6 +36,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                     color_options: all_mana_colors(),
                 },
                 restrictions: vec![],
+                expiry: None,
             });
         }
 
@@ -45,6 +47,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                     color_options: all_mana_colors(),
                 },
                 restrictions: vec![],
+                expiry: None,
             });
         }
 
@@ -54,6 +57,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
             return Some(Effect::Mana {
                 produced: ManaProduction::ChosenColor { count },
                 restrictions: vec![],
+                expiry: None,
             });
         }
 
@@ -67,6 +71,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                         color_options,
                     },
                     restrictions: vec![],
+                    expiry: None,
                 });
             }
         }
@@ -87,6 +92,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                 color_options: all_mana_colors(),
             },
             restrictions: vec![],
+            expiry: None,
         });
     }
 
@@ -97,6 +103,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                 color_options: all_mana_colors(),
             },
             restrictions: vec![],
+            expiry: None,
         });
     }
 
@@ -108,6 +115,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                 count: fallback_count,
             },
             restrictions: vec![],
+            expiry: None,
         });
     }
 

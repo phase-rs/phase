@@ -398,7 +398,10 @@ pub(super) fn pay_and_push_adventure(
     // Check for X in cost -- if present, return ManaPayment for player input
     if let crate::types::mana::ManaCost::Cost { shards, .. } = cost {
         if shards.contains(&ManaCostShard::X) {
-            return Ok(WaitingFor::ManaPayment { player });
+            return Ok(WaitingFor::ManaPayment {
+                player,
+                convoke_eligible: false,
+            });
         }
     }
 

@@ -592,6 +592,9 @@ pub enum RestrictionScope {
 pub enum CastingPermission {
     /// CR 715.5: After Adventure resolves to exile, creature face castable from exile.
     AdventureCreature,
+    /// Card may be cast from exile for the specified cost by its owner.
+    /// Building block for Airbending, Foretell, Suspend, and similar "cast from exile" mechanics.
+    ExileWithAltCost { cost: ManaCost },
 }
 
 /// When a delayed triggered ability fires (CR 603.7).
@@ -618,6 +621,11 @@ pub enum DelayedTriggerCondition {
     /// CR 603.7c: "when [object] enters the battlefield" — fires on zone change
     /// to battlefield.
     WhenEntersBattlefield { filter: TargetFilter },
+    /// "when [object] dies or is exiled" — fires on zone change to graveyard OR exile.
+    /// Building block for Earthbending return trigger and similar mechanics.
+    WhenDiesOrExiled {
+        object_id: super::identifiers::ObjectId,
+    },
 }
 
 /// Specifies variable-count targeting for "any number of" effects.
@@ -1434,6 +1442,9 @@ pub enum Effect {
         types: Vec<String>,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        /// Keywords to grant to the animated permanent (e.g., Haste for Earthbending).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keywords: Vec<Keyword>,
     },
     /// Generic continuous effect application at resolution.
     GenericEffect {
@@ -1467,6 +1478,10 @@ pub enum Effect {
         produced: ManaProduction,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         restrictions: Vec<ManaSpendRestriction>,
+        /// When set, produced mana persists beyond normal phase-transition drains
+        /// until the specified expiry condition is met (e.g., EndOfCombat for firebending).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expiry: Option<crate::types::mana::ManaExpiry>,
     },
     Discard {
         #[serde(default = "default_one")]
@@ -1624,6 +1639,13 @@ pub enum Effect {
     /// CR 701.52: The Ring tempts the controller. Increments ring level and prompts
     /// ring-bearer selection if the controller has creatures on the battlefield.
     RingTemptsYou,
+    /// Grant a casting permission to the target object (e.g., "cast from exile for {2}").
+    /// Building block for Airbending, Foretell, Suspend, Hideaway, and similar mechanics.
+    GrantCastingPermission {
+        permission: CastingPermission,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
     /// Semantic marker for effects the engine has not yet implemented a handler for.
     /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.
     Unimplemented {
@@ -1759,6 +1781,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::FlipCoin { .. } => "FlipCoin",
         Effect::FlipCoinUntilLose { .. } => "FlipCoinUntilLose",
         Effect::RingTemptsYou => "RingTemptsYou",
+        Effect::GrantCastingPermission { .. } => "GrantCastingPermission",
         Effect::Unimplemented { name, .. } => name,
     }
 }
@@ -1839,6 +1862,7 @@ pub enum EffectKind {
     FlipCoin,
     FlipCoinUntilLose,
     RingTemptsYou,
+    GrantCastingPermission,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
     Equip,
@@ -1920,6 +1944,7 @@ impl From<&Effect> for EffectKind {
             Effect::FlipCoin { .. } => EffectKind::FlipCoin,
             Effect::FlipCoinUntilLose { .. } => EffectKind::FlipCoinUntilLose,
             Effect::RingTemptsYou => EffectKind::RingTemptsYou,
+            Effect::GrantCastingPermission { .. } => EffectKind::GrantCastingPermission,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,
         }
     }
@@ -3223,6 +3248,7 @@ mod tests {
                 colors: vec![ManaColor::Green, ManaColor::Green],
             },
             restrictions: vec![],
+            expiry: None,
         };
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();
@@ -3241,6 +3267,7 @@ mod tests {
                     colors: vec![ManaColor::White, ManaColor::Green],
                 },
                 restrictions: vec![],
+                expiry: None,
             }
         );
     }

@@ -13,14 +13,20 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (power, toughness, types_list) = match &ability.effect {
+    let (power, toughness, types_list, kw_list) = match &ability.effect {
         Effect::Animate {
             power,
             toughness,
             types,
+            keywords,
             ..
-        } => (power.unwrap_or(0), toughness.unwrap_or(0), types.as_slice()),
-        _ => (0, 0, [].as_slice()),
+        } => (
+            power.unwrap_or(0),
+            toughness.unwrap_or(0),
+            types.as_slice(),
+            keywords.as_slice(),
+        ),
+        _ => (0, 0, [].as_slice(), [].as_slice()),
     };
 
     let targets = resolve_animate_targets(ability);
@@ -45,6 +51,13 @@ pub fn resolve(
                 }
             } else if !obj.card_types.subtypes.contains(&t.to_string()) {
                 obj.card_types.subtypes.push(t.to_string());
+            }
+        }
+
+        // Grant keywords (e.g., Haste for Earthbending)
+        for kw in kw_list {
+            if !obj.keywords.contains(kw) {
+                obj.keywords.push(kw.clone());
             }
         }
 
@@ -102,6 +115,7 @@ mod tests {
                 power: Some(7),
                 toughness: Some(7),
                 types: vec!["Creature".to_string(), "Beast".to_string()],
+                keywords: vec![],
                 target: TargetFilter::None,
             },
             vec![],

@@ -75,6 +75,7 @@ mod tests {
             Effect::Mana {
                 produced,
                 restrictions: vec![],
+                expiry: None,
             },
         )
         .cost(AbilityCost::Tap)
@@ -179,6 +180,7 @@ mod tests {
                     count: CountValue::Fixed(1),
                 },
                 restrictions: vec![],
+                expiry: None,
             },
         )
         .cost(AbilityCost::Tap);

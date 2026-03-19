@@ -86,6 +86,7 @@ mod tests {
                 source_id: ObjectId(0),
                 snow: false,
                 restrictions: vec![],
+                expiry: None,
             });
         }
         let cost = ManaCost::Cost {

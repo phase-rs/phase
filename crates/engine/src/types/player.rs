@@ -1,6 +1,9 @@
+use std::collections::HashSet;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::events::BendingType;
 use super::identifiers::ObjectId;
 use super::mana::ManaPool;
 
@@ -49,6 +52,10 @@ pub struct Player {
     #[serde(default)]
     pub is_eliminated: bool,
 
+    /// Avatar crossover: which bending types this player has performed this turn.
+    #[serde(default)]
+    pub bending_types_this_turn: HashSet<BendingType>,
+
     // Derived fields (computed in WASM bridge, not persisted)
     #[serde(skip_deserializing, default)]
     pub can_look_at_top_of_library: bool,
@@ -71,6 +78,7 @@ impl Default for Player {
             descended_this_turn: false,
             cards_drawn_this_turn: 0,
             is_eliminated: false,
+            bending_types_this_turn: HashSet::new(),
             can_look_at_top_of_library: false,
         }
     }

@@ -38,6 +38,7 @@ fn add_mana(runner: &mut GameRunner, player: PlayerId, color: ManaType, count: u
             source_id: ObjectId(0),
             snow: false,
             restrictions: Vec::new(),
+            expiry: None,
         });
     }
 }

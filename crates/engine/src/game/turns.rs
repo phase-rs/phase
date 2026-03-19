@@ -45,8 +45,17 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.phase = next;
 
     // CR 500.4: Mana pools empty between phases/steps.
+    // Firebending mana (EndOfCombat expiry) persists within combat steps.
+    let in_combat = matches!(
+        next,
+        Phase::BeginCombat
+            | Phase::DeclareAttackers
+            | Phase::DeclareBlockers
+            | Phase::CombatDamage
+            | Phase::EndCombat
+    );
     for player in &mut state.players {
-        player.mana_pool.clear();
+        player.mana_pool.clear_step_transition(in_combat);
     }
 
     // Reset priority to active player at start of each phase
@@ -98,6 +107,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         player.life_lost_this_turn = 0;
         player.descended_this_turn = false;
         player.cards_drawn_this_turn = 0;
+        player.bending_types_this_turn.clear();
     }
 
     // Reset loyalty_activated_this_turn for all permanents controlled by the active player
@@ -527,6 +537,7 @@ mod tests {
             source_id: ObjectId(1),
             snow: false,
             restrictions: Vec::new(),
+            expiry: None,
         });
 
         let mut events = Vec::new();

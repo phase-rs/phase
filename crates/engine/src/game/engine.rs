@@ -546,12 +546,15 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 ));
             }
         }
-        (WaitingFor::ManaPayment { player }, GameAction::CancelCast) => {
+        (WaitingFor::ManaPayment { player, .. }, GameAction::CancelCast) => {
             WaitingFor::Priority { player: *player }
         }
         // Allow mana abilities during mana payment (mid-cast)
         (
-            WaitingFor::ManaPayment { player },
+            WaitingFor::ManaPayment {
+                player,
+                convoke_eligible,
+            },
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
@@ -572,7 +575,10 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                     &ability_def,
                     &mut events,
                 )?;
-                WaitingFor::ManaPayment { player: *player }
+                WaitingFor::ManaPayment {
+                    player: *player,
+                    convoke_eligible: *convoke_eligible,
+                }
             } else {
                 return Err(EngineError::ActionNotAllowed(
                     "Only mana abilities can be activated during mana payment".to_string(),
@@ -580,18 +586,88 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             }
         }
         // Allow basic land tapping during mana payment
-        (WaitingFor::ManaPayment { player }, GameAction::TapLandForMana { object_id }) => {
+        (
+            WaitingFor::ManaPayment {
+                player,
+                convoke_eligible,
+            },
+            GameAction::TapLandForMana { object_id },
+        ) => {
             handle_tap_land_for_mana(state, object_id, &mut events)?;
             state
                 .lands_tapped_for_mana
                 .entry(*player)
                 .or_default()
                 .push(object_id);
-            WaitingFor::ManaPayment { player: *player }
+            WaitingFor::ManaPayment {
+                player: *player,
+                convoke_eligible: *convoke_eligible,
+            }
         }
-        (WaitingFor::ManaPayment { player }, GameAction::UntapLandForMana { object_id }) => {
+        (
+            WaitingFor::ManaPayment {
+                player,
+                convoke_eligible,
+            },
+            GameAction::UntapLandForMana { object_id },
+        ) => {
             handle_untap_land_for_mana(state, *player, object_id, &mut events)?;
-            WaitingFor::ManaPayment { player: *player }
+            WaitingFor::ManaPayment {
+                player: *player,
+                convoke_eligible: *convoke_eligible,
+            }
+        }
+        // Waterbend / Convoke: tap a creature or artifact to pay {1} generic mana.
+        // CR 702.6b: Summoning sickness does not apply to tapping for convoke.
+        (
+            WaitingFor::ManaPayment {
+                player,
+                convoke_eligible: true,
+            },
+            GameAction::TapForConvoke { object_id },
+        ) => {
+            let obj = state
+                .objects
+                .get(&object_id)
+                .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
+            let is_artifact = obj
+                .card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Artifact);
+            let is_creature = obj
+                .card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Creature);
+            if obj.controller != *player || obj.tapped || (!is_artifact && !is_creature) {
+                return Err(EngineError::ActionNotAllowed(
+                    "Can only tap untapped creatures or artifacts you control for convoke"
+                        .to_string(),
+                ));
+            }
+            // Tap the permanent (no summoning sickness check — CR 702.6b)
+            if let Some(obj) = state.objects.get_mut(&object_id) {
+                obj.tapped = true;
+            }
+            events.push(GameEvent::PermanentTapped { object_id });
+            // Add one colorless mana to pool to represent the {1} generic payment
+            let unit = crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Colorless,
+                object_id,
+                false,
+                Vec::new(),
+            );
+            if let Some(p) = state.players.iter_mut().find(|p| p.id == *player) {
+                p.mana_pool.add(unit);
+            }
+            events.push(GameEvent::ManaAdded {
+                player_id: *player,
+                mana_type: crate::types::mana::ManaType::Colorless,
+                source_id: object_id,
+            });
+            WaitingFor::ManaPayment {
+                player: *player,
+                convoke_eligible: true,
+            }
         }
         (
             WaitingFor::MulliganDecision {
@@ -687,6 +763,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                         from,
                         enter_tapped,
                         enter_with_counters,
+                        controller_override,
                         ..
                     } = event
                     {
@@ -695,6 +772,9 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                             if let Some(obj) = state.objects.get_mut(&object_id) {
                                 obj.tapped = enter_tapped;
                                 obj.entered_battlefield_turn = Some(state.turn_number);
+                                if let Some(new_controller) = controller_override {
+                                    obj.controller = new_controller;
+                                }
                                 apply_etb_counters(obj, &enter_with_counters, &mut events);
                             }
                         }
@@ -1932,6 +2012,7 @@ fn handle_play_land(
                 to,
                 enter_tapped,
                 enter_with_counters,
+                controller_override,
                 ..
             } = event
             {
@@ -1939,6 +2020,9 @@ fn handle_play_land(
                 if let Some(obj) = state.objects.get_mut(&object_id) {
                     obj.tapped = enter_tapped;
                     obj.entered_battlefield_turn = Some(state.turn_number);
+                    if let Some(new_controller) = controller_override {
+                        obj.controller = new_controller;
+                    }
                     apply_etb_counters(obj, &enter_with_counters, events);
                 }
             }
@@ -2877,6 +2961,7 @@ mod tests {
                             colors: vec![crate::types::mana::ManaColor::Blue],
                         },
                         restrictions: vec![],
+                        expiry: None,
                     },
                 )
                 .cost(crate::types::ability::AbilityCost::Tap),
@@ -2889,6 +2974,7 @@ mod tests {
                             colors: vec![crate::types::mana::ManaColor::Black],
                         },
                         restrictions: vec![],
+                        expiry: None,
                     },
                 )
                 .cost(crate::types::ability::AbilityCost::Tap)
@@ -3081,6 +3167,7 @@ mod tests {
                 source_id: ObjectId(0),
                 snow: false,
                 restrictions: Vec::new(),
+                expiry: None,
             });
         }
 
@@ -3149,6 +3236,7 @@ mod tests {
                 source_id: ObjectId(0),
                 snow: false,
                 restrictions: Vec::new(),
+                expiry: None,
             });
         }
 
@@ -3226,6 +3314,7 @@ mod tests {
             source_id: ObjectId(0),
             snow: false,
             restrictions: Vec::new(),
+            expiry: None,
         });
 
         // Cast bolt — multiple valid targets (creature + 2 players) requires selection
@@ -3280,6 +3369,7 @@ mod tests {
                 source_id: ObjectId(0),
                 snow: false,
                 restrictions: Vec::new(),
+                expiry: None,
             });
         }
     }
@@ -3697,6 +3787,7 @@ mod tests {
                             colors: vec![crate::types::mana::ManaColor::Green],
                         },
                         restrictions: vec![],
+                        expiry: None,
                     },
                 )
                 .cost(AbilityCost::Tap),
@@ -3741,6 +3832,7 @@ mod tests {
         // Set up ManaPayment state
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),
+            convoke_eligible: false,
         };
 
         // Create a creature with a mana ability on the battlefield
@@ -3762,6 +3854,7 @@ mod tests {
                             colors: vec![crate::types::mana::ManaColor::Green],
                         },
                         restrictions: vec![],
+                        expiry: None,
                     },
                 )
                 .cost(AbilityCost::Tap),
@@ -3782,7 +3875,8 @@ mod tests {
             matches!(
                 result.waiting_for,
                 WaitingFor::ManaPayment {
-                    player: PlayerId(0)
+                    player: PlayerId(0),
+                    ..
                 }
             ),
             "should remain in ManaPayment after mana ability"
@@ -4330,6 +4424,7 @@ mod tests {
             source_id: ObjectId(0),
             snow: false,
             restrictions: Vec::new(),
+            expiry: None,
         });
 
         // Create a forest on the battlefield to tap during ManaPayment
@@ -4366,7 +4461,8 @@ mod tests {
             assert!(matches!(
                 untap_result.waiting_for,
                 WaitingFor::ManaPayment {
-                    player: PlayerId(0)
+                    player: PlayerId(0),
+                    ..
                 }
             ));
         }

@@ -93,12 +93,42 @@ impl ManaRestriction {
     }
 }
 
+/// When mana expires — controls lifecycle beyond the normal CR 500.4 phase drain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ManaExpiry {
+    /// Mana persists through combat steps but drains at EndCombat → PostCombatMain.
+    /// Used by Firebending and similar "mana lasts within combat" mechanics.
+    EndOfCombat,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManaUnit {
     pub color: ManaType,
     pub source_id: ObjectId,
     pub snow: bool,
     pub restrictions: Vec<ManaRestriction>,
+    /// When set, this mana survives normal phase-transition drains until the
+    /// specified expiry condition is met.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expiry: Option<ManaExpiry>,
+}
+
+impl ManaUnit {
+    /// Construct a standard mana unit with no expiry.
+    pub fn new(
+        color: ManaType,
+        source_id: ObjectId,
+        snow: bool,
+        restrictions: Vec<ManaRestriction>,
+    ) -> Self {
+        Self {
+            color,
+            source_id,
+            snow,
+            restrictions,
+            expiry: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -347,6 +377,19 @@ impl ManaPool {
         self.mana.clear();
     }
 
+    /// CR 500.4: Clear mana on phase transition, retaining combat-expiry mana
+    /// while still within combat phases.
+    pub fn clear_step_transition(&mut self, in_combat: bool) {
+        if in_combat {
+            // Retain mana with EndOfCombat expiry; drain everything else
+            self.mana
+                .retain(|u| u.expiry == Some(ManaExpiry::EndOfCombat));
+        } else {
+            // Leaving combat or non-combat transition: drain everything
+            self.mana.clear();
+        }
+    }
+
     /// Remove all mana units produced by the given source.
     /// Returns the number of units removed (zero if mana was already spent).
     pub fn remove_from_source(&mut self, source_id: ObjectId) -> usize {
@@ -394,12 +437,7 @@ mod tests {
     use super::*;
 
     fn make_unit(color: ManaType) -> ManaUnit {
-        ManaUnit {
-            color,
-            source_id: ObjectId(1),
-            snow: false,
-            restrictions: Vec::new(),
-        }
+        ManaUnit::new(color, ObjectId(1), false, Vec::new())
     }
 
     #[test]
@@ -514,6 +552,7 @@ mod tests {
             source_id: ObjectId(42),
             snow: true,
             restrictions: vec![ManaRestriction::OnlyForSpellType("Creature".to_string())],
+            expiry: None,
         };
         assert_eq!(unit.source_id, ObjectId(42));
         assert!(unit.snow);
@@ -573,6 +612,7 @@ mod tests {
             source_id: ObjectId(1),
             snow: false,
             restrictions: vec![ManaRestriction::OnlyForCreatureType("Elf".to_string())],
+            expiry: None,
         });
         pool.add(make_unit(ManaType::Green));
 
@@ -594,6 +634,7 @@ mod tests {
             source_id: ObjectId(1),
             snow: false,
             restrictions: vec![ManaRestriction::OnlyForCreatureType("Elf".to_string())],
+            expiry: None,
         });
 
         let elf_spell = SpellMeta {
@@ -611,18 +652,21 @@ mod tests {
             source_id: ObjectId(10),
             snow: false,
             restrictions: Vec::new(),
+            expiry: None,
         });
         pool.add(ManaUnit {
             color: ManaType::Red,
             source_id: ObjectId(10),
             snow: false,
             restrictions: Vec::new(),
+            expiry: None,
         });
         pool.add(ManaUnit {
             color: ManaType::Blue,
             source_id: ObjectId(20),
             snow: false,
             restrictions: Vec::new(),
+            expiry: None,
         });
 
         let removed = pool.remove_from_source(ObjectId(10));
@@ -648,6 +692,7 @@ mod tests {
             source_id: ObjectId(1),
             snow: false,
             restrictions: vec![ManaRestriction::OnlyForCreatureType("Elf".to_string())],
+            expiry: None,
         });
 
         let goblin_spell = SpellMeta {

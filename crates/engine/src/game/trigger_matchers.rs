@@ -213,16 +213,18 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::BecomesCrewed,
         TriggerMode::BecomesPlotted,
         TriggerMode::BecomesSaddled,
-        TriggerMode::Airbend,
-        TriggerMode::Earthbend,
-        TriggerMode::Firebend,
-        TriggerMode::Waterbend,
-        TriggerMode::ElementalBend,
     ];
 
     for mode in unimplemented_modes {
         r.insert(mode, match_unimplemented);
     }
+
+    // Avatar crossover: bending trigger matchers
+    r.insert(TriggerMode::Firebend, match_firebend);
+    r.insert(TriggerMode::Airbend, match_airbend);
+    r.insert(TriggerMode::Earthbend, match_earthbend);
+    r.insert(TriggerMode::Waterbend, match_waterbend);
+    r.insert(TriggerMode::ElementalBend, match_elemental_bend);
 
     r
 }
@@ -1534,6 +1536,109 @@ pub(super) fn match_unimplemented(
     _state: &GameState,
 ) -> bool {
     false
+}
+
+// ---------------------------------------------------------------------------
+// Avatar crossover: Bending trigger matchers
+// ---------------------------------------------------------------------------
+
+/// Matches GameEvent::Firebend for the controller of this trigger's source.
+pub(super) fn match_firebend(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    _source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::Firebend { controller, .. } = event {
+        let source_controller = state
+            .objects
+            .get(&_source_id)
+            .map(|obj| obj.controller)
+            .unwrap_or(PlayerId(255));
+        *controller == source_controller
+    } else {
+        false
+    }
+}
+
+/// Matches GameEvent::Airbend for the controller of this trigger's source.
+pub(super) fn match_airbend(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    _source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::Airbend { controller, .. } = event {
+        let source_controller = state
+            .objects
+            .get(&_source_id)
+            .map(|obj| obj.controller)
+            .unwrap_or(PlayerId(255));
+        *controller == source_controller
+    } else {
+        false
+    }
+}
+
+/// Matches GameEvent::Earthbend for the controller of this trigger's source.
+pub(super) fn match_earthbend(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    _source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::Earthbend { controller, .. } = event {
+        let source_controller = state
+            .objects
+            .get(&_source_id)
+            .map(|obj| obj.controller)
+            .unwrap_or(PlayerId(255));
+        *controller == source_controller
+    } else {
+        false
+    }
+}
+
+/// Matches GameEvent::Waterbend for the controller of this trigger's source.
+pub(super) fn match_waterbend(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    _source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::Waterbend { controller, .. } = event {
+        let source_controller = state
+            .objects
+            .get(&_source_id)
+            .map(|obj| obj.controller)
+            .unwrap_or(PlayerId(255));
+        *controller == source_controller
+    } else {
+        false
+    }
+}
+
+/// Matches any of the four bending GameEvents (for Avatar Aang's "whenever you
+/// firebend, airbend, earthbend, or waterbend" trigger).
+pub(super) fn match_elemental_bend(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    _source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let controller = match event {
+        GameEvent::Firebend { controller, .. }
+        | GameEvent::Airbend { controller, .. }
+        | GameEvent::Earthbend { controller, .. }
+        | GameEvent::Waterbend { controller, .. } => controller,
+        _ => return false,
+    };
+    let source_controller = state
+        .objects
+        .get(&_source_id)
+        .map(|obj| obj.controller)
+        .unwrap_or(PlayerId(255));
+    *controller == source_controller
 }
 
 // ---------------------------------------------------------------------------

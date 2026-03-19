@@ -157,6 +157,7 @@ impl GameScenario {
                     colors: vec![color],
                 },
                 restrictions: vec![],
+                expiry: None,
             },
         )
         .cost(crate::types::ability::AbilityCost::Tap);

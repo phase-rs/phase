@@ -226,6 +226,9 @@ pub enum Keyword {
         subtype: String,
     },
 
+    /// Firebending N — produces N {R} when this creature attacks (Avatar crossover).
+    Firebending(u32),
+
     /// Fallback for unrecognized keywords.
     Unknown(String),
 }
@@ -435,6 +438,7 @@ impl FromStr for Keyword {
                     }
                     return Ok(Keyword::Unknown(s.to_string()));
                 }
+                "firebending" => return Ok(Keyword::Firebending(p.parse().unwrap_or(1))),
                 "afflict" => return Ok(Keyword::Afflict),
                 "enchant" => return Ok(Keyword::Enchant(parse_enchant_target(p))),
                 "etbcounter" => {
@@ -528,6 +532,7 @@ impl FromStr for Keyword {
             "dethrone" => Ok(Keyword::Dethrone),
             "doubleteam" => Ok(Keyword::DoubleTeam),
             "livingmetal" => Ok(Keyword::LivingMetal),
+            "firebending" => Ok(Keyword::Firebending(1)),
             "hideaway" => Ok(Keyword::Hideaway),
             "cumulative" => Ok(Keyword::Cumulative),
             "ripple" => Ok(Keyword::Ripple),
@@ -742,6 +747,8 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Saddle" => Ok(Keyword::Saddle(uint(data))),
         "Soulshift" => Ok(Keyword::Soulshift(uint(data))),
         "Backup" => Ok(Keyword::Backup(uint(data))),
+        // Avatar crossover: Firebending
+        "Firebending" => Ok(Keyword::Firebending(uint(data))),
         // CR 702.157
         "Squad" => Ok(Keyword::Squad(mana(data)?)),
         // CR 702.29

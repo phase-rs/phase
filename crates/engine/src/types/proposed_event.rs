@@ -28,6 +28,10 @@ pub enum ProposedEvent {
         /// Each entry is (counter_type_string, count). Set by ETB-counter replacements.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         enter_with_counters: Vec<(String, u32)>,
+        /// Override the controller on ETB. Used by Earthbending return ("under your control")
+        /// and other "enters the battlefield under [player]'s control" effects.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        controller_override: Option<PlayerId>,
         applied: HashSet<ReplacementId>,
     },
     Damage {
@@ -106,6 +110,7 @@ impl ProposedEvent {
             cause,
             enter_tapped: false,
             enter_with_counters: Vec::new(),
+            controller_override: None,
             applied: HashSet::new(),
         }
     }

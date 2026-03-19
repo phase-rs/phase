@@ -98,6 +98,7 @@ fn synthesize_basic_land_mana(face: &mut CardFace) {
                             colors: vec![color],
                         },
                         restrictions: vec![],
+                        expiry: None,
                     },
                 )
                 .cost(AbilityCost::Tap),

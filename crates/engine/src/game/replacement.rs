@@ -1417,6 +1417,7 @@ mod tests {
             cause: None,
             enter_tapped: false,
             enter_with_counters: Vec::new(),
+            controller_override: None,
             applied: HashSet::new(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
@@ -1538,6 +1539,7 @@ mod tests {
             cause: None,
             enter_tapped: false,
             enter_with_counters: Vec::new(),
+            controller_override: None,
             applied: HashSet::new(),
         };
 

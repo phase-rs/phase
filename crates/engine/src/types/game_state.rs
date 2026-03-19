@@ -134,6 +134,10 @@ pub enum WaitingFor {
     },
     ManaPayment {
         player: PlayerId,
+        /// When true, the player can tap untapped creatures/artifacts to pay {1} generic
+        /// each (Waterbending, Convoke). Summoning sickness does not apply.
+        #[serde(default)]
+        convoke_eligible: bool,
     },
     TargetSelection {
         player: PlayerId,
@@ -350,7 +354,7 @@ impl WaitingFor {
             WaitingFor::Priority { player }
             | WaitingFor::MulliganDecision { player, .. }
             | WaitingFor::MulliganBottomCards { player, .. }
-            | WaitingFor::ManaPayment { player }
+            | WaitingFor::ManaPayment { player, .. }
             | WaitingFor::TargetSelection { player, .. }
             | WaitingFor::DeclareAttackers { player, .. }
             | WaitingFor::DeclareBlockers { player, .. }
@@ -1043,6 +1047,7 @@ mod tests {
             },
             WaitingFor::ManaPayment {
                 player: PlayerId(0),
+                convoke_eligible: false,
             },
             WaitingFor::DeclareAttackers {
                 player: PlayerId(0),

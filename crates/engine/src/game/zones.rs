@@ -62,13 +62,15 @@ pub fn move_to_zone(
         }
     }
 
-    // CR 715.4: Clear AdventureCreature permission when leaving exile
+    // CR 715.4: Clear exile-based casting permissions when leaving exile
     // (prevents re-casting if the card returns to exile via a different effect).
+    // Covers AdventureCreature, ExileWithAltCost (Airbending/Foretell/Suspend), and future variants.
     if from == crate::types::zones::Zone::Exile {
         obj_mut.casting_permissions.retain(|p| {
             !matches!(
                 p,
                 crate::types::ability::CastingPermission::AdventureCreature
+                    | crate::types::ability::CastingPermission::ExileWithAltCost { .. }
             )
         });
     }

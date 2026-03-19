@@ -12,11 +12,12 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (produced, restrictions) = match &ability.effect {
+    let (produced, restrictions, expiry) = match &ability.effect {
         Effect::Mana {
             produced,
             restrictions,
-        } => (produced, restrictions),
+            expiry,
+        } => (produced, restrictions, *expiry),
         _ => return Err(EffectError::MissingParam("Produced".to_string())),
     };
     // ChosenColor needs to read from the source object's chosen_attributes
@@ -48,6 +49,7 @@ pub fn resolve(
             source_id: ability.source_id,
             snow: false,
             restrictions: concrete_restrictions.clone(),
+            expiry,
         };
         player.mana_pool.add(unit);
 
@@ -153,6 +155,7 @@ mod tests {
             Effect::Mana {
                 produced,
                 restrictions: vec![],
+                expiry: None,
             },
             vec![],
             ObjectId(100),
@@ -429,6 +432,7 @@ mod tests {
                     color_options: vec![ManaColor::Green],
                 },
                 restrictions: vec![ManaSpendRestriction::SpellType("Creature".to_string())],
+                expiry: None,
             },
             vec![],
             ObjectId(100),
@@ -472,6 +476,7 @@ mod tests {
                     color_options: vec![ManaColor::Green],
                 },
                 restrictions: vec![ManaSpendRestriction::ChosenCreatureType],
+                expiry: None,
             },
             vec![],
             obj_id,
@@ -499,6 +504,7 @@ mod tests {
                     colors: vec![ManaColor::Red],
                 },
                 restrictions: vec![ManaSpendRestriction::ChosenCreatureType],
+                expiry: None,
             },
             vec![],
             ObjectId(999),

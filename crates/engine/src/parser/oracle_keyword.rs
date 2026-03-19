@@ -53,6 +53,10 @@ pub(crate) fn extract_keyword_line(
         // Not an MTGJSON match — try parsing as any keyword (for keyword-only line validation)
         if let Some(kw) = parse_keyword_from_oracle(&lower) {
             if !matches!(kw, Keyword::Unknown(_)) {
+                // Keywords not in MTGJSON (e.g., firebending) must be extracted here.
+                // They also validate the line as a keyword line.
+                any_mtgjson_match = true;
+                new_keywords.push(kw);
                 continue;
             }
         }
@@ -199,6 +203,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Dethrone => "dethrone".to_string(),
         Keyword::DoubleTeam => "double team".to_string(),
         Keyword::LivingMetal => "living metal".to_string(),
+        Keyword::Firebending(_) => "firebending".to_string(),
         // Parameterized keywords — return just the base name
         Keyword::Dredge(_) => "dredge".to_string(),
         Keyword::Modular(_) => "modular".to_string(),

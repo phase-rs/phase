@@ -60,7 +60,7 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
         WaitingFor::MulliganBottomCards { player, count } => {
             bottom_card_actions(state, *player, *count)
         }
-        WaitingFor::ManaPayment { player } => mana_payment_actions(state, *player),
+        WaitingFor::ManaPayment { player, .. } => mana_payment_actions(state, *player),
         WaitingFor::TargetSelection {
             player,
             target_slots,
@@ -1023,6 +1023,7 @@ mod tests {
                             colors: vec![ManaColor::Blue],
                         },
                         restrictions: vec![],
+                        expiry: None,
                     },
                 )
                 .cost(AbilityCost::Tap),
@@ -1035,6 +1036,7 @@ mod tests {
                             colors: vec![ManaColor::Black],
                         },
                         restrictions: vec![],
+                        expiry: None,
                     },
                 )
                 .cost(AbilityCost::Tap)
@@ -1201,6 +1203,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),
+            convoke_eligible: false,
         };
 
         let blank_land = create_object(

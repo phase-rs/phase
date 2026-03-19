@@ -444,6 +444,7 @@ mod tests {
                 source_id: crate::types::identifiers::ObjectId(0),
                 snow: false,
                 restrictions: Vec::new(),
+                expiry: None,
             });
         }
 

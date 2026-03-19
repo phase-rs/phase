@@ -101,6 +101,11 @@ pub enum GameAction {
     ChooseRingBearer {
         target: ObjectId,
     },
+    /// Tap a creature or artifact to pay {1} generic mana during a convoke-eligible cost
+    /// (Waterbending, Convoke). Summoning sickness does not apply to this tap.
+    TapForConvoke {
+        object_id: ObjectId,
+    },
     /// Set auto-pass mode for the acting player (CR 117.4).
     SetAutoPass {
         mode: AutoPassRequest,

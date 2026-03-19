@@ -501,9 +501,28 @@ pub fn declare_attackers(
         .unwrap_or_else(|| players::next_player(state, state.active_player));
 
     events.push(GameEvent::AttackersDeclared {
-        attacker_ids,
+        attacker_ids: attacker_ids.clone(),
         defending_player,
     });
+
+    // Emit Firebend events for each attacking creature with firebending.
+    // These go into the same events batch so process_triggers catches both
+    // AttackersDeclared (for the mana trigger) and Firebend (for Avatar Aang).
+    for &obj_id in &attacker_ids {
+        if let Some(obj) = state.objects.get(&obj_id) {
+            if obj
+                .keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Firebending(_)))
+            {
+                events.push(GameEvent::Firebend {
+                    source_id: obj_id,
+                    controller: obj.controller,
+                });
+            }
+        }
+    }
+
     super::restrictions::record_attackers_declared(state, attacker_count);
 
     Ok(())

@@ -9,6 +9,15 @@ use super::phase::Phase;
 use super::player::PlayerId;
 use super::zones::Zone;
 
+/// Avatar crossover: The four elemental bending types, tracked per-turn on each player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BendingType {
+    Fire,
+    Air,
+    Earth,
+    Water,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum GameEvent {
@@ -194,6 +203,26 @@ pub enum GameEvent {
     /// CR 701.52: The Ring tempted a player.
     RingTemptsYou {
         player_id: PlayerId,
+    },
+    /// Avatar crossover: A creature with firebending attacked, producing mana.
+    Firebend {
+        source_id: ObjectId,
+        controller: PlayerId,
+    },
+    /// Avatar crossover: A permanent or spell was airbent (exiled with alt-cast permission).
+    Airbend {
+        source_id: ObjectId,
+        controller: PlayerId,
+    },
+    /// Avatar crossover: A land was earthbent (animated with counters + return trigger).
+    Earthbend {
+        source_id: ObjectId,
+        controller: PlayerId,
+    },
+    /// Avatar crossover: A waterbend cost was paid (tap-to-pay for generic mana).
+    Waterbend {
+        source_id: ObjectId,
+        controller: PlayerId,
     },
 }
 

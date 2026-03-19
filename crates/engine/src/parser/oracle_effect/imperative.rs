@@ -811,6 +811,7 @@ pub(super) fn parse_cost_resource_ast(
             Some(Effect::Mana {
                 produced,
                 restrictions,
+                ..
             }) => Some(CostResourceImperativeAst::Mana {
                 produced,
                 restrictions,
@@ -850,6 +851,7 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
         } => Effect::Mana {
             produced,
             restrictions,
+            expiry: None,
         },
         CostResourceImperativeAst::Damage {
             amount,

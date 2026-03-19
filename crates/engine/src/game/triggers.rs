@@ -114,16 +114,24 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
         // Scan all permanents on the battlefield for matching triggers
         let battlefield_ids: Vec<ObjectId> = state.battlefield.clone();
         for obj_id in battlefield_ids {
-            let (controller, trigger_defs, timestamp, has_prowess) = {
+            let (controller, trigger_defs, timestamp, has_prowess, firebending_n) = {
                 let obj = match state.objects.get(&obj_id) {
                     Some(o) => o,
                     None => continue,
                 };
+                let fb_n = obj.keywords.iter().find_map(|k| {
+                    if let Keyword::Firebending(n) = k {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                });
                 (
                     obj.controller,
                     obj.trigger_definitions.clone(),
                     obj.entered_battlefield_turn.unwrap_or(0),
                     obj.has_keyword(&Keyword::Prowess),
+                    fb_n,
                 )
             };
 
@@ -178,6 +186,45 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             modal: None,
                             mode_abilities: vec![],
                         });
+                    }
+                }
+            }
+
+            // Keyword-based triggers: Firebending
+            // Firebending N triggers when a creature with firebending is declared as attacker.
+            // Produces N {R} mana with EndOfCombat expiry.
+            if let GameEvent::AttackersDeclared { attacker_ids, .. } = event {
+                if let Some(n) = firebending_n {
+                    if attacker_ids.contains(&obj_id) && n > 0 {
+                        let fb_effect = Effect::Mana {
+                            produced: crate::types::ability::ManaProduction::Fixed {
+                                colors: vec![crate::types::mana::ManaColor::Red; n as usize],
+                            },
+                            restrictions: vec![],
+                            expiry: Some(crate::types::mana::ManaExpiry::EndOfCombat),
+                        };
+                        let fb_ability =
+                            ResolvedAbility::new(fb_effect, Vec::new(), obj_id, controller);
+                        let fb_trig_def = TriggerDefinition::new(TriggerMode::Firebend)
+                            .description(format!("Firebending {n}"));
+                        pending.push(PendingTrigger {
+                            source_id: obj_id,
+                            controller,
+                            condition: fb_trig_def.condition,
+                            ability: fb_ability,
+                            timestamp,
+                            target_constraints: Vec::new(),
+                            trigger_event: Some(event.clone()),
+                            modal: None,
+                            mode_abilities: vec![],
+                        });
+                        // Track bending type for Avatar Aang's "if you've done all four"
+                        if let Some(player) = state.players.iter_mut().find(|p| p.id == controller)
+                        {
+                            player
+                                .bending_types_this_turn
+                                .insert(crate::types::events::BendingType::Fire);
+                        }
                     }
                 }
             }
@@ -474,6 +521,19 @@ fn delayed_trigger_matches(
                     to: Zone::Battlefield,
                     ..
                 }
+            )
+        }),
+        // "when [object] dies or is exiled" — zone change to graveyard OR exile from battlefield.
+        // Building block for Earthbending return trigger.
+        DelayedTriggerCondition::WhenDiesOrExiled { object_id } => events.iter().any(|e| {
+            matches!(
+                e,
+                GameEvent::ZoneChanged {
+                    object_id: id,
+                    from: Zone::Battlefield,
+                    to: Zone::Graveyard | Zone::Exile,
+                }
+                if *id == *object_id
             )
         }),
     }

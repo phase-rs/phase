@@ -162,6 +162,7 @@ fn test_smoke_game_cast_spell() {
             source_id: forest_id,
             snow: false,
             restrictions: vec![],
+            expiry: None,
         });
 
     // Cast Lightning Bolt

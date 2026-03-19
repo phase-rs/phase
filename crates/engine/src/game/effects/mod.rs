@@ -35,6 +35,7 @@ pub mod fight;
 pub mod flip_coin;
 pub mod force_block;
 pub mod gain_control;
+pub mod grant_permission;
 pub mod investigate;
 pub mod life;
 pub mod mana;
@@ -137,6 +138,7 @@ pub fn resolve_effect(
         Effect::FlipCoin { .. } => flip_coin::resolve(state, ability, events),
         Effect::FlipCoinUntilLose { .. } => flip_coin::resolve_until_lose(state, ability, events),
         Effect::RingTemptsYou => ring::resolve(state, ability, events),
+        Effect::GrantCastingPermission { .. } => grant_permission::resolve(state, ability, events),
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);

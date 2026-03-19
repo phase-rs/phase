@@ -98,6 +98,7 @@ pub fn produce_mana(
         source_id,
         snow: false,
         restrictions: Vec::new(),
+        expiry: None,
     };
 
     let player = state
@@ -493,6 +494,7 @@ mod tests {
             source_id: ObjectId(1),
             snow: false,
             restrictions: Vec::new(),
+            expiry: None,
         }
     }
 
@@ -782,6 +784,7 @@ mod tests {
             source_id: ObjectId(1),
             snow: false,
             restrictions: vec![ManaRestriction::OnlyForCreatureType("Elf".to_string())],
+            expiry: None,
         });
         pool.add(make_unit(ManaType::Green));
 

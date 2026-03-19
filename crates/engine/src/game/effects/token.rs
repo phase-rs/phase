@@ -196,7 +196,6 @@ const IGNORED_SUFFIXES: &[&str] = &[
     "cardsinhand",
     "mountainwalk",
     "leavedrain",
-    "firebending",
     "exileplay",
     "search",
     "mill",
@@ -226,16 +225,52 @@ fn is_ignored(s: &str) -> bool {
 }
 
 fn extract_keywords(segments: &[&str]) -> Vec<Keyword> {
-    segments.iter().filter_map(|s| lookup_keyword(s)).collect()
+    let mut keywords = Vec::new();
+    let mut skip_next = false;
+    for (i, s) in segments.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if let Some(kw) = lookup_keyword(s) {
+            keywords.push(kw);
+        } else if *s == "firebending" {
+            // Parameterized: "firebending" followed by a numeric segment
+            let n = segments
+                .get(i + 1)
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(1);
+            keywords.push(Keyword::Firebending(n));
+            skip_next = segments
+                .get(i + 1)
+                .is_some_and(|v| v.parse::<u32>().is_ok());
+        }
+    }
+    keywords
 }
 
-/// Extract subtypes: anything that isn't a keyword or ignored suffix.
+/// Extract subtypes: anything that isn't a keyword, parameterized keyword, or ignored suffix.
 fn extract_subtypes(segments: &[&str]) -> Vec<String> {
-    segments
-        .iter()
-        .filter(|s| lookup_keyword(s).is_none() && !is_ignored(s))
-        .map(|s| capitalize(s))
-        .collect()
+    let mut subtypes = Vec::new();
+    let mut skip_next = false;
+    for (i, s) in segments.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if lookup_keyword(s).is_some() || is_ignored(s) {
+            continue;
+        }
+        // Skip parameterized keyword + its numeric argument
+        if *s == "firebending" {
+            skip_next = segments
+                .get(i + 1)
+                .is_some_and(|v| v.parse::<u32>().is_ok());
+            continue;
+        }
+        subtypes.push(capitalize(s));
+    }
+    subtypes
 }
 
 fn capitalize(s: &str) -> String {

@@ -538,6 +538,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             toughness,
             types,
             target,
+            ..
         } => {
             if let (Some(p), Some(t)) = (power, toughness) {
                 d.push(("p/t".into(), format!("{p}/{t}")));
@@ -660,7 +661,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::PayCost { .. }
         | Effect::LoseTheGame
         | Effect::WinTheGame
-        | Effect::RingTemptsYou => {}
+        | Effect::RingTemptsYou
+        | Effect::GrantCastingPermission { .. } => {}
     }
     d
 }

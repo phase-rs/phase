@@ -211,6 +211,7 @@ mod tests {
                     colors: vec![color],
                 },
                 restrictions: vec![],
+                expiry: None,
             },
         )
         .cost(AbilityCost::Tap)

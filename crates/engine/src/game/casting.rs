@@ -117,7 +117,7 @@ fn spell_object_id_for_card_id(
                 })
                 .map(|obj| obj.id)
         })
-        // CR 715.5: Check exile for cards with AdventureCreature permission.
+        // CR 715.5: Check exile for cards with cast-from-exile permissions.
         .or_else(|| {
             state
                 .exile
@@ -126,9 +126,7 @@ fn spell_object_id_for_card_id(
                     state.objects.get(&obj_id).is_some_and(|obj| {
                         obj.card_id == card_id
                             && obj.owner == player
-                            && obj.casting_permissions.contains(
-                                &crate::types::ability::CastingPermission::AdventureCreature,
-                            )
+                            && has_exile_cast_permission(obj)
                     })
                 })
                 .copied()
@@ -154,17 +152,27 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
         );
     }
 
-    // CR 715.5: Cards in exile with AdventureCreature permission are castable as creatures.
+    // CR 715.5: Cards in exile with AdventureCreature or ExileWithAltCost permission
+    // are castable by their owner.
     objects.extend(state.exile.iter().filter(|&&obj_id| {
-        state.objects.get(&obj_id).is_some_and(|obj| {
-            obj.owner == player
-                && obj
-                    .casting_permissions
-                    .contains(&crate::types::ability::CastingPermission::AdventureCreature)
-        })
+        state
+            .objects
+            .get(&obj_id)
+            .is_some_and(|obj| obj.owner == player && has_exile_cast_permission(obj))
     }));
 
     objects
+}
+
+/// Check if an object has any permission allowing it to be cast from exile.
+fn has_exile_cast_permission(obj: &crate::game::game_object::GameObject) -> bool {
+    obj.casting_permissions.iter().any(|p| {
+        matches!(
+            p,
+            crate::types::ability::CastingPermission::AdventureCreature
+                | crate::types::ability::CastingPermission::ExileWithAltCost { .. }
+        )
+    })
 }
 
 fn prepare_spell_cast(
@@ -176,15 +184,12 @@ fn prepare_spell_cast(
         .objects
         .get(&object_id)
         .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
-    // CR 715.5: Cards in exile with AdventureCreature permission are castable as creatures.
-    let has_adventure_permission = obj.zone == Zone::Exile
-        && obj
-            .casting_permissions
-            .contains(&crate::types::ability::CastingPermission::AdventureCreature);
+    // CR 715.5: Cards in exile with AdventureCreature or ExileWithAltCost permission.
+    let has_exile_permission = obj.zone == Zone::Exile && has_exile_cast_permission(obj);
     let castable_zone = obj.owner == player
         && (obj.zone == Zone::Hand
             || (state.format_config.command_zone && obj.zone == Zone::Command && obj.is_commander)
-            || has_adventure_permission);
+            || has_exile_permission);
     if !castable_zone {
         return Err(EngineError::InvalidAction(
             "Card is not in a castable zone".to_string(),
@@ -210,7 +215,18 @@ fn prepare_spell_cast(
         .unwrap_or_else(default_spell_ability_def);
 
     let flash_cost = restrictions::flash_timing_cost(state, player, obj);
-    let mut mana_cost = obj.mana_cost.clone();
+    // ExileWithAltCost: override mana cost when casting from exile with this permission.
+    let alt_cost_from_exile = if obj.zone == Zone::Exile {
+        obj.casting_permissions.iter().find_map(|p| match p {
+            crate::types::ability::CastingPermission::ExileWithAltCost { cost } => {
+                Some(cost.clone())
+            }
+            _ => None,
+        })
+    } else {
+        None
+    };
+    let mut mana_cost = alt_cost_from_exile.unwrap_or_else(|| obj.mana_cost.clone());
     if let Err(base_timing_error) =
         restrictions::check_spell_timing(state, player, obj, &ability_def, false)
     {
@@ -1200,6 +1216,7 @@ mod tests {
                 source_id: ObjectId(0),
                 snow: false,
                 restrictions: Vec::new(),
+                expiry: None,
             });
         }
     }
@@ -1292,6 +1309,7 @@ mod tests {
                         colors: vec![ManaColor::Blue],
                     },
                     restrictions: vec![],
+                    expiry: None,
                 },
             )
             .cost(crate::types::ability::AbilityCost::Tap),
@@ -1304,6 +1322,7 @@ mod tests {
                         colors: vec![ManaColor::Black],
                     },
                     restrictions: vec![],
+                    expiry: None,
                 },
             )
             .cost(crate::types::ability::AbilityCost::Tap)
