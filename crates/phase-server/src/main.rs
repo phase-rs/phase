@@ -719,10 +719,28 @@ async fn handle_client_message(
 
             if !ai_seats.is_empty() {
                 // --- AI game path: create, start, and run initial AI actions ---
-                let ai_requests: Vec<_> = ai_seats
-                    .iter()
-                    .map(|s| (s.seat_index, s.difficulty, resolved.clone()))
-                    .collect();
+                let mut ai_requests = Vec::new();
+                for seat in &ai_seats {
+                    let ai_deck_data = match &seat.deck_name {
+                        Some(name) if name.eq_ignore_ascii_case("random") => {
+                            server_core::starter_decks::random_starter_deck()
+                        }
+                        Some(name) => server_core::starter_decks::find_starter_deck(name)
+                            .unwrap_or_else(|| {
+                                warn!(deck = %name, "unknown AI deck name, using random");
+                                server_core::starter_decks::random_starter_deck()
+                            }),
+                        None => server_core::starter_decks::random_starter_deck(),
+                    };
+                    let ai_resolved = match resolve_deck(db, &ai_deck_data) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            error!(error = %e, "AI deck resolve failed, cloning host deck");
+                            resolved.clone()
+                        }
+                    };
+                    ai_requests.push((seat.seat_index, seat.difficulty, ai_resolved));
+                }
 
                 let (game_code, player_token, game_started_msg, ai_results) = {
                     let mut mgr = state.lock().await;

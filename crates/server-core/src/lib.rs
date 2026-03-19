@@ -4,6 +4,7 @@ pub mod lobby;
 pub mod protocol;
 pub mod reconnect;
 pub mod session;
+pub mod starter_decks;
 
 pub use deck_resolve::resolve_deck;
 pub use filter::filter_state_for_player;
