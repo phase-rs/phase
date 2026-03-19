@@ -10,6 +10,22 @@
   <a href="#quick-start">Quick Start</a> · <a href="#features">Features</a> · <a href="#architecture">Architecture</a> · <a href="#development">Development</a>
 </p>
 
+<!-- coverage-badges:start -->
+<p align="center">
+  <img alt="Card Coverage" src="https://img.shields.io/badge/card_coverage-71%25-yellowgreen">
+  <img alt="Keywords" src="https://img.shields.io/badge/keywords-140%2F140-brightgreen">
+  <img alt="Cards" src="https://img.shields.io/badge/cards-24208%2F34313-yellowgreen">
+  <br/>
+  <img alt="Pauper" src="https://img.shields.io/badge/Pauper-87%25-green">
+  <img alt="Modern" src="https://img.shields.io/badge/Modern-77%25-yellowgreen">
+  <img alt="Pioneer" src="https://img.shields.io/badge/Pioneer-77%25-yellowgreen">
+  <img alt="Legacy" src="https://img.shields.io/badge/Legacy-74%25-yellowgreen">
+  <img alt="Vintage" src="https://img.shields.io/badge/Vintage-74%25-yellowgreen">
+  <img alt="Commander" src="https://img.shields.io/badge/Commander-74%25-yellowgreen">
+  <img alt="Standard" src="https://img.shields.io/badge/Standard-72%25-yellowgreen">
+</p>
+<!-- coverage-badges:end -->
+
 ---
 
 A Rust-native MTG engine compiling to native and WASM, powering a Tauri desktop app, browser PWA, and WebSocket multiplayer. Implements comprehensive MTG rules using functional architecture — pure reducers, discriminated unions, and immutable state with structural sharing — with an Arena-quality React/TypeScript UI.
@@ -17,7 +33,7 @@ A Rust-native MTG engine compiling to native and WASM, powering a Tauri desktop 
 ## Features
 
 - **Rules engine** — Turns, priority, stack, combat, state-based actions, layers, triggers, replacement effects
-- **32,300+ cards** — Parsed from MTGJSON
+- **34,300+ cards** — Parsed from MTGJSON
 - **AI opponent** — Per-card decision logic, game tree search, and evaluation heuristics
 - **Game UI** — Battlefield, hand, stack, targeting overlays, mana payment, and animations
 - **Multiplayer** — WebSocket server with hidden information and lobby system
