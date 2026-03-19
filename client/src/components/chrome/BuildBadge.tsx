@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { isTauri } from "../../services/sidecar";
 
 type UpdateStatus =
@@ -17,6 +17,7 @@ interface BuildBadgeProps {
 export function BuildBadge({ className = "", inline = false }: BuildBadgeProps = {}) {
   const [status, setStatus] = useState<UpdateStatus>("idle");
   const [availableVersion, setAvailableVersion] = useState<string | null>(null);
+  const pendingUpdateRef = useRef<{ downloadAndInstall: () => Promise<void> } | null>(null);
 
   const checkForUpdates = useCallback(async () => {
     if (status === "checking" || status === "downloading") return;
@@ -27,6 +28,7 @@ export function BuildBadge({ className = "", inline = false }: BuildBadgeProps =
         const { check } = await import("@tauri-apps/plugin-updater");
         const update = await check();
         if (update) {
+          pendingUpdateRef.current = update;
           setAvailableVersion(update.version);
           setStatus("available");
         } else {
@@ -48,15 +50,13 @@ export function BuildBadge({ className = "", inline = false }: BuildBadgeProps =
   }, [status]);
 
   const installUpdate = useCallback(async () => {
+    const update = pendingUpdateRef.current;
+    if (!update) return;
     setStatus("downloading");
     try {
-      const { check } = await import("@tauri-apps/plugin-updater");
-      const update = await check();
-      if (update) {
-        await update.downloadAndInstall();
-        const { relaunch } = await import("@tauri-apps/plugin-process");
-        await relaunch();
-      }
+      await update.downloadAndInstall();
+      const { relaunch } = await import("@tauri-apps/plugin-process");
+      await relaunch();
     } catch {
       setStatus("error");
       setTimeout(() => setStatus("idle"), 3000);
