@@ -466,6 +466,16 @@ fn delayed_trigger_matches(
                 }
             )
         }),
+        // CR 603.7c: "when [object] enters the battlefield" — zone change to battlefield
+        DelayedTriggerCondition::WhenEntersBattlefield { .. } => events.iter().any(|e| {
+            matches!(
+                e,
+                GameEvent::ZoneChanged {
+                    to: Zone::Battlefield,
+                    ..
+                }
+            )
+        }),
     }
 }
 
@@ -677,6 +687,7 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
         | Effect::Fight { target, .. }
         | Effect::Bounce { target, .. }
         | Effect::CopySpell { target, .. }
+        | Effect::BecomeCopy { target, .. }
         | Effect::AddCounter { target, .. }
         | Effect::RemoveCounter { target, .. }
         | Effect::PutCounter { target, .. }

@@ -53,6 +53,7 @@ pub(super) struct TokenDescription {
     pub(super) keywords: Vec<Keyword>,
     pub(super) tapped: bool,
     pub(super) count: CountValue,
+    pub(super) attach_to: Option<TargetFilter>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -102,6 +103,7 @@ pub(super) enum PredicateAst {
     Become {
         effect: Effect,
         duration: Option<Duration>,
+        sub_ability: Option<Box<AbilityDefinition>>,
     },
     Restriction {
         effect: Effect,
@@ -159,6 +161,17 @@ pub(super) enum ImperativeFamilyAst {
     BecomeMonarch,
     Proliferate,
     GainKeyword(Effect),
+    LoseKeyword(Effect),
+    /// CR 104.3a: "[target player] lose(s) the game"
+    LoseTheGame,
+    /// CR 104.3a: "[you/target player] win(s) the game"
+    WinTheGame,
+    /// CR 706: Roll a die with N sides.
+    RollDie {
+        sides: u8,
+    },
+    /// CR 705: Flip a coin.
+    FlipCoin,
     Shuffle(ShuffleImperativeAst),
     Put(PutImperativeAst),
     YouMay {

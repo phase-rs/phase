@@ -1369,6 +1369,15 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         }
     }
 
+    // CR 702: "lose [keyword]" / "loses [keyword]" — keyword removal.
+    if let Some(keyword_text) = extract_lose_keyword_clause(text) {
+        for part in split_keyword_list(keyword_text.trim().trim_end_matches('.')) {
+            if let Some(kw) = map_keyword(part.trim().trim_end_matches('.')) {
+                modifications.push(ContinuousModification::RemoveKeyword { keyword: kw });
+            }
+        }
+    }
+
     modifications
 }
 
@@ -1516,6 +1525,34 @@ fn extract_keyword_clause(text: &str) -> Option<&str> {
     for prefix in ["gains ", "gain ", "has ", "have "] {
         if lower.starts_with(prefix) {
             return Some(&text[prefix.len()..]);
+        }
+    }
+
+    None
+}
+
+/// Extract the keyword text from "lose [keyword]" / "loses [keyword]" clauses.
+/// Mirrors `extract_keyword_clause` but for keyword removal.
+fn extract_lose_keyword_clause(text: &str) -> Option<&str> {
+    let lower = text.to_lowercase();
+
+    for needle in [" and loses ", " and lose "] {
+        if let Some(pos) = lower.find(needle) {
+            let after = &text[pos + needle.len()..];
+            // Stop before "and gains" to avoid consuming the gain clause
+            let end = lower[pos + needle.len()..]
+                .find(" and gain")
+                .unwrap_or(after.len());
+            return Some(&after[..end]);
+        }
+    }
+
+    for prefix in ["loses ", "lose "] {
+        if let Some(rest) = lower.strip_prefix(prefix) {
+            let after = &text[prefix.len()..];
+            // Stop before "and gains"/"and gain" to avoid consuming the gain clause
+            let end = rest.find(" and gain").unwrap_or(after.len());
+            return Some(&after[..end]);
         }
     }
 

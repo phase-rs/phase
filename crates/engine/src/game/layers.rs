@@ -141,6 +141,15 @@ fn evaluate_condition(
             .is_some_and(|current| current >= *level),
         StaticCondition::Unrecognized { .. } => true,
         StaticCondition::DuringYourTurn => state.active_player == controller,
+        // CR 701.52: True when this creature is the ring-bearer for its controller.
+        StaticCondition::IsRingBearer => state
+            .ring_bearer
+            .get(&controller)
+            .is_some_and(|bearer| *bearer == Some(source_id)),
+        // CR 701.52: True when the controller's ring level is at least this value.
+        StaticCondition::RingLevelAtLeast { level } => {
+            state.ring_level.get(&controller).copied().unwrap_or(0) >= *level
+        }
         StaticCondition::None => true,
     }
 }
@@ -546,6 +555,16 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             None
         };
 
+    // Pre-read chosen color from source (avoids borrow conflict in the loop)
+    let chosen_color = if matches!(effect.modification, ContinuousModification::AddChosenColor) {
+        state
+            .objects
+            .get(&effect.source_id)
+            .and_then(|src| src.chosen_color())
+    } else {
+        None
+    };
+
     // Pre-compute dynamic P/T values (avoids borrow conflict in the loop)
     let dynamic_pt = match &effect.modification {
         ContinuousModification::SetDynamicPower { value }
@@ -630,6 +649,12 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                     if !obj.card_types.subtypes.iter().any(|s| s == subtype) {
                         obj.card_types.subtypes.push(subtype.clone());
                     }
+                }
+            }
+            // CR 105.3: Set the object's color to the chosen color.
+            ContinuousModification::AddChosenColor => {
+                if let Some(color) = chosen_color {
+                    obj.color = vec![color];
                 }
             }
             ContinuousModification::SetDynamicPower { .. } => {

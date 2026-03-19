@@ -197,6 +197,7 @@ pub(super) fn parse_search_and_creation_ast(
                 keywords,
                 tapped,
                 count,
+                attach_to,
             }) => Some(SearchCreationImperativeAst::Token {
                 token: TokenDescription {
                     name,
@@ -207,6 +208,7 @@ pub(super) fn parse_search_and_creation_ast(
                     keywords,
                     tapped,
                     count,
+                    attach_to,
                 },
             }),
             _ => None,
@@ -240,6 +242,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             keywords: token.keywords,
             tapped: token.tapped,
             count: token.count,
+            attach_to: token.attach_to,
         },
     }
 }
@@ -461,10 +464,14 @@ fn try_parse_gain_keyword(text: &str) -> Option<Effect> {
     let (text_without_duration, duration) = super::strip_trailing_duration(text);
     let modifications = parse_continuous_modifications(text_without_duration);
 
-    // Only accept if we got at least one AddKeyword modification
-    let has_keyword = modifications
-        .iter()
-        .any(|m| matches!(m, ContinuousModification::AddKeyword { .. }));
+    // Only accept if we got at least one AddKeyword or RemoveKeyword modification
+    let has_keyword = modifications.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::AddKeyword { .. }
+                | ContinuousModification::RemoveKeyword { .. }
+        )
+    });
     if !has_keyword {
         return None;
     }
@@ -867,6 +874,36 @@ pub(super) fn parse_imperative_family_ast(text: &str, lower: &str) -> Option<Imp
     if lower == "proliferate" || lower.starts_with("proliferate.") {
         return Some(ImperativeFamilyAst::Proliferate);
     }
+    // CR 706: "roll a d20" / "roll a d6" / "roll a d4" / word-form variants
+    if let Some(sides) = try_parse_roll_die_sides(lower) {
+        return Some(ImperativeFamilyAst::RollDie { sides });
+    }
+
+    // CR 705: "flip a coin"
+    if lower == "flip a coin" || lower == "flips a coin" {
+        return Some(ImperativeFamilyAst::FlipCoin);
+    }
+
+    // CR 104.3a: "lose the game" / "win the game" — game-ending effects.
+    // Must come before keyword granting to intercept "lose" before it falls through.
+    if lower == "lose the game" || lower == "loses the game" {
+        return Some(ImperativeFamilyAst::LoseTheGame);
+    }
+    if lower == "win the game" || lower == "wins the game" {
+        return Some(ImperativeFamilyAst::WinTheGame);
+    }
+    // CR 702: "lose [keyword]" / "lose [keyword] until end of turn" — keyword removal
+    // in bare imperative form. Mirrors "gain [keyword]" using RemoveKeyword.
+    // Also handles compound "lose defender and gains flying" via parse_continuous_modifications.
+    if lower.starts_with("lose ")
+        && !lower.contains("life")
+        && !lower.contains("the game")
+        && !lower.contains("mana")
+    {
+        if let Some(effect) = try_parse_gain_keyword(text) {
+            return Some(ImperativeFamilyAst::LoseKeyword(effect));
+        }
+    }
     // CR 702: "gain [keyword]" / "gain [keyword] until end of turn" — keyword granting
     // in bare imperative form (subject-stripped sub-abilities like "it gains haste").
     // Must come before shuffle/utility to intercept "gain" before it falls through.
@@ -900,6 +937,65 @@ pub(super) fn parse_imperative_family_ast(text: &str, lower: &str) -> Option<Imp
     None
 }
 
+/// CR 706: Parse die side count from "roll a dN" / "roll a six-sided die" patterns.
+fn try_parse_roll_die_sides(lower: &str) -> Option<u8> {
+    // "roll a d20", "roll a d6", "roll a d4"
+    let rest = lower
+        .strip_prefix("roll a d")
+        .or_else(|| lower.strip_prefix("rolls a d"))?;
+    if let Ok(sides) = rest.parse::<u8>() {
+        return Some(sides);
+    }
+    // Word-form: "roll a six-sided die", "roll a four-sided die"
+    match rest {
+        _ if rest.starts_with("four-sided") || rest.starts_with("4-sided") => Some(4),
+        _ if rest.starts_with("six-sided") || rest.starts_with("6-sided") => Some(6),
+        _ if rest.starts_with("twenty-sided") || rest.starts_with("20-sided") => Some(20),
+        _ => None,
+    }
+}
+
+/// CR 706.2: Try to parse a d20 result table line like "1—9 | Draw two cards"
+/// or "20 | Search your library for a card". Returns `(min, max, effect_text)`.
+pub(crate) fn try_parse_die_result_line(text: &str) -> Option<(u8, u8, &str)> {
+    let trimmed = text.trim();
+
+    // Find the pipe separator: "N—M | effect" or "N | effect"
+    let pipe_idx = trimmed.find(" | ")?;
+    let range_part = trimmed[..pipe_idx].trim();
+    let effect_text = trimmed[pipe_idx + 3..].trim();
+
+    // Parse range: "1—9" (em dash U+2014), "10—19", "20" (single value)
+    let (min, max) = if let Some(dash_idx) = range_part.find('\u{2014}') {
+        let min_str = &range_part[..dash_idx];
+        let max_str = &range_part[dash_idx + '\u{2014}'.len_utf8()..];
+        (min_str.parse::<u8>().ok()?, max_str.parse::<u8>().ok()?)
+    } else {
+        // Single value like "20"
+        let val = range_part.parse::<u8>().ok()?;
+        (val, val)
+    };
+
+    Some((min, max, effect_text))
+}
+
+/// CR 705: Try to parse "if you win the flip, [effect]" / "if you lose the flip, [effect]"
+/// from Oracle text. Returns `(is_win, effect_text)`.
+pub(crate) fn try_parse_coin_flip_branch(text: &str) -> Option<(bool, &str)> {
+    let lower = text.to_lowercase();
+    if let Some(rest) = lower.strip_prefix("if you win the flip, ") {
+        let _ = rest; // Only used for prefix detection
+        let effect_text = &text["if you win the flip, ".len()..];
+        Some((true, effect_text))
+    } else if let Some(rest) = lower.strip_prefix("if you lose the flip, ") {
+        let _ = rest;
+        let effect_text = &text["if you lose the flip, ".len()..];
+        Some((false, effect_text))
+    } else {
+        None
+    }
+}
+
 pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> Effect {
     match ast {
         ImperativeFamilyAst::Structured(ast) => lower_imperative_ast(ast),
@@ -919,6 +1015,17 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch,
         ImperativeFamilyAst::Proliferate => Effect::Proliferate,
         ImperativeFamilyAst::GainKeyword(effect) => effect,
+        ImperativeFamilyAst::LoseKeyword(effect) => effect,
+        ImperativeFamilyAst::LoseTheGame => Effect::LoseTheGame,
+        ImperativeFamilyAst::WinTheGame => Effect::WinTheGame,
+        ImperativeFamilyAst::RollDie { sides } => Effect::RollDie {
+            sides,
+            results: vec![],
+        },
+        ImperativeFamilyAst::FlipCoin => Effect::FlipCoin {
+            win_effect: None,
+            lose_effect: None,
+        },
         ImperativeFamilyAst::Shuffle(ast) => lower_shuffle_ast(ast),
         ImperativeFamilyAst::Put(ast) => lower_put_ast(ast),
         ImperativeFamilyAst::YouMay { text } => super::parse_effect(&text),

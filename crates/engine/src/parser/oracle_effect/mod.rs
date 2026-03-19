@@ -1,6 +1,6 @@
 mod animation;
 mod counter;
-mod imperative;
+pub(crate) mod imperative;
 mod mana;
 mod sequence;
 mod subject;
@@ -61,16 +61,32 @@ fn try_parse_inline_delayed_trigger(text: &str) -> Option<ParsedEffectClause> {
         DelayedTriggerCondition::WhenDies {
             filter: parse_delayed_subject_filter(condition_text),
         }
+    } else if condition_text.contains("is put into")
+        && (condition_text.contains("graveyard") || condition_text.contains("a graveyard"))
+    {
+        // CR 700.4: "is put into a graveyard" from battlefield = dies
+        DelayedTriggerCondition::WhenDies {
+            filter: parse_delayed_subject_filter(condition_text),
+        }
     } else if condition_text.contains("leaves the battlefield") {
         DelayedTriggerCondition::WhenLeavesPlayFiltered {
+            filter: parse_delayed_subject_filter(condition_text),
+        }
+    } else if condition_text.contains("enters the battlefield") || condition_text.contains("enters")
+    {
+        DelayedTriggerCondition::WhenEntersBattlefield {
             filter: parse_delayed_subject_filter(condition_text),
         }
     } else {
         return None;
     };
 
-    // "that creature/permanent" references the parent spell's target
-    let uses_tracked_set = condition_text.contains("that ");
+    // "that creature/permanent/token" references the parent spell's target.
+    // "the exiled creature/card" and "the targeted creature" also reference
+    // the parent's tracked set.
+    let uses_tracked_set = condition_text.contains("that ")
+        || condition_text.contains("the exiled ")
+        || condition_text.contains("the targeted ");
 
     let inner = parse_effect_chain(effect_text, AbilityKind::Spell);
 
@@ -86,12 +102,28 @@ fn try_parse_inline_delayed_trigger(text: &str) -> Option<ParsedEffectClause> {
 }
 
 /// Map delayed trigger condition subjects to TargetFilter.
-/// "that creature"/"that permanent" → ParentTarget (references the parent spell's target).
-/// "it"/"this creature" → SelfRef.
+/// CR 603.7c: Delayed triggers track objects by reference.
+/// "that creature"/"that permanent"/"that token"/"that card" → ParentTarget (parent spell's target).
+/// "the exiled creature"/"the exiled card"/"the creature"/"the permanent" → ParentTarget (back-reference).
+/// "the targeted creature" → ParentTarget.
+/// "it"/"this creature"/"this permanent"/"this artifact" → SelfRef (source object).
+/// "target creature" → ParentTarget (named target in the condition).
 fn parse_delayed_subject_filter(condition_text: &str) -> TargetFilter {
-    if condition_text.contains("that ") {
+    if condition_text.contains("that ")
+        || condition_text.contains("the exiled ")
+        || condition_text.contains("the targeted ")
+        || condition_text.contains("the creature")
+        || condition_text.contains("the permanent")
+        || condition_text.contains("the token")
+        || condition_text.contains("target ")
+    {
         TargetFilter::ParentTarget
-    } else if condition_text.contains("it ") || condition_text.starts_with("it") {
+    } else if condition_text.contains("it ")
+        || condition_text.starts_with("it")
+        || condition_text.contains("this creature")
+        || condition_text.contains("this permanent")
+        || condition_text.contains("this artifact")
+    {
         TargetFilter::SelfRef
     } else {
         TargetFilter::Any
@@ -156,6 +188,27 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
         });
     }
 
+    // CR 106.12: "don't lose [unspent] {color} mana as steps and phases end" —
+    // mana pool retention. Parsed as supported no-op (runtime behavior is future work).
+    {
+        let lower = text.to_lowercase();
+        if lower.contains("lose") && lower.contains("mana as steps") {
+            return parsed_clause(Effect::GenericEffect {
+                static_abilities: vec![],
+                duration: None,
+                target: None,
+            });
+        }
+    }
+
+    // CR 701.52: "the ring tempts you" — Ring Tempts You effect.
+    {
+        let lower = text.to_lowercase();
+        if lower.contains("the ring tempts you") {
+            return parsed_clause(Effect::RingTemptsYou);
+        }
+    }
+
     // CR 603.7c: "When that creature dies, ..." — inline delayed trigger creation.
     if let Some(clause) = try_parse_inline_delayed_trigger(text) {
         return clause;
@@ -164,6 +217,24 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
     // CR 614.16: "Damage can't be prevented [this turn]" → Effect::AddRestriction
     if let Some(clause) = try_parse_damage_prevention_disabled(text) {
         return clause;
+    }
+
+    // CR 705: "If you win/lose the flip, [effect]" — coin flip branch.
+    // Returns a FlipCoin with the appropriate branch filled in.
+    // consolidate_die_and_coin_defs merges these into the preceding FlipCoin.
+    if let Some((is_win, effect_text)) = imperative::try_parse_coin_flip_branch(text) {
+        let branch_def = parse_effect_chain(effect_text, AbilityKind::Spell);
+        return if is_win {
+            parsed_clause(Effect::FlipCoin {
+                win_effect: Some(Box::new(branch_def)),
+                lose_effect: None,
+            })
+        } else {
+            parsed_clause(Effect::FlipCoin {
+                win_effect: None,
+                lose_effect: Some(Box::new(branch_def)),
+            })
+        };
     }
 
     if let Some((duration, rest)) = strip_leading_duration(text) {
@@ -853,8 +924,16 @@ fn lower_subject_predicate_ast(
             duration,
             sub_ability,
         },
-        PredicateAst::Become { effect, duration }
-        | PredicateAst::Restriction { effect, duration } => ParsedEffectClause {
+        PredicateAst::Become {
+            effect,
+            duration,
+            sub_ability,
+        } => ParsedEffectClause {
+            effect,
+            duration,
+            sub_ability,
+        },
+        PredicateAst::Restriction { effect, duration } => ParsedEffectClause {
             effect,
             duration,
             sub_ability: None,
@@ -1394,6 +1473,10 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
         }
     }
 
+    // CR 706 + CR 705: Consolidate die result table lines into their parent RollDie,
+    // and coin flip conditional branches into their parent FlipCoin.
+    consolidate_die_and_coin_defs(&mut defs, kind);
+
     // Chain: last has no sub_ability, each earlier one chains to next
     if defs.len() > 1 {
         let last = defs.pop().unwrap();
@@ -1413,6 +1496,58 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
                 },
             )
         })
+    }
+}
+
+/// CR 705: Post-process parsed ability defs to consolidate coin flip conditional
+/// branches into their parent `FlipCoin` effect.
+///
+/// Pattern: a bare `FlipCoin { win: None, lose: None }` followed by one or more
+/// `FlipCoin { win: Some(..), lose: None }` / `FlipCoin { win: None, lose: Some(..) }`
+/// defs produced by the "if you win/lose the flip" intercept in `parse_effect_clause`.
+fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _kind: AbilityKind) {
+    let mut i = 0;
+    while i < defs.len() {
+        // CR 705: Consolidate coin flip branches
+        if matches!(
+            &defs[i].effect,
+            Effect::FlipCoin {
+                win_effect: None,
+                lose_effect: None,
+            }
+        ) {
+            let mut win = None;
+            let mut lose = None;
+            let mut j = i + 1;
+            while j < defs.len() && (win.is_none() || lose.is_none()) {
+                match &defs[j].effect {
+                    Effect::FlipCoin {
+                        win_effect: Some(w),
+                        lose_effect: None,
+                    } if win.is_none() => {
+                        win = Some(w.clone());
+                        j += 1;
+                    }
+                    Effect::FlipCoin {
+                        win_effect: None,
+                        lose_effect: Some(l),
+                    } if lose.is_none() => {
+                        lose = Some(l.clone());
+                        j += 1;
+                    }
+                    _ => break,
+                }
+            }
+            if win.is_some() || lose.is_some() {
+                defs[i].effect = Effect::FlipCoin {
+                    win_effect: win,
+                    lose_effect: lose,
+                };
+                defs.drain(i + 1..j);
+            }
+        }
+
+        i += 1;
     }
 }
 
@@ -2614,6 +2749,83 @@ mod tests {
             Effect::Token { ref name, ref types, power: PtValue::Fixed(0), toughness: PtValue::Fixed(0), count: CountValue::Fixed(1), .. }
             if name == "Treasure" && types == &vec!["Artifact".to_string(), "Treasure".to_string()]
         ));
+    }
+
+    #[test]
+    fn effect_create_lander_token() {
+        let e = parse_effect("Create a Lander token");
+        assert!(matches!(
+            e,
+            Effect::Token { ref name, ref types, .. }
+            if name == "Lander" && types == &vec!["Artifact".to_string(), "Lander".to_string()]
+        ));
+    }
+
+    #[test]
+    fn effect_create_mutagen_token() {
+        let e = parse_effect("Create a Mutagen token");
+        assert!(matches!(
+            e,
+            Effect::Token { ref name, ref types, .. }
+            if name == "Mutagen" && types == &vec!["Artifact".to_string(), "Mutagen".to_string()]
+        ));
+    }
+
+    #[test]
+    fn effect_create_role_token_attached_to_target() {
+        let e = parse_effect("Create a Monster Role token attached to target creature you control");
+        match e {
+            Effect::Token {
+                ref name,
+                ref types,
+                ref attach_to,
+                ..
+            } => {
+                assert_eq!(name, "Monster Role");
+                assert_eq!(
+                    types,
+                    &vec![
+                        "Enchantment".to_string(),
+                        "Aura".to_string(),
+                        "Role".to_string()
+                    ]
+                );
+                assert!(attach_to.is_some(), "attach_to should be set");
+            }
+            other => panic!("expected Token, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_create_wicked_role_token() {
+        let e = parse_effect("Create a Wicked Role token attached to target creature you control");
+        assert!(matches!(
+            e,
+            Effect::Token { ref name, ref types, .. }
+            if name == "Wicked Role"
+                && types.contains(&"Enchantment".to_string())
+                && types.contains(&"Aura".to_string())
+                && types.contains(&"Role".to_string())
+        ));
+    }
+
+    #[test]
+    fn effect_create_role_token_attached_to_it() {
+        let e = parse_effect("Create a Cursed Role token attached to it");
+        match e {
+            Effect::Token {
+                ref name,
+                ref attach_to,
+                ..
+            } => {
+                assert_eq!(name, "Cursed Role");
+                assert!(
+                    attach_to.is_some(),
+                    "attach_to should be set for 'attached to it'"
+                );
+            }
+            other => panic!("expected Token, got {other:?}"),
+        }
     }
 
     #[test]

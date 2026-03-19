@@ -362,7 +362,8 @@ export type WaitingFor =
   | { type: "DiscardForCost"; data: { player: PlayerId; count: number; cards: ObjectId[]; pending_cast: PendingCast } }
   | { type: "SacrificeForCost"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_cast: PendingCast } }
   | { type: "OptionalEffectChoice"; data: { player: PlayerId; source_id: ObjectId } }
-  | { type: "UnlessPayment"; data: { player: PlayerId; cost: ManaCost; pending_counter: unknown } };
+  | { type: "UnlessPayment"; data: { player: PlayerId; cost: ManaCost; pending_counter: unknown } }
+  | { type: "ChooseRingBearer"; data: { player: PlayerId; candidates: ObjectId[] } };
 
 // ── Action Result ────────────────────────────────────────────────────────
 
@@ -401,6 +402,7 @@ export type GameAction =
   | { type: "ActivateNinjutsu"; data: { ninjutsu_card_id: CardId; attacker_to_return: ObjectId } }
   | { type: "DecideOptionalEffect"; data: { accept: boolean } }
   | { type: "PayUnlessCost"; data: { pay: boolean } }
+  | { type: "ChooseRingBearer"; data: { target: ObjectId } }
   | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn" } } }
   | { type: "CancelAutoPass" };
 
@@ -447,7 +449,8 @@ export type GameEvent =
   | { type: "Regenerated"; data: { object_id: ObjectId } }
   | { type: "CreatureSuspected"; data: { object_id: ObjectId } }
   | { type: "CaseSolved"; data: { object_id: ObjectId } }
-  | { type: "ClassLevelGained"; data: { object_id: ObjectId; level: number } };
+  | { type: "ClassLevelGained"; data: { object_id: ObjectId; level: number } }
+  | { type: "RingTemptsYou"; data: { player_id: PlayerId } };
 
 // ── Game State ───────────────────────────────────────────────────────────
 

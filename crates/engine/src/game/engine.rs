@@ -1131,6 +1131,26 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             state.last_named_choice = None;
             state.waiting_for.clone()
         }
+        // CR 701.52: Player selects a ring-bearer from candidates.
+        (
+            WaitingFor::ChooseRingBearer { player, candidates },
+            GameAction::ChooseRingBearer { target },
+        ) => {
+            if !candidates.contains(&target) {
+                return Err(EngineError::InvalidAction(
+                    "Invalid ring-bearer choice".to_string(),
+                ));
+            }
+            let p = *player;
+            state.ring_bearer.insert(p, Some(target));
+            state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
+            // Resume pending continuation if present
+            if let Some(cont) = state.pending_continuation.take() {
+                let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
+            }
+            state.waiting_for.clone()
+        }
         (WaitingFor::Priority { player }, GameAction::PlayFaceDown { card_id }) => {
             if state.priority_player != *player {
                 return Err(EngineError::NotYourPriority);

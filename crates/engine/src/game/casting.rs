@@ -243,6 +243,10 @@ fn prepare_spell_cast(
                         generic: tax,
                     };
                 }
+                crate::types::mana::ManaCost::SelfManaCost => {
+                    // SelfManaCost should have been resolved before reaching here;
+                    // treat as no-op for commander tax purposes.
+                }
             }
         }
     }

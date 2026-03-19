@@ -34,15 +34,22 @@ pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
         keywords: token.keywords,
         tapped: token.tapped,
         count: token.count,
+        attach_to: token.attach_to,
     })
 }
 
 pub(super) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     let text = text.trim().trim_end_matches('.');
     let lower = text.to_lowercase();
-    if lower.contains(" attached to ") {
-        return None;
-    }
+
+    // CR 303.7: Strip "attached to [target]" suffix and capture the attachment target.
+    let (text, attach_to) = if let Some(pos) = lower.find(" attached to ") {
+        let target_text = &text[pos + " attached to ".len()..];
+        let (target, _) = parse_target(target_text);
+        (&text[..pos], Some(target))
+    } else {
+        (text, None)
+    };
 
     let (mut count, leading_name, mut rest) =
         if let Some((count, rest)) = parse_token_count_prefix(text) {
@@ -82,10 +89,6 @@ pub(super) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     let (name_override, suffix) = parse_token_name_clause(suffix);
     let keywords = parse_token_keyword_clause(suffix);
     let (mut name, types) = parse_token_identity(descriptor)?;
-
-    if suffix.to_lowercase().contains(" attached to ") {
-        return None;
-    }
 
     if let Some(name_override) = leading_name.or(name_override) {
         name = name_override;
@@ -140,6 +143,7 @@ pub(super) fn parse_token_description(text: &str) -> Option<TokenDescription> {
         keywords,
         tapped,
         count,
+        attach_to,
     })
 }
 
@@ -369,7 +373,14 @@ fn parse_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> {
 }
 
 fn known_named_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> {
-    let name = match descriptor.trim().to_lowercase().as_str() {
+    let lower = descriptor.trim().to_lowercase();
+
+    // CR 303.7: Role tokens are Enchantment — Aura Role tokens.
+    if let Some(identity) = known_role_token_identity(&lower) {
+        return Some(identity);
+    }
+
+    let name = match lower.as_str() {
         "treasure" => "Treasure",
         "food" => "Food",
         "clue" => "Clue",
@@ -379,12 +390,42 @@ fn known_named_token_identity(descriptor: &str) -> Option<(String, Vec<String>)>
         "junk" => "Junk",
         "shard" => "Shard",
         "gold" => "Gold",
+        "lander" => "Lander",
+        "mutagen" => "Mutagen",
         _ => return None,
     };
 
     Some((
         name.to_string(),
         vec!["Artifact".to_string(), name.to_string()],
+    ))
+}
+
+/// CR 303.7: Role tokens are predefined Enchantment — Aura Role tokens with
+/// "enchant creature you control". Each Role type grants fixed abilities to the
+/// enchanted creature.
+fn known_role_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> {
+    let name = match descriptor {
+        "cursed role" => "Cursed Role",
+        "monster role" => "Monster Role",
+        "royal role" => "Royal Role",
+        "sorcerer role" => "Sorcerer Role",
+        "wicked role" => "Wicked Role",
+        "young hero role" => "Young Hero Role",
+        "virtuous role" => "Virtuous Role",
+        "huntsman role" => "Huntsman Role",
+        "chef role" => "Chef Role",
+        "questing role" => "Questing Role",
+        _ => return None,
+    };
+
+    Some((
+        name.to_string(),
+        vec![
+            "Enchantment".to_string(),
+            "Aura".to_string(),
+            "Role".to_string(),
+        ],
     ))
 }
 

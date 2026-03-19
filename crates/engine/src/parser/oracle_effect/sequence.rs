@@ -95,7 +95,7 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
 fn starts_prefix_clause(current_lower: &str) -> bool {
     current_lower.starts_with("until ")
         || current_lower.starts_with("if ")
-        || current_lower.starts_with("when you do")
+        || current_lower.starts_with("when ")
         || current_lower.starts_with("for each ")
 }
 
@@ -118,6 +118,7 @@ pub(super) fn starts_clause_text(text: &str) -> bool {
         "exile ",
         "explore",
         "fight ",
+        "flip ",
         "investigate",
         "gain control ",
         "gain ",
@@ -128,6 +129,7 @@ pub(super) fn starts_clause_text(text: &str) -> bool {
         "put ",
         "return ",
         "reveal ",
+        "roll ",
         "sacrifice ",
         "scry ",
         "search ",

@@ -381,6 +381,17 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
                 ),
             ]
         }
+        // CR 701.52: Choose a ring-bearer from candidate creatures.
+        WaitingFor::ChooseRingBearer { player, candidates } => candidates
+            .iter()
+            .map(|&target| {
+                candidate(
+                    GameAction::ChooseRingBearer { target },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::GameOver { .. } => Vec::new(),
     }
 }

@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AdditionalCost,
-    CastingRestriction, Comparator, Effect, ModalChoice, ReplacementDefinition, SolveCondition,
-    SpellCastingOption, StaticDefinition, TriggerDefinition, TypedFilter,
+    CastingRestriction, Comparator, DieResultBranch, Effect, ModalChoice, ReplacementDefinition,
+    SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition, TypedFilter,
 };
 use crate::types::keywords::Keyword;
 
@@ -230,17 +230,29 @@ pub fn parse_oracle_text(
             if !constraints.restrictions.is_empty() {
                 def.activation_restrictions = constraints.restrictions;
             }
-            result.abilities.push(def);
             i += 1;
+            // CR 706: If the activated ability ends with "roll a dN", consume
+            // subsequent d20 table lines and attach them as die result branches.
+            if effect_text.to_lowercase().contains("roll a d") {
+                i = attach_die_result_branches_to_chain(&mut def, &lines, i);
+            }
+            result.abilities.push(def);
             continue;
         }
 
         // Priority 5-6: Triggered abilities — starts with When/Whenever/At
         if lower.starts_with("when ") || lower.starts_with("whenever ") || lower.starts_with("at ")
         {
-            let trigger = parse_trigger_line(&line, card_name);
-            result.triggers.push(trigger);
+            let mut trigger = parse_trigger_line(&line, card_name);
             i += 1;
+            // CR 706: If the trigger's effect ends with "roll a dN", consume
+            // subsequent d20 table lines and attach them as die result branches.
+            if lower.contains("roll a d") {
+                if let Some(ref mut execute) = trigger.execute {
+                    i = attach_die_result_branches_to_chain(execute, &lines, i);
+                }
+            }
+            result.triggers.push(trigger);
             continue;
         }
 
@@ -300,17 +312,51 @@ pub fn parse_oracle_text(
             }
         }
 
+        // CR 706: Die roll table — "Roll a dN" followed by "min—max | effect" lines.
+        // Consumes the header + all table lines and produces a single RollDie ability.
+        if let Some((def, next_i)) = try_parse_die_roll_table(
+            &lines,
+            i,
+            &line,
+            if is_spell {
+                AbilityKind::Spell
+            } else {
+                AbilityKind::Activated
+            },
+        ) {
+            result.abilities.push(def);
+            i = next_i;
+            continue;
+        }
+
         // Priority 9: Imperative verb for instants/sorceries
         if is_spell {
             let mut def = parse_effect_chain(&line, AbilityKind::Spell);
             def.description = Some(line.to_string());
-            result.abilities.push(def);
             i += 1;
+            // CR 706: If the parsed chain ends with "roll a dN", consume
+            // subsequent d20 table lines and attach them as die result branches.
+            if lower.contains("roll a d") {
+                i = attach_die_result_branches_to_chain(&mut def, &lines, i);
+            }
+            result.abilities.push(def);
             continue;
         }
 
         // Priority 12: Roman numeral chapters (saga) — skip
         if is_saga_chapter(&lower) {
+            i += 1;
+            continue;
+        }
+
+        // "The flashback cost is equal to its mana cost" → extract Flashback keyword
+        if lower.contains("flashback cost")
+            && lower.contains("equal to")
+            && lower.contains("mana cost")
+        {
+            result.extracted_keywords.push(Keyword::Flashback(
+                crate::types::mana::ManaCost::SelfManaCost,
+            ));
             i += 1;
             continue;
         }
@@ -341,9 +387,15 @@ pub fn parse_oracle_text(
                 || effect_lower.starts_with("whenever ")
                 || effect_lower.starts_with("at ")
             {
-                let trigger = parse_trigger_line(&effect_text, card_name);
-                result.triggers.push(trigger);
+                let mut trigger = parse_trigger_line(&effect_text, card_name);
                 i += 1;
+                // CR 706: Consume subsequent d20 table lines for triggered die rolls.
+                if effect_lower.contains("roll a d") {
+                    if let Some(ref mut execute) = trigger.execute {
+                        i = attach_die_result_branches_to_chain(execute, &lines, i);
+                    }
+                }
+                result.triggers.push(trigger);
                 continue;
             }
             // Try as static
@@ -1064,6 +1116,164 @@ pub(super) fn normalize_self_refs_for_static(text: &str, card_name: &str) -> Str
         result = result.replace(phrase, "~");
     }
     result
+}
+
+/// CR 706: Walk the sub_ability chain of a parsed trigger/ability to find the
+/// terminal `RollDie { results: [] }` node and attach die result branches
+/// from subsequent oracle text lines.
+///
+/// Returns the updated line index (past any consumed table lines).
+fn attach_die_result_branches_to_chain(
+    def: &mut AbilityDefinition,
+    lines: &[&str],
+    start_line: usize,
+) -> usize {
+    use super::oracle_effect::imperative::try_parse_die_result_line;
+
+    // Walk to the end of the sub_ability chain to find the RollDie node.
+    let roll_die = find_terminal_roll_die(def);
+    let roll_die = match roll_die {
+        Some(rd) => rd,
+        None => return start_line,
+    };
+
+    // Consume subsequent d20 table lines
+    let mut branches = Vec::new();
+    let mut j = start_line;
+    while j < lines.len() {
+        let table_line = strip_reminder_text(lines[j].trim());
+        if table_line.is_empty() {
+            j += 1;
+            continue;
+        }
+        if let Some((min, max, effect_text)) = try_parse_die_result_line(&table_line) {
+            let effect_text = strip_die_table_flavor_label(effect_text);
+            let branch_def = parse_effect_chain(effect_text, AbilityKind::Spell);
+            branches.push(DieResultBranch {
+                min,
+                max,
+                effect: Box::new(branch_def),
+            });
+            j += 1;
+        } else {
+            break;
+        }
+    }
+
+    if !branches.is_empty() {
+        if let Effect::RollDie {
+            ref mut results, ..
+        } = roll_die
+        {
+            *results = branches;
+        }
+    }
+
+    j
+}
+
+/// Walk the sub_ability chain to find a terminal `RollDie { results: [] }` node.
+fn find_terminal_roll_die(def: &mut AbilityDefinition) -> Option<&mut Effect> {
+    // Check the current node first
+    if matches!(&def.effect, Effect::RollDie { results, .. } if results.is_empty()) {
+        return Some(&mut def.effect);
+    }
+    // Walk sub_ability chain
+    if let Some(ref mut sub) = def.sub_ability {
+        return find_terminal_roll_die(sub);
+    }
+    None
+}
+
+/// CR 706: Try to parse a die roll table starting at line `i`.
+/// Detects "Roll a dN" followed by "min—max | effect" table lines.
+/// Returns the consolidated `RollDie` ability definition and the next line index.
+fn try_parse_die_roll_table(
+    lines: &[&str],
+    i: usize,
+    line: &str,
+    kind: AbilityKind,
+) -> Option<(AbilityDefinition, usize)> {
+    use super::oracle_effect::imperative::try_parse_die_result_line;
+
+    let lower = line.to_lowercase();
+    // Check for "roll a dN" pattern
+    let sides = parse_roll_die_sides(&lower)?;
+
+    // Look ahead for table lines
+    let mut branches = Vec::new();
+    let mut j = i + 1;
+    while j < lines.len() {
+        let table_line = strip_reminder_text(lines[j].trim());
+        if table_line.is_empty() {
+            j += 1;
+            continue;
+        }
+        if let Some((min, max, effect_text)) = try_parse_die_result_line(&table_line) {
+            // Strip optional flavor label like "Trapped! — "
+            let effect_text = strip_die_table_flavor_label(effect_text);
+            let branch_def = parse_effect_chain(effect_text, kind);
+            branches.push(DieResultBranch {
+                min,
+                max,
+                effect: Box::new(branch_def),
+            });
+            j += 1;
+        } else {
+            break;
+        }
+    }
+
+    if branches.is_empty() {
+        // No table lines follow — still a valid RollDie, just without branches
+        let mut def = AbilityDefinition::new(
+            kind,
+            Effect::RollDie {
+                sides,
+                results: vec![],
+            },
+        );
+        def.description = Some(line.to_string());
+        return Some((def, i + 1));
+    }
+
+    let mut def = AbilityDefinition::new(
+        kind,
+        Effect::RollDie {
+            sides,
+            results: branches,
+        },
+    );
+    def.description = Some(line.to_string());
+    Some((def, j))
+}
+
+/// CR 706: Parse die side count from "roll a dN" patterns in lowercased text.
+fn parse_roll_die_sides(lower: &str) -> Option<u8> {
+    let rest = lower
+        .strip_prefix("roll a d")
+        .or_else(|| lower.strip_prefix("rolls a d"))?;
+    let rest = rest.trim_end_matches('.');
+    if let Ok(sides) = rest.parse::<u8>() {
+        return Some(sides);
+    }
+    // Word-form: "roll a dfour-sided die", etc. — not a real pattern.
+    // The "d" prefix doesn't precede word forms; handle separately if needed.
+    None
+}
+
+/// Strip optional flavor labels from d20 table effect text.
+/// E.g., "Trapped! — You lose 3 life" → "You lose 3 life"
+fn strip_die_table_flavor_label(text: &str) -> &str {
+    // Look for " — " (em dash U+2014) pattern at the start
+    if let Some(idx) = text.find(" \u{2014} ") {
+        let before = &text[..idx];
+        // Flavor labels are short (1-4 words) and often end with "!"
+        if before.split_whitespace().count() <= 4 {
+            return &text[idx + " \u{2014} ".len()..];
+        }
+    }
+    text
 }
 
 #[cfg(test)]

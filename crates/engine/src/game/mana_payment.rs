@@ -124,7 +124,7 @@ pub fn can_pay(pool: &ManaPool, cost: &ManaCost) -> bool {
 /// counted if the restriction permits the given spell. When `None`, all mana is eligible.
 pub fn can_pay_for_spell(pool: &ManaPool, cost: &ManaCost, spell: Option<&SpellMeta>) -> bool {
     match cost {
-        ManaCost::NoCost => true,
+        ManaCost::NoCost | ManaCost::SelfManaCost => true,
         ManaCost::Cost { shards, generic } => {
             // Clone pool to simulate payment
             let mut sim = pool.clone();
@@ -202,7 +202,7 @@ pub fn pay_cost_with_demand(
     spell: Option<&SpellMeta>,
 ) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
     match cost {
-        ManaCost::NoCost => Ok((Vec::new(), Vec::new())),
+        ManaCost::NoCost | ManaCost::SelfManaCost => Ok((Vec::new(), Vec::new())),
         ManaCost::Cost { shards, generic } => {
             let mut spent = Vec::new();
             let mut life_payments = Vec::new();

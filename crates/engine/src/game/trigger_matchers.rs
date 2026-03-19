@@ -133,6 +133,16 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 722: Monarch triggers
     r.insert(TriggerMode::BecomeMonarch, match_become_monarch);
 
+    // CR 706: Die rolling triggers
+    r.insert(TriggerMode::RolledDie, match_rolled_die);
+    r.insert(TriggerMode::RolledDieOnce, match_rolled_die);
+
+    // CR 705: Coin flipping triggers
+    r.insert(TriggerMode::FlippedCoin, match_flipped_coin);
+
+    // CR 701.52: Ring tempts you trigger
+    r.insert(TriggerMode::RingTemptsYou, match_ring_tempts_you);
+
     // Remaining trigger modes: recognized but not yet matched against events.
     let unimplemented_modes = [
         TriggerMode::DamagePreventedOnce,
@@ -171,9 +181,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::PlaneswalkedFrom,
         TriggerMode::PlaneswalkedTo,
         TriggerMode::ChaosEnsues,
-        TriggerMode::RolledDie,
-        TriggerMode::RolledDieOnce,
-        TriggerMode::FlippedCoin,
         TriggerMode::Clashed,
         TriggerMode::Copied,
         TriggerMode::ConjureAll,
@@ -181,7 +188,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::BecomeRenowned,
         TriggerMode::BecomeMonstrous,
         TriggerMode::Proliferate,
-        TriggerMode::RingTemptsYou,
         TriggerMode::Surveil,
         TriggerMode::Scry,
         TriggerMode::Abandoned,
@@ -1473,7 +1479,54 @@ pub(super) fn match_become_monarch(
     }
 }
 
-/// Unimplemented: matches nothing. Placeholder for trigger modes not yet supported.
+///// CR 706: Match die roll events.
+pub(super) fn match_rolled_die(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::DieRolled { player_id, .. } = event {
+        valid_player_matches(trigger, state, *player_id, source_id)
+    } else {
+        false
+    }
+}
+
+/// CR 705: Match coin flip events.
+pub(super) fn match_flipped_coin(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::CoinFlipped { player_id, .. } = event {
+        valid_player_matches(trigger, state, *player_id, source_id)
+    } else {
+        false
+    }
+}
+
+/// CR 701.52: Match "the Ring tempts you" events.
+pub(super) fn match_ring_tempts_you(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    _source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::RingTemptsYou { player_id } = event {
+        // The trigger fires for the controller of the source that has this trigger.
+        let source_controller = state
+            .objects
+            .get(&_source_id)
+            .map(|obj| obj.controller)
+            .unwrap_or(PlayerId(255));
+        *player_id == source_controller
+    } else {
+        false
+    }
+}
+
 pub(super) fn match_unimplemented(
     _event: &GameEvent,
     _trigger: &TriggerDefinition,

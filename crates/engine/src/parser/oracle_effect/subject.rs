@@ -31,7 +31,11 @@ pub(super) fn try_parse_subject_predicate_ast(text: &str) -> Option<ClauseAst> {
         return Some(subject_predicate_ast_from_clause(
             text,
             clause,
-            |effect, duration, _sub_ability| PredicateAst::Become { effect, duration },
+            |effect, duration, sub_ability| PredicateAst::Become {
+                effect,
+                duration,
+                sub_ability,
+            },
         ));
     }
 
@@ -361,6 +365,24 @@ fn build_become_clause(
         return Some(clause);
     }
 
+    // CR 707.2 / CR 613.1a: "become a copy of [target]" — copy copiable characteristics.
+    // Must intercept before parse_animation_spec which rejects "copy of" patterns.
+    if let Some(copy_target_text) = become_text
+        .to_lowercase()
+        .strip_prefix("a copy of ")
+        .map(|_| &become_text["a copy of ".len()..])
+    {
+        let (target, _) = parse_target(copy_target_text);
+        return Some(ParsedEffectClause {
+            effect: Effect::BecomeCopy {
+                target,
+                duration: duration.clone(),
+            },
+            duration,
+            sub_ability: None,
+        });
+    }
+
     let animation = parse_animation_spec(become_text)?;
     let modifications = animation_modifications(&animation);
     if modifications.is_empty() {
@@ -409,9 +431,10 @@ fn try_parse_become_choice(
                 kind: ChosenSubtypeKind::BasicLandType,
             },
         )
+    } else if lower.contains("color") {
+        // CR 105.3: "become the color of your choice" — player chooses a color.
+        (ChoiceType::Color, ContinuousModification::AddChosenColor)
     } else {
-        // Color-based choices ("become the color of your choice") deferred —
-        // the engine doesn't have SetChosenColor as a ContinuousModification yet.
         return None;
     };
 
@@ -656,6 +679,7 @@ pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
         "tap",
         "transform",
         "untap",
+        "win",
     ];
 
     let lower = text.to_lowercase();

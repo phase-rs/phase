@@ -306,7 +306,7 @@ fn shard_colors(shard: &ManaCostShard) -> Vec<ManaColor> {
 
 pub(crate) fn derive_colors_from_mana_cost(mana_cost: &ManaCost) -> Vec<ManaColor> {
     match mana_cost {
-        ManaCost::NoCost => vec![],
+        ManaCost::NoCost | ManaCost::SelfManaCost => vec![],
         ManaCost::Cost { shards, .. } => {
             let mut colors = Vec::new();
             for shard in shards {

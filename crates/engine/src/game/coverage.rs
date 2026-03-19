@@ -356,6 +356,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Attach { target }
         | Effect::Fight { target }
         | Effect::CopySpell { target }
+        | Effect::BecomeCopy { target, .. }
         | Effect::Suspect { target }
         | Effect::Connive { target }
         | Effect::PhaseOut { target }
@@ -392,6 +393,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             keywords,
             count,
             tapped,
+            attach_to,
         } => {
             let mut desc = String::new();
             match count {
@@ -419,6 +421,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if *tapped {
                 desc.push_str(" tapped");
+            }
+            if attach_to.is_some() {
+                desc.push_str(" attached");
             }
             d.push(("token".into(), desc));
         }
@@ -601,6 +606,26 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("free cast".into(), "yes".into()));
             }
         }
+        Effect::RollDie { sides, results } => {
+            d.push(("sides".into(), sides.to_string()));
+            if !results.is_empty() {
+                d.push(("branches".into(), results.len().to_string()));
+            }
+        }
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+        } => {
+            if win_effect.is_some() {
+                d.push(("win".into(), "yes".into()));
+            }
+            if lose_effect.is_some() {
+                d.push(("lose".into(), "yes".into()));
+            }
+        }
+        Effect::FlipCoinUntilLose { .. } => {
+            d.push(("mode".into(), "until lose".into()));
+        }
         Effect::Unimplemented { .. }
         | Effect::Explore
         | Effect::Investigate
@@ -611,7 +636,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Cleanup { .. }
         | Effect::AddRestriction { .. }
         | Effect::CreateEmblem { .. }
-        | Effect::PayCost { .. } => {}
+        | Effect::PayCost { .. }
+        | Effect::LoseTheGame
+        | Effect::WinTheGame
+        | Effect::RingTemptsYou => {}
     }
     d
 }

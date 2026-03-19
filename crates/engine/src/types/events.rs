@@ -180,6 +180,21 @@ pub enum GameEvent {
     MonarchChanged {
         player_id: PlayerId,
     },
+    /// CR 706: A die was rolled.
+    DieRolled {
+        player_id: PlayerId,
+        sides: u8,
+        result: u8,
+    },
+    /// CR 705: A coin was flipped.
+    CoinFlipped {
+        player_id: PlayerId,
+        won: bool,
+    },
+    /// CR 701.52: The Ring tempted a player.
+    RingTemptsYou {
+        player_id: PlayerId,
+    },
 }
 
 #[cfg(test)]

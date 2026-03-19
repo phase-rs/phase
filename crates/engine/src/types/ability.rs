@@ -94,6 +94,15 @@ pub enum Parity {
     Even,
 }
 
+/// A branch in a d20/d6/d4 result table (CR 706.2).
+/// Each branch covers a contiguous range of die results and maps to an effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DieResultBranch {
+    pub min: u8,
+    pub max: u8,
+    pub effect: Box<AbilityDefinition>,
+}
+
 impl std::str::FromStr for Parity {
     type Err = ();
     fn from_str(s: &str) -> Result<Self, ()> {
@@ -578,6 +587,9 @@ pub enum DelayedTriggerCondition {
     /// CR 603.7c: "when [object] leaves the battlefield" — filter-based variant
     /// that fires on any zone change from battlefield.
     WhenLeavesPlayFiltered { filter: TargetFilter },
+    /// CR 603.7c: "when [object] enters the battlefield" — fires on zone change
+    /// to battlefield.
+    WhenEntersBattlefield { filter: TargetFilter },
 }
 
 /// Specifies variable-count targeting for "any number of" effects.
@@ -950,6 +962,12 @@ pub enum StaticCondition {
         text: String,
     },
     DuringYourTurn,
+    /// CR 701.52: True when this creature is the ring-bearer for its controller.
+    IsRingBearer,
+    /// CR 701.52: True when the controller's ring level is at least this value (0-indexed).
+    RingLevelAtLeast {
+        level: u8,
+    },
     None,
 }
 
@@ -1189,6 +1207,10 @@ pub enum Effect {
         tapped: bool,
         #[serde(default = "default_count_value_one")]
         count: CountValue,
+        /// CR 303.7: When a Role token or Aura token is created "attached to" a
+        /// target, this field captures that attachment target.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attach_to: Option<TargetFilter>,
     },
     GainLife {
         #[serde(default = "default_quantity_one")]
@@ -1318,6 +1340,14 @@ pub enum Effect {
     CopySpell {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+    },
+    /// CR 707.2 / CR 613.1a: Become a copy of target permanent.
+    /// Sets copiable characteristics at Layer 1.
+    BecomeCopy {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration: Option<Duration>,
     },
     ChooseCard {
         #[serde(default)]
@@ -1511,6 +1541,33 @@ pub enum Effect {
         #[serde(default)]
         scope: PreventionScope,
     },
+    /// CR 104.3a: A player who meets this effect's condition loses the game.
+    /// The affected player is determined by resolution context (controller's opponent
+    /// if untargeted, or explicit target if targeted).
+    LoseTheGame,
+    /// CR 104.3a: The controller wins the game — all opponents lose.
+    WinTheGame,
+    /// CR 706: Roll a die with the given number of sides.
+    /// If `results` is non-empty, execute the matching branch.
+    RollDie {
+        sides: u8,
+        #[serde(default)]
+        results: Vec<DieResultBranch>,
+    },
+    /// CR 705: Flip a coin. Optionally execute different effects on win/lose.
+    FlipCoin {
+        #[serde(default)]
+        win_effect: Option<Box<AbilityDefinition>>,
+        #[serde(default)]
+        lose_effect: Option<Box<AbilityDefinition>>,
+    },
+    /// CR 705: Flip coins until you lose a flip, then execute effect with win count.
+    FlipCoinUntilLose {
+        win_effect: Box<AbilityDefinition>,
+    },
+    /// CR 701.52: The Ring tempts the controller. Increments ring level and prompts
+    /// ring-bearer selection if the controller has creatures on the battlefield.
+    RingTemptsYou,
     /// Semantic marker for effects the engine has not yet implemented a handler for.
     /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.
     Unimplemented {
@@ -1611,6 +1668,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::BecomeMonarch => "BecomeMonarch",
         Effect::Proliferate => "Proliferate",
         Effect::CopySpell { .. } => "CopySpell",
+        Effect::BecomeCopy { .. } => "BecomeCopy",
         Effect::ChooseCard { .. } => "ChooseCard",
         Effect::PutCounter { .. } => "PutCounter",
         Effect::MultiplyCounter { .. } => "MultiplyCounter",
@@ -1638,6 +1696,12 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::PayCost { .. } => "PayCost",
         Effect::CastFromZone { .. } => "CastFromZone",
         Effect::PreventDamage { .. } => "PreventDamage",
+        Effect::LoseTheGame => "LoseTheGame",
+        Effect::WinTheGame => "WinTheGame",
+        Effect::RollDie { .. } => "RollDie",
+        Effect::FlipCoin { .. } => "FlipCoin",
+        Effect::FlipCoinUntilLose { .. } => "FlipCoinUntilLose",
+        Effect::RingTemptsYou => "RingTemptsYou",
         Effect::Unimplemented { name, .. } => name,
     }
 }
@@ -1685,6 +1749,7 @@ pub enum EffectKind {
     BecomeMonarch,
     Proliferate,
     CopySpell,
+    BecomeCopy,
     ChooseCard,
     PutCounter,
     MultiplyCounter,
@@ -1710,6 +1775,12 @@ pub enum EffectKind {
     CastFromZone,
     PreventDamage,
     Regenerate,
+    LoseTheGame,
+    WinTheGame,
+    RollDie,
+    FlipCoin,
+    FlipCoinUntilLose,
+    RingTemptsYou,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
     Equip,
@@ -1756,6 +1827,7 @@ impl From<&Effect> for EffectKind {
             Effect::BecomeMonarch => EffectKind::BecomeMonarch,
             Effect::Proliferate => EffectKind::Proliferate,
             Effect::CopySpell { .. } => EffectKind::CopySpell,
+            Effect::BecomeCopy { .. } => EffectKind::BecomeCopy,
             Effect::ChooseCard { .. } => EffectKind::ChooseCard,
             Effect::PutCounter { .. } => EffectKind::PutCounter,
             Effect::MultiplyCounter { .. } => EffectKind::MultiplyCounter,
@@ -1783,6 +1855,12 @@ impl From<&Effect> for EffectKind {
             Effect::PayCost { .. } => EffectKind::PayCost,
             Effect::CastFromZone { .. } => EffectKind::CastFromZone,
             Effect::PreventDamage { .. } => EffectKind::PreventDamage,
+            Effect::LoseTheGame => EffectKind::LoseTheGame,
+            Effect::WinTheGame => EffectKind::WinTheGame,
+            Effect::RollDie { .. } => EffectKind::RollDie,
+            Effect::FlipCoin { .. } => EffectKind::FlipCoin,
+            Effect::FlipCoinUntilLose { .. } => EffectKind::FlipCoinUntilLose,
+            Effect::RingTemptsYou => EffectKind::RingTemptsYou,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,
         }
     }
@@ -2598,6 +2676,9 @@ pub enum ContinuousModification {
     AddChosenSubtype {
         kind: ChosenSubtypeKind,
     },
+    /// CR 105.3: Set the object's color to the chosen color.
+    /// Reads from `chosen_attributes` at layer evaluation time.
+    AddChosenColor,
     SetColor {
         colors: Vec<ManaColor>,
     },
@@ -3199,6 +3280,7 @@ mod tests {
             keywords: vec![Keyword::Vigilance],
             tapped: true,
             count: CountValue::Variable("the number of creatures you control".to_string()),
+            attach_to: None,
         };
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();

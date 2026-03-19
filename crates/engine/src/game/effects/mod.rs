@@ -10,6 +10,7 @@ use crate::types::identifiers::{ObjectId, TrackedSetId};
 pub mod add_restriction;
 pub mod animate;
 pub mod attach;
+pub mod become_copy;
 pub mod become_monarch;
 pub mod bounce;
 pub mod cast_from_zone;
@@ -31,6 +32,7 @@ pub mod draw;
 pub mod effect;
 pub mod explore;
 pub mod fight;
+pub mod flip_coin;
 pub mod force_block;
 pub mod gain_control;
 pub mod investigate;
@@ -45,6 +47,8 @@ pub mod pump;
 pub mod regenerate;
 pub mod reveal_hand;
 pub mod reveal_top;
+pub mod ring;
+pub mod roll_die;
 pub mod sacrifice;
 pub mod scry;
 pub mod search_library;
@@ -56,6 +60,7 @@ pub mod suspect;
 pub mod tap_untap;
 pub mod token;
 pub mod transform_effect;
+pub mod win_lose;
 
 /// Dispatch to the appropriate effect handler using typed pattern matching.
 pub fn resolve_effect(
@@ -97,6 +102,7 @@ pub fn resolve_effect(
         Effect::BecomeMonarch => become_monarch::resolve(state, ability, events),
         Effect::Proliferate => proliferate::resolve(state, ability, events),
         Effect::CopySpell { .. } => copy_spell::resolve(state, ability, events),
+        Effect::BecomeCopy { .. } => become_copy::resolve(state, ability, events),
         Effect::ChooseCard { .. } => choose_card::resolve(state, ability, events),
         Effect::PutCounter { .. } => counters::resolve_add(state, ability, events),
         Effect::MultiplyCounter { .. } => counters::resolve_multiply(state, ability, events),
@@ -124,6 +130,12 @@ pub fn resolve_effect(
         Effect::PayCost { .. } => pay::resolve(state, ability, events),
         Effect::CastFromZone { .. } => cast_from_zone::resolve(state, ability, events),
         Effect::PreventDamage { .. } => prevent_damage::resolve(state, ability, events),
+        Effect::LoseTheGame => win_lose::resolve_lose(state, ability, events),
+        Effect::WinTheGame => win_lose::resolve_win(state, ability, events),
+        Effect::RollDie { .. } => roll_die::resolve(state, ability, events),
+        Effect::FlipCoin { .. } => flip_coin::resolve(state, ability, events),
+        Effect::FlipCoinUntilLose { .. } => flip_coin::resolve_until_lose(state, ability, events),
+        Effect::RingTemptsYou => ring::resolve(state, ability, events),
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);
@@ -180,6 +192,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&crate::types::abilit
         | Effect::Attach { target, .. }
         | Effect::Transform { target, .. }
         | Effect::CopySpell { target, .. }
+        | Effect::BecomeCopy { target, .. }
         | Effect::CastFromZone { target, .. }
         | Effect::PreventDamage { target, .. }
         | Effect::Connive { target, .. }

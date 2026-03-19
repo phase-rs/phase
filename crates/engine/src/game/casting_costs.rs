@@ -500,7 +500,7 @@ pub(super) fn auto_tap_lands(
     use crate::types::mana::ManaCost;
 
     let (shards, generic) = match cost {
-        ManaCost::NoCost => return,
+        ManaCost::NoCost | ManaCost::SelfManaCost => return,
         ManaCost::Cost { shards, generic } if shards.is_empty() && *generic == 0 => return,
         ManaCost::Cost { shards, generic } => (shards, *generic),
     };

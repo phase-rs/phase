@@ -306,6 +306,8 @@ pub enum ManaCost {
         shards: Vec<ManaCostShard>,
         generic: u32,
     },
+    /// The card's own mana cost (used for "the flashback cost is equal to its mana cost").
+    SelfManaCost,
 }
 
 impl ManaCost {

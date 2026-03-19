@@ -242,7 +242,8 @@ fn matches_filter_prop(
         }
         FilterProp::CmcGE { value } => {
             let cmc = match &obj.mana_cost {
-                crate::types::mana::ManaCost::NoCost => 0u32,
+                crate::types::mana::ManaCost::NoCost
+                | crate::types::mana::ManaCost::SelfManaCost => 0u32,
                 crate::types::mana::ManaCost::Cost { shards, generic } => {
                     *generic + shards.len() as u32
                 }
@@ -251,7 +252,8 @@ fn matches_filter_prop(
         }
         FilterProp::CmcLE { value } => {
             let cmc = match &obj.mana_cost {
-                crate::types::mana::ManaCost::NoCost => 0u32,
+                crate::types::mana::ManaCost::NoCost
+                | crate::types::mana::ManaCost::SelfManaCost => 0u32,
                 crate::types::mana::ManaCost::Cost { shards, generic } => {
                     *generic + shards.len() as u32
                 }

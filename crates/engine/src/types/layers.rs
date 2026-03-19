@@ -75,9 +75,9 @@ impl ContinuousModification {
             | ContinuousModification::RemoveSubtype { .. }
             | ContinuousModification::AddAllCreatureTypes
             | ContinuousModification::AddChosenSubtype { .. } => Layer::Type,
-            ContinuousModification::SetColor { .. } | ContinuousModification::AddColor { .. } => {
-                Layer::Color
-            }
+            ContinuousModification::SetColor { .. }
+            | ContinuousModification::AddColor { .. }
+            | ContinuousModification::AddChosenColor => Layer::Color,
         }
     }
 }

@@ -97,6 +97,10 @@ pub enum GameAction {
     PayUnlessCost {
         pay: bool,
     },
+    /// CR 701.52: Choose a creature to be the ring-bearer.
+    ChooseRingBearer {
+        target: ObjectId,
+    },
     /// Set auto-pass mode for the acting player (CR 117.4).
     SetAutoPass {
         mode: AutoPassRequest,

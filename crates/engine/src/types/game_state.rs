@@ -306,6 +306,11 @@ pub enum WaitingFor {
         /// The counter ability to execute if the opponent declines to pay.
         pending_counter: Box<ResolvedAbility>,
     },
+    /// CR 701.52: Player must choose which creature becomes their ring-bearer.
+    ChooseRingBearer {
+        player: PlayerId,
+        candidates: Vec<ObjectId>,
+    },
     /// CR 601.2b: Player must choose a card to discard as part of an additional casting cost.
     /// After selection, the card is discarded and casting continues via `pay_and_push`.
     DiscardForCost {
@@ -358,6 +363,7 @@ impl WaitingFor {
             | WaitingFor::MultiTargetSelection { player, .. }
             | WaitingFor::AdventureCastChoice { player, .. }
             | WaitingFor::NinjutsuActivation { player, .. }
+            | WaitingFor::ChooseRingBearer { player, .. }
             | WaitingFor::DiscardForCost { player, .. }
             | WaitingFor::SacrificeForCost { player, .. }
             | WaitingFor::OptionalEffectChoice { player, .. }
@@ -651,6 +657,13 @@ pub struct GameState {
     /// Gates IfYouDo sub-abilities. Reset in DecideOptionalEffect handler.
     #[serde(skip)]
     pub cost_payment_failed_flag: bool,
+
+    /// CR 701.52: Per-player ring level (0-3, 4 levels total).
+    #[serde(default)]
+    pub ring_level: HashMap<PlayerId, u8>,
+    /// CR 701.52: Per-player ring-bearer (the creature the Ring is on).
+    #[serde(default)]
+    pub ring_bearer: HashMap<PlayerId, Option<ObjectId>>,
 }
 
 /// A runtime-generated continuous effect stored at state level.
@@ -777,6 +790,8 @@ impl GameState {
             restrictions: Vec::new(),
             current_trigger_event: None,
             cost_payment_failed_flag: false,
+            ring_level: HashMap::new(),
+            ring_bearer: HashMap::new(),
         }
     }
 
@@ -1155,8 +1170,30 @@ mod tests {
                     target_constraints: vec![],
                 }),
             },
+            WaitingFor::SacrificeForCost {
+                player: PlayerId(0),
+                count: 1,
+                permanents: vec![ObjectId(1)],
+                pending_cast: Box::new(PendingCast {
+                    object_id: ObjectId(1),
+                    card_id: CardId(1),
+                    ability: ResolvedAbility::new(
+                        crate::types::ability::Effect::Unimplemented {
+                            name: "Dummy".to_string(),
+                            description: None,
+                        },
+                        vec![],
+                        ObjectId(1),
+                        PlayerId(0),
+                    ),
+                    cost: ManaCost::NoCost,
+                    activation_cost: None,
+                    activation_ability_index: None,
+                    target_constraints: vec![],
+                }),
+            },
         ];
-        assert_eq!(variants.len(), 18);
+        assert_eq!(variants.len(), 19);
     }
 
     #[test]

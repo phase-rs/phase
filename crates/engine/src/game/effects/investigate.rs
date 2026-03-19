@@ -24,6 +24,7 @@ pub fn resolve(
             keywords: vec![],
             tapped: false,
             count: crate::types::ability::CountValue::Fixed(1),
+            attach_to: None,
         },
         ability.targets.clone(),
         ability.source_id,
