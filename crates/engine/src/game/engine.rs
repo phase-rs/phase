@@ -8,8 +8,7 @@ use crate::types::ability::{
 use crate::types::actions::GameAction;
 use crate::types::events::{BendingType, GameEvent};
 use crate::types::game_state::{
-    ActionResult, AutoPassMode, AutoPassRequest, ConvokeMode, GameState, StackEntry,
-    StackEntryKind, WaitingFor,
+    ActionResult, AutoPassMode, AutoPassRequest, ConvokeMode, GameState, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
@@ -36,7 +35,6 @@ use super::planeswalker;
 use super::priority;
 use super::restrictions;
 use super::sba;
-use super::stack;
 use super::triggers;
 use super::turns;
 use super::zones;
@@ -560,7 +558,8 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 EngineError::InvalidAction("No pending cast to finalize".to_string())
             })?;
             if let Some(ability_index) = pending.activation_ability_index {
-                // Activated ability finalization: pay mana, pay remaining costs, push to stack.
+                // Activated ability finalization: pay mana from pool, then delegate
+                // remaining costs + target selection + stack push to shared helper.
                 casting::pay_mana_cost(
                     state,
                     *player,
@@ -568,38 +567,15 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                     &pending.cost,
                     &mut events,
                 )?;
-                // Pay remaining non-waterbend costs from activation_cost
-                if let Some(ref act_cost) = pending.activation_cost {
-                    casting::pay_ability_cost(
-                        state,
-                        *player,
-                        pending.object_id,
-                        act_cost,
-                        &mut events,
-                    )?;
-                }
-                let entry_id = ObjectId(state.next_object_id);
-                state.next_object_id += 1;
-                stack::push_to_stack(
+                casting_costs::push_activated_ability_to_stack(
                     state,
-                    StackEntry {
-                        id: entry_id,
-                        source_id: pending.object_id,
-                        controller: *player,
-                        kind: StackEntryKind::ActivatedAbility {
-                            source_id: pending.object_id,
-                            ability: pending.ability,
-                        },
-                    },
+                    *player,
+                    pending.object_id,
+                    ability_index,
+                    pending.ability,
+                    pending.activation_cost.as_ref(),
                     &mut events,
-                );
-                restrictions::record_ability_activation(state, pending.object_id, ability_index);
-                events.push(GameEvent::AbilityActivated {
-                    source_id: pending.object_id,
-                });
-                state.priority_passes.clear();
-                state.priority_pass_count = 0;
-                WaitingFor::Priority { player: *player }
+                )?
             } else {
                 casting_costs::finalize_cast(
                     state,

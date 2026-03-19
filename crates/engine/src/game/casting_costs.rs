@@ -20,7 +20,10 @@ use super::restrictions;
 use super::stack;
 use super::zones;
 
-use super::ability_utils::flatten_targets_in_chain;
+use super::ability_utils::{
+    assign_targets_in_chain, auto_select_targets, begin_target_selection, build_target_slots,
+    flatten_targets_in_chain,
+};
 
 /// Handle the player's decision on an additional cost (kicker, blight, "or pay").
 ///
@@ -180,7 +183,7 @@ pub(crate) fn handle_sacrifice_for_cost(
 
 /// Push an activated ability to the stack after all costs are paid.
 /// Shared by `handle_activate_ability` (direct path) and `handle_sacrifice_for_cost` (interactive path).
-fn push_activated_ability_to_stack(
+pub(super) fn push_activated_ability_to_stack(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
@@ -195,9 +198,55 @@ fn push_activated_ability_to_stack(
         super::casting::pay_ability_cost(state, player, source_id, cost, events)?;
     }
 
+    // CR 602.2a: Check if the ability has targets that need selection.
+    // This handles cases where cost payment (sacrifice, waterbend) detoured
+    // before target selection in handle_activate_ability.
+    let target_slots = build_target_slots(state, &resolved)?;
+    if !target_slots.is_empty() {
+        if let Some(targets) = auto_select_targets(&target_slots, &[])? {
+            let mut resolved = resolved;
+            assign_targets_in_chain(&mut resolved, &targets)?;
+
+            let assigned_targets = flatten_targets_in_chain(&resolved);
+            emit_targeting_events(state, &assigned_targets, source_id, player, events);
+
+            // Fall through to push below
+            return push_ability_entry(state, player, source_id, ability_index, resolved, events);
+        }
+
+        // Targets need interactive selection
+        let selection = begin_target_selection(&target_slots, &[])?;
+        return Ok(WaitingFor::TargetSelection {
+            player,
+            pending_cast: Box::new(PendingCast {
+                object_id: source_id,
+                card_id: CardId(0),
+                ability: resolved,
+                cost: crate::types::mana::ManaCost::NoCost,
+                activation_cost: remaining_cost.cloned(),
+                activation_ability_index: Some(ability_index),
+                target_constraints: Vec::new(),
+            }),
+            target_slots,
+            selection,
+        });
+    }
+
     let assigned_targets = flatten_targets_in_chain(&resolved);
     emit_targeting_events(state, &assigned_targets, source_id, player, events);
 
+    push_ability_entry(state, player, source_id, ability_index, resolved, events)
+}
+
+/// Final step: create stack entry and record activation.
+fn push_ability_entry(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    resolved: ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
 
