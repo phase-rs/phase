@@ -1066,6 +1066,7 @@ mod tests {
             Effect::RevealHand {
                 target: TargetFilter::Player,
                 card_filter: TargetFilter::Any,
+                count: None,
             },
             vec![],
             ObjectId(10),

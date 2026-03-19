@@ -423,6 +423,7 @@ mod tests {
             Effect::RevealHand {
                 target: TargetFilter::Any,
                 card_filter: TargetFilter::Any,
+                count: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             source_id,

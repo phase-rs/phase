@@ -1,4 +1,5 @@
 use crate::game::filter::matches_target_filter;
+use crate::game::quantity::resolve_quantity;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
@@ -16,9 +17,11 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let card_filter = match &ability.effect {
-        Effect::RevealHand { card_filter, .. } => card_filter.clone(),
-        _ => TargetFilter::Any,
+    let (card_filter, count) = match &ability.effect {
+        Effect::RevealHand {
+            card_filter, count, ..
+        } => (card_filter.clone(), count.clone()),
+        _ => (TargetFilter::Any, None),
     };
 
     // Find the target player from resolved targets
@@ -31,12 +34,21 @@ pub fn resolve(
         })
         .ok_or(EffectError::MissingParam("target player".to_string()))?;
 
-    let hand: Vec<_> = state
+    let full_hand: Vec<_> = state
         .players
         .iter()
         .find(|p| p.id == target_player)
         .map(|p| p.hand.clone())
         .unwrap_or_default();
+
+    // CR 701.16a: If a count is specified, reveal only that many cards.
+    let hand = if let Some(count_expr) = &count {
+        let n = resolve_quantity(state, count_expr, ability.controller, ability.source_id).max(0)
+            as usize;
+        full_hand.into_iter().take(n).collect()
+    } else {
+        full_hand
+    };
 
     if hand.is_empty() {
         events.push(GameEvent::EffectResolved {
@@ -105,6 +117,7 @@ mod tests {
             Effect::RevealHand {
                 target: TargetFilter::Any,
                 card_filter: TargetFilter::Any,
+                count: None,
             },
             vec![TargetRef::Player(target_player)],
             ObjectId(100),

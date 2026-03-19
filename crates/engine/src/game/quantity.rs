@@ -115,6 +115,9 @@ fn resolve_ref(
                 .and_then(|obj| obj.power)
                 .unwrap_or(0)
         }
+        QuantityRef::Devotion { colors } => {
+            crate::game::devotion::count_devotion(state, controller, colors) as i32
+        }
         QuantityRef::TargetLifeTotal => {
             // CR 119.3 + CR 107.2: Find the first player target and return their life total.
             targets

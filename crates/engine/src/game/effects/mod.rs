@@ -17,6 +17,7 @@ pub mod cast_from_zone;
 pub mod change_zone;
 pub mod choose;
 pub mod choose_card;
+pub mod choose_from_zone;
 pub mod cleanup;
 pub mod connive;
 pub mod copy_spell;
@@ -139,6 +140,7 @@ pub fn resolve_effect(
         Effect::FlipCoinUntilLose { .. } => flip_coin::resolve_until_lose(state, ability, events),
         Effect::RingTemptsYou => ring::resolve(state, ability, events),
         Effect::GrantCastingPermission { .. } => grant_permission::resolve(state, ability, events),
+        Effect::ChooseFromZone { .. } => choose_from_zone::resolve(state, ability, events),
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);

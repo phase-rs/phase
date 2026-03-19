@@ -179,6 +179,30 @@ pub(super) fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<Targe
         let (target, _) = parse_target(&text[16..]);
         return Some(TargetedImperativeAst::GainControl { target });
     }
+    // Earthbend: "earthbend [N] target <type>" → Animate with haste + is_earthbend
+    if let Some(rest) = lower.strip_prefix("earthbend ") {
+        let (pt, target_text) = parse_number(rest)
+            .map(|(n, rem)| (n as i32, rem.trim_start()))
+            .unwrap_or((0, rest));
+        let (target, _) = parse_target(&text[text.len() - target_text.len()..]);
+        return Some(TargetedImperativeAst::Earthbend {
+            target,
+            power: pt,
+            toughness: pt,
+        });
+    }
+    // Airbend: "airbend target <type> <mana_cost>" → GrantCastingPermission(ExileWithAltCost)
+    if let Some(rest) = lower.strip_prefix("airbend ") {
+        let original_rest = &text[text.len() - rest.len()..];
+        let (target, after_target) = parse_target(original_rest);
+        let cost = parse_mana_symbols(after_target.trim_start())
+            .map(|(c, _)| c)
+            .unwrap_or(crate::types::mana::ManaCost::Cost {
+                generic: 2,
+                shards: vec![],
+            });
+        return Some(TargetedImperativeAst::Airbend { target, cost });
+    }
     None
 }
 
@@ -204,6 +228,22 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         },
         TargetedImperativeAst::Fight { target } => Effect::Fight { target },
         TargetedImperativeAst::GainControl { target } => Effect::GainControl { target },
+        TargetedImperativeAst::Earthbend {
+            target,
+            power,
+            toughness,
+        } => Effect::Animate {
+            power: Some(power),
+            toughness: Some(toughness),
+            types: vec!["Creature".to_string()],
+            target,
+            keywords: vec![crate::types::keywords::Keyword::Haste],
+            is_earthbend: true,
+        },
+        TargetedImperativeAst::Airbend { target, cost } => Effect::GrantCastingPermission {
+            permission: crate::types::ability::CastingPermission::ExileWithAltCost { cost },
+            target,
+        },
         TargetedImperativeAst::ZoneCounterProxy(ast) => lower_zone_counter_ast(*ast),
     }
 }
@@ -305,6 +345,18 @@ pub(super) fn parse_hand_reveal_ast(text: &str, lower: &str) -> Option<HandRevea
         return None;
     }
 
+    // CR 701.16a: "reveals a number of cards from their hand equal to X"
+    if lower.contains("hand") && lower.contains("equal to ") {
+        if let Some((_, qty_text)) = lower.split_once("equal to ") {
+            let qty_text = qty_text.trim_end_matches('.');
+            if let Some(qty) = super::super::oracle_static::parse_quantity_ref(qty_text) {
+                return Some(HandRevealImperativeAst::RevealPartialHand {
+                    count: crate::types::ability::QuantityExpr::Ref { qty },
+                });
+            }
+        }
+    }
+
     if lower.contains("hand") {
         return Some(HandRevealImperativeAst::RevealHand);
     }
@@ -323,10 +375,17 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
         HandRevealImperativeAst::LookAtHand { target } => Effect::RevealHand {
             target,
             card_filter: TargetFilter::Any,
+            count: None,
         },
         HandRevealImperativeAst::RevealHand => Effect::RevealHand {
             target: TargetFilter::Any,
             card_filter: TargetFilter::Any,
+            count: None,
+        },
+        HandRevealImperativeAst::RevealPartialHand { count } => Effect::RevealHand {
+            target: TargetFilter::Any,
+            card_filter: TargetFilter::Any,
+            count: Some(count),
         },
         HandRevealImperativeAst::RevealTop { count } => Effect::RevealTop {
             player: TargetFilter::Controller,
@@ -374,6 +433,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
         ChooseImperativeAst::RevealHandFilter { card_filter } => Effect::RevealHand {
             target: TargetFilter::Any,
             card_filter,
+            count: None,
         },
     }
 }
@@ -1231,5 +1291,74 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             counter_type,
             target,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_earthbend_verb() {
+        let text = "Earthbend 3 target land";
+        let lower = text.to_lowercase();
+        let result = parse_targeted_action_ast(text, &lower);
+        assert!(result.is_some(), "Should parse 'earthbend' verb");
+        let effect = lower_targeted_action_ast(result.unwrap());
+        match effect {
+            Effect::Animate {
+                power,
+                toughness,
+                is_earthbend,
+                keywords,
+                ..
+            } => {
+                assert_eq!(power, Some(3));
+                assert_eq!(toughness, Some(3));
+                assert!(is_earthbend);
+                assert!(keywords.contains(&crate::types::keywords::Keyword::Haste));
+            }
+            other => panic!("Expected Effect::Animate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_airbend_verb() {
+        let text = "Airbend target creature {2}";
+        let lower = text.to_lowercase();
+        let result = parse_targeted_action_ast(text, &lower);
+        assert!(result.is_some(), "Should parse 'airbend' verb");
+        let effect = lower_targeted_action_ast(result.unwrap());
+        match effect {
+            Effect::GrantCastingPermission { permission, .. } => {
+                assert!(
+                    matches!(
+                        permission,
+                        crate::types::ability::CastingPermission::ExileWithAltCost { ref cost }
+                            if matches!(cost, crate::types::mana::ManaCost::Cost { generic: 2, .. })
+                    ),
+                    "Expected ExileWithAltCost with {{2}}, got {permission:?}"
+                );
+            }
+            other => panic!("Expected Effect::GrantCastingPermission, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_earthbend_default_pt() {
+        let text = "Earthbend target land";
+        let lower = text.to_lowercase();
+        let result = parse_targeted_action_ast(text, &lower);
+        assert!(result.is_some());
+        let effect = lower_targeted_action_ast(result.unwrap());
+        match effect {
+            Effect::Animate {
+                power, toughness, ..
+            } => {
+                assert_eq!(power, Some(0));
+                assert_eq!(toughness, Some(0));
+            }
+            other => panic!("Expected Effect::Animate, got {other:?}"),
+        }
     }
 }

@@ -4,7 +4,7 @@ use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
-use crate::types::events::GameEvent;
+use crate::types::events::{BendingType, GameEvent};
 use crate::types::game_state::GameState;
 
 /// Animate effect: turn a non-creature permanent into a creature.
@@ -13,20 +13,22 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (power, toughness, types_list, kw_list) = match &ability.effect {
+    let (power, toughness, types_list, kw_list, is_earthbend) = match &ability.effect {
         Effect::Animate {
             power,
             toughness,
             types,
             keywords,
+            is_earthbend,
             ..
         } => (
             power.unwrap_or(0),
             toughness.unwrap_or(0),
             types.as_slice(),
             keywords.as_slice(),
+            *is_earthbend,
         ),
-        _ => (0, 0, [].as_slice(), [].as_slice()),
+        _ => (0, 0, [].as_slice(), [].as_slice(), false),
     };
 
     let targets = resolve_animate_targets(ability);
@@ -62,6 +64,21 @@ pub fn resolve(
         }
 
         state.layers_dirty = true;
+    }
+
+    // Emit earthbend event for bending trigger system (mirrors grant_permission.rs Airbend pattern)
+    if is_earthbend {
+        events.push(GameEvent::Earthbend {
+            source_id: ability.source_id,
+            controller: ability.controller,
+        });
+        if let Some(p) = state
+            .players
+            .iter_mut()
+            .find(|p| p.id == ability.controller)
+        {
+            p.bending_types_this_turn.insert(BendingType::Earth);
+        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -117,6 +134,7 @@ mod tests {
                 types: vec!["Creature".to_string(), "Beast".to_string()],
                 keywords: vec![],
                 target: TargetFilter::None,
+                is_earthbend: false,
             },
             vec![],
             obj_id,

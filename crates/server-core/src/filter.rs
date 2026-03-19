@@ -38,6 +38,11 @@ pub fn filter_state_for_player(state: &GameState, viewer: PlayerId) -> GameState
         .lands_tapped_for_mana
         .retain(|pid, _| *pid == viewer);
 
+    // Hide pending cast info from opponents (contains full spell data)
+    if filtered.pending_cast.is_some() && filtered.waiting_for.acting_player() != Some(viewer) {
+        filtered.pending_cast = None;
+    }
+
     for pool in &mut filtered.deck_pools {
         if pool.player != viewer {
             pool.registered_main.clear();

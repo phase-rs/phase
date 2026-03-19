@@ -4,8 +4,14 @@
 # Node
 node_modules/
 
+# GSD
+.planning/
+
 # WASM output (generated)
 client/src/wasm/
+
+# Claude worktrees
+.claude/worktrees/
 
 # Build output
 client/dist/

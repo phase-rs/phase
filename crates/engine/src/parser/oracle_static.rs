@@ -10,6 +10,7 @@ use crate::types::ability::{
     StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::keywords::Keyword;
+use crate::types::mana::ManaColor;
 use crate::types::statics::StaticMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1056,11 +1057,47 @@ fn parse_quantity_comparison(lower: &str) -> Option<StaticCondition> {
 
 /// Map a quantity phrase to a dynamic QuantityRef.
 pub(super) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
-    match text.trim().trim_end_matches('.') {
+    let trimmed = text.trim().trim_end_matches('.');
+    match trimmed {
         "cards in your hand" => Some(QuantityRef::HandSize),
         "your life total" => Some(QuantityRef::LifeTotal),
         "cards in your graveyard" => Some(QuantityRef::GraveyardSize),
-        _ => None,
+        _ => {
+            // "the number of {type} you control" → ObjectCount { filter }
+            if let Some(rest) = trimmed.strip_prefix("the number of ") {
+                let (filter, _) = parse_type_phrase(rest);
+                if !matches!(filter, TargetFilter::Any) {
+                    return Some(QuantityRef::ObjectCount { filter });
+                }
+            }
+            // "your devotion to {color}" / "your devotion to {color} and {color}"
+            if let Some(rest) = trimmed.strip_prefix("your devotion to ") {
+                let colors = parse_devotion_colors(rest);
+                if !colors.is_empty() {
+                    return Some(QuantityRef::Devotion { colors });
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Parse color names from a devotion phrase like "black", "black and red".
+fn parse_devotion_colors(text: &str) -> Vec<ManaColor> {
+    text.split(" and ")
+        .filter_map(|word| {
+            let capitalized = capitalize_first(word.trim());
+            ManaColor::from_str(&capitalized).ok()
+        })
+        .collect()
+}
+
+/// Capitalize the first letter of a word (for ManaColor::from_str).
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
     }
 }
 
@@ -3000,5 +3037,47 @@ mod tests {
         assert!(def
             .modifications
             .contains(&ContinuousModification::AddPower { value: 2 }));
+    }
+
+    #[test]
+    fn parse_quantity_ref_object_count() {
+        let qty = parse_quantity_ref("the number of creatures you control").unwrap();
+        assert!(
+            matches!(qty, QuantityRef::ObjectCount { .. }),
+            "Expected ObjectCount, got {qty:?}"
+        );
+    }
+
+    #[test]
+    fn parse_quantity_ref_subtype_count() {
+        let qty = parse_quantity_ref("the number of Allies you control").unwrap();
+        assert!(
+            matches!(qty, QuantityRef::ObjectCount { .. }),
+            "Expected ObjectCount, got {qty:?}"
+        );
+    }
+
+    #[test]
+    fn parse_quantity_ref_devotion_single() {
+        let qty = parse_quantity_ref("your devotion to black").unwrap();
+        match qty {
+            QuantityRef::Devotion { colors } => {
+                assert_eq!(colors, vec![crate::types::mana::ManaColor::Black]);
+            }
+            other => panic!("Expected Devotion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_quantity_ref_devotion_multi() {
+        let qty = parse_quantity_ref("your devotion to black and red").unwrap();
+        match qty {
+            QuantityRef::Devotion { colors } => {
+                assert_eq!(colors.len(), 2);
+                assert!(colors.contains(&crate::types::mana::ManaColor::Black));
+                assert!(colors.contains(&crate::types::mana::ManaColor::Red));
+            }
+            other => panic!("Expected Devotion, got {other:?}"),
+        }
     }
 }

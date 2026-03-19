@@ -133,6 +133,10 @@ pub(super) enum ContinuationAst {
     /// CR 701.15: "It can't be regenerated" / "They can't be regenerated" — sets
     /// `cant_regenerate: true` on the preceding Destroy/DestroyAll effect.
     CantRegenerate,
+    /// "Choose one/N of them" after a ChangeZone to exile → ChooseFromZone { count, zone: Exile }.
+    ChooseFromExile {
+        count: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,6 +239,17 @@ pub(super) enum TargetedImperativeAst {
     GainControl {
         target: TargetFilter,
     },
+    /// Earthbend: animate target land into a creature with haste (emits Earthbend event).
+    Earthbend {
+        target: TargetFilter,
+        power: i32,
+        toughness: i32,
+    },
+    /// Airbend: exile target and grant cast-from-exile permission at specified cost.
+    Airbend {
+        target: TargetFilter,
+        cost: ManaCost,
+    },
     /// Proxy for zone-counter family (destroy/exile/put counter) used during
     /// compound splitting to unify targeted and zone-counter parsing.
     ZoneCounterProxy(Box<ZoneCounterImperativeAst>),
@@ -269,9 +284,17 @@ pub(super) enum UtilityImperativeAst {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum HandRevealImperativeAst {
-    LookAtHand { target: TargetFilter },
+    LookAtHand {
+        target: TargetFilter,
+    },
     RevealHand,
-    RevealTop { count: u32 },
+    /// "reveals a number of cards from their hand equal to X" (CR 701.16a).
+    RevealPartialHand {
+        count: crate::types::ability::QuantityExpr,
+    },
+    RevealTop {
+        count: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

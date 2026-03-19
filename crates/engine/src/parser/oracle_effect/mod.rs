@@ -10,13 +10,13 @@ mod types;
 use std::str::FromStr;
 
 use super::oracle_target::{parse_event_context_ref, parse_target};
-use super::oracle_util::{contains_possessive, parse_number};
+use super::oracle_util::{contains_possessive, parse_mana_symbols, parse_number};
 use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, ChoiceType, DamageAmount,
-    DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer, MultiTargetSpec,
-    PlayerFilter, PtValue, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TypeFilter,
-    TypedFilter,
+    AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChoiceType,
+    DamageAmount, DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer,
+    MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr, QuantityRef, StaticDefinition,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
@@ -257,6 +257,11 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
         return clause;
     }
 
+    // CR 400.7i: "you may play/cast that card [this turn]" — impulse draw permission.
+    if let Some(clause) = try_parse_play_from_exile(text) {
+        return clause;
+    }
+
     let ast = parse_clause_ast(text);
     lower_clause_ast(ast)
 }
@@ -360,6 +365,68 @@ fn try_parse_equal_to_quantity_effect(text: &str) -> Option<ParsedEffectClause> 
         }));
     }
     None
+}
+
+/// CR 400.7i: Parse "you may play/cast that card [this turn]" — impulse draw permission.
+///
+/// Handles patterns like:
+/// - "you may play that card this turn"
+/// - "you may cast that card this turn"
+/// - "you may play that card"
+/// - "you may play it this turn"
+fn try_parse_play_from_exile(text: &str) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    let lower = lower.trim_end_matches('.');
+
+    // Try full forms first: "you may play/cast that card/it/those cards ..."
+    // Then bare forms (after "you may" has been stripped): "play that card ..."
+    let full_rest = lower
+        .strip_prefix("you may play ")
+        .or_else(|| lower.strip_prefix("you may cast "));
+
+    if let Some(rest) = full_rest {
+        // Full form: rest must start with a card reference
+        if !(rest.starts_with("that card")
+            || rest.starts_with("that spell")
+            || rest.starts_with("those cards")
+            || rest.starts_with("it ")
+            || rest == "it")
+        {
+            return None;
+        }
+    } else {
+        // Bare form (after "you may" was stripped by parse_effect_chain):
+        // Only match when temporal context exists ("this turn", "until"),
+        // otherwise it's a CastFromZone, not impulse draw permission.
+        let has_temporal = lower.contains("this turn") || lower.contains("until ");
+        if !has_temporal {
+            return None;
+        }
+        if lower.contains("without paying") {
+            return None;
+        }
+        if !(lower.starts_with("play that card")
+            || lower.starts_with("cast that card")
+            || lower.starts_with("play it")
+            || lower.starts_with("cast it"))
+        {
+            return None;
+        }
+    }
+
+    // Default duration is UntilEndOfTurn for impulse draw
+    let duration = if lower.contains("until the end of your next turn")
+        || lower.contains("until your next turn")
+    {
+        Duration::UntilYourNextTurn
+    } else {
+        Duration::UntilEndOfTurn
+    };
+
+    Some(parsed_clause(Effect::GrantCastingPermission {
+        permission: CastingPermission::PlayFromExile { duration },
+        target: TargetFilter::Any,
+    }))
 }
 
 /// Parse "for each" quantity patterns on draw/life/damage/mill effects.
@@ -554,6 +621,35 @@ fn try_parse_verb_and_target<'a>(
     if lower.starts_with("gain control of ") {
         let (target, rem) = parse_target(&text[16..]);
         return Some((TargetedImperativeAst::GainControl { target }, rem));
+    }
+    // Earthbend: "earthbend [N] target <type>" → Animate with haste + is_earthbend
+    if let Some(rest) = lower.strip_prefix("earthbend ") {
+        let (pt, target_text) = parse_number(rest)
+            .map(|(n, rem)| (n as i32, rem.trim_start()))
+            .unwrap_or((0, rest));
+        let original_target_text = &text[text.len() - target_text.len()..];
+        let (target, rem) = parse_target(original_target_text);
+        return Some((
+            TargetedImperativeAst::Earthbend {
+                target,
+                power: pt,
+                toughness: pt,
+            },
+            rem,
+        ));
+    }
+    // Airbend: "airbend target <type> <mana_cost>" → GrantCastingPermission(ExileWithAltCost)
+    if let Some(rest) = lower.strip_prefix("airbend ") {
+        let original_rest = &text[text.len() - rest.len()..];
+        let (target, after_target) = parse_target(original_rest);
+        let (cost, rem) = parse_mana_symbols(after_target.trim_start()).unwrap_or((
+            crate::types::mana::ManaCost::Cost {
+                generic: 2,
+                shards: vec![],
+            },
+            after_target,
+        ));
+        return Some((TargetedImperativeAst::Airbend { target, cost }, rem));
     }
 
     // Destroy: check "all"/"each" prefix for mass destruction
@@ -3393,6 +3489,108 @@ mod tests {
             ),
             "Expected Choose {{ BasicLandType }}, got {:?}",
             e
+        );
+    }
+
+    #[test]
+    fn parse_play_from_exile_this_turn() {
+        let def = parse_effect_chain("You may play that card this turn.", AbilityKind::Spell);
+        assert!(matches!(
+            &def.effect,
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    duration: Duration::UntilEndOfTurn
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_play_from_exile_next_turn() {
+        let def = parse_effect_chain(
+            "You may play that card until the end of your next turn.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                def.effect,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile {
+                        duration: Duration::UntilYourNextTurn
+                    },
+                    ..
+                }
+            ),
+            "Expected GrantCastingPermission(PlayFromExile, UntilYourNextTurn), got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn parse_impulse_draw_chain() {
+        // "Exile the top two cards of your library. Choose one of them. Until end of turn, you may play that card."
+        let def = parse_effect_chain(
+            "Exile the top two cards of your library. Choose one of them. Until end of turn, you may play that card.",
+            AbilityKind::Spell,
+        );
+        // First effect: ChangeZone to Exile
+        assert!(
+            matches!(def.effect, Effect::ChangeZone { .. }),
+            "Expected ChangeZone, got {:?}",
+            def.effect
+        );
+        // Second: ChooseFromZone
+        let sub1 = def.sub_ability.as_ref().expect("Expected sub_ability");
+        assert!(
+            matches!(
+                sub1.effect,
+                Effect::ChooseFromZone {
+                    count: 1,
+                    zone: crate::types::zones::Zone::Exile,
+                }
+            ),
+            "Expected ChooseFromZone {{ count: 1, zone: Exile }}, got {:?}",
+            sub1.effect
+        );
+        // Third: GrantCastingPermission with PlayFromExile
+        let sub2 = sub1
+            .sub_ability
+            .as_ref()
+            .expect("Expected second sub_ability");
+        assert!(
+            matches!(
+                sub2.effect,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile {
+                        duration: Duration::UntilEndOfTurn
+                    },
+                    ..
+                }
+            ),
+            "Expected GrantCastingPermission(PlayFromExile), got {:?}",
+            sub2.effect
+        );
+    }
+
+    #[test]
+    fn parse_dynamic_reveal_count_with_continuation() {
+        // Bala Ged Thief pattern: "reveals a number of cards from their hand equal to the number of Allies you control. You choose one of them. That player discards that card."
+        let def = parse_effect_chain(
+            "Target opponent reveals a number of cards from their hand equal to the number of Allies you control. You choose one of them. That player discards that card.",
+            AbilityKind::Spell,
+        );
+        // First effect: RevealHand with count
+        match &def.effect {
+            Effect::RevealHand { count, .. } => {
+                assert!(count.is_some(), "Expected dynamic count on RevealHand");
+            }
+            other => panic!("Expected RevealHand, got {:?}", other),
+        }
+        // Should have sub_ability chain for discard
+        assert!(
+            def.sub_ability.is_some(),
+            "Expected sub_ability for discard continuation"
         );
     }
 }

@@ -71,6 +71,7 @@ pub fn move_to_zone(
                 p,
                 crate::types::ability::CastingPermission::AdventureCreature
                     | crate::types::ability::CastingPermission::ExileWithAltCost { .. }
+                    | crate::types::ability::CastingPermission::PlayFromExile { .. }
             )
         });
     }

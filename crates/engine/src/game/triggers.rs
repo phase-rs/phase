@@ -1909,6 +1909,7 @@ pub mod tests {
                                         },
                                     ]),
                                 ),
+                                count: None,
                             },
                         )
                         .sub_ability(

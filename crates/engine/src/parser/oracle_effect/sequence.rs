@@ -1,8 +1,20 @@
+use super::super::oracle_util::parse_number;
 use super::types::*;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, Effect, StaticDefinition, TargetFilter,
 };
 use crate::types::zones::Zone;
+
+/// Parse count from "choose one/two/three/N of them/those" text using `parse_number`.
+fn parse_choose_count_from_text(lower: &str) -> u32 {
+    // Strip "you " prefix if present, then "choose "
+    let rest = lower
+        .strip_prefix("you ")
+        .unwrap_or(lower)
+        .strip_prefix("choose ")
+        .unwrap_or(lower);
+    parse_number(rest).map(|(n, _)| n).unwrap_or(1)
+}
 
 pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     let mut chunks = Vec::new();
@@ -246,6 +258,15 @@ pub(super) fn apply_clause_continuation(
                 _ => {}
             }
         }
+        ContinuationAst::ChooseFromExile { count } => {
+            defs.push(AbilityDefinition::new(
+                kind,
+                Effect::ChooseFromZone {
+                    count,
+                    zone: Zone::Exile,
+                },
+            ));
+        }
     }
 }
 
@@ -263,6 +284,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::SearchDestination { .. } => false,
         ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
         ContinuationAst::CantRegenerate => true,
+        ContinuationAst::ChooseFromExile { .. } => true,
     }
 }
 
@@ -286,7 +308,10 @@ pub(super) fn parse_followup_continuation_ast(
 
     match previous_effect {
         Effect::RevealHand { .. }
-            if lower.contains("card from it") || lower.contains("card from among") =>
+            if lower.contains("card from it")
+                || lower.contains("card from among")
+                || lower.contains("one of them")
+                || lower.contains("one of those") =>
         {
             let card_filter = if lower.starts_with("you choose ") || lower.starts_with("choose ") {
                 super::parse_choose_filter(&lower)
@@ -316,6 +341,14 @@ pub(super) fn parse_followup_continuation_ast(
                 || lower.contains("cannot be regenerated") =>
         {
             Some(ContinuationAst::CantRegenerate)
+        }
+        // "Choose one/two/N of them/those" after exile → ChooseFromZone building block
+        Effect::ChangeZone { .. }
+            if (lower.contains("of them") || lower.contains("of those"))
+                && (lower.starts_with("choose ") || lower.starts_with("you choose ")) =>
+        {
+            let count = parse_choose_count_from_text(&lower);
+            Some(ContinuationAst::ChooseFromExile { count })
         }
         _ => None,
     }
