@@ -32,7 +32,7 @@ export default defineConfig({
       manifest: false, // Use public/manifest.json
       includeAssets: ["**/*.{mp3,json}"],
       workbox: {
-        maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
+        maximumFileSizeToCacheInBytes: 10 * 1024 * 1024,
         runtimeCaching: [
           {
             urlPattern: /card-data\.json$/,
