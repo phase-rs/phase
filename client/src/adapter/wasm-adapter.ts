@@ -62,7 +62,7 @@ export class WasmAdapter implements EngineAdapter {
 
     // Load the card database into WASM for name-based deck resolution
     try {
-      const resp = await fetch("/card-data.json");
+      const resp = await fetch(__CARD_DATA_URL__);
       if (resp.ok) {
         const text = await resp.text();
         const count = load_card_database(text);

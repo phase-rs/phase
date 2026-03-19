@@ -210,7 +210,7 @@ function CardCoverageView() {
   const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    fetch("/coverage-data.json")
+    fetch(__COVERAGE_DATA_URL__)
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
@@ -537,7 +537,7 @@ function GapAnalysisView() {
   const [formatFilter, setFormatFilter] = useState<FormatFilter>("all");
 
   useEffect(() => {
-    fetch("/coverage-data.json")
+    fetch(__COVERAGE_DATA_URL__)
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();

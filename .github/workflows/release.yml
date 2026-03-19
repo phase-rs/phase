@@ -50,10 +50,30 @@ jobs:
         run: ./scripts/build-wasm.sh release
 
       - name: Build frontend
+        env:
+          CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/card-data.json"
+          COVERAGE_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/coverage-data.json"
         run: |
           cd client
           pnpm install --frozen-lockfile
           pnpm build
+
+      - name: Upload card data to R2
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: r2 object put phase-rs-data/card-data.json --file client/public/card-data.json --content-type application/json --remote
+
+      - name: Upload coverage data to R2
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: r2 object put phase-rs-data/coverage-data.json --file client/public/coverage-data.json --content-type application/json --remote
+
+      - name: Remove large data files from dist (served from R2)
+        run: rm -f client/dist/card-data.json client/dist/coverage-data.json
 
       - name: Upload frontend artifact
         uses: actions/upload-artifact@v4

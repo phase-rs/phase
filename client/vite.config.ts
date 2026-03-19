@@ -35,7 +35,7 @@ export default defineConfig({
         maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
         runtimeCaching: [
           {
-            urlPattern: /\/card-data\.json$/,
+            urlPattern: /card-data\.json$/,
             handler: "CacheFirst",
             options: {
               cacheName: "card-database",
@@ -66,6 +66,12 @@ export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(process.env.npm_package_version ?? "0.1.0"),
     __BUILD_HASH__: JSON.stringify(gitHash()),
+    __CARD_DATA_URL__: JSON.stringify(
+      process.env.CARD_DATA_URL || "/card-data.json",
+    ),
+    __COVERAGE_DATA_URL__: JSON.stringify(
+      process.env.COVERAGE_DATA_URL || "/coverage-data.json",
+    ),
   },
   build: {
     target: "esnext",

@@ -47,7 +47,7 @@ function ensureWasmInit(): Promise<void> {
 async function ensureCardDatabase(): Promise<void> {
   if (!cardDbLoadPromise) {
     cardDbLoadPromise = (async () => {
-      const response = await fetch("/card-data.json");
+      const response = await fetch(__CARD_DATA_URL__);
       if (!response.ok) {
         throw new Error(`Failed to load card-data.json (${response.status})`);
       }
