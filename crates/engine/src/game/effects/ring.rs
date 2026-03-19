@@ -101,8 +101,7 @@ mod tests {
     #[test]
     fn ring_tempts_emits_effect_resolved_event() {
         let mut state = GameState::new_two_player(42);
-        let ability =
-            ResolvedAbility::new(Effect::RingTemptsYou, vec![], ObjectId(1), PlayerId(0));
+        let ability = ResolvedAbility::new(Effect::RingTemptsYou, vec![], ObjectId(1), PlayerId(0));
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -119,8 +118,7 @@ mod tests {
     #[test]
     fn ring_level_caps_at_four() {
         let mut state = GameState::new_two_player(42);
-        let ability =
-            ResolvedAbility::new(Effect::RingTemptsYou, vec![], ObjectId(1), PlayerId(0));
+        let ability = ResolvedAbility::new(Effect::RingTemptsYou, vec![], ObjectId(1), PlayerId(0));
 
         // Tempt 5 times — level should cap at 4
         for _ in 0..5 {
@@ -167,8 +165,7 @@ mod tests {
     #[test]
     fn ring_tempts_no_creatures_still_increments_level() {
         let mut state = GameState::new_two_player(42);
-        let ability =
-            ResolvedAbility::new(Effect::RingTemptsYou, vec![], ObjectId(1), PlayerId(0));
+        let ability = ResolvedAbility::new(Effect::RingTemptsYou, vec![], ObjectId(1), PlayerId(0));
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
