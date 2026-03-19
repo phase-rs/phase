@@ -3,12 +3,22 @@ use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
 use engine::types::match_config::MatchConfig;
 use engine::types::player::PlayerId;
+use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeckData {
     pub main_deck: Vec<String>,
     pub sideboard: Vec<String>,
+}
+
+/// AI seat configuration sent by the client when creating a game with AI opponents.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiSeatRequest {
+    pub seat_index: u8,
+    pub difficulty: AiDifficulty,
+    pub deck_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +58,8 @@ pub enum ClientMessage {
         player_count: u8,
         #[serde(default)]
         match_config: MatchConfig,
+        #[serde(default)]
+        ai_seats: Vec<AiSeatRequest>,
     },
     JoinGameWithPassword {
         game_code: String,
@@ -268,6 +280,7 @@ mod tests {
             timer_seconds: Some(60),
             player_count: 4,
             match_config: MatchConfig::default(),
+            ai_seats: vec![],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -549,6 +562,88 @@ mod tests {
             } => {
                 assert_eq!(player, PlayerId(0));
                 assert_eq!(remaining_seconds, 30);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn ai_seat_request_roundtrips() {
+        let req = AiSeatRequest {
+            seat_index: 1,
+            difficulty: AiDifficulty::Hard,
+            deck_name: Some("Mono Red".to_string()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: AiSeatRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.seat_index, 1);
+        assert_eq!(parsed.difficulty, AiDifficulty::Hard);
+        assert_eq!(parsed.deck_name, Some("Mono Red".to_string()));
+    }
+
+    #[test]
+    fn ai_seat_request_uses_camel_case_keys() {
+        let req = AiSeatRequest {
+            seat_index: 1,
+            difficulty: AiDifficulty::Medium,
+            deck_name: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("seatIndex").is_some());
+        assert!(json.get("deckName").is_some());
+        // Verify snake_case keys are NOT present
+        assert!(json.get("seat_index").is_none());
+        assert!(json.get("deck_name").is_none());
+    }
+
+    #[test]
+    fn create_game_with_settings_ai_seats_roundtrips() {
+        let msg = ClientMessage::CreateGameWithSettings {
+            deck: DeckData {
+                main_deck: vec!["Forest".to_string()],
+                sideboard: Vec::new(),
+            },
+            display_name: "Host".to_string(),
+            public: false,
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            match_config: MatchConfig::default(),
+            ai_seats: vec![AiSeatRequest {
+                seat_index: 1,
+                difficulty: AiDifficulty::VeryHard,
+                deck_name: None,
+            }],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::CreateGameWithSettings { ai_seats, .. } => {
+                assert_eq!(ai_seats.len(), 1);
+                assert_eq!(ai_seats[0].seat_index, 1);
+                assert_eq!(ai_seats[0].difficulty, AiDifficulty::VeryHard);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn create_game_with_settings_missing_ai_seats_defaults_to_empty() {
+        let json = r#"{
+          "type":"CreateGameWithSettings",
+          "data":{
+            "deck":{"main_deck":["Forest"],"sideboard":[]},
+            "display_name":"Alice",
+            "public":true,
+            "password":null,
+            "timer_seconds":null,
+            "player_count":2
+          }
+        }"#;
+        let parsed: ClientMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            ClientMessage::CreateGameWithSettings { ai_seats, .. } => {
+                assert!(ai_seats.is_empty());
             }
             _ => panic!("wrong variant"),
         }

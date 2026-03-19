@@ -459,29 +459,75 @@ async fn handle_client_message(
             };
 
             debug!(game = %game_code, player = ?identity.player_id, action = ?action, "Action");
-            let mut mgr = state.lock().await;
-            match mgr.handle_action(&game_code, &player_token, action) {
-                Ok((filtered_states, events, legal_actions)) => {
-                    debug!(game = %game_code, events = events.len(), "action applied");
-                    let session = mgr.sessions.get(&game_code).unwrap();
-                    let actor = server_core::acting_player(&session.state.waiting_for);
-                    let eliminated = session.state.eliminated_players.clone();
 
-                    let conns = connections.lock().await;
-                    if let Some(players) = conns.get(&game_code) {
-                        for (pid, pstate) in &filtered_states {
-                            if let Some(s) = players.get(pid) {
-                                let player_legals = if actor == Some(*pid) {
-                                    legal_actions.clone()
-                                } else {
-                                    vec![]
-                                };
-                                let _ = s.send(ServerMessage::StateUpdate {
-                                    state: pstate.clone(),
-                                    events: events.clone(),
-                                    legal_actions: player_legals,
-                                    eliminated_players: eliminated.clone(),
-                                });
+            // Apply human action and collect AI follow-up results while holding the lock
+            let action_result = {
+                let mut mgr = state.lock().await;
+                match mgr.handle_action(&game_code, &player_token, action) {
+                    Ok(human_result) => {
+                        // Run AI follow-up actions
+                        let ai_results = match mgr.sessions.get_mut(&game_code) {
+                            Some(session) => session.run_ai_and_filter(),
+                            None => vec![],
+                        };
+                        let session = mgr.sessions.get(&game_code).unwrap();
+                        let actor = server_core::acting_player(&session.state.waiting_for);
+                        let eliminated = session.state.eliminated_players.clone();
+                        Ok((human_result, ai_results, actor, eliminated))
+                    }
+                    Err(e) => Err(e),
+                }
+            }; // lock dropped
+
+            match action_result {
+                Ok(((filtered_states, events, legal_actions), ai_results, actor, eliminated)) => {
+                    debug!(game = %game_code, events = events.len(), "action applied");
+
+                    // Broadcast human action result
+                    {
+                        let conns = connections.lock().await;
+                        if let Some(players) = conns.get(&game_code) {
+                            for (pid, pstate) in &filtered_states {
+                                if let Some(s) = players.get(pid) {
+                                    let player_legals =
+                                        if ai_results.is_empty() && actor == Some(*pid) {
+                                            legal_actions.clone()
+                                        } else {
+                                            // AI will act next — don't send legal actions yet
+                                            vec![]
+                                        };
+                                    let _ = s.send(ServerMessage::StateUpdate {
+                                        state: pstate.clone(),
+                                        events: events.clone(),
+                                        legal_actions: player_legals,
+                                        eliminated_players: eliminated.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    // Broadcast AI follow-up results with delays
+                    for (i, result) in ai_results.iter().enumerate() {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        let (ai_filtered, ai_events, ai_legal) = result;
+                        let is_last = i == ai_results.len() - 1;
+                        let conns = connections.lock().await;
+                        if let Some(players) = conns.get(&game_code) {
+                            for (pid, pstate) in ai_filtered {
+                                if let Some(s) = players.get(pid) {
+                                    let player_legals = if is_last && actor == Some(*pid) {
+                                        ai_legal.clone()
+                                    } else {
+                                        vec![]
+                                    };
+                                    let _ = s.send(ServerMessage::StateUpdate {
+                                        state: pstate.clone(),
+                                        events: ai_events.clone(),
+                                        legal_actions: player_legals,
+                                        eliminated_players: eliminated.clone(),
+                                    });
+                                }
                             }
                         }
                     }
@@ -501,63 +547,106 @@ async fn handle_client_message(
             player_token,
         } => {
             info!(game = %game_code, "Reconnect attempt");
-            let mut mgr = state.lock().await;
-            match mgr.handle_reconnect(&game_code, &player_token) {
-                Ok(filtered_state) => {
-                    let session = mgr.sessions.get(&game_code).unwrap();
-                    let player = session.player_for_token(&player_token).unwrap();
-                    let player_names = session.display_names.clone();
 
-                    // Find first opponent name for backward compat
-                    let opponent_name = engine::game::players::opponents(&session.state, player)
-                        .first()
-                        .and_then(|&opp| {
-                            let name = &session.display_names[opp.0 as usize];
-                            if name.is_empty() {
-                                None
-                            } else {
-                                Some(name.clone())
-                            }
-                        });
+            // Extract all data while holding the lock, then send messages after
+            let reconnect_result = {
+                let mut mgr = state.lock().await;
+                match mgr.handle_reconnect(&game_code, &player_token) {
+                    Ok(filtered_state) => {
+                        let session = mgr.sessions.get_mut(&game_code).unwrap();
+                        let player = session.player_for_token(&player_token).unwrap();
+                        let player_names = session.display_names.clone();
 
-                    let legal_actions_all = engine_legal_actions(&session.state);
-                    let actor = server_core::acting_player(&session.state.waiting_for);
-                    let player_legals = if actor == Some(player) {
-                        legal_actions_all
-                    } else {
-                        vec![]
-                    };
+                        let opponent_name =
+                            engine::game::players::opponents(&session.state, player)
+                                .first()
+                                .and_then(|&opp| {
+                                    let name = &session.display_names[opp.0 as usize];
+                                    if name.is_empty() {
+                                        None
+                                    } else {
+                                        Some(name.clone())
+                                    }
+                                });
 
+                        let legal_actions_all = engine_legal_actions(&session.state);
+                        let actor = server_core::acting_player(&session.state.waiting_for);
+                        let player_legals = if actor == Some(player) {
+                            legal_actions_all
+                        } else {
+                            vec![]
+                        };
+
+                        let game_started_msg = ServerMessage::GameStarted {
+                            state: filtered_state,
+                            your_player: player,
+                            opponent_name,
+                            player_names,
+                            legal_actions: player_legals,
+                        };
+
+                        // Run AI follow-up if AI is next to act after reconnect
+                        let ai_results = session.run_ai_and_filter();
+
+                        Ok((player, game_started_msg, ai_results))
+                    }
+                    Err(e) => Err(e),
+                }
+            }; // lock dropped
+
+            match reconnect_result {
+                Ok((player, game_started_msg, ai_results)) => {
                     info!(game = %game_code, player = ?player, "reconnect succeeded");
                     identity.game_code = Some(game_code.clone());
                     identity.player_id = Some(player);
                     identity.player_token = Some(player_token);
 
-                    let mut conns = connections.lock().await;
-                    conns
-                        .entry(game_code.clone())
-                        .or_default()
-                        .insert(player, tx.clone());
+                    {
+                        let mut conns = connections.lock().await;
+                        conns
+                            .entry(game_code.clone())
+                            .or_default()
+                            .insert(player, tx.clone());
 
-                    let msg = ServerMessage::GameStarted {
-                        state: filtered_state,
-                        your_player: player,
-                        opponent_name,
-                        player_names,
-                        legal_actions: player_legals,
-                    };
-                    if let Ok(json) = serde_json::to_string(&msg) {
+                        // Notify all other players about the reconnection
+                        let reconnect_msg = ServerMessage::OpponentReconnected {
+                            player: Some(player),
+                        };
+                        if let Some(game_conns) = conns.get(&game_code) {
+                            for (&pid, sender) in game_conns.iter() {
+                                if pid != player {
+                                    let _ = sender.send(reconnect_msg.clone());
+                                }
+                            }
+                        }
+                    }
+
+                    if let Ok(json) = serde_json::to_string(&game_started_msg) {
                         let _ = socket.send(Message::text(json)).await;
                     }
 
-                    // Notify all other players about the reconnection
-                    let reconnect_msg = ServerMessage::OpponentReconnected {
-                        player: Some(player),
-                    };
-                    if let Some(game_conns) = conns.get(&game_code) {
-                        for (&pid, sender) in game_conns.iter() {
-                            if pid != player {
-                                let _ = sender.send(reconnect_msg.clone());
+                    // Broadcast AI follow-up results with delays
+                    for result in ai_results {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        let (filtered_states, events, legal_actions) = result;
+                        let actor = {
+                            let mgr = state.lock().await;
+                            let session = mgr.sessions.get(&game_code).unwrap();
+                            server_core::acting_player(&session.state.waiting_for)
+                        };
+                        for (pid, pstate) in &filtered_states {
+                            if *pid == player {
+                                let player_legals = if actor == Some(*pid) {
+                                    legal_actions.clone()
+                                } else {
+                                    vec![]
+                                };
+                                let _ = tx.send(ServerMessage::StateUpdate {
+                                    state: pstate.clone(),
+                                    events: events.clone(),
+                                    legal_actions: player_legals,
+                                    eliminated_players: vec![],
+                                });
                             }
                         }
                     }
@@ -605,6 +694,7 @@ async fn handle_client_message(
             timer_seconds,
             player_count: requested_player_count,
             match_config,
+            ai_seats,
         } => {
             info!(
                 display_name = %display_name,
@@ -612,6 +702,7 @@ async fn handle_client_message(
                 has_password = password.is_some(),
                 timer = ?timer_seconds,
                 deck_size = deck.main_deck.len(),
+                ai_seats = ai_seats.len(),
                 "CreateGameWithSettings"
             );
             let resolved = match resolve_deck(db, &deck) {
@@ -626,51 +717,148 @@ async fn handle_client_message(
                 }
             };
 
-            let mut mgr = state.lock().await;
-            let pc = requested_player_count.clamp(2, 6);
-            let (game_code, player_token) = mgr.create_game_n_players(
-                resolved,
-                display_name.clone(),
-                timer_seconds,
-                pc,
-                match_config,
-            );
-            info!(game = %game_code, host = %display_name, players = pc, "game created via lobby");
+            if !ai_seats.is_empty() {
+                // --- AI game path: create, start, and run initial AI actions ---
+                let ai_requests: Vec<_> = ai_seats
+                    .iter()
+                    .map(|s| (s.seat_index, s.difficulty, resolved.clone()))
+                    .collect();
 
-            identity.game_code = Some(game_code.clone());
-            identity.player_id = Some(PlayerId(0));
-            identity.player_token = Some(player_token.clone());
+                let (game_code, player_token, game_started_msg, ai_results) = {
+                    let mut mgr = state.lock().await;
+                    let (game_code, player_token) = mgr.create_game_with_ai(
+                        resolved,
+                        display_name.clone(),
+                        timer_seconds,
+                        match_config,
+                        ai_requests,
+                        db.card_names(),
+                    );
 
-            let mut conns = connections.lock().await;
-            conns
-                .entry(game_code.clone())
-                .or_default()
-                .insert(PlayerId(0), tx.clone());
+                    let session = mgr.sessions.get_mut(&game_code).unwrap();
+                    let legal_actions = engine_legal_actions(&session.state);
+                    let actor = server_core::acting_player(&session.state.waiting_for);
+                    let player_names = session.display_names.clone();
 
-            let mut lob = lobby.lock().await;
-            lob.register_game(&game_code, display_name, public, password, timer_seconds);
+                    let host_legals = if actor == Some(PlayerId(0)) {
+                        legal_actions
+                    } else {
+                        vec![]
+                    };
+                    let host_state =
+                        server_core::filter_state_for_player(&session.state, PlayerId(0));
 
-            let msg = ServerMessage::GameCreated {
-                game_code: game_code.clone(),
-                player_token,
-            };
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
-            }
+                    let game_started_msg = ServerMessage::GameStarted {
+                        state: host_state,
+                        your_player: PlayerId(0),
+                        opponent_name: Some(session.display_names[1].clone()),
+                        player_names,
+                        legal_actions: host_legals,
+                    };
 
-            if public {
-                let games = lob.public_games();
-                if let Some(game) = games.into_iter().find(|g| g.game_code == game_code) {
-                    broadcast_to_lobby_subscribers(
-                        lobby_subscribers,
-                        ServerMessage::LobbyGameAdded { game },
-                    )
-                    .await;
+                    let ai_results = session.run_ai_and_filter();
+                    (game_code, player_token, game_started_msg, ai_results)
+                }; // lock dropped
+
+                identity.game_code = Some(game_code.clone());
+                identity.player_id = Some(PlayerId(0));
+                identity.player_token = Some(player_token.clone());
+
+                {
+                    let mut conns = connections.lock().await;
+                    conns
+                        .entry(game_code.clone())
+                        .or_default()
+                        .insert(PlayerId(0), tx.clone());
                 }
-            }
 
-            let count = player_count.load(Ordering::Relaxed);
-            broadcast_player_count(lobby_subscribers, count).await;
+                // Send GameCreated, then GameStarted (no lobby registration for AI games)
+                let created_msg = ServerMessage::GameCreated {
+                    game_code: game_code.clone(),
+                    player_token,
+                };
+                if let Ok(json) = serde_json::to_string(&created_msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                if let Ok(json) = serde_json::to_string(&game_started_msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+
+                // Broadcast initial AI actions (e.g. mulligan decisions) with delays
+                for result in ai_results {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    let (filtered_states, events, legal_actions) = result;
+                    let actor = {
+                        let mgr = state.lock().await;
+                        let session = mgr.sessions.get(&game_code).unwrap();
+                        server_core::acting_player(&session.state.waiting_for)
+                    };
+                    for (pid, pstate) in &filtered_states {
+                        if *pid == PlayerId(0) {
+                            let player_legals = if actor == Some(*pid) {
+                                legal_actions.clone()
+                            } else {
+                                vec![]
+                            };
+                            let _ = tx.send(ServerMessage::StateUpdate {
+                                state: pstate.clone(),
+                                events: events.clone(),
+                                legal_actions: player_legals,
+                                eliminated_players: vec![],
+                            });
+                        }
+                    }
+                }
+
+                info!(game = %game_code, host = %display_name, "AI game started");
+            } else {
+                // --- Standard multiplayer path ---
+                let mut mgr = state.lock().await;
+                let pc = requested_player_count.clamp(2, 6);
+                let (game_code, player_token) = mgr.create_game_n_players(
+                    resolved,
+                    display_name.clone(),
+                    timer_seconds,
+                    pc,
+                    match_config,
+                );
+                info!(game = %game_code, host = %display_name, players = pc, "game created via lobby");
+
+                identity.game_code = Some(game_code.clone());
+                identity.player_id = Some(PlayerId(0));
+                identity.player_token = Some(player_token.clone());
+
+                let mut conns = connections.lock().await;
+                conns
+                    .entry(game_code.clone())
+                    .or_default()
+                    .insert(PlayerId(0), tx.clone());
+
+                let mut lob = lobby.lock().await;
+                lob.register_game(&game_code, display_name, public, password, timer_seconds);
+
+                let msg = ServerMessage::GameCreated {
+                    game_code: game_code.clone(),
+                    player_token,
+                };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+
+                if public {
+                    let games = lob.public_games();
+                    if let Some(game) = games.into_iter().find(|g| g.game_code == game_code) {
+                        broadcast_to_lobby_subscribers(
+                            lobby_subscribers,
+                            ServerMessage::LobbyGameAdded { game },
+                        )
+                        .await;
+                    }
+                }
+
+                let count = player_count.load(Ordering::Relaxed);
+                broadcast_player_count(lobby_subscribers, count).await;
+            }
         }
 
         ClientMessage::JoinGameWithPassword {

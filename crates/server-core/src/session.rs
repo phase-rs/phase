@@ -10,13 +10,14 @@ use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::match_config::MatchConfig;
 use engine::types::player::PlayerId;
+use phase_ai::config::{AiConfig, AiDifficulty, Platform};
 use rand::Rng;
 
 use crate::filter::filter_state_for_player;
 use crate::reconnect::ReconnectManager;
 
 /// Result of handling a game action: per-player filtered states, events, and legal actions.
-type ActionResult = (Vec<(PlayerId, GameState)>, Vec<GameEvent>, Vec<GameAction>);
+pub type ActionResult = (Vec<(PlayerId, GameState)>, Vec<GameEvent>, Vec<GameAction>);
 
 /// Returns the player who must act for the given WaitingFor, or None if the game is over.
 pub fn acting_player(waiting_for: &WaitingFor) -> Option<PlayerId> {
@@ -36,6 +37,8 @@ pub struct GameSession {
     pub player_count: u8,
     /// Seats controlled by AI (not occupied by a human player).
     pub ai_seats: HashSet<PlayerId>,
+    /// Per-AI-player configuration (difficulty, search params, etc.).
+    pub ai_configs: HashMap<PlayerId, AiConfig>,
 }
 
 impl GameSession {
@@ -47,14 +50,48 @@ impl GameSession {
             .map(|i| PlayerId(i as u8))
     }
 
-    /// Returns the first unclaimed seat index, if any.
+    /// Returns the first unclaimed human seat index, if any.
+    /// AI seats are skipped — humans cannot join an AI-controlled seat.
     pub fn first_open_seat(&self) -> Option<usize> {
-        self.player_tokens.iter().position(|t| t.is_empty())
+        self.player_tokens
+            .iter()
+            .enumerate()
+            .position(|(i, t)| t.is_empty() && !self.ai_seats.contains(&PlayerId(i as u8)))
     }
 
-    /// Returns true if all seats are claimed.
+    /// Returns true if all seats are claimed (by humans or AI).
     pub fn is_full(&self) -> bool {
-        self.player_tokens.iter().all(|t| !t.is_empty())
+        self.player_tokens
+            .iter()
+            .enumerate()
+            .all(|(i, t)| !t.is_empty() || self.ai_seats.contains(&PlayerId(i as u8)))
+    }
+
+    /// Run AI actions and return per-action broadcast data.
+    ///
+    /// Each entry contains: per-player filtered states, events, and legal actions.
+    /// Returns an empty vec if the session has no AI seats.
+    pub fn run_ai_and_filter(&mut self) -> Vec<ActionResult> {
+        if self.ai_seats.is_empty() {
+            return vec![];
+        }
+
+        let ai_results =
+            phase_ai::auto_play::run_ai_actions(&mut self.state, &self.ai_seats, &self.ai_configs);
+
+        ai_results
+            .into_iter()
+            .map(|r| {
+                let filtered: Vec<(PlayerId, GameState)> = (0..self.player_count)
+                    .map(|i| {
+                        let pid = PlayerId(i);
+                        (pid, filter_state_for_player(&self.state, pid))
+                    })
+                    .collect();
+                let legal = engine_legal_actions(&self.state);
+                (filtered, r.events, legal)
+            })
+            .collect()
     }
 }
 
@@ -138,6 +175,7 @@ impl SessionManager {
             timer_seconds,
             player_count,
             ai_seats: HashSet::new(),
+            ai_configs: HashMap::new(),
         };
 
         self.token_to_game
@@ -214,6 +252,74 @@ impl SessionManager {
         if let Some(session) = self.sessions.get_mut(game_code) {
             session.state.all_card_names = names;
         }
+    }
+
+    /// Create a game with AI opponents. Returns (game_code, player_token) for the host.
+    ///
+    /// The host occupies seat 0. AI players are placed in the requested seats with
+    /// their decks, configs, and display names. The game starts immediately.
+    pub fn create_game_with_ai(
+        &mut self,
+        host_deck: PlayerDeckPayload,
+        display_name: String,
+        timer_seconds: Option<u32>,
+        match_config: MatchConfig,
+        ai_requests: Vec<(u8, AiDifficulty, PlayerDeckPayload)>,
+        card_names: Vec<String>,
+    ) -> (String, String) {
+        let total_players = 1 + ai_requests.len() as u8;
+        let (game_code, player_token) = self.create_game_n_players(
+            host_deck,
+            display_name,
+            timer_seconds,
+            total_players,
+            match_config,
+        );
+
+        let session = self.sessions.get_mut(&game_code).unwrap();
+        for (seat_index, difficulty, deck) in &ai_requests {
+            let seat = *seat_index as usize;
+            session.display_names[seat] = format!("AI ({difficulty:?})");
+            session.connected[seat] = true;
+            session.decks[seat] = Some(deck.clone());
+            let pid = PlayerId(*seat_index);
+            session.ai_seats.insert(pid);
+            let config = phase_ai::config::create_config_for_players(
+                *difficulty,
+                Platform::Native,
+                total_players,
+            );
+            session.ai_configs.insert(pid, config);
+        }
+
+        // Build DeckPayload: seat 0 → player, seat 1 → opponent, seats 2+ → ai_decks
+        let player_deck = session.decks[0].clone().unwrap_or(PlayerDeckPayload {
+            main_deck: Vec::new(),
+            sideboard: Vec::new(),
+        });
+        let opponent_deck = session.decks[1].clone().unwrap_or(PlayerDeckPayload {
+            main_deck: Vec::new(),
+            sideboard: Vec::new(),
+        });
+        let ai_decks: Vec<PlayerDeckPayload> = session.decks[2..]
+            .iter()
+            .map(|d| {
+                d.clone().unwrap_or(PlayerDeckPayload {
+                    main_deck: Vec::new(),
+                    sideboard: Vec::new(),
+                })
+            })
+            .collect();
+        let payload = DeckPayload {
+            player: player_deck,
+            opponent: opponent_deck,
+            ai_decks,
+        };
+        load_deck_into_state(&mut session.state, &payload);
+        session.state.all_card_names = card_names;
+        let _result = start_game(&mut session.state);
+
+        (game_code, player_token)
     }
 
     /// Handle a game action from a player.

@@ -1,3 +1,4 @@
+pub mod auto_play;
 pub mod card_hints;
 pub mod combat_ai;
 pub mod config;

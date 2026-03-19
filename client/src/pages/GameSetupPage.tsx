@@ -241,7 +241,10 @@ export function GameSetupPage() {
             "phase-ws-session",
             JSON.stringify({ gameCode: data.game_code, playerToken: data.player_token }),
           );
-          setStep("waiting");
+          // AI games get GameStarted immediately — skip the waiting step
+          if (!settings.aiSeats.length) {
+            setStep("waiting");
+          }
         } else if (msg.type === "GameStarted") {
           ws.close();
           hostWsRef.current = null;

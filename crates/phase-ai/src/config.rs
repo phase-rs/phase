@@ -1,7 +1,9 @@
+use serde::{Deserialize, Serialize};
+
 use crate::eval::EvalWeights;
 
 /// AI difficulty level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum AiDifficulty {
     VeryEasy,
     Easy,
@@ -468,5 +470,21 @@ mod tests {
     fn player_count_stored_in_config() {
         let config = create_config_for_players(AiDifficulty::Medium, Platform::Native, 4);
         assert_eq!(config.player_count, 4);
+    }
+
+    #[test]
+    fn ai_difficulty_serde_roundtrips() {
+        let difficulties = [
+            AiDifficulty::VeryEasy,
+            AiDifficulty::Easy,
+            AiDifficulty::Medium,
+            AiDifficulty::Hard,
+            AiDifficulty::VeryHard,
+        ];
+        for diff in &difficulties {
+            let json = serde_json::to_string(diff).unwrap();
+            let parsed: AiDifficulty = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, *diff);
+        }
     }
 }
