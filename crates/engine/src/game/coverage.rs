@@ -294,6 +294,13 @@ fn fmt_quantity(q: &QuantityExpr) -> String {
     match q {
         QuantityExpr::Fixed { value } => value.to_string(),
         QuantityExpr::Ref { qty } => format!("{qty:?}"),
+        QuantityExpr::HalfRounded { inner, rounding } => {
+            let dir = match rounding {
+                crate::types::ability::RoundingMode::Up => "up",
+                crate::types::ability::RoundingMode::Down => "down",
+            };
+            format!("half({}, rounded {})", fmt_quantity(inner), dir)
+        }
     }
 }
 
@@ -625,6 +632,19 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         }
         Effect::FlipCoinUntilLose { .. } => {
             d.push(("mode".into(), "until lose".into()));
+        }
+        Effect::MoveCounters {
+            source,
+            counter_type,
+            target,
+        } => {
+            d.push(("source".into(), fmt_target(source)));
+            if let Some(ct) = counter_type {
+                d.push(("counter".into(), ct.clone()));
+            } else {
+                d.push(("counter".into(), "all".into()));
+            }
+            d.push(("target".into(), fmt_target(target)));
         }
         Effect::Unimplemented { .. }
         | Effect::Explore

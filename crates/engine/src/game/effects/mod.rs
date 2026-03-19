@@ -106,6 +106,7 @@ pub fn resolve_effect(
         Effect::ChooseCard { .. } => choose_card::resolve(state, ability, events),
         Effect::PutCounter { .. } => counters::resolve_add(state, ability, events),
         Effect::MultiplyCounter { .. } => counters::resolve_multiply(state, ability, events),
+        Effect::MoveCounters { .. } => counters::resolve_move(state, ability, events),
         Effect::Animate { .. } => animate::resolve(state, ability, events),
         Effect::GenericEffect { .. } => effect::resolve(state, ability, events),
         Effect::Cleanup { .. } => cleanup::resolve(state, ability, events),
@@ -186,6 +187,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&crate::types::abilit
         | Effect::AddCounter { target, .. }
         | Effect::RemoveCounter { target, .. }
         | Effect::PutCounter { target, .. }
+        | Effect::MoveCounters { target, .. }
         | Effect::ChangeZone { target, .. }
         | Effect::RevealHand { target, .. }
         | Effect::Fight { target, .. }

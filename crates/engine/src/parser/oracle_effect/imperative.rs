@@ -5,7 +5,8 @@ use super::types::*;
 use crate::parser::oracle_static::parse_continuous_modifications;
 use crate::types::ability::{
     ContinuousModification, Duration, Effect, GainLifePlayer, PaymentCost, PreventionAmount,
-    PreventionScope, PtValue, QuantityExpr, StaticDefinition, TargetFilter,
+    PreventionScope, PtValue, QuantityExpr, QuantityRef, RoundingMode, StaticDefinition,
+    TargetFilter,
 };
 use crate::types::zones::Zone;
 
@@ -39,8 +40,13 @@ pub(super) fn parse_numeric_imperative_ast(
     }
 
     if lower.contains("lose") && lower.contains("life") {
+        if let Some(expr) = try_parse_half_life_amount(lower) {
+            return Some(NumericImperativeAst::LoseLife { amount: expr });
+        }
         let amount = super::extract_number_before(lower, "life").unwrap_or(1) as i32;
-        return Some(NumericImperativeAst::LoseLife { amount });
+        return Some(NumericImperativeAst::LoseLife {
+            amount: QuantityExpr::Fixed { value: amount },
+        });
     }
 
     if lower.contains("gets +")
@@ -74,6 +80,42 @@ pub(super) fn parse_numeric_imperative_ast(
     None
 }
 
+/// CR 107.2: Parse "half [possessive] life, rounded up/down" → `HalfRounded` expression.
+/// General building block for halving life total expressions.
+fn try_parse_half_life_amount(lower: &str) -> Option<QuantityExpr> {
+    // Match "lose half their life, rounded up" / "lose half your life, rounded up"
+    let after_lose = lower
+        .strip_prefix("lose ")
+        .or_else(|| lower.strip_prefix("loses "))?
+        .trim();
+    let after_half = after_lose.strip_prefix("half ")?;
+
+    // Determine whose life total
+    let qty =
+        if after_half.starts_with("their life") || after_half.starts_with("that player's life") {
+            QuantityRef::TargetLifeTotal
+        } else if after_half.starts_with("your life") || after_half.starts_with("his or her life") {
+            QuantityRef::LifeTotal
+        } else {
+            return None;
+        };
+
+    // Parse rounding direction
+    let rounding = if lower.contains("rounded up") {
+        RoundingMode::Up
+    } else if lower.contains("rounded down") {
+        RoundingMode::Down
+    } else {
+        // Default to up per most MTG cards using "half life"
+        RoundingMode::Up
+    };
+
+    Some(QuantityExpr::HalfRounded {
+        inner: Box::new(QuantityExpr::Ref { qty }),
+        rounding,
+    })
+}
+
 pub(super) fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect {
     match ast {
         NumericImperativeAst::Draw { count } => Effect::Draw {
@@ -85,9 +127,7 @@ pub(super) fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect 
             amount: QuantityExpr::Fixed { value: amount },
             player: GainLifePlayer::Controller,
         },
-        NumericImperativeAst::LoseLife { amount } => Effect::LoseLife {
-            amount: QuantityExpr::Fixed { value: amount },
-        },
+        NumericImperativeAst::LoseLife { amount } => Effect::LoseLife { amount },
         NumericImperativeAst::Pump { power, toughness } => Effect::Pump {
             power,
             toughness,
@@ -1043,6 +1083,23 @@ pub(super) fn parse_zone_counter_ast(text: &str, lower: &str) -> Option<ZoneCoun
         return Some(ast);
     }
     if lower.starts_with("put ") && lower.contains("counter") {
+        // Try move-counters first ("put its counters on ...")
+        if let Some((
+            Effect::MoveCounters {
+                source,
+                counter_type,
+                target,
+            },
+            _rem,
+        )) = super::counter::try_parse_move_counters(lower, text)
+        {
+            return Some(ZoneCounterImperativeAst::MoveCounters {
+                source,
+                counter_type,
+                target,
+            });
+        }
+        // Then fixed-count put ("put N counter(s) on ...")
         return match try_parse_put_counter(lower, text) {
             Some((
                 Effect::PutCounter {
@@ -1136,6 +1193,15 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
         } => Effect::RemoveCounter {
             counter_type,
             count,
+            target,
+        },
+        ZoneCounterImperativeAst::MoveCounters {
+            source,
+            counter_type,
+            target,
+        } => Effect::MoveCounters {
+            source,
+            counter_type,
             target,
         },
     }

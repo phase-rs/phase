@@ -6,7 +6,9 @@
 
 use crate::game::filter::matches_target_filter_controlled;
 use crate::game::game_object::parse_counter_type;
-use crate::types::ability::{PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef};
+use crate::types::ability::{
+    PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, TargetRef,
+};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -24,6 +26,10 @@ pub fn resolve_quantity(
     match expr {
         QuantityExpr::Fixed { value } => *value,
         QuantityExpr::Ref { qty } => resolve_ref(state, qty, controller, source_id, &[]),
+        QuantityExpr::HalfRounded { inner, rounding } => {
+            let base = resolve_quantity(state, inner, controller, source_id);
+            half_rounded(base, *rounding)
+        }
     }
 }
 
@@ -44,6 +50,18 @@ pub fn resolve_quantity_with_targets(
             ability.source_id,
             &ability.targets,
         ),
+        QuantityExpr::HalfRounded { inner, rounding } => {
+            let base = resolve_quantity_with_targets(state, inner, ability);
+            half_rounded(base, *rounding)
+        }
+    }
+}
+
+/// CR 107.2: Divide by 2, rounding in the specified direction.
+fn half_rounded(value: i32, rounding: RoundingMode) -> i32 {
+    match rounding {
+        RoundingMode::Up => (value + 1) / 2,
+        RoundingMode::Down => value / 2,
     }
 }
 
@@ -97,6 +115,19 @@ fn resolve_ref(
                 .and_then(|obj| obj.power)
                 .unwrap_or(0)
         }
+        QuantityRef::TargetLifeTotal => {
+            // CR 119.3 + CR 107.2: Find the first player target and return their life total.
+            targets
+                .iter()
+                .find_map(|t| {
+                    if let TargetRef::Player(pid) = t {
+                        state.players.iter().find(|p| p.id == *pid)
+                    } else {
+                        None
+                    }
+                })
+                .map_or(0, |p| p.life)
+        }
     }
 }
 
@@ -126,7 +157,7 @@ mod tests {
     use super::*;
     use crate::game::game_object::CounterType;
     use crate::game::zones::create_object;
-    use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
+    use crate::types::ability::{ControllerRef, Effect, TargetFilter, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::zones::Zone;
@@ -294,5 +325,56 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 2);
+    }
+
+    #[test]
+    fn half_rounded_up_even() {
+        let state = GameState::new_two_player(42);
+        let expr = QuantityExpr::HalfRounded {
+            inner: Box::new(QuantityExpr::Fixed { value: 20 }),
+            rounding: crate::types::ability::RoundingMode::Up,
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
+            10
+        );
+    }
+
+    #[test]
+    fn half_rounded_up_odd() {
+        let state = GameState::new_two_player(42);
+        let expr = QuantityExpr::HalfRounded {
+            inner: Box::new(QuantityExpr::Fixed { value: 7 }),
+            rounding: crate::types::ability::RoundingMode::Up,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 4);
+    }
+
+    #[test]
+    fn half_rounded_down_odd() {
+        let state = GameState::new_two_player(42);
+        let expr = QuantityExpr::HalfRounded {
+            inner: Box::new(QuantityExpr::Fixed { value: 7 }),
+            rounding: crate::types::ability::RoundingMode::Down,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 3);
+    }
+
+    #[test]
+    fn resolve_target_life_total() {
+        let state = GameState::new_two_player(42);
+        // Player 1 starts at 20 life
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::TargetLifeTotal,
+        };
+        let ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: expr.clone(),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 20);
     }
 }

@@ -691,6 +691,7 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
         | Effect::AddCounter { target, .. }
         | Effect::RemoveCounter { target, .. }
         | Effect::PutCounter { target, .. }
+        | Effect::MoveCounters { target, .. }
         | Effect::Transform { target, .. }
         | Effect::RevealHand { target, .. }
         | Effect::PreventDamage { target, .. } => {

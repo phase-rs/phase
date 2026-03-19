@@ -97,3 +97,31 @@ pub(super) fn normalize_counter_type(raw: &str) -> String {
         other => other.to_string(),
     }
 }
+
+/// CR 121.5: Parse "put its counters on [target]" → MoveCounters effect.
+/// "its" / "this creature's" are possessive pronouns referring to the ability source.
+pub(super) fn try_parse_move_counters<'a>(lower: &str, text: &'a str) -> Option<(Effect, &'a str)> {
+    let after_put = lower.strip_prefix("put ")?.trim();
+    // Detect "its counters" / "this creature's counters"
+    let after_possessive = after_put
+        .strip_prefix("its counter")
+        .or_else(|| after_put.strip_prefix("this creature's counter"))?;
+    // Skip past optional "s" (counter vs counters) then expect " on "
+    let after_counters = after_possessive
+        .strip_prefix('s')
+        .unwrap_or(after_possessive);
+    let after_on = after_counters.strip_prefix(" on ")?;
+
+    // Compute byte offset into original `text` for parse_target.
+    let offset_in_text = text.len() - after_on.len();
+    let (target, remainder) = parse_target(&text[offset_in_text..]);
+
+    Some((
+        Effect::MoveCounters {
+            source: TargetFilter::SelfRef,
+            counter_type: None,
+            target,
+        },
+        remainder,
+    ))
+}

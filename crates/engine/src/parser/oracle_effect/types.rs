@@ -188,7 +188,7 @@ pub(super) enum NumericImperativeAst {
         amount: i32,
     },
     LoseLife {
-        amount: i32,
+        amount: QuantityExpr,
     },
     Pump {
         power: crate::types::ability::PtValue,
@@ -361,6 +361,12 @@ pub(super) enum ZoneCounterImperativeAst {
     RemoveCounter {
         counter_type: String,
         count: i32,
+        target: TargetFilter,
+    },
+    /// CR 121.5: "Put its counters on [target]" — copy all counters from source to target.
+    MoveCounters {
+        source: TargetFilter,
+        counter_type: Option<String>,
         target: TargetFilter,
     },
 }

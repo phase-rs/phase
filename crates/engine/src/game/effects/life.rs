@@ -209,12 +209,9 @@ pub fn resolve_lose(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let amount: i32 = match &ability.effect {
-        Effect::LoseLife { amount } => crate::game::quantity::resolve_quantity(
-            state,
-            amount,
-            ability.controller,
-            ability.source_id,
-        ),
+        Effect::LoseLife { amount } => {
+            crate::game::quantity::resolve_quantity_with_targets(state, amount, ability)
+        }
         _ => return Err(EffectError::MissingParam("LoseLife amount".to_string())),
     };
 

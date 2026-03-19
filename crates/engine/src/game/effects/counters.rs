@@ -180,6 +180,73 @@ fn resolve_defined_or_targets(
         .collect()
 }
 
+/// CR 121.5: Read counters from source and put equivalent counters on target.
+/// Does NOT remove counters from source — per official rulings, "put its counters on"
+/// creates new counters matching the source's counter state.
+pub fn resolve_move(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    // Read source counters (clone — we never remove from source)
+    let source_counters = state
+        .objects
+        .get(&ability.source_id)
+        .map(|obj| obj.counters.clone())
+        .unwrap_or_default();
+
+    if source_counters.is_empty() {
+        // No counters to copy — no-op
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
+    // Filter by counter_type if specified
+    let counter_type_filter = match &ability.effect {
+        Effect::MoveCounters { counter_type, .. } => counter_type.as_deref(),
+        _ => None,
+    };
+
+    // Resolve destination target
+    let dest_ids: Vec<_> = ability
+        .targets
+        .iter()
+        .filter_map(|t| {
+            if let TargetRef::Object(id) = t {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for dest_id in dest_ids {
+        for (ct, &count) in &source_counters {
+            if count == 0 {
+                continue;
+            }
+            // Filter by type if specified
+            if let Some(type_filter) = counter_type_filter {
+                let ct_name = format!("{ct:?}");
+                if !ct_name.eq_ignore_ascii_case(type_filter) {
+                    continue;
+                }
+            }
+            add_counter_with_replacement(state, dest_id, ct.clone(), count, events);
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+    });
+
+    Ok(())
+}
+
 /// Remove counters from target objects, clamping at 0.
 pub fn resolve_remove(
     state: &mut GameState,

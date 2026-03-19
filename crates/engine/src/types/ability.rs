@@ -849,6 +849,15 @@ pub enum QuantityRef {
     Variable { name: String },
     /// The power of the targeted permanent. Used for "equal to target's power".
     TargetPower,
+    /// CR 119.3 + CR 107.2: The life total of the targeted player.
+    TargetLifeTotal,
+}
+
+/// CR 107.2: Rounding direction for "half X" expressions in Magic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum RoundingMode {
+    Up,
+    Down,
 }
 
 /// A filter matching players by game-state conditions.
@@ -874,6 +883,11 @@ pub enum QuantityExpr {
     Ref { qty: QuantityRef },
     /// A literal integer constant.
     Fixed { value: i32 },
+    /// CR 107.2: "Half X, rounded up/down" — divides the inner expression by 2.
+    HalfRounded {
+        inner: Box<QuantityExpr>,
+        rounding: RoundingMode,
+    },
 }
 
 /// Comparison operator used in static conditions.
@@ -1369,6 +1383,18 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 121.5: Put counters from source onto target.
+    MoveCounters {
+        /// Where counters are read from (SelfRef = ability source object).
+        #[serde(default = "default_target_filter_self_ref")]
+        source: TargetFilter,
+        /// When Some, only move this counter type. When None, move all counters.
+        #[serde(default)]
+        counter_type: Option<String>,
+        /// Where counters go.
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
     Animate {
         #[serde(default)]
         power: Option<i32>,
@@ -1672,6 +1698,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ChooseCard { .. } => "ChooseCard",
         Effect::PutCounter { .. } => "PutCounter",
         Effect::MultiplyCounter { .. } => "MultiplyCounter",
+        Effect::MoveCounters { .. } => "MoveCounters",
         Effect::Animate { .. } => "Animate",
         Effect::GenericEffect { .. } => "Effect",
         Effect::Cleanup { .. } => "Cleanup",
@@ -1753,6 +1780,7 @@ pub enum EffectKind {
     ChooseCard,
     PutCounter,
     MultiplyCounter,
+    MoveCounters,
     Animate,
     GenericEffect,
     Cleanup,
@@ -1831,6 +1859,7 @@ impl From<&Effect> for EffectKind {
             Effect::ChooseCard { .. } => EffectKind::ChooseCard,
             Effect::PutCounter { .. } => EffectKind::PutCounter,
             Effect::MultiplyCounter { .. } => EffectKind::MultiplyCounter,
+            Effect::MoveCounters { .. } => EffectKind::MoveCounters,
             Effect::Animate { .. } => EffectKind::Animate,
             Effect::GenericEffect { .. } => EffectKind::GenericEffect,
             Effect::Cleanup { .. } => EffectKind::Cleanup,
