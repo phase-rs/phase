@@ -256,10 +256,12 @@ impl SessionManager {
             _ => {}
         }
 
-        // SetAutoPass: skip legality check (always legal when you have priority)
-        let is_set_auto_pass = matches!(action, GameAction::SetAutoPass { .. });
-        if !is_set_auto_pass {
-            // Validate action is legal
+        // Mana abilities skip the legal_actions pre-check — they are excluded from
+        // legal_actions() for auto-pass purposes but validated by apply() directly.
+        // SetAutoPass also skips (always legal when you have priority).
+        let skip_legality =
+            action.is_mana_ability() || matches!(action, GameAction::SetAutoPass { .. });
+        if !skip_legality {
             let legal_actions = engine_legal_actions(&session.state);
             if !legal_actions.contains(&action) {
                 return Err(format!("Illegal action: {:?}", action));

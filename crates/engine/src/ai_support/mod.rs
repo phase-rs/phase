@@ -18,17 +18,17 @@ pub fn validated_candidate_actions(state: &GameState) -> Vec<CandidateAction> {
         .collect()
 }
 
+/// Returns the legal actions for the current game state, excluding mana abilities.
+///
+/// Mana abilities (CR 605.3a) are omitted because they do not represent meaningful
+/// priority decisions — the frontend derives land tappability from game state.
+/// The AI uses `candidate_actions()` which includes them.
 pub fn legal_actions(state: &GameState) -> Vec<GameAction> {
     validated_candidate_actions(state)
         .into_iter()
         .map(|candidate| candidate.action)
+        .filter(|action| !action.is_mana_ability())
         .collect()
-}
-
-/// Returns true if the legal actions contain any action that should prevent
-/// auto-passing priority (i.e., a meaningful game decision beyond mana abilities).
-pub fn has_priority_holding_actions(actions: &[GameAction]) -> bool {
-    actions.iter().any(|a| a.is_priority_holding())
 }
 
 #[cfg(test)]

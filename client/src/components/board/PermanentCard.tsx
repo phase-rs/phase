@@ -46,16 +46,30 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   );
   const waitingFor = useGameStore((s) => s.waitingFor);
 
-  // Primitive count — stable reference for glow ring, no infinite loop
-  const activatableCount = useGameStore((s) => {
+  // Check if this permanent has activatable non-mana abilities from legal actions
+  const hasActivatableAbility = useGameStore((s) => {
     const wf = s.waitingFor;
-    if (!wf || wf.type !== "Priority" || wf.data.player !== playerId) return 0;
-    return s.legalActions.filter((a) =>
-      (a.type === "ActivateAbility" && a.data.source_id === objectId) ||
-      (a.type === "TapLandForMana" && a.data.object_id === objectId),
-    ).length;
+    if (!wf || wf.type !== "Priority" || wf.data.player !== playerId) return false;
+    return s.legalActions.some((a) =>
+      a.type === "ActivateAbility" && a.data.source_id === objectId,
+    );
   });
-  const isActivatable = activatableCount > 0;
+
+  // Land tappability derived from game state — no need for legal_actions
+  const canTapForMana = useGameStore((s) => {
+    const wf = s.waitingFor;
+    if (!wf) return false;
+    // Mana abilities are legal during priority and mana payment
+    const isPlayerActing =
+      (wf.type === "Priority" && wf.data.player === playerId) ||
+      (wf.type === "ManaPayment" && wf.data.player === playerId) ||
+      (wf.type === "UnlessPayment" && wf.data.player === playerId);
+    if (!isPlayerActing) return false;
+    const o = s.gameState?.objects[objectId];
+    return !!o && !o.tapped && o.controller === playerId
+      && o.card_types.core_types.includes("Land");
+  });
+  const isActivatable = hasActivatableAbility || canTapForMana;
 
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
   const cardRef = useRef<HTMLDivElement | null>(null);
@@ -163,14 +177,25 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
     } else if (isValidTarget) {
       dispatchAction({ type: "ChooseTarget", data: { target: { Object: objectId } } });
     } else if (isActivatable) {
-      const actions = useGameStore.getState().legalActions.filter((a) =>
-        (a.type === "ActivateAbility" && a.data.source_id === objectId) ||
-        (a.type === "TapLandForMana" && a.data.object_id === objectId),
+      const abilityActions = useGameStore.getState().legalActions.filter((a) =>
+        a.type === "ActivateAbility" && a.data.source_id === objectId,
       );
-      if (actions.length === 1) {
-        dispatchAction(actions[0]);
+      if (abilityActions.length === 0 && canTapForMana) {
+        // No non-mana abilities — tap for mana directly
+        dispatchAction({ type: "TapLandForMana", data: { object_id: objectId } });
+      } else if (abilityActions.length === 1 && !canTapForMana) {
+        dispatchAction(abilityActions[0]);
       } else {
-        setPendingAbilityChoice({ objectId, actions });
+        // Multiple abilities or both ability + mana — show choice modal
+        const allActions = [...abilityActions];
+        if (canTapForMana) {
+          allActions.push({ type: "TapLandForMana", data: { object_id: objectId } });
+        }
+        if (allActions.length === 1) {
+          dispatchAction(allActions[0]);
+        } else {
+          setPendingAbilityChoice({ objectId, actions: allActions });
+        }
       }
     } else if (isUndoableTap) {
       dispatchAction({ type: "UntapLandForMana", data: { object_id: objectId } });

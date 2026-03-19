@@ -106,49 +106,17 @@ pub enum GameAction {
 }
 
 impl GameAction {
-    /// Whether this action should prevent auto-passing priority.
+    /// CR 605.3a: Whether this action is a mana ability activation.
     ///
-    /// Mana abilities (CR 605.3a) are always legal during priority but do not
-    /// represent meaningful decisions on their own — tapping a land with nothing
-    /// to spend the mana on should not hold up the game. Similarly, PassPriority
-    /// and UI-only actions (SetAutoPass, CancelAutoPass) are never meaningful.
-    ///
-    /// Uses exhaustive match so new variants must explicitly opt in or out.
-    pub fn is_priority_holding(&self) -> bool {
-        match self {
-            // Non-holding: pass, mana abilities, and UI-only controls
-            GameAction::PassPriority
-            | GameAction::TapLandForMana { .. }
-            | GameAction::UntapLandForMana { .. }
-            | GameAction::SetAutoPass { .. }
-            | GameAction::CancelAutoPass => false,
-
-            // Holding: any action that represents a meaningful game decision
-            GameAction::PlayLand { .. }
-            | GameAction::CastSpell { .. }
-            | GameAction::ActivateAbility { .. }
-            | GameAction::DeclareAttackers { .. }
-            | GameAction::DeclareBlockers { .. }
-            | GameAction::MulliganDecision { .. }
-            | GameAction::SelectCards { .. }
-            | GameAction::SelectTargets { .. }
-            | GameAction::ChooseTarget { .. }
-            | GameAction::ChooseReplacement { .. }
-            | GameAction::CancelCast
-            | GameAction::Equip { .. }
-            | GameAction::Transform { .. }
-            | GameAction::PlayFaceDown { .. }
-            | GameAction::TurnFaceUp { .. }
-            | GameAction::SubmitSideboard { .. }
-            | GameAction::ChoosePlayDraw { .. }
-            | GameAction::ChooseOption { .. }
-            | GameAction::SelectModes { .. }
-            | GameAction::DecideOptionalCost { .. }
-            | GameAction::ChooseAdventureFace { .. }
-            | GameAction::ActivateNinjutsu { .. }
-            | GameAction::DecideOptionalEffect { .. }
-            | GameAction::PayUnlessCost { .. } => true,
-        }
+    /// Mana abilities are excluded from `legal_actions()` because they do not
+    /// represent meaningful priority decisions — the frontend derives land
+    /// tappability from game state directly. The engine's `apply()` validates
+    /// mana actions independently, so they bypass the server's pre-validation.
+    pub fn is_mana_ability(&self) -> bool {
+        matches!(
+            self,
+            GameAction::TapLandForMana { .. } | GameAction::UntapLandForMana { .. }
+        )
     }
 }
 

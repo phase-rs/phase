@@ -41,7 +41,7 @@ Lines are classified in this exact order. **The first match wins.** Understandin
 | 1 | Keywords-only line (comma-separated keywords) | Keyword extraction | `oracle.rs` |
 | 2 | `"Enchant {filter}"` | Skipped (handled externally) | — |
 | 3 | `"Equip {cost}"` / `"Equip — {cost}"` | `try_parse_equip()` | `oracle.rs` |
-| 4 | `"Choose one/two —"` (modal) | Bullet point parsing | `oracle.rs` |
+| 4 | `"Choose one/two —"` (modal) | Bullet point parsing | `oracle_modal.rs` |
 | 5 | Planeswalker loyalty `[+N]/[-N]/[0]:` | `try_parse_loyalty_line()` | `oracle.rs` |
 | 6 | Contains `":"` with cost prefix | Activated ability: cost + `parse_effect_chain()` | `oracle_cost.rs` |
 | 7 | Starts with `"When"` / `"Whenever"` / `"At"` | `parse_trigger_line()` | `oracle_trigger.rs` |
@@ -73,85 +73,269 @@ Detects replacement effect text:
 
 ---
 
-## The Effect Parsing Pipeline
+## Deep Dive: The `oracle_effect/` Directory
 
-### `parse_effect_chain()` — `crates/engine/src/parser/oracle_effect/mod.rs`
-
-Handles multi-sentence abilities by splitting on `. ` and `, then ` boundaries:
+The `oracle_effect/` directory is the heart of the parser. It was split from a single file into 9 sub-modules for maintainability:
 
 ```
-"Exile target creature. Its controller gains 3 life."
-    ↓ split on ". "
-["Exile target creature", "Its controller gains 3 life"]
-    ↓ parse each via parse_effect_clause()
-[ChangeZone { destination: Exile }, GainLife { amount: 3 }]
-    ↓ chain via sub_ability
-ChangeZone { ..., sub_ability: Some(GainLife { ... }) }
+oracle_effect/
+├── mod.rs          — Main orchestrator: parse_effect_chain(), parse_effect_clause(), compound detection (~2700 lines)
+├── imperative.rs   — Imperative verb family parsing: parse_*_ast() and lower_*_ast() helpers (~890 lines)
+├── subject.rs      — Subject-predicate sentence parsing: try_parse_subject_predicate_ast() (~560 lines)
+├── sequence.rs     — Clause boundary splitting and continuation absorption (~290 lines)
+├── token.rs        — Token creation parsing: "create a 1/1 white Spirit token with flying" (~450 lines)
+├── animation.rs    — Animation/become effects: "becomes a 3/3 creature with flying" (~280 lines)
+├── counter.rs      — Counter mechanics: "put N +1/+1 counters on target" (~100 lines)
+├── mana.rs         — Mana production and spend restrictions: "add {W}{U}" (~365 lines)
+└── types.rs        — All AST type definitions (ClauseAst, ImperativeFamilyAst, etc.) (~370 lines)
 ```
 
-**Special compositional logic:**
-- **SearchLibrary**: Injects `ChangeZone` sub_ability for the destination ("put it into your hand")
-- **RevealHand**: Extracts card filter from follow-up sentence ("you may choose a nonland card")
-- **Mana restrictions**: Absorbs "Spend this mana only to cast..." sentences as `ManaSpendRestriction` on the preceding `Effect::Mana` (e.g., Cavern of Souls, Unclaimed Territory). Uses `parse_mana_spend_restriction()` helper.
-- **Counter side-static**: Absorbs follow-up text that augments `Effect::Counter { source_static }`
-- **Shuffle**: Parsed as its own imperative family and chained only when it is a real subsequent action
+### AST Type System — `oracle_effect/types.rs`
 
-### Clause AST + lowering
+The parser uses a two-phase architecture: **parse → AST → lower → Effect**. This separates sentence classification from Effect construction.
 
-Single clauses now go through an explicit parse/lower split:
+**Top-level clause classification — `ClauseAst`:**
+
+| Variant | Shape | Example |
+|---------|-------|---------|
+| `Imperative { text }` | Bare verb, no subject | "draw three cards" |
+| `SubjectPredicate { subject, predicate }` | Subject + verb | "target creature gets +2/+2" |
+| `Conditional { clause }` | Wrapped conditional | "if you control a creature, draw a card" |
+
+**Predicate types — `PredicateAst`:**
+
+| Variant | Detected by | Example |
+|---------|------------|---------|
+| `Continuous` | "gets/get", "has/have" | "gets +2/+2 and has flying" |
+| `Become` | "becomes" | "becomes a 3/3 creature" |
+| `Restriction` | "can't", "cannot" | "can't attack or block" |
+| `ImperativeFallback` | None of the above | Falls back to imperative parsing |
+
+**Imperative family dispatch — `ImperativeFamilyAst`:**
+
+| Variant | Sub-parser | Verb patterns |
+|---------|-----------|---------------|
+| `Structured(ImperativeAst)` | Multiple sub-types below | Most verbs |
+| `CostResource(CostResourceImperativeAst)` | `parse_cost_resource_ast()` | "add {mana}", "pay N life", "activate only if" |
+| `ZoneCounter(ZoneCounterImperativeAst)` | `parse_zone_counter_ast()` | "destroy", "exile", "counter", "put counter" |
+| `Shuffle(ShuffleImperativeAst)` | `parse_shuffle_ast()` | "shuffle", "shuffle into library" |
+| `Put(PutImperativeAst)` | `parse_put_ast()` | "put into/on top of" |
+| `Explore` | Direct match | "explore" |
+| `Proliferate` | Direct match | "proliferate" |
+| `YouMay { text }` | "you may" prefix | Wraps inner effect |
+
+**Structured imperative sub-categories — `ImperativeAst`:**
+
+| Variant | Sub-parser | Effect patterns |
+|---------|-----------|----------------|
+| `Numeric(NumericImperativeAst)` | `parse_numeric_imperative_ast()` | Draw, GainLife, LoseLife, Pump, Scry, Surveil, Mill |
+| `Targeted(TargetedImperativeAst)` | `parse_targeted_action_ast()` | Tap, Untap, Sacrifice, Discard, Return, Fight, GainControl |
+| `SearchCreation(SearchCreationImperativeAst)` | `parse_search_and_creation_ast()` | SearchLibrary, Dig, Token, CopyTokenOf |
+| `HandReveal(HandRevealImperativeAst)` | `parse_hand_reveal_ast()` | LookAtHand, RevealHand, RevealTop |
+| `Choose(ChooseImperativeAst)` | `parse_choose_ast()` | TargetOnly, NamedChoice, RevealHandFilter |
+| `Utility(UtilityImperativeAst)` | `parse_utility_imperative_ast()` | Prevent, Regenerate, Copy, Transform, Attach |
+
+**Supporting AST types:**
+
+| Type | Purpose | Used by |
+|------|---------|---------|
+| `TokenDescription` | Token metadata (name, P/T, colors, types, keywords, count) | Token creation |
+| `AnimationSpec` | Animation parameters (P/T, colors, keywords, types) | Become effects |
+| `SearchLibraryDetails` | Search filter, count, reveal flag | Search library |
+| `SubjectApplication` | Subject → TargetFilter mapping (affected + optional explicit target) | Subject-predicate parsing |
+| `ContinuationAst` | Follow-up phrase that modifies preceding effect | Sequence absorption |
+| `ClauseBoundary` | Sentence (`.`), Then (`, then`), Comma (`,`) | Clause splitting |
+| `ParsedEffectClause` | Parsing result: effect + duration + sub_ability | All clause parsing |
+
+### Clause Splitting & Continuations — `oracle_effect/sequence.rs`
+
+**`split_clause_sequence(text) -> Vec<ClauseChunk>`** splits multi-sentence text into independent clauses:
+
+- Splits on `.` (Sentence), `, then` (Then), and certain `,` boundaries (Comma)
+- Respects parentheses and quotes (won't split inside them)
+- Preserves possessive apostrophes (e.g., "player's")
+
+**Continuation absorption** is the mechanism where a follow-up clause modifies a preceding effect rather than creating a new sub_ability:
+
+| Pattern | Continuation type | What it does |
+|---------|------------------|-------------|
+| Search → "put into your hand" | `SearchDestination` | Appends ChangeZone sub_ability to SearchLibrary |
+| RevealHand → "choose a nonland card" | `RevealHandFilter` | Patches existing RevealHand's card filter |
+| Mana → "spend this mana only..." | `ManaRestriction` | Patches ManaSpendRestriction on Mana effect |
+| Counter → "that spell loses all abilities" | `CounterSourceStatic` | Patches source_static on Counter effect |
+| Token → "suspect it" | `SuspectLastCreated` | Appends Suspect sub_ability |
+
+Key functions:
+- `parse_followup_continuation_ast(text, previous_effect)` — Detects continuations based on the previous effect type
+- `parse_intrinsic_continuation_ast(text, effect)` — Detects continuations within the same clause
+- `continuation_absorbs_current(continuation, effect) -> bool` — Determines if continuation patches vs. chains
+- `apply_clause_continuation(defs, continuation)` — Applies the continuation to the ability chain
+
+### Subject-Predicate Parsing — `oracle_effect/subject.rs`
+
+**`try_parse_subject_predicate_ast(text) -> Option<ClauseAst>`** parses sentences with explicit subjects.
+
+**Subject parsing via `parse_subject_application(subject)`:**
+
+| Subject text | Result |
+|-------------|--------|
+| "target creature" | Explicit target with TargetFilter |
+| "all creatures", "each creature" | Mass filter (affects all matching) |
+| "~", "it", "this creature" | SelfRef |
+| "enchanted creature" | EnchantedCreature filter |
+| "equipped creature" | EquippedCreature filter |
+| "defending player" | DefendingPlayer filter |
+| "creatures you control" | Typed filter with controller: You |
+
+**Predicate parsing hierarchy:**
+1. `try_parse_subject_continuous_clause()` — "gets +X/+Y", "has keyword" → GenericEffect with ContinuousModification
+2. `try_parse_subject_become_clause()` — "becomes a 3/3 creature" → GenericEffect with animation modifications
+3. `try_parse_subject_restriction_clause()` — "can't attack or block" → AddRestriction effect
+4. Fallback: `strip_subject_clause()` + reparse as imperative
+
+### Imperative Family Parsing — `oracle_effect/imperative.rs`
+
+**`parse_imperative_family_ast(text, lower) -> Option<ImperativeFamilyAst>`** is the master dispatcher. It tries all families in this order:
+
+1. CostResource → 2. ZoneCounter → 3. Numeric → 4. Targeted → 5. SearchCreation → 6. Explore/Proliferate → 7. Shuffle → 8. HandReveal → 9. Choose → 10. Put → 11. YouMay
+
+Each `parse_*_ast()` returns an AST node, and each `lower_*_ast()` converts it to an `Effect`. **Detailed family reference:**
+
+#### `parse_numeric_imperative_ast()` — Numeric effects
+| Pattern | AST → Effect |
+|---------|-------------|
+| "draw N" | Draw { count } → Effect::Draw |
+| "gain N life" | GainLife { amount } → Effect::GainLife |
+| "lose N life" | LoseLife { amount } → Effect::LoseLife |
+| "gets +X/+Y" | Pump { power, toughness } → Effect::Pump |
+| "scry N" | Scry { count } → Effect::Scry |
+| "surveil N" | Surveil { count } → Effect::Surveil |
+| "mill N" | Mill { count } → Effect::Mill |
+
+#### `parse_zone_counter_ast()` — Zone changes and counters
+| Pattern | AST → Effect |
+|---------|-------------|
+| "destroy target/all" | Destroy → Effect::Destroy / DestroyAll |
+| "exile target/all" | Exile → Effect::ChangeZone / ChangeZoneAll |
+| "counter target" | Counter → Effect::Counter |
+| "put N counters on" | PutCounter → Effect::PutCounter (via `counter.rs`) |
+| "remove N counters from" | RemoveCounter → Effect::RemoveCounter (via `counter.rs`) |
+
+#### `parse_targeted_action_ast()` — Targeted actions
+| Pattern | AST → Effect |
+|---------|-------------|
+| "tap {target}" | Tap → Effect::TapUntap { tap: true } |
+| "untap {target}" | Untap → Effect::TapUntap { tap: false } |
+| "sacrifice {target}" | Sacrifice → Effect::Sacrifice |
+| "discard N" | Discard → Effect::Discard |
+| "return {target}" | Return → Effect::ChangeZone (to hand) |
+| "return {target} to battlefield" | ReturnToBattlefield → Effect::ChangeZone (to battlefield) |
+| "fight {target}" | Fight → Effect::Fight |
+| "gain control of {target}" | GainControl → Effect::GainControl |
+
+#### `parse_cost_resource_ast()` — Mana and cost patterns
+| Pattern | AST → Effect |
+|---------|-------------|
+| "add {mana}" | Mana → Effect::Mana (via `mana.rs`) |
+| "pay N life" | Pay { Life } → Effect::Pay |
+| "pay {mana}" | Pay { Mana } → Effect::Pay |
+| "activate only if" | ActivateOnlyIf → Effect::Unimplemented (placeholder) |
+| Damage patterns | Damage → Effect::DealDamage (via `try_parse_damage()` in `mod.rs`) |
+
+#### `parse_search_and_creation_ast()` — Search and tokens
+| Pattern | AST → Effect |
+|---------|-------------|
+| "search your library" | SearchLibrary → Effect::SearchLibrary |
+| "look at the top N" | Dig → Effect::Dig |
+| "create a/N {token desc}" | Token → Effect::Token (via `token.rs`) |
+| "token that's a copy of" | CopyTokenOf → Effect::CopyTokenOf |
+
+#### `parse_shuffle_ast()` — Shuffle variants
+| Pattern | AST → Effect |
+|---------|-------------|
+| "shuffle" (bare) | ShuffleLibrary → Effect::Shuffle |
+| "shuffle {noun} into library" | ChangeZoneToLibrary → Effect::ChangeZone + Shuffle |
+| "shuffle {possessive} graveyard" | ChangeZoneAllToLibrary → Effect::ChangeZoneAll + Shuffle |
+
+#### Other families
+- **`parse_hand_reveal_ast()`**: LookAtHand, RevealHand, RevealTop
+- **`parse_choose_ast()`**: TargetOnly (choose-as-targeting), NamedChoice (creature type/color/etc.), RevealHandFilter
+- **`parse_put_ast()`**: Mill (put top N into graveyard), ZoneChange, TopOfLibrary
+- **`parse_utility_imperative_ast()`**: Prevent, Regenerate, Copy, Transform, Attach
+
+### Token Parsing — `oracle_effect/token.rs`
+
+Parses "create a 1/1 white Spirit creature token with flying" into `TokenDescription`:
+
+1. Count prefix: "a" → 1, "two" → 2, "X" → Variable
+2. P/T prefix: "1/1", "X/X" (variable), "*/*" (star)
+3. Supertypes: "legendary"
+4. Colors: "white", "blue", etc.
+5. Type + subtype: "Spirit creature", "Treasure artifact"
+6. Name clause: optional named tokens (e.g., "named Shard")
+7. Keywords: "with flying and vigilance"
+8. "where X is" expressions → variable P/T or count
+9. "for each ... this way" → TrackedSetSize count
+
+### Animation Parsing — `oracle_effect/animation.rs`
+
+Parses "becomes a 3/3 creature with flying" into `AnimationSpec` → `Vec<ContinuousModification>`:
+
+- Fixed P/T: "3/3" → SetPower(3), SetToughness(3)
+- Colors: "white", "red and green" → SetColor
+- Types: "creature", "artifact creature" → AddType/AddSubtype
+- Keywords: "with flying, vigilance" → AddKeyword
+- "loses all other abilities" → RemoveAllAbilities
+
+### Counter Parsing — `oracle_effect/counter.rs`
+
+- `try_parse_put_counter(lower, text)` — "put N +1/+1 counter(s) on {target}"
+- `try_parse_remove_counter(lower)` — "remove N counter(s) from {target}"
+- Counter type normalization: "+1/+1" → "P1P1", "-1/-1" → "M1M1"
+
+### Mana Parsing — `oracle_effect/mana.rs`
+
+- `try_parse_add_mana_effect(text)` — "add {W}{U}", "add {C}", "add one mana of any color"
+  - Handles: Fixed symbols, Colorless, AnyOneColor, AnyCombination, ChosenColor
+- `parse_mana_spend_restriction(lower)` — "spend this mana only to cast creature spells"
+- `try_parse_activate_only_condition(text)` — "activate only if you control a Plains"
+
+### Compound Action Detection — `oracle_effect/mod.rs`
+
+**`try_split_targeted_compound(text)`** — Detects `"verb target X and verb2 it"`:
+- Uses `parse_target()` remainder to find the split point
+- If second clause has anaphoric pronoun ("it", "them"), inherits parent target via `replace_target_with_parent()`
+
+**`try_parse_compound_shuffle(text)`** — Special case for `"shuffle X and Y into libraries"`:
+- Creates two ChangeZone effects (primary + sub_ability)
+
+### Special-Case Matchers in `parse_effect_clause()` — `oracle_effect/mod.rs`
+
+These run before the AST pipeline:
+
+| Matcher | Pattern | Effect |
+|---------|---------|--------|
+| `try_parse_damage_prevention_disabled()` | "damage can't be prevented this turn" | GenericEffect + DamagePreventionDisabled |
+| `try_parse_still_a_type()` | "it's still a land" | GenericEffect + AddType |
+| `try_parse_for_each_effect()` | "draw a card for each creature" | Effect with QuantityExpr::Ref |
+| `try_parse_equal_to_quantity_effect()` | "mill cards equal to hand size" | Effect with QuantityExpr |
+
+---
+
+## The Two-Phase Parse/Lower Architecture
+
+Single clauses go through an explicit parse/lower split:
 
 ```rust
-parse_effect_clause()
-  -> parse_clause_ast()
-  -> lower_clause_ast()
-  -> lower_imperative_clause()
-  -> parse_imperative_effect()
-  -> parse_imperative_family_ast()
-  -> lower_imperative_family_ast()
+parse_effect_clause()                    // mod.rs — entry point
+  → parse_clause_ast()                   // mod.rs — classify sentence shape
+  → lower_clause_ast()                   // mod.rs — convert AST to Effect
+    → lower_subject_predicate_ast()      // mod.rs — for SubjectPredicate clauses
+    → lower_imperative_clause()          // mod.rs — for Imperative clauses
+      → parse_imperative_effect()        // mod.rs — try special cases, then delegate
+        → parse_imperative_family_ast()  // imperative.rs — classify verb family
+        → lower_imperative_family_ast()  // imperative.rs — convert to Effect
 ```
-
-`parse_imperative_family_ast()` groups related patterns before lowering:
-
-- `CostResource`
-- `ZoneCounter`
-- `Numeric`
-- `Targeted`
-- `SearchCreation`
-- `HandReveal`
-- `Choose`
-- `Utility`
-- `Shuffle`
-- `Put`
-- `YouMay`
-
-When adding a pattern, first decide whether it belongs in an existing family. Only add a new family when the sentence shape is genuinely different.
-
-### `parse_effect_clause()` — `oracle_effect/mod.rs`
-
-Current processing order:
-
-1. Strip leading sequence connectors / trailing period
-2. Strip leading duration: `"until end of turn, X"` → recurse on `X`
-3. Build `ClauseAst`
-4. Lower the AST
-5. For imperative clauses, strip trailing duration and lower through imperative-family parsing
-
-### `parse_imperative_effect()` — `oracle_effect/mod.rs`
-
-`parse_imperative_effect()` still owns the imperative fallback, but most work now belongs in the typed `parse_*_ast()` helpers under `parse_imperative_family_ast()` in `oracle_effect/imperative.rs`.
-
-Use these registration points (all in `oracle_effect/imperative.rs`):
-
-- `parse_numeric_imperative_ast()` — draw/gain-life/lose-life/pump/scry/surveil/mill
-- `parse_zone_counter_ast()` — destroy/exile/counter/put-counter
-- `parse_cost_resource_ast()` — mana, damage, "activate only" restrictions
-- `parse_targeted_action_ast()` — tap/untap/sacrifice/discard/return/fight/gain control
-- `parse_search_and_creation_ast()` — search/dig/token creation/copy-token-of
-- `parse_hand_reveal_ast()` — look/reveal-hand / reveal-top
-- `parse_choose_ast()` — named choice / choose-as-targeting / reveal-hand follow-up filters
-- `parse_put_ast()` — "put ... into/on top of ..."
-- `parse_shuffle_ast()` — shuffle / move back to library
-- `parse_utility_imperative_ast()` — attach/copy/transform-like fallbacks
 
 ---
 
@@ -164,30 +348,20 @@ Use these registration points (all in `oracle_effect/imperative.rs`):
 `strip_subject_clause()` (in `oracle_effect/subject.rs`) is now a fallback helper, not the primary sentence model. The parser first tries to build a `SubjectPredicate` AST via `try_parse_subject_predicate_ast()` (also in `subject.rs`); only the fallback path strips the grammatical subject and lowers the remainder as an imperative.
 
 ```
-"Target creature gets +2/+2"  →  "gets +2/+2"
-"You draw three cards"         →  "draw three cards"
-"Its controller gains 3 life"  →  "gains 3 life"  ← PROBLEM
+"Target creature gets +2/+2"  →  SubjectPredicate AST → Continuous predicate
+"You draw three cards"         →  SubjectPredicate fails → strip "You" → imperative "draw three cards"
+"Its controller gains 3 life"  →  INTERCEPTED by try_parse_targeted_controller_gain_life()
 ```
 
 ### Why it's dangerous
 
-Subject stripping **discards semantic information**. In the third example, we lose the fact that it's the *controller* who gains life, not the spell's caster. After stripping, "gains 3 life" defaults to the caster.
+Subject stripping **discards semantic information**. "Its controller gains 3 life" would lose the fact that it's the *controller* who gains life, not the spell's caster.
 
 ### The `try_parse_*` intercept pattern
 
 **If the subject carries game-relevant information, preserve it before falling back to `strip_subject_clause()`.**
 
-Today the main preserved case is still `try_parse_targeted_controller_gain_life()`, which runs in `lower_imperative_clause()` before fallback subject stripping:
-
-```rust
-if let Some(effect) = try_parse_targeted_controller_gain_life(text) {
-    return Some(effect);  // Preserved: who gains life + amount source
-}
-// THEN fall back to stripping subject if needed
-if let Some(predicate) = strip_subject_clause(text) {
-    return parse_effect_clause(predicate, card_types);
-}
-```
+`try_parse_targeted_controller_gain_life()` (in `subject.rs`) runs in `lower_imperative_clause()` (in `mod.rs`) before fallback subject stripping.
 
 **When to add a `try_parse_*` interceptor:**
 - The subject determines WHO is affected (controller, owner, opponent)
@@ -207,24 +381,13 @@ if let Some(predicate) = strip_subject_clause(text) {
 **`parse_target(text) → Option<(TargetFilter, &str)>`**
 Consumes "target ..." from text, returns the filter and remaining text.
 
-- `"target creature"` → `Typed { card_type: Creature, ... }`
-- `"target opponent"` → `Typed { controller: Opponent, ... }`
-- `"target creature you control"` → adds controller filter
-- `"target creature with power 2 or less"` → adds `FilterProp::PowerLE(2)`
-
 **`parse_type_phrase(text) → TargetFilter`**
-Parses complex type descriptions without the "target" prefix.
-
-- Handles color prefixes: "white creature"
-- "non" prefixes: "nonland permanent"
-- "or" combinations: "creature or artifact" → distributes controller
-- Power/toughness constraints: "with power 2 or less"
-- Zone suffixes: "card from a graveyard" → `FilterProp::InZone { Graveyard }`, "card in your graveyard" → `InZone { Graveyard }` + `controller: You`
+Parses complex type descriptions without the "target" prefix. Handles color prefixes, "non" prefixes, "or" combinations, power/toughness constraints, and zone suffixes.
 
 **`parse_zone_suffix(text) → Option<(FilterProp, Option<ControllerRef>, usize)>`**
-Detects zone qualifiers after a type phrase. Handles possessive ("from your graveyard"), indefinite ("from a graveyard"), and direct ("from exile") forms for all non-battlefield zones. Skips optional "card"/"cards" before zone prepositions. When `InZone` is present in the filter, `find_legal_targets` searches ONLY that zone exclusively.
+Detects zone qualifiers after a type phrase. When `InZone` is present in the filter, `find_legal_targets` searches ONLY that zone exclusively.
 
-### `oracle_util.rs` — Shared Utilities
+### `oracle_util.rs` — Shared Utilities & Phrase Matching
 
 | Function | What it does | Use when |
 |----------|-------------|----------|
@@ -234,13 +397,7 @@ Detects zone qualifiers after a type phrase. Handles possessive ("from your grav
 | `contains_possessive(text)` | Matches "your"/"their"/"its owner's" | Zone references: "into your hand" |
 | `starts_with_possessive(text)` | Same, anchored at start | Subject detection |
 | `contains_object_pronoun(text)` | Matches "it"/"them"/"that card"/"those cards" | Anaphoric references in compound effects |
-
-### `oracle_util.rs` — Phrase Matching
-
-**`match_phrase_variants(text, phrases) → bool`**
-Shared backbone for phrase helpers. Normalizes and checks against a list of patterns.
-
-All phrase helpers (`contains_possessive`, `contains_object_pronoun`, etc.) are built on this function. If you need a new phrase helper, implement it via `match_phrase_variants()` in `oracle_util.rs` rather than duplicating normalization logic.
+| `match_phrase_variants(text, phrases)` | Shared backbone for all phrase helpers | Building new phrase matchers |
 
 ---
 
@@ -257,67 +414,47 @@ Getting this wrong produces **silent** failures:
 - Possessive forms that fall to `parse_target` → no target found → `Unimplemented`
 - Targeting forms that match `contains_possessive` → skip targeting phase entirely → wrong player affected
 
-**Rule of thumb:**
-- "your/their/its" → `contains_possessive()` → no targeting needed
-- "target X's" → `parse_target()` → requires targeting phase (goes on stack, player selects)
-
 ---
 
 ## Checklist — Adding a New Parser Pattern
 
 ### Phase 1 — Identify Where It Belongs
 
-Determine which parser module handles your text:
-
-- **Imperative verb/family** ("exile", "draw", "create", "choose", "put", "shuffle") → the relevant `parse_*_ast()` helper in `oracle_effect/`
-- **Subject + predicate** ("Target creature gets...") → `try_parse_*` or subject stripping in `oracle_effect/`
-- **Trigger** ("When/Whenever/At") → `parse_trigger_line()` in `oracle_trigger.rs`
-- **Static** ("has/gets/can't") → `parse_static_line()` in `oracle_static.rs`
-- **Replacement** ("As enters", "instead") → `parse_replacement()` in `oracle_replacement.rs`
-- **New gate in is_static/is_replacement_pattern** → `oracle.rs`
+- **Imperative verb/family** → the relevant `parse_*_ast()` in `oracle_effect/imperative.rs`
+- **Subject + predicate** → `try_parse_subject_*` in `oracle_effect/subject.rs`
+- **Token creation** → `oracle_effect/token.rs`
+- **Animation/become** → `oracle_effect/animation.rs`
+- **Counter mechanics** → `oracle_effect/counter.rs`
+- **Mana production** → `oracle_effect/mana.rs`
+- **Continuation/absorption** → `oracle_effect/sequence.rs`
+- **Trigger** → `parse_trigger_line()` in `oracle_trigger.rs`
+- **Static** → `parse_static_line()` in `oracle_static.rs`
+- **Replacement** → `parse_replacement()` in `oracle_replacement.rs`
+- **Routing gate** → `is_static_pattern()` / `is_replacement_pattern()` in `oracle.rs`
 
 ### Phase 2 — Add the Pattern
 
-- [ ] **Write the parser test FIRST** — the pattern you're matching, the expected output:
-  ```rust
-  #[test]
-  fn effect_your_new_pattern() {
-      let e = parse_effect("your oracle text here");
-      assert!(matches!(e, Effect::YourEffect { field: expected, .. }));
-  }
-  ```
-
-- [ ] **Add the pattern match** in the appropriate function. Place it at the right priority position:
-  - More specific patterns go BEFORE more general ones
-  - Check existing order to avoid shadowing
-
-- [ ] **Use existing helpers** — before writing string manipulation:
-  - `parse_target()` for "target X" phrases
-  - `parse_number()` for count extraction
-  - `contains_possessive()` / `contains_object_pronoun()` for pronoun detection
-  - `parse_type_phrase()` for card type descriptions
-  - `strip_reminder_text()` should already be done by caller
+- [ ] **Write the parser test FIRST**
+- [ ] **Add the pattern match** — more specific patterns go BEFORE more general ones
+- [ ] **Use existing helpers** — `parse_target()`, `parse_number()`, `contains_possessive()`, `parse_type_phrase()`
 
 ### Phase 3 — Handle the Subject (if predicate pattern)
 
-- [ ] **Decide: intercept or strip?**
-  - Does the subject carry game-relevant info? → Preserve it before fallback subject stripping
-  - Is the subject just "you" or boilerplate? → Let subject stripping handle it
+- [ ] **Decide: intercept or strip?** — Does the subject carry game-relevant info? → add `try_parse_*` in `subject.rs`
 
 ### Phase 4 — Chain Composition (if multi-sentence)
 
-- [ ] **Check `parse_effect_chain()` for special handling**
-  If your pattern commonly appears in multi-sentence abilities with compositional behavior (like SearchLibrary → ChangeZone → Shuffle), add composition logic in `parse_effect_chain()`.
+- [ ] **Check continuation system in `sequence.rs`** — for follow-up clauses that modify preceding effects
+- [ ] **Check `parse_effect_chain()` in `mod.rs`** — for special chaining behavior
 
 ### Phase 5 — Routing (if new category)
 
-- [ ] **`oracle.rs` — `is_static_pattern()` or `is_replacement_pattern()`**
-  If your text is being routed to the wrong parser (e.g., a static ability falling through to effect parsing), add a detection pattern.
+- [ ] **`oracle.rs` — `is_static_pattern()` or `is_replacement_pattern()`** — if text is routed to the wrong parser
 
 ### Phase 6 — Tests & Verification
 
 - [ ] Parser unit tests for each new pattern
-- [ ] Snapshot test: `crates/engine/tests/oracle_parser.rs` — verify card abilities parse correctly
+- [ ] Snapshot test: `crates/engine/tests/oracle_parser.rs`
 - [ ] `cargo coverage` — check that Unimplemented count decreased
 - [ ] `cargo test -p engine && cargo clippy --all-targets -- -D warnings`
 
@@ -325,27 +462,16 @@ Determine which parser module handles your text:
 
 ## Adding a New Phrase Helper
 
-If you need to detect a new recurring phrase pattern:
-
-1. Identify the phrase variants (e.g., "sacrifice a creature", "sacrifice a permanent", "sacrifices a")
+1. Identify the phrase variants
 2. Implement via `match_phrase_variants()` in `oracle_util.rs`
 3. Export from the module and use in parsers
 4. Add tests for all variants
-
-**Do not** copy-paste string matching logic — use `match_phrase_variants()` to get normalization for free.
 
 ---
 
 ## `~` Normalization
 
-Before parsing, card names and self-references are replaced with `~`:
-
-```
-"Put a +1/+1 counter on Ajani's Pridemate" → "Put a +1/+1 counter on ~"
-"This creature gets +1/+1"                  → "~ gets +1/+1"
-```
-
-All parsers receive `~`-normalized text. `parse_target()` maps `~` → `TargetFilter::SelfRef` automatically.
+Before parsing, card names and self-references are replaced with `~`. All parsers receive `~`-normalized text. `parse_target()` maps `~` → `TargetFilter::SelfRef` automatically.
 
 ---
 
@@ -356,11 +482,11 @@ All parsers receive `~`-normalized text. `parse_target()` maps `~` → `TargetFi
 | Pattern too broad, shadows existing match | Existing cards break, wrong Effect produced | Place specific patterns before general ones; test existing patterns still work |
 | Using `parse_target` for possessive forms | No target found → Unimplemented | Use `contains_possessive()` → `Controller` |
 | Using `contains_possessive` for targeting forms | Targeting phase skipped, wrong player affected | Use `parse_target()` → full targeting |
-| Not stripping reminder text | Parenthesized text breaks pattern matching | `strip_reminder_text()` is called by the entry point — verify your caller does it |
 | Hardcoding amount as 1 instead of `parse_number()` | "Draw three cards" parses as draw 1 | Always use `parse_number()` for count extraction |
-| Subject carries info but gets stripped | "Its controller gains life" → caster gains life | Preserve the subject before fallback subject stripping |
-| Added pattern to wrong AST family | Text lowers to the wrong `Effect` or misses continuation absorption | Register it in the smallest matching `parse_*_ast()` helper |
-| Not checking `parse_effect_chain()` composition | "Search... put into hand... shuffle" parses as 3 separate abilities instead of chained | Add composition logic in `parse_effect_chain()` |
+| Subject carries info but gets stripped | "Its controller gains life" → caster gains life | Preserve via `try_parse_*` in `subject.rs` |
+| Added pattern to wrong AST family | Text lowers to the wrong `Effect` or misses continuation | Register in the smallest matching `parse_*_ast()` in `imperative.rs` |
+| Not checking continuation system | "Search... put into hand... shuffle" parses as 3 separate abilities | Add continuation logic in `sequence.rs` |
+| Editing `mod.rs` when sub-module is the right place | Bloats the orchestrator | Token → `token.rs`, mana → `mana.rs`, counters → `counter.rs` |
 | Returning `Unimplemented` with misleading `name` | Coverage report miscategorizes the gap | Use the actual verb as `name`, full text as `description` |
 
 ---
@@ -371,8 +497,8 @@ After completing work using this skill:
 
 1. **Verify references** with the check below
 2. **Update the priority table** if parsing order changed
-3. **Update the AST family guidance** if new imperative families or continuation absorptions were added
-4. **Add new phrase helpers** to the helper module table
+3. **Update the AST family tables** if new imperative families or continuation absorptions were added
+4. **Update the deep dive section** if new sub-modules were added to `oracle_effect/`
 
 ### Verification
 
@@ -380,15 +506,27 @@ After completing work using this skill:
 rg -q "fn parse_oracle_text" crates/engine/src/parser/oracle.rs && \
 rg -q "fn is_static_pattern" crates/engine/src/parser/oracle.rs && \
 rg -q "fn is_replacement_pattern" crates/engine/src/parser/oracle.rs && \
-rg -q "fn parse_effect_chain" crates/engine/src/parser/oracle_effect/ && \
-rg -q "fn parse_effect_clause" crates/engine/src/parser/oracle_effect/ && \
-rg -q "fn parse_imperative_effect" crates/engine/src/parser/oracle_effect/ && \
-rg -q "fn strip_subject_clause" crates/engine/src/parser/oracle_effect/ && \
+rg -q "fn parse_effect_chain" crates/engine/src/parser/oracle_effect/mod.rs && \
+rg -q "fn parse_effect_clause" crates/engine/src/parser/oracle_effect/mod.rs && \
+rg -q "fn parse_imperative_effect" crates/engine/src/parser/oracle_effect/mod.rs && \
+rg -q "fn strip_subject_clause" crates/engine/src/parser/oracle_effect/subject.rs && \
+rg -q "fn try_parse_subject_predicate_ast" crates/engine/src/parser/oracle_effect/subject.rs && \
+rg -q "fn try_parse_targeted_controller_gain_life" crates/engine/src/parser/oracle_effect/subject.rs && \
+rg -q "fn parse_imperative_family_ast" crates/engine/src/parser/oracle_effect/imperative.rs && \
+rg -q "fn parse_numeric_imperative_ast" crates/engine/src/parser/oracle_effect/imperative.rs && \
+rg -q "fn parse_zone_counter_ast" crates/engine/src/parser/oracle_effect/imperative.rs && \
+rg -q "fn split_clause_sequence" crates/engine/src/parser/oracle_effect/sequence.rs && \
+rg -q "fn parse_followup_continuation_ast" crates/engine/src/parser/oracle_effect/sequence.rs && \
+rg -q "fn try_parse_token" crates/engine/src/parser/oracle_effect/token.rs && \
+rg -q "fn parse_animation_spec" crates/engine/src/parser/oracle_effect/animation.rs && \
+rg -q "fn try_parse_put_counter" crates/engine/src/parser/oracle_effect/counter.rs && \
+rg -q "fn try_parse_add_mana_effect" crates/engine/src/parser/oracle_effect/mana.rs && \
 rg -q "fn parse_target" crates/engine/src/parser/oracle_target.rs && \
 rg -q "fn parse_type_phrase" crates/engine/src/parser/oracle_target.rs && \
 rg -q "fn parse_number" crates/engine/src/parser/oracle_util.rs && \
 rg -q "fn contains_possessive" crates/engine/src/parser/oracle_util.rs && \
 rg -q "fn contains_object_pronoun" crates/engine/src/parser/oracle_util.rs && \
+rg -q "fn match_phrase_variants" crates/engine/src/parser/oracle_util.rs && \
 rg -q "fn parse_trigger_line" crates/engine/src/parser/oracle_trigger.rs && \
 rg -q "fn parse_static_line" crates/engine/src/parser/oracle_static.rs && \
 echo "✓ extend-oracle-parser skill references valid" || \

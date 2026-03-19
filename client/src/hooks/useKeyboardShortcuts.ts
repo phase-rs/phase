@@ -74,11 +74,16 @@ export function useKeyboardShortcuts(): void {
         case "T":
           if (waitingFor?.type === "ManaPayment") {
             e.preventDefault();
-            // Tap all lands the engine says are legal to tap
-            const { legalActions } = useGameStore.getState();
-            for (const action of legalActions) {
-              if (action.type === "TapLandForMana") {
-                dispatch(action);
+            // Tap all untapped lands controlled by the player
+            const gs = useGameStore.getState().gameState;
+            const mp = waitingFor.data.player;
+            if (gs) {
+              for (const id of gs.battlefield) {
+                const o = gs.objects[id];
+                if (o && !o.tapped && o.controller === mp
+                    && o.card_types.core_types.includes("Land")) {
+                  dispatch({ type: "TapLandForMana", data: { object_id: id } });
+                }
               }
             }
           }
