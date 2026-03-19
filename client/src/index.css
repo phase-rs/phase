@@ -205,6 +205,11 @@ body {
   }
 }
 
+/* Class level bookmark — notched bottom edge */
+.clip-bookmark {
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 4px), 50% 100%, 0 calc(100% - 4px));
+}
+
 /* Debug layout bounds — toggled via Ctrl+Shift+D */
 .debug-bounds [data-debug-label] {
   outline: 2px solid color-mix(in srgb, currentColor 60%, transparent);

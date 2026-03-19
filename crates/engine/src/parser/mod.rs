@@ -1,7 +1,12 @@
 pub mod oracle;
+pub(crate) mod oracle_casting;
+pub(crate) mod oracle_class;
 pub mod oracle_cost;
 pub mod oracle_effect;
+pub(crate) mod oracle_keyword;
+pub(crate) mod oracle_modal;
 pub mod oracle_replacement;
+pub(crate) mod oracle_saga;
 pub mod oracle_static;
 pub mod oracle_target;
 pub mod oracle_trigger;

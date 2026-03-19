@@ -2,7 +2,7 @@ import type { PTColor } from "../../viewmodel/cardProps";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { computePTDisplay } from "../../viewmodel/cardProps.ts";
+import { computePTDisplay, toRoman } from "../../viewmodel/cardProps.ts";
 import { frameNeedsLightText, getCardDisplayColors, getFrameGradient } from "./cardFrame.ts";
 
 interface ArtCropCardProps {
@@ -142,7 +142,18 @@ export function ArtCropCard({ objectId }: ArtCropCardProps) {
         </div>
       </div>
 
-      {/* 5. GOLDEN DEVOTION/TRACKER BADGE */}
+      {/* 5a. CLASS LEVEL BADGE (CR 716) — gold-leaf bookmark */}
+      {obj.class_level != null && (
+        <div className="absolute -bottom-[3px] -left-[3px] z-20 flex items-center justify-center">
+          <div className="rounded-t-[3px] rounded-b-none bg-gradient-to-b from-amber-950 to-stone-900 px-1.5 pt-[3px] pb-[5px] border border-amber-800/60 shadow-[inset_0_1px_1px_rgba(255,255,255,0.15),0_2px_4px_rgba(0,0,0,0.8)] clip-bookmark">
+            <span className="font-serif font-bold text-amber-300 text-[10px] leading-none drop-shadow-[0_1px_1px_rgba(0,0,0,0.8)]">
+              {toRoman(obj.class_level)}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* 5b. GOLDEN DEVOTION/TRACKER BADGE */}
       {!isToken && devotionValue != null && (
         <div className="absolute -bottom-[2px] -left-[2px] z-20 flex items-center justify-center">
           <div className="w-[18px] h-[18px] rounded-[2px] bg-gradient-to-br from-[#f2cc59] to-[#c78b1e] border border-[#4a350d] flex items-center justify-center shadow-[inset_0_1px_1px_rgba(255,255,255,0.7),inset_0_-1px_1px_rgba(0,0,0,0.3),0_2px_4px_rgba(0,0,0,0.8)]">

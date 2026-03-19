@@ -1,5 +1,9 @@
 import type { GameObject, Keyword, ManaColor, ObjectId } from "../adapter/types";
 
+const ROMAN = ["", "I", "II", "III", "IV", "V"] as const;
+/** Convert a small integer (1–5) to a Roman numeral string. */
+export function toRoman(n: number): string { return ROMAN[n] ?? String(n); }
+
 export interface CardViewProps {
   id: ObjectId;
   name: string;

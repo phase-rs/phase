@@ -10,7 +10,7 @@ import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { computePTDisplay } from "../../viewmodel/cardProps.ts";
+import { computePTDisplay, toRoman } from "../../viewmodel/cardProps.ts";
 import { getCardDisplayColors } from "../card/cardFrame.ts";
 
 interface PermanentCardProps {
@@ -262,6 +262,17 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
           {obj.loyalty != null && (
             <div className="absolute bottom-0 left-1/2 z-20 -translate-x-1/2 rounded-t bg-gray-900/90 px-1.5 py-0.5 text-xs font-bold text-amber-300">
               {obj.loyalty}
+            </div>
+          )}
+
+          {/* Class level badge (CR 716) — gold-leaf bookmark */}
+          {obj.class_level != null && (
+            <div className="absolute -bottom-[3px] -left-[3px] z-20">
+              <div className="rounded-t-[3px] rounded-b-none bg-gradient-to-b from-amber-950 to-stone-900 px-1.5 pt-[3px] pb-[5px] border border-amber-800/60 shadow-md clip-bookmark">
+                <span className="font-serif text-[10px] font-bold text-amber-300 drop-shadow-[0_1px_1px_rgba(0,0,0,0.8)]">
+                  {toRoman(obj.class_level)}
+                </span>
+              </div>
             </div>
           )}
 

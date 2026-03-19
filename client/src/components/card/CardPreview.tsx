@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useGameStore } from "../../stores/gameStore.ts";
+import { useUiStore } from "../../stores/uiStore.ts";
+import { toRoman } from "../../viewmodel/cardProps.ts";
 
 interface CardPreviewProps {
   cardName: string | null;
@@ -37,6 +40,10 @@ function CardPreviewInner({
     size: "normal",
     faceIndex,
   });
+  const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
+  const classLevel = useGameStore((s) =>
+    inspectedObjectId != null ? s.gameState?.objects[inspectedObjectId]?.class_level : undefined,
+  );
   const [pointerPosition, setPointerPosition] = useState<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
@@ -89,12 +96,23 @@ function CardPreviewInner({
       {isLoading || !src ? (
         <div className="max-h-[80vh] max-w-[42vw] w-[clamp(220px,26vw,472px)] aspect-[5/7] rounded-xl border border-gray-600 bg-gray-700 shadow-2xl animate-pulse md:max-w-[45vw]" />
       ) : (
-        <img
-          src={src}
-          alt={cardName}
-          className="max-h-[80vh] max-w-[42vw] w-[clamp(220px,26vw,472px)] rounded-xl border border-gray-600 object-cover shadow-2xl md:max-w-[45vw]"
-          draggable={false}
-        />
+        <div className="relative">
+          <img
+            src={src}
+            alt={cardName}
+            className="max-h-[80vh] max-w-[42vw] w-[clamp(220px,26vw,472px)] rounded-xl border border-gray-600 object-cover shadow-2xl md:max-w-[45vw]"
+            draggable={false}
+          />
+          {classLevel != null && (
+            <div className="absolute bottom-3 left-3 z-10">
+              <div className="rounded-t-[4px] rounded-b-none bg-gradient-to-b from-amber-950 to-stone-900 px-3 pt-1.5 pb-2 border border-amber-800/60 shadow-lg clip-bookmark">
+                <span className="font-serif text-base font-bold text-amber-300 drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">
+                  {toRoman(classLevel)}
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
