@@ -44,7 +44,18 @@ Violating this rule causes cascading failures across the team. Treat every line 
 
 ### CRITICAL: Building Blocks and Architecture Purity
 
-**Before writing any logic, search for existing building blocks.** The codebase has composable helpers for parsing (`parse_type_phrase`, `parse_non_prefix`, `parse_number`, `parse_target`, `parse_continuous_modifications`), filtering (`FilterProp` variants, `TargetFilter`), and game mechanics (`enter_tapped`, `enter_with_counters`, the replacement pipeline). Duplicating what these already do is a defect.
+**Before writing any logic, search for existing building blocks.** Duplicating what these already do is a defect. Check these modules before writing new utility functions:
+
+| Module | What lives here |
+|--------|----------------|
+| `parser/oracle_util.rs` | Number/ordinal parsing, mana symbol parsing, reminder text stripping, possessive/pronoun phrase matching, phrase variant helpers, subtype canonicalization, filter merging |
+| `parser/oracle_target.rs` | Target extraction from Oracle text (`"target creature"` → `TargetFilter`), type phrase parsing, event context refs |
+| `parser/oracle_static.rs` | Static ability line parsing, continuous modification extraction (`"gets +N/+M and has flying"` → typed modifications) |
+| `game/filter.rs` | Runtime `TargetFilter` evaluation against game objects and players |
+| `game/zones.rs` | Zone manipulation primitives — creating, moving, adding, removing objects |
+| `game/quantity.rs` | Dynamic quantity resolution (`QuantityExpr` → concrete `i32` from game state) |
+| `game/ability_utils.rs` | Ability construction, target slot wiring, chained ability building, target selection/validation |
+| `game/keywords.rs` | Keyword presence queries, protection checks, keyword string parsing |
 
 **Self-review every change as you go.** After writing code, ask:
 1. Did I duplicate logic that an existing helper already handles?
@@ -142,8 +153,8 @@ phase-server    — Axum WebSocket server for multiplayer
 
 - **`types/`** — Core data types: `GameState`, `GameAction`, `GameEvent`, `GameObject`, `Phase`, `Zone`, `ManaPool`, abilities, triggers. All types use `serde` for serialization across the WASM boundary.
 - **`game/engine.rs`** — Main `apply(state, action) -> ActionResult` function. Pure reducer pattern: takes game state + action, returns events + new waiting_for state.
-- **`game/`** — Game logic modules: `turns`, `priority`, `stack`, `combat`, `combat_damage`, `sba` (state-based actions), `targeting`, `mana_payment`, `mana_abilities`, `mana_sources`, `mulligan`, `layers` (MTG Rule 613), `triggers`, `trigger_matchers`, `replacement`, `static_abilities`, `keywords`, `zones`, `casting`, `casting_costs`, `casting_targets`, `commander`, `day_night`, `deck_loading`, `deck_validation`, `derived`, `devotion`, `elimination`, `filter`, `game_object`, `match_flow`, `morph`, `planeswalker`, `players`, `printed_cards`, `quantity`, `restrictions`, `scenario`, `scenario_db`, `transform`, `coverage`, `ability_utils`.
-- **`game/effects/`** — Effect handlers (~43 modules), including: `add_restriction`, `animate`, `attach`, `bounce`, `change_zone`, `choose`, `choose_card`, `cleanup`, `copy_spell`, `counter`, `counters`, `create_emblem`, `deal_damage`, `delayed_trigger`, `destroy`, `dig`, `discard`, `draw`, `effect`, `explore`, `fight`, `gain_control`, `life`, `mana`, `mill`, `pay`, `proliferate`, `pump`, `regenerate`, `reveal_hand`, `reveal_top`, `sacrifice`, `scry`, `search_library`, `set_class_level`, `shuffle`, `solve_case`, `surveil`, `suspect`, `tap_untap`, `token`, `transform_effect`. New effects are added as modules here following the existing handler pattern.
+- **`game/`** — Game logic modules: `turns`, `priority`, `stack`, `combat`, `combat_damage`, `sba` (state-based actions), `targeting`, `mana_payment`, `mana_abilities`, `mana_sources`, `mulligan`, `layers` (MTG Rule 613), `triggers`, `trigger_matchers`, `replacement`, `static_abilities`, `keywords`, `zones`, `casting`, `casting_costs`, `casting_targets`, `commander`, `day_night`, `deck_loading`, `deck_validation`, `derived`, `devotion`, `elimination`, `filter`, `game_object`, `match_flow`, `morph`, `planeswalker`, `players`, `printed_cards`, `quantity`, `restrictions`, `scenario`, `scenario_db`, `transform`, `coverage`, `ability_utils`, `sacrifice`.
+- **`game/effects/`** — Effect handlers (~56 modules), including: `add_restriction`, `animate`, `attach`, `become_copy`, `become_monarch`, `bounce`, `cast_from_zone`, `change_zone`, `choose`, `choose_card`, `choose_from_zone`, `cleanup`, `connive`, `copy_spell`, `counter`, `counters`, `create_emblem`, `deal_damage`, `delayed_trigger`, `destroy`, `dig`, `discard`, `draw`, `effect`, `explore`, `fight`, `flip_coin`, `force_block`, `gain_control`, `grant_permission`, `investigate`, `life`, `mana`, `mill`, `pay`, `phase_out`, `prevent_damage`, `proliferate`, `pump`, `regenerate`, `reveal_hand`, `reveal_top`, `ring`, `roll_die`, `sacrifice`, `scry`, `search_library`, `set_class_level`, `shuffle`, `solve_case`, `surveil`, `suspect`, `tap_untap`, `token`, `transform_effect`, `win_lose`. New effects are added as modules here following the existing handler pattern.
 - **`parser/`** — Oracle text parser: converts MTGJSON Oracle text into typed `AbilityDefinition` structs. Main dispatcher in `oracle.rs`, with specialized sub-parsers: `oracle_effect/` (directory with `mod.rs`, `imperative.rs`, `subject.rs`, `token.rs`, `sequence.rs`, `animation.rs`, `counter.rs`, `mana.rs`, `types.rs`), `oracle_trigger.rs`, `oracle_static.rs`, `oracle_replacement.rs`, `oracle_target.rs`, `oracle_util.rs`, `oracle_cost.rs`, `oracle_keyword.rs`, `oracle_casting.rs`, `oracle_class.rs`, `oracle_modal.rs`, `oracle_saga.rs`. See `docs/parser-instructions.md` for architecture and contribution guide.
 - **`ai_support/`** — Engine-side AI support: `legal_actions()` generates validated candidate actions for all `WaitingFor` states, `candidates.rs` implements action generation per state, `context.rs` provides game context for AI evaluation. This module lives in the engine crate so both WASM and server consumers share the same logic.
 - **`database/`** — Card database with three loading paths:
@@ -187,7 +198,7 @@ State is filtered per-player (`filter_state_for_player`) to hide opponent's hand
 - **`components/`** — React components organized by domain: `animation/`, `board/`, `card/`, `chrome/`, `combat/`, `controls/`, `deck-builder/`, `hand/`, `hud/`, `lobby/`, `log/`, `mana/`, `menu/`, `modal/`, `multiplayer/`, `settings/`, `splash/`, `stack/`, `targeting/`, `ui/`, `zone/`
 - **`services/`** — `scryfall.ts` (card image API), `imageCache.ts` (IndexedDB caching via idb-keyval), `deckParser.ts`
 - **`hooks/`** — `useGameDispatch`, `useCardImage`, `useKeyboardShortcuts`, `useLongPress`, `usePhaseInfo`, `usePlayerId`
-- **`pages/`** — `MenuPage`, `GamePage`, `GameSetupPage`, `PlayPage`, `MultiplayerPage`, `DeckBuilderPage` (React Router)
+- **`pages/`** — `MenuPage`, `GamePage`, `GameSetupPage`, `PlayPage`, `MultiplayerPage`, `DeckBuilderPage`, `MyDecksPage`, `CoveragePage` (React Router)
 
 ### Key Patterns
 
@@ -217,7 +228,7 @@ These patterns must be used on first write, not fixed after clippy complains:
 - **Iterator methods** over range-indexed loops: `for item in slice.iter().skip(1)` not `for i in 1..slice.len()`
 - **`rsplit(' ').next()`** to get the last word, not `rsplit().collect::<Vec>().first()`
 - **Exhaustive `match`** without wildcard fallbacks when the enum is known — let the compiler catch missing arms
-- **Reuse existing building blocks** before writing one-off string logic. Search the codebase for helpers like `contains_possessive`, `contains_object_pronoun`, `parse_target`, `parse_type_phrase`, `parse_number` in `oracle_util.rs` and `oracle_target.rs`
+- **Reuse existing building blocks** before writing one-off string logic. See the helper reference table in the "Building Blocks and Architecture Purity" section above
 - **NEVER match on verbatim Oracle text strings** (e.g. `if lower == "the number of cards in your hand is greater than your life total"`). This is the single most prohibited pattern in the codebase. Every Oracle phrase must be decomposed into typed building blocks (grammar prefix/suffix stripping, composable helpers, typed enum variants). A verbatim string match handles exactly one card and poisons the parser architecture permanently. Instead: identify the grammatical structure, add typed `QuantityRef`/`Comparator`/`FilterProp` variants as needed, and parse with `strip_prefix`/`split_once` + helpers so the pattern covers every card in the class.
 - **Separate abstraction layers in enum design.** An enum variant must belong to exactly one semantic layer — do not conflate different concepts in the same type. Example: `QuantityRef` (a *reference* to a dynamic game value: `HandSize`, `LifeTotal`) must not contain `Fixed { value: i32 }` (a *constant* that requires no game-state lookup). Instead, introduce a wrapping expression type (`QuantityExpr`) that is either a `Ref(QuantityRef)` or a `Fixed(i32)`. Ask: "Does this variant belong to the same abstraction as all the others, or does it belong one level up?" Wrong layer placement creates API confusion, breaks exhaustive match semantics, and forces callers to handle heterogeneous cases that should be uniform.
 

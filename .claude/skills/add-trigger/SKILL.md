@@ -158,7 +158,7 @@ The trigger pipeline responds to `GameEvent` variants. If no existing event cove
   3. Check trigger-specific fields (`origin`, `destination`, `combat_damage`, `valid_target`, etc.)
   4. Return true if all checks pass
 
-- [ ] **`crates/engine/src/game/triggers.rs` — `build_trigger_registry()`**
+- [ ] **`crates/engine/src/game/trigger_matchers.rs` — `build_trigger_registry()`**
   Add an entry: `registry.insert(TriggerMode::YourEvent, match_your_event);`
 
   **If you skip this, the trigger will parse correctly but never fire at runtime — a silent failure.**
@@ -276,7 +276,7 @@ After completing work using this skill:
 rg -q "fn process_triggers" crates/engine/src/game/triggers.rs && \
 rg -q "fn collect_matching_triggers" crates/engine/src/game/triggers.rs && \
 rg -q "fn extract_target_filter_from_effect" crates/engine/src/game/triggers.rs && \
-rg -q "fn build_trigger_registry" crates/engine/src/game/triggers.rs && \
+rg -q "fn build_trigger_registry" crates/engine/src/game/trigger_matchers.rs && \
 rg -q "struct TriggerDefinition" crates/engine/src/types/ability.rs && \
 rg -q "enum TriggerMode" crates/engine/src/types/triggers.rs && \
 rg -q "enum TriggerConstraint" crates/engine/src/types/ability.rs && \
