@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use crate::game::combat::{CombatState, DamageAssignment, DamageTarget};
 use crate::game::effects::life::apply_life_gain;
+use crate::game::game_object::GameObject;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::sba;
 use crate::game::triggers;
@@ -11,6 +12,19 @@ use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::proposed_event::ProposedEvent;
+
+/// CR 510.1a / CR 510.1c: Returns the amount of combat damage a creature assigns.
+/// Normally equal to power, but if `assigns_damage_from_toughness` is set (e.g. Doran),
+/// uses toughness instead.
+fn combat_damage_amount(obj: &GameObject) -> u32 {
+    if obj.assigns_damage_from_toughness {
+        // CR 510.1c: Assign combat damage equal to toughness rather than power.
+        obj.toughness.unwrap_or(0).max(0) as u32
+    } else {
+        // CR 510.1a: Assign combat damage equal to power.
+        obj.power.unwrap_or(0).max(0) as u32
+    }
+}
 
 /// Resolve combat damage with first strike / double strike support (CR 510.1).
 /// CR 702.7b: If any creature has first strike or double strike, two damage sub-steps run.
@@ -84,7 +98,7 @@ fn first_strike_damage_step(state: &mut GameState) -> Vec<GameEvent> {
             }
             _ => continue,
         };
-        let power = obj.power.unwrap_or(0).max(0) as u32;
+        let power = combat_damage_amount(obj);
         if power == 0 {
             continue;
         }
@@ -104,7 +118,7 @@ fn first_strike_damage_step(state: &mut GameState) -> Vec<GameEvent> {
     }
 
     // Blockers with first/double strike
-    for (blocker_id, attacker_id) in &combat.blocker_to_attacker {
+    for (blocker_id, attacker_ids) in &combat.blocker_to_attacker {
         let obj = match state.objects.get(blocker_id) {
             Some(o)
                 if o.zone == crate::types::zones::Zone::Battlefield
@@ -115,17 +129,13 @@ fn first_strike_damage_step(state: &mut GameState) -> Vec<GameEvent> {
             }
             _ => continue,
         };
-        let power = obj.power.unwrap_or(0).max(0) as u32;
+        let power = combat_damage_amount(obj);
         if power == 0 {
             continue;
         }
-        all_assignments.push((
-            *blocker_id,
-            DamageAssignment {
-                target: DamageTarget::Object(*attacker_id),
-                amount: power,
-            },
-        ));
+        // CR 510.1c: Blocker assigns combat damage among the attackers it blocks.
+        let blocker_assignments = distribute_blocker_damage(*blocker_id, power, attacker_ids);
+        all_assignments.extend(blocker_assignments);
     }
 
     apply_combat_damage(state, &all_assignments)
@@ -159,7 +169,7 @@ fn regular_damage_step(state: &mut GameState) -> Vec<GameEvent> {
         // Skip if no first strike step happened and creature doesn't need to deal
         // (all creatures deal in regular step if no first strike step)
 
-        let power = obj.power.unwrap_or(0).max(0) as u32;
+        let power = combat_damage_amount(obj);
         if power == 0 {
             continue;
         }
@@ -179,7 +189,7 @@ fn regular_damage_step(state: &mut GameState) -> Vec<GameEvent> {
     }
 
     // Blockers: same logic
-    for (blocker_id, attacker_id) in &combat.blocker_to_attacker {
+    for (blocker_id, attacker_ids) in &combat.blocker_to_attacker {
         let obj = match state.objects.get(blocker_id) {
             Some(o) if o.zone == crate::types::zones::Zone::Battlefield => o,
             _ => continue,
@@ -192,20 +202,59 @@ fn regular_damage_step(state: &mut GameState) -> Vec<GameEvent> {
             continue;
         }
 
-        let power = obj.power.unwrap_or(0).max(0) as u32;
+        let power = combat_damage_amount(obj);
         if power == 0 {
             continue;
         }
-        all_assignments.push((
-            *blocker_id,
-            DamageAssignment {
-                target: DamageTarget::Object(*attacker_id),
-                amount: power,
-            },
-        ));
+        // CR 510.1c: Blocker assigns combat damage among the attackers it blocks.
+        let blocker_assignments = distribute_blocker_damage(*blocker_id, power, attacker_ids);
+        all_assignments.extend(blocker_assignments);
     }
 
     apply_combat_damage(state, &all_assignments)
+}
+
+/// CR 510.1c: Distribute a blocker's combat damage among the attackers it blocks.
+/// When blocking multiple attackers, damage is split evenly (first attacker gets remainder).
+fn distribute_blocker_damage(
+    blocker_id: ObjectId,
+    power: u32,
+    attacker_ids: &[ObjectId],
+) -> Vec<(ObjectId, DamageAssignment)> {
+    if attacker_ids.is_empty() {
+        return Vec::new();
+    }
+    if attacker_ids.len() == 1 {
+        return vec![(
+            blocker_id,
+            DamageAssignment {
+                target: DamageTarget::Object(attacker_ids[0]),
+                amount: power,
+            },
+        )];
+    }
+    // Split damage evenly; first attacker gets the remainder
+    let n = attacker_ids.len() as u32;
+    let base = power / n;
+    let remainder = power % n;
+    attacker_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &aid)| {
+            let amount = base + if (i as u32) < remainder { 1 } else { 0 };
+            if amount == 0 {
+                None
+            } else {
+                Some((
+                    blocker_id,
+                    DamageAssignment {
+                        target: DamageTarget::Object(aid),
+                        amount,
+                    },
+                ))
+            }
+        })
+        .collect()
 }
 
 /// Determine how an attacker assigns its damage (CR 510.1c).
@@ -591,7 +640,11 @@ mod tests {
         };
         for (attacker_id, blockers) in blocker_assignments {
             for &blocker_id in &blockers {
-                combat.blocker_to_attacker.insert(blocker_id, attacker_id);
+                combat
+                    .blocker_to_attacker
+                    .entry(blocker_id)
+                    .or_default()
+                    .push(attacker_id);
             }
             combat.blocker_assignments.insert(attacker_id, blockers);
         }

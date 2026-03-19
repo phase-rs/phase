@@ -976,6 +976,8 @@ pub(super) fn is_replacement_pattern(lower: &str) -> bool {
         || lower.trim_end_matches('.').ends_with(" enter tapped")
         || (lower.contains("as ") && lower.contains("enters") && lower.contains("choose a"))
         || (lower.contains("enters") && lower.contains("counter"))
+        // CR 707.9: "enter as a copy of" clone replacement effects
+        || lower.contains("enter as a copy of")
 }
 
 /// Create an Unimplemented fallback ability.

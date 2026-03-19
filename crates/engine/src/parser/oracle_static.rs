@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_effect::parse_effect_chain;
-use super::oracle_target::parse_type_phrase;
+use super::oracle_target::{parse_counter_suffix, parse_type_phrase};
 use super::oracle_util::{parse_number, strip_reminder_text};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChosenSubtypeKind, Comparator, ContinuousModification,
@@ -95,6 +95,12 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         }
     }
 
+    // --- "Each creature you control [with condition] assigns combat damage equal to its toughness" ---
+    // CR 510.1c: Doran-class effects that cause creatures to use toughness for combat damage.
+    if let Some(def) = parse_assigns_damage_from_toughness(&lower, &text) {
+        return Some(def);
+    }
+
     // --- "Other [Subtype] creatures you control get/have..." ---
     // e.g. "Other Zombies you control get +1/+1"
     if let Some(rest) = lower.strip_prefix("other ") {
@@ -109,24 +115,50 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         return Some(result);
     }
 
-    // --- "Creatures you control get +N/+M" ---
+    // --- "Creatures you control [with counter condition] get/have ..." ---
     if lower.starts_with("creatures you control ") {
-        if let Some(def) = parse_continuous_gets_has(
-            &text[22..],
-            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-            &text,
-        ) {
+        let after_prefix = &text[22..];
+        let (filter, predicate_text) =
+            if let Some((prop, rest)) = strip_counter_condition_prefix(after_prefix) {
+                (
+                    TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .controller(ControllerRef::You)
+                            .properties(vec![prop]),
+                    ),
+                    rest,
+                )
+            } else {
+                (
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                    after_prefix,
+                )
+            };
+        if let Some(def) = parse_continuous_gets_has(predicate_text, filter, &text) {
             return Some(def);
         }
     }
 
-    // --- "Other creatures you control get +N/+M" ---
+    // --- "Other creatures you control [with counter condition] get/have ..." ---
     if lower.starts_with("other creatures you control ") {
-        if let Some(def) = parse_continuous_gets_has(
-            &text[28..],
-            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-            &text,
-        ) {
+        let after_prefix = &text[28..];
+        let (filter, predicate_text) =
+            if let Some((prop, rest)) = strip_counter_condition_prefix(after_prefix) {
+                (
+                    TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .controller(ControllerRef::You)
+                            .properties(vec![prop]),
+                    ),
+                    rest,
+                )
+            } else {
+                (
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                    after_prefix,
+                )
+            };
+        if let Some(def) = parse_continuous_gets_has(predicate_text, filter, &text) {
             return Some(def);
         }
     }
@@ -436,10 +468,17 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         );
     }
 
-    // --- "can block an additional creature" / "can block any number" ---
-    if lower.contains("can block an additional") || lower.contains("can block any number") {
+    // --- "can block an additional creature" / "can block any number" (CR 509.1b) ---
+    if lower.contains("can block any number") {
         return Some(
-            StaticDefinition::new(StaticMode::Other("ExtraBlockers".into()))
+            StaticDefinition::new(StaticMode::ExtraBlockers { count: None })
+                .affected(TargetFilter::SelfRef)
+                .description(text.to_string()),
+        );
+    }
+    if lower.contains("can block an additional") {
+        return Some(
+            StaticDefinition::new(StaticMode::ExtraBlockers { count: Some(1) })
                 .affected(TargetFilter::SelfRef)
                 .description(text.to_string()),
         );
@@ -503,6 +542,15 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                 } else {
                     return None;
                 };
+            // CR 613.7: Check for "with [counter] on it/them" condition between
+            // "you control" and the predicate (e.g., "Elf creatures you control
+            // with a +1/+1 counter on it has trample").
+            let (typed_filter, after_prefix) =
+                if let Some((prop, rest)) = strip_counter_condition_prefix(after_prefix) {
+                    (add_property(typed_filter, prop), rest)
+                } else {
+                    (typed_filter, after_prefix)
+                };
             let typed_filter = if is_other {
                 add_another_filter(typed_filter)
             } else {
@@ -540,6 +588,13 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                 } else {
                     return None;
                 };
+            // CR 613.7: Check for "with [counter] on it/them" condition
+            let (typed_filter, after_prefix) =
+                if let Some((prop, rest)) = strip_counter_condition_prefix(after_prefix) {
+                    (add_property(typed_filter, prop), rest)
+                } else {
+                    (typed_filter, after_prefix)
+                };
             let typed_filter = if is_other {
                 add_another_filter(typed_filter)
             } else {
@@ -550,6 +605,56 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
     }
 
     None
+}
+
+/// CR 510.1c: Parse "each creature you control [with condition] assigns combat damage
+/// equal to its toughness rather than its power" patterns.
+///
+/// Supports three Oracle patterns:
+/// - "each creature you control assigns combat damage equal to its toughness..."
+/// - "each creature you control with defender assigns combat damage equal to its toughness..."
+/// - "each creature you control with toughness greater than its power assigns combat damage..."
+fn parse_assigns_damage_from_toughness(lower: &str, text: &str) -> Option<StaticDefinition> {
+    let rest = lower.strip_prefix("each creature you control ")?;
+
+    let suffix = "assigns combat damage equal to its toughness rather than its power";
+    let suffix_alt = "assign combat damage equal to their toughness rather than their power";
+
+    let (condition_text, _) = if let Some(pos) = rest.find(suffix) {
+        (&rest[..pos], &rest[pos + suffix.len()..])
+    } else if let Some(pos) = rest.find(suffix_alt) {
+        (&rest[..pos], &rest[pos + suffix_alt.len()..])
+    } else {
+        return None;
+    };
+
+    let condition_text = condition_text.trim();
+
+    let mut filter = TypedFilter::creature().controller(ControllerRef::You);
+
+    if !condition_text.is_empty() {
+        // Parse "with [condition]" clause
+        let with_clause = condition_text.strip_prefix("with ")?;
+        let with_clause = with_clause.trim();
+
+        if with_clause == "toughness greater than its power" {
+            filter = filter.properties(vec![FilterProp::ToughnessGTPower]);
+        } else {
+            // Treat as keyword condition: "with defender", "with flying", etc.
+            // Validate it parses as a keyword, then store the lowercase string.
+            let _keyword: Keyword = with_clause.parse().ok()?;
+            filter = filter.properties(vec![FilterProp::WithKeyword {
+                value: with_clause.to_string(),
+            }]);
+        }
+    }
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(filter))
+            .modifications(vec![ContinuousModification::AssignDamageFromToughness])
+            .description(text.to_string()),
+    )
 }
 
 fn parse_subject_rule_static(text: &str) -> Option<StaticDefinition> {
@@ -993,6 +1098,12 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
     let trimmed = subject.trim();
     let lower = trimmed.to_lowercase();
 
+    // Strip "Each " prefix — "Each creature you control" is semantically identical to
+    // "Creatures you control" for filter purposes.
+    if lower.starts_with("each ") {
+        return parse_continuous_subject_filter(trimmed[5..].trim());
+    }
+
     if lower.starts_with("other ") {
         let original_rest = trimmed[6..].trim();
         return parse_continuous_subject_filter(original_rest).map(add_another_filter);
@@ -1007,6 +1118,19 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
     }
 
     parse_rule_static_subject_filter(trimmed)
+}
+
+/// Try to strip a leading "with [counter] counter(s) on it/them" clause from `text`,
+/// returning the `FilterProp` and the remaining text after the clause.
+/// CR 613.1 + CR 613.7: Used to parse conditional static keyword grants in layer 6.
+fn strip_counter_condition_prefix(text: &str) -> Option<(FilterProp, &str)> {
+    let lower = text.to_lowercase();
+    if !lower.starts_with("with ") {
+        return None;
+    }
+    // parse_counter_suffix expects optional leading whitespace before "with"
+    let (prop, consumed) = parse_counter_suffix(&lower)?;
+    Some((prop, text[consumed..].trim_start()))
 }
 
 fn parse_modified_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
@@ -1089,6 +1213,22 @@ fn add_another_filter(filter: TargetFilter) -> TargetFilter {
             filters: vec![
                 other,
                 TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Another])),
+            ],
+        },
+    }
+}
+
+/// Add a single `FilterProp` to an existing `TargetFilter`.
+fn add_property(filter: TargetFilter, prop: FilterProp) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            typed.properties.push(prop);
+            TargetFilter::Typed(typed)
+        }
+        other => TargetFilter::And {
+            filters: vec![
+                other,
+                TargetFilter::Typed(TypedFilter::default().properties(vec![prop])),
             ],
         },
     }
@@ -1584,7 +1724,11 @@ fn map_keyword(text: &str) -> Option<Keyword> {
         return Some(keyword);
     }
     match Keyword::from_str(word) {
-        Ok(Keyword::Unknown(_)) => None,
+        Ok(Keyword::Unknown(_)) => {
+            // Fall through to Oracle-format parser for parameterized keywords
+            // like "protection from red" that use spaces instead of colons.
+            super::oracle_keyword::parse_keyword_from_oracle(word)
+        }
         Ok(kw) => Some(kw),
         Err(_) => None, // Infallible, but satisfy the compiler
     }
@@ -2665,7 +2809,7 @@ mod tests {
     fn static_can_block_additional_creature() {
         let def = parse_static_line("Palace Guard can block an additional creature each combat.")
             .unwrap();
-        assert_eq!(def.mode, StaticMode::Other("ExtraBlockers".to_string()));
+        assert_eq!(def.mode, StaticMode::ExtraBlockers { count: Some(1) });
         assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     }
 
@@ -2673,7 +2817,7 @@ mod tests {
     fn static_can_block_any_number() {
         let def =
             parse_static_line("Hundred-Handed One can block any number of creatures.").unwrap();
-        assert_eq!(def.mode, StaticMode::Other("ExtraBlockers".to_string()));
+        assert_eq!(def.mode, StaticMode::ExtraBlockers { count: None });
         assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     }
 
@@ -2703,5 +2847,158 @@ mod tests {
         assert!(def
             .modifications
             .contains(&ContinuousModification::SetPower { value: 2 }));
+    }
+
+    // ── CR 510.1c: AssignDamageFromToughness (Doran-class) ─────────────
+
+    #[test]
+    fn static_assigns_damage_from_toughness_basic() {
+        // CR 510.1c: "Each creature you control assigns combat damage equal to its toughness"
+        let def = parse_static_line(
+            "Each creature you control assigns combat damage equal to its toughness rather than its power.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+        );
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AssignDamageFromToughness));
+    }
+
+    #[test]
+    fn static_assigns_damage_from_toughness_with_defender() {
+        // CR 510.1c: "Each creature you control with defender assigns combat damage..."
+        let def = parse_static_line(
+            "Each creature you control with defender assigns combat damage equal to its toughness rather than its power.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::WithKeyword {
+                        value: "defender".to_string(),
+                    }]),
+            ))
+        );
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AssignDamageFromToughness));
+    }
+
+    #[test]
+    fn static_assigns_damage_from_toughness_gt_power() {
+        // CR 510.1c: "Each creature you control with toughness greater than its power..."
+        let def = parse_static_line(
+            "Each creature you control with toughness greater than its power assigns combat damage equal to its toughness rather than its power.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::ToughnessGTPower]),
+            ))
+        );
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AssignDamageFromToughness));
+    }
+
+    // --- Conditional counter-based keyword grants (CR 613.7) ---
+
+    #[test]
+    fn static_each_creature_with_counter_has_trample() {
+        let def =
+            parse_static_line("Each creature you control with a +1/+1 counter on it has trample.")
+                .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        match &def.affected {
+            Some(TargetFilter::Typed(TypedFilter {
+                card_type: Some(TypeFilter::Creature),
+                controller: Some(ControllerRef::You),
+                properties,
+                ..
+            })) => {
+                assert!(properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::CountersGE {
+                        ref counter_type,
+                        count: 1,
+                    } if counter_type == "+1/+1"
+                )));
+            }
+            other => panic!("Expected Typed creature filter, got {:?}", other),
+        }
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Trample
+            }));
+    }
+
+    #[test]
+    fn static_creatures_with_counters_have_haste() {
+        let def =
+            parse_static_line("Creatures you control with +1/+1 counters on them have haste.")
+                .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        match &def.affected {
+            Some(TargetFilter::Typed(TypedFilter {
+                card_type: Some(TypeFilter::Creature),
+                controller: Some(ControllerRef::You),
+                properties,
+                ..
+            })) => {
+                assert!(properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::CountersGE {
+                        ref counter_type,
+                        count: 1,
+                    } if counter_type == "+1/+1"
+                )));
+            }
+            other => panic!("Expected Typed creature filter, got {:?}", other),
+        }
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste
+            }));
+    }
+
+    #[test]
+    fn static_creatures_with_counter_get_pump() {
+        let def = parse_static_line("Creatures you control with a +1/+1 counter on it gets +2/+2.")
+            .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        match &def.affected {
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                properties,
+                ..
+            })) => {
+                assert!(properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::CountersGE {
+                        ref counter_type,
+                        count: 1,
+                    } if counter_type == "+1/+1"
+                )));
+            }
+            other => panic!("Expected Typed creature filter, got {:?}", other),
+        }
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }));
     }
 }

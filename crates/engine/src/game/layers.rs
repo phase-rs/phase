@@ -205,6 +205,8 @@ pub fn evaluate_layers(state: &mut GameState) {
                 obj.static_definitions = obj.base_static_definitions.clone();
             }
             obj.color = obj.base_color.clone();
+            // CR 510.1c: Reset damage-from-toughness flag; re-applied by continuous effects.
+            obj.assigns_damage_from_toughness = false;
         }
     }
 
@@ -677,6 +679,10 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                 if !obj.static_definitions.iter().any(|sd| sd.mode == *mode) {
                     obj.static_definitions.push(def);
                 }
+            }
+            // CR 510.1c: Mark creature as assigning combat damage from toughness.
+            ContinuousModification::AssignDamageFromToughness => {
+                obj.assigns_damage_from_toughness = true;
             }
         }
     }

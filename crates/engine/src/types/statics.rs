@@ -24,6 +24,11 @@ pub enum StaticMode {
     CantDraw,
     Panharmonicon,
     IgnoreHexproof,
+    /// CR 509.1a + CR 509.1b: This creature can block additional creatures.
+    /// `None` = any number, `Some(n)` = n additional creatures beyond the default 1.
+    ExtraBlockers {
+        count: Option<u32>,
+    },
     /// Fallback for unrecognized static mode strings.
     Other(String),
 }
@@ -47,6 +52,10 @@ impl fmt::Display for StaticMode {
             StaticMode::CantDraw => write!(f, "CantDraw"),
             StaticMode::Panharmonicon => write!(f, "Panharmonicon"),
             StaticMode::IgnoreHexproof => write!(f, "IgnoreHexproof"),
+            StaticMode::ExtraBlockers { count } => match count {
+                None => write!(f, "ExtraBlockers(any)"),
+                Some(n) => write!(f, "ExtraBlockers({n})"),
+            },
             StaticMode::Other(s) => write!(f, "{s}"),
         }
     }

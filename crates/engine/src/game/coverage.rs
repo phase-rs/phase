@@ -222,6 +222,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 parts.push(format!("non-{}", value.to_lowercase()));
             }
             FilterProp::Suspected => parts.push("suspected".into()),
+            FilterProp::ToughnessGTPower => parts.push("toughness > power".into()),
             FilterProp::Other { value } => parts.push(value.clone()),
         }
     }

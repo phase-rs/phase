@@ -350,6 +350,16 @@ fn is_protected_from(
                     }
                 }
             }
+            // CR 702.16: ChosenColor resolves from the protected permanent's chosen_attributes
+            Keyword::Protection(ProtectionTarget::ChosenColor) => {
+                if let Some(color) = obj.chosen_color() {
+                    if let Some(source_obj) = state.objects.get(&source_id) {
+                        if source_obj.color.contains(&color) {
+                            return true;
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }

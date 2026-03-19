@@ -106,6 +106,23 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        // CR 707.9: AI chooses a permanent to copy for "enter as a copy of" replacements.
+        WaitingFor::CopyTargetChoice {
+            player,
+            valid_targets,
+            ..
+        } => valid_targets
+            .iter()
+            .map(|&target_id| {
+                candidate(
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(target_id)),
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::EquipTarget {
             player,
             equipment_id,

@@ -806,7 +806,7 @@ fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)> {
 
 /// Parse "with [counter] counter(s) on it/them".
 /// Returns (FilterProp, bytes consumed from the original text).
-fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
+pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
     let rest = trimmed.strip_prefix("with ")?;
 

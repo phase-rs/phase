@@ -27,8 +27,8 @@ pub struct CombatState {
     pub attackers: Vec<AttackerInfo>,
     /// attacker_id -> ordered list of blocker ids
     pub blocker_assignments: HashMap<ObjectId, Vec<ObjectId>>,
-    /// blocker_id -> attacker_id (reverse lookup)
-    pub blocker_to_attacker: HashMap<ObjectId, ObjectId>,
+    /// blocker_id -> attacker_ids (reverse lookup; Vec supports multi-blocking via ExtraBlockers)
+    pub blocker_to_attacker: HashMap<ObjectId, Vec<ObjectId>>,
     pub damage_assignments: HashMap<ObjectId, Vec<DamageAssignment>>,
     pub first_strike_done: bool,
 }
@@ -118,6 +118,20 @@ pub fn validate_blockers(
     state: &GameState,
     assignments: &[(ObjectId, ObjectId)],
 ) -> Result<(), String> {
+    // Detect duplicate (blocker, attacker) pairs — the Vec-based blocker_to_attacker
+    // no longer prevents this implicitly like the old HashMap<ObjectId, ObjectId> did.
+    {
+        let mut seen = std::collections::HashSet::new();
+        for &pair in assignments {
+            if !seen.insert(pair) {
+                return Err(format!(
+                    "Duplicate block assignment: {:?} blocking {:?}",
+                    pair.0, pair.1
+                ));
+            }
+        }
+    }
+
     // Group assignments by attacker for menace validation
     let mut blockers_per_attacker: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
 
@@ -206,6 +220,17 @@ pub fn validate_blockers(
                         blocker_id, attacker_id
                     ));
                 }
+                // CR 702.16: ChosenColor resolves from the source permanent's chosen_attributes
+                Keyword::Protection(ProtectionTarget::ChosenColor) => {
+                    if let Some(color) = attacker.chosen_color() {
+                        if blocker.color.contains(&color) {
+                            return Err(format!(
+                                "{:?} cannot block {:?} (protection from chosen color {:?})",
+                                blocker_id, attacker_id, color
+                            ));
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -288,6 +313,32 @@ pub fn validate_blockers(
             .entry(attacker_id)
             .or_default()
             .push(blocker_id);
+    }
+
+    // CR 509.1a + CR 509.1b: Enforce per-blocker limit on how many attackers it can block.
+    // Default is 1; ExtraBlockers { count: Some(n) } allows 1 + n; count: None = unlimited.
+    {
+        let mut attackers_per_blocker: HashMap<ObjectId, u32> = HashMap::new();
+        for &(blocker_id, _) in assignments {
+            *attackers_per_blocker.entry(blocker_id).or_default() += 1;
+        }
+        for (&blocker_id, &num_blocked) in &attackers_per_blocker {
+            if num_blocked <= 1 {
+                continue;
+            }
+            let blocker = state
+                .objects
+                .get(&blocker_id)
+                .ok_or_else(|| format!("Blocker {:?} not found during limit check", blocker_id))?;
+            // Find the best ExtraBlockers grant on this creature
+            let max_allowed = extra_block_limit(blocker);
+            if num_blocked > max_allowed {
+                return Err(format!(
+                    "{:?} is blocking {} attackers but can only block {}",
+                    blocker_id, num_blocked, max_allowed
+                ));
+            }
+        }
     }
 
     // CR 702.110b: Menace — must be blocked by two or more creatures or not at all.
@@ -475,7 +526,11 @@ pub fn declare_blockers(
     let mut grouped: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
     for &(blocker_id, attacker_id) in assignments {
         grouped.entry(attacker_id).or_default().push(blocker_id);
-        combat.blocker_to_attacker.insert(blocker_id, attacker_id);
+        combat
+            .blocker_to_attacker
+            .entry(blocker_id)
+            .or_default()
+            .push(attacker_id);
     }
 
     // Auto-order blockers by ObjectId ascending (deterministic default)
@@ -565,10 +620,24 @@ fn can_block_pair(blocker: &GameObject, attacker: &GameObject) -> bool {
         return false;
     }
     for kw in &attacker.keywords {
-        if let Keyword::Protection(ProtectionTarget::Color(color)) = kw {
-            if blocker.color.contains(color) {
+        match kw {
+            Keyword::Protection(ProtectionTarget::Color(color))
+                if blocker.color.contains(color) =>
+            {
                 return false;
             }
+            Keyword::Protection(ProtectionTarget::Multicolored) if blocker.color.len() > 1 => {
+                return false;
+            }
+            // CR 702.16: ChosenColor resolves from the source permanent's chosen_attributes
+            Keyword::Protection(ProtectionTarget::ChosenColor) => {
+                if let Some(color) = attacker.chosen_color() {
+                    if blocker.color.contains(&color) {
+                        return false;
+                    }
+                }
+            }
+            _ => {}
         }
     }
     if attacker.has_keyword(&Keyword::Flying)
@@ -607,6 +676,22 @@ fn can_block_pair(blocker: &GameObject, attacker: &GameObject) -> bool {
         return false;
     }
     true
+}
+
+/// CR 509.1a + CR 509.1b: Compute the maximum number of attackers a creature can block.
+/// Default is 1. ExtraBlockers { count: Some(n) } adds n (so 1+n). count: None = unlimited (u32::MAX).
+/// Multiple ExtraBlockers stack: the best (highest) limit wins.
+fn extra_block_limit(blocker: &GameObject) -> u32 {
+    let mut max: u32 = 1;
+    for sd in &blocker.static_definitions {
+        if let StaticMode::ExtraBlockers { count } = &sd.mode {
+            match count {
+                None => return u32::MAX, // unlimited
+                Some(n) => max = max.max(1 + n),
+            }
+        }
+    }
+    max
 }
 
 /// For each valid blocker, compute which attackers it can legally block.
@@ -966,7 +1051,7 @@ mod tests {
 
         let combat = state.combat.as_ref().unwrap();
         assert_eq!(combat.blocker_assignments[&attacker], vec![blocker]);
-        assert_eq!(combat.blocker_to_attacker[&blocker], attacker);
+        assert_eq!(combat.blocker_to_attacker[&blocker], vec![attacker]);
     }
 
     #[test]
@@ -1298,6 +1383,186 @@ mod tests {
         let blocker = create_creature(&mut state, PlayerId(1), "Small", 1, 1);
 
         assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
+    }
+
+    #[test]
+    fn extra_blockers_allows_blocking_two_attackers() {
+        use crate::types::ability::StaticDefinition;
+
+        let mut state = setup();
+        let attacker1 = create_creature(&mut state, PlayerId(0), "Bear A", 2, 2);
+        let attacker2 = create_creature(&mut state, PlayerId(0), "Bear B", 2, 2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Palace Guard", 1, 4);
+
+        // CR 509.1b: "can block an additional creature" → ExtraBlockers { count: Some(1) }
+        state
+            .objects
+            .get_mut(&blocker)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::ExtraBlockers {
+                count: Some(1),
+            }));
+
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo {
+                    object_id: attacker1,
+                    defending_player: PlayerId(1),
+                },
+                AttackerInfo {
+                    object_id: attacker2,
+                    defending_player: PlayerId(1),
+                },
+            ],
+            ..Default::default()
+        });
+
+        // Blocking two attackers should succeed with ExtraBlockers { count: Some(1) }
+        assert!(validate_blockers(&state, &[(blocker, attacker1), (blocker, attacker2)]).is_ok());
+    }
+
+    #[test]
+    fn extra_blockers_rejects_exceeding_limit() {
+        use crate::types::ability::StaticDefinition;
+
+        let mut state = setup();
+        let attacker1 = create_creature(&mut state, PlayerId(0), "Bear A", 2, 2);
+        let attacker2 = create_creature(&mut state, PlayerId(0), "Bear B", 2, 2);
+        let attacker3 = create_creature(&mut state, PlayerId(0), "Bear C", 2, 2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Palace Guard", 1, 4);
+
+        // "can block an additional creature" → can block 2, not 3
+        state
+            .objects
+            .get_mut(&blocker)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::ExtraBlockers {
+                count: Some(1),
+            }));
+
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo {
+                    object_id: attacker1,
+                    defending_player: PlayerId(1),
+                },
+                AttackerInfo {
+                    object_id: attacker2,
+                    defending_player: PlayerId(1),
+                },
+                AttackerInfo {
+                    object_id: attacker3,
+                    defending_player: PlayerId(1),
+                },
+            ],
+            ..Default::default()
+        });
+
+        // Blocking three attackers should fail
+        assert!(validate_blockers(
+            &state,
+            &[
+                (blocker, attacker1),
+                (blocker, attacker2),
+                (blocker, attacker3)
+            ]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn extra_blockers_unlimited_allows_many() {
+        use crate::types::ability::StaticDefinition;
+
+        let mut state = setup();
+        let attacker1 = create_creature(&mut state, PlayerId(0), "Bear A", 2, 2);
+        let attacker2 = create_creature(&mut state, PlayerId(0), "Bear B", 2, 2);
+        let attacker3 = create_creature(&mut state, PlayerId(0), "Bear C", 2, 2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Hundred-Handed One", 3, 5);
+
+        // "can block any number of creatures" → ExtraBlockers { count: None }
+        state
+            .objects
+            .get_mut(&blocker)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::ExtraBlockers {
+                count: None,
+            }));
+
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo {
+                    object_id: attacker1,
+                    defending_player: PlayerId(1),
+                },
+                AttackerInfo {
+                    object_id: attacker2,
+                    defending_player: PlayerId(1),
+                },
+                AttackerInfo {
+                    object_id: attacker3,
+                    defending_player: PlayerId(1),
+                },
+            ],
+            ..Default::default()
+        });
+
+        // Blocking three attackers should succeed with unlimited
+        assert!(validate_blockers(
+            &state,
+            &[
+                (blocker, attacker1),
+                (blocker, attacker2),
+                (blocker, attacker3)
+            ]
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn normal_creature_cannot_block_two_attackers() {
+        let mut state = setup();
+        let attacker1 = create_creature(&mut state, PlayerId(0), "Bear A", 2, 2);
+        let attacker2 = create_creature(&mut state, PlayerId(0), "Bear B", 2, 2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
+
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo {
+                    object_id: attacker1,
+                    defending_player: PlayerId(1),
+                },
+                AttackerInfo {
+                    object_id: attacker2,
+                    defending_player: PlayerId(1),
+                },
+            ],
+            ..Default::default()
+        });
+
+        // CR 509.1a: Default is blocking only one creature
+        assert!(validate_blockers(&state, &[(blocker, attacker1), (blocker, attacker2)]).is_err());
+    }
+
+    #[test]
+    fn duplicate_block_assignment_rejected() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo {
+                object_id: attacker,
+                defending_player: PlayerId(1),
+            }],
+            ..Default::default()
+        });
+
+        // Same (blocker, attacker) pair submitted twice
+        assert!(validate_blockers(&state, &[(blocker, attacker), (blocker, attacker)]).is_err());
     }
 
     // --- Horsemanship tests ---

@@ -343,6 +343,7 @@ export type WaitingFor =
   | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]> } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
   | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidate_descriptions?: string[] } }
+  | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[] } }
   | { type: "EquipTarget"; data: { player: PlayerId; equipment_id: ObjectId; valid_targets: ObjectId[] } }
   | { type: "ScryChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "DigChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_count: number } }

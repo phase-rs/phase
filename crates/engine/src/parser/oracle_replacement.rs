@@ -44,6 +44,12 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
         return Some(def);
     }
 
+    // --- "You may have ~ enter as a copy of [filter]" (clone replacement) ---
+    // CR 707.9: "Enter as a copy" is a replacement effect modifying the ETB event.
+    if let Some(def) = parse_clone_replacement(&norm_lower, &text) {
+        return Some(def);
+    }
+
     // --- "[Type] your opponents control enter tapped" (external replacement) ---
     if let Some(def) = parse_external_enters_tapped(&norm_lower, &text) {
         return Some(def);
@@ -146,11 +152,18 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
 fn replace_self_refs(text: &str, card_name: &str) -> String {
     let result = text.replace(card_name, "~");
     // Case-insensitive replacement for self-referencing phrases
-    ["this creature", "this land", "this permanent"]
-        .iter()
-        .fold(result, |acc, phrase| {
-            case_insensitive_replace(&acc, phrase, "~")
-        })
+    [
+        "this creature",
+        "this land",
+        "this permanent",
+        "this enchantment",
+        "this artifact",
+        "this vehicle",
+    ]
+    .iter()
+    .fold(result, |acc, phrase| {
+        case_insensitive_replace(&acc, phrase, "~")
+    })
 }
 
 fn case_insensitive_replace(text: &str, pattern: &str, replacement: &str) -> String {
@@ -263,6 +276,56 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
                     persist: true,
                 },
             ))
+            .valid_card(TargetFilter::SelfRef)
+            .description(original_text.to_string()),
+    )
+}
+
+/// CR 707.9 / CR 614.1c: Parse clone replacement effect.
+/// "You may have ~ enter as a copy of [any] [type] on the battlefield"
+/// Emits an Optional Moved replacement with BecomeCopy as the execute effect.
+/// The player chooses a valid permanent to copy as part of the replacement.
+fn parse_clone_replacement(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+    // Must contain "enter as a copy of" (after self-ref normalization)
+    let copy_idx = norm_lower.find("enter as a copy of ")?;
+    // Must be preceded by "you may have" for the optional framing
+    if !norm_lower[..copy_idx].contains("you may have") {
+        return None;
+    }
+
+    let after_copy = &norm_lower[copy_idx + "enter as a copy of ".len()..];
+    // Strip "any " / "a " / "an " article before the type phrase
+    let type_text = after_copy
+        .strip_prefix("any ")
+        .or_else(|| after_copy.strip_prefix("a "))
+        .or_else(|| after_copy.strip_prefix("an "))
+        .unwrap_or(after_copy);
+
+    // Strip trailing "on the battlefield" and punctuation
+    let type_text = type_text
+        .trim_end_matches('.')
+        .trim_end_matches(" on the battlefield")
+        .trim();
+
+    let (filter, leftover) = parse_type_phrase(type_text);
+    if !leftover.trim().is_empty() {
+        return None;
+    }
+
+    // CR 707.9a: The copy effect uses the chosen object's copiable values.
+    // This is NOT targeting (hexproof/shroud don't apply).
+    let copy_effect = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::BecomeCopy {
+            target: filter,
+            duration: None,
+        },
+    );
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(copy_effect)
+            .mode(ReplacementMode::Optional { decline: None })
             .valid_card(TargetFilter::SelfRef)
             .description(original_text.to_string()),
     )
@@ -1397,5 +1460,120 @@ mod tests {
             def.damage_target_filter,
             Some(DamageTargetFilter::PlayerOnly)
         );
+    }
+
+    // ── Clone replacement tests ──
+
+    #[test]
+    fn clone_creature_basic() {
+        // CR 707.9: "You may have ~ enter as a copy of any creature on the battlefield"
+        let def = parse_replacement_line(
+            "You may have Clone enter as a copy of any creature on the battlefield.",
+            "Clone",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(
+            def.mode,
+            ReplacementMode::Optional { decline: None }
+        ));
+        let execute = def.execute.as_ref().unwrap();
+        match &execute.effect {
+            Effect::BecomeCopy { target, duration } => {
+                assert!(duration.is_none());
+                match target {
+                    TargetFilter::Typed(TypedFilter { card_type, .. }) => {
+                        assert_eq!(*card_type, Some(TypeFilter::Creature));
+                    }
+                    other => panic!("Expected Typed creature filter, got {other:?}"),
+                }
+            }
+            other => panic!("Expected BecomeCopy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clone_enchantment() {
+        // Estrid's Invocation, Copy Enchantment
+        let def = parse_replacement_line(
+            "You may have this enchantment enter as a copy of an enchantment on the battlefield.",
+            "Copy Enchantment",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(
+            def.mode,
+            ReplacementMode::Optional { decline: None }
+        ));
+        let execute = def.execute.as_ref().unwrap();
+        match &execute.effect {
+            Effect::BecomeCopy { target, .. } => match target {
+                TargetFilter::Typed(TypedFilter { card_type, .. }) => {
+                    assert_eq!(*card_type, Some(TypeFilter::Enchantment));
+                }
+                other => panic!("Expected Typed enchantment filter, got {other:?}"),
+            },
+            other => panic!("Expected BecomeCopy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clone_artifact() {
+        // Sculpting Steel, Phyrexian Metamorph
+        let def = parse_replacement_line(
+            "You may have this artifact enter as a copy of any artifact on the battlefield.",
+            "Sculpting Steel",
+        )
+        .unwrap();
+        assert!(matches!(
+            def.mode,
+            ReplacementMode::Optional { decline: None }
+        ));
+        let execute = def.execute.as_ref().unwrap();
+        match &execute.effect {
+            Effect::BecomeCopy { target, .. } => match target {
+                TargetFilter::Typed(TypedFilter { card_type, .. }) => {
+                    assert_eq!(*card_type, Some(TypeFilter::Artifact));
+                }
+                other => panic!("Expected Typed artifact filter, got {other:?}"),
+            },
+            other => panic!("Expected BecomeCopy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clone_vehicle() {
+        let def = parse_replacement_line(
+            "You may have this vehicle enter as a copy of any vehicle on the battlefield.",
+            "Mirror Vehicle",
+        )
+        .unwrap();
+        assert!(matches!(
+            def.mode,
+            ReplacementMode::Optional { decline: None }
+        ));
+        let execute = def.execute.as_ref().unwrap();
+        match &execute.effect {
+            Effect::BecomeCopy { target, .. } => match target {
+                TargetFilter::Typed(TypedFilter { subtype, .. }) => {
+                    assert_eq!(subtype.as_deref(), Some("Vehicle"));
+                }
+                other => panic!("Expected Typed vehicle filter, got {other:?}"),
+            },
+            other => panic!("Expected BecomeCopy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clone_uses_self_ref_normalization() {
+        // "this creature" should be normalized to "~" by replace_self_refs
+        let def = parse_replacement_line(
+            "You may have this creature enter as a copy of any creature on the battlefield.",
+            "Some Clone",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(def.mode, ReplacementMode::Optional { .. }));
     }
 }

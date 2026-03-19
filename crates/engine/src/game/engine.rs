@@ -2,8 +2,8 @@ use rand::Rng;
 use thiserror::Error;
 
 use crate::types::ability::{
-    AbilityDefinition, ChoiceType, ChoiceValue, ChosenAttribute, EffectKind, ResolvedAbility,
-    TargetRef,
+    AbilityDefinition, ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind,
+    ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
@@ -729,6 +729,39 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 super::replacement::ReplacementResult::Prevented => WaitingFor::Priority {
                     player: state.active_player,
                 },
+            }
+        }
+        // CR 707.9: Player chose a permanent to copy for "enter as a copy of" replacement.
+        (
+            WaitingFor::CopyTargetChoice {
+                player,
+                source_id,
+                valid_targets,
+            },
+            GameAction::ChooseTarget { target },
+        ) => {
+            let target_id = match target {
+                Some(TargetRef::Object(id)) if valid_targets.contains(&id) => id,
+                _ => {
+                    return Err(EngineError::InvalidAction(
+                        "Invalid copy target".to_string(),
+                    ));
+                }
+            };
+            // CR 707.2: Copy copiable characteristics from the chosen permanent.
+            let ability = ResolvedAbility::new(
+                Effect::BecomeCopy {
+                    target: TargetFilter::Any,
+                    duration: None,
+                },
+                vec![TargetRef::Object(target_id)],
+                *source_id,
+                *player,
+            );
+            let _ = effects::resolve_ability_chain(state, &ability, &mut events, 0);
+            state.layers_dirty = true;
+            WaitingFor::Priority {
+                player: state.active_player,
             }
         }
         (
@@ -1747,6 +1780,8 @@ fn apply_etb_counters(
 
 /// Apply a post-replacement side effect after a zone change has been executed.
 /// Used by Optional replacements (e.g., shock lands: pay life on accept, tap on decline).
+/// CR 707.9: For "enter as a copy" replacements, sets up CopyTargetChoice instead of
+/// immediate resolution, since the player must choose which permanent to copy.
 fn apply_post_replacement_effect(
     state: &mut GameState,
     effect_def: &crate::types::ability::AbilityDefinition,
@@ -1762,6 +1797,21 @@ fn apply_post_replacement_effect(
         })
         .unwrap_or((ObjectId(0), state.active_player));
 
+    // CR 707.9: BecomeCopy needs interactive target selection — the player chooses
+    // which permanent to copy. This is a choice, not targeting (hexproof doesn't apply).
+    if let Effect::BecomeCopy { ref target, .. } = effect_def.effect {
+        let valid_targets = find_copy_targets(state, target, source_id, controller);
+        if valid_targets.is_empty() {
+            // No valid targets — clone enters as itself (no copy)
+            return None;
+        }
+        return Some(WaitingFor::CopyTargetChoice {
+            player: controller,
+            source_id,
+            valid_targets,
+        });
+    }
+
     let targets = object_id
         .map(TargetRef::Object)
         .into_iter()
@@ -1773,6 +1823,31 @@ fn apply_post_replacement_effect(
         WaitingFor::Priority { .. } => None,
         wf => Some(wf.clone()),
     }
+}
+
+/// CR 707.9: Find valid permanents on the battlefield that match the copy filter.
+/// This is a choice, not targeting — hexproof/shroud/protection don't apply.
+fn find_copy_targets(
+    state: &GameState,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    controller: PlayerId,
+) -> Vec<ObjectId> {
+    state
+        .objects
+        .iter()
+        .filter(|(id, obj)| {
+            // Must be on the battlefield
+            obj.zone == Zone::Battlefield
+                // Can't copy itself
+                && **id != source_id
+                // Must match the type filter
+                && super::filter::matches_target_filter_controlled(
+                    state, **id, filter, source_id, controller,
+                )
+        })
+        .map(|(id, _)| *id)
+        .collect()
 }
 
 fn resolved_ability_from_definition(
@@ -5619,5 +5694,106 @@ mod phase_trigger_regression_tests {
         // Verify the choice was stored on the object
         let obj = state.objects.get(&obj_id).unwrap();
         assert_eq!(obj.chosen_color(), Some(ManaColor::Red));
+    }
+
+    #[test]
+    fn copy_target_choice_resolves_become_copy() {
+        // CR 707.9: Test the CopyTargetChoice → BecomeCopy flow.
+        // Set up a clone creature on battlefield and a target creature to copy.
+        let mut state = GameState::new_two_player(42);
+
+        let target_id = zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let target = state.objects.get_mut(&target_id).unwrap();
+            target.base_power = Some(2);
+            target.base_toughness = Some(2);
+            target.power = Some(2);
+            target.toughness = Some(2);
+        }
+
+        let clone_id = zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Clone".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let clone = state.objects.get_mut(&clone_id).unwrap();
+            clone.base_power = Some(0);
+            clone.base_toughness = Some(0);
+            clone.power = Some(0);
+            clone.toughness = Some(0);
+        }
+
+        // Set up CopyTargetChoice waiting state
+        state.waiting_for = WaitingFor::CopyTargetChoice {
+            player: PlayerId(0),
+            source_id: clone_id,
+            valid_targets: vec![target_id],
+        };
+
+        // Player chooses to copy Grizzly Bears
+        let result = apply(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target_id)),
+            },
+        );
+        assert!(result.is_ok());
+
+        // Verify the clone now has the target's characteristics
+        let clone = state.objects.get(&clone_id).unwrap();
+        assert_eq!(clone.name, "Grizzly Bears");
+        assert_eq!(clone.power, Some(2));
+        assert_eq!(clone.toughness, Some(2));
+    }
+
+    #[test]
+    fn copy_target_choice_rejects_invalid_target() {
+        let mut state = GameState::new_two_player(42);
+
+        let valid_id = zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let invalid_id = zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bird".to_string(),
+            Zone::Battlefield,
+        );
+        let clone_id = zones::create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Clone".to_string(),
+            Zone::Battlefield,
+        );
+
+        state.waiting_for = WaitingFor::CopyTargetChoice {
+            player: PlayerId(0),
+            source_id: clone_id,
+            valid_targets: vec![valid_id], // Bird is NOT in valid targets
+        };
+
+        // Try to choose invalid target
+        let result = apply(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(invalid_id)),
+            },
+        );
+        assert!(result.is_err());
     }
 }

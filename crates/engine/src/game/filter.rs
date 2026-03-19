@@ -329,6 +329,12 @@ fn matches_filter_prop(
         },
         // CR 702.157a: Match creatures with the suspected designation.
         FilterProp::Suspected => obj.is_suspected,
+        // CR 510.1c: Match creatures whose toughness exceeds their power.
+        FilterProp::ToughnessGTPower => {
+            let power = obj.power.unwrap_or(0);
+            let toughness = obj.toughness.unwrap_or(0);
+            toughness > power
+        }
         FilterProp::Other { .. } => true, // Permissive fallback for unrecognized properties
     }
 }

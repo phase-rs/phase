@@ -193,6 +193,11 @@ pub struct GameObject {
     #[serde(default)]
     pub is_suspected: bool,
 
+    /// CR 510.1c: This creature assigns combat damage equal to its toughness
+    /// rather than its power. Set by continuous effects during layer evaluation.
+    #[serde(default)]
+    pub assigns_damage_from_toughness: bool,
+
     /// CR 719.1: Case enchantment solve state. Present only on Case permanents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub case_state: Option<CaseState>,
@@ -259,6 +264,7 @@ impl GameObject {
             casting_permissions: Vec::new(),
             chosen_attributes: Vec::new(),
             is_suspected: false,
+            assigns_damage_from_toughness: false,
             case_state: None,
             class_level: None,
         }

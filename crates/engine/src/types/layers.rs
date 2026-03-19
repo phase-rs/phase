@@ -79,6 +79,8 @@ impl ContinuousModification {
             ContinuousModification::SetColor { .. }
             | ContinuousModification::AddColor { .. }
             | ContinuousModification::AddChosenColor => Layer::Color,
+            // CR 510.1c: Rule-modification effect processed in Ability layer (layer 6).
+            ContinuousModification::AssignDamageFromToughness => Layer::Ability,
         }
     }
 }

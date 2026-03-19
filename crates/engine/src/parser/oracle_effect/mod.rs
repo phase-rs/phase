@@ -1205,6 +1205,13 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
         Some(ChoiceType::NumberRange { min: 0, max: 20 })
     } else if rest.starts_with("a land type") || rest.starts_with("a nonbasic land type") {
         Some(ChoiceType::LandType)
+    } else if rest.starts_with("an opponent") {
+        // CR 800.4a: Choose an opponent from among players in the game.
+        Some(ChoiceType::Opponent)
+    } else if rest.starts_with("a player") {
+        Some(ChoiceType::Player)
+    } else if rest.starts_with("two colors") {
+        Some(ChoiceType::TwoColors)
     } else {
         // Generic "X or Y" pattern — must come AFTER all specific patterns above
         try_parse_binary_choice(rest).map(|options| ChoiceType::Labeled { options })

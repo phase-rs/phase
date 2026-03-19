@@ -114,9 +114,11 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
   const isHumanTargetSelection =
     (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
     && waitingFor.data.player === playerId;
-  const isValidTarget = isHumanTargetSelection && currentTargetRefs.some(
+  const isCopyTargetChoice =
+    waitingFor?.type === "CopyTargetChoice" && waitingFor.data.player === playerId;
+  const isValidTarget = (isHumanTargetSelection && currentTargetRefs.some(
     (target) => "Object" in target && target.Object === objectId,
-  );
+  )) || (isCopyTargetChoice && waitingFor.data.valid_targets.includes(objectId));
 
   // Combat state — check both UI selection and committed combat state
   const isSelectingAttacker =

@@ -2460,7 +2460,7 @@ mod tests {
         let mut blocker_assignments = HashMap::new();
         blocker_assignments.insert(attacker_id, vec![blocker_id]);
         let mut blocker_to_attacker = HashMap::new();
-        blocker_to_attacker.insert(blocker_id, attacker_id);
+        blocker_to_attacker.insert(blocker_id, vec![attacker_id]);
 
         state.combat = Some(CombatState {
             attackers: vec![AttackerInfo {

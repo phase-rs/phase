@@ -56,6 +56,11 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::CantDraw, handle_rule_mod);
     registry.insert(StaticMode::Panharmonicon, handle_rule_mod);
     registry.insert(StaticMode::IgnoreHexproof, handle_rule_mod);
+    registry.insert(
+        StaticMode::ExtraBlockers { count: Some(1) },
+        handle_rule_mod,
+    );
+    registry.insert(StaticMode::ExtraBlockers { count: None }, handle_rule_mod);
 
     // Promoted static ability handlers
     registry.insert(

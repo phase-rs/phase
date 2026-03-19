@@ -163,6 +163,15 @@ pub enum WaitingFor {
         #[serde(default)]
         candidate_descriptions: Vec<String>,
     },
+    /// CR 707.9: Player chooses a permanent to copy as part of an "enter as a copy of"
+    /// replacement effect. This is a choice, not targeting (hexproof/shroud don't apply).
+    CopyTargetChoice {
+        player: PlayerId,
+        /// The permanent that just entered the battlefield (the clone).
+        source_id: ObjectId,
+        /// Legal permanents on the battlefield that can be copied.
+        valid_targets: Vec<ObjectId>,
+    },
     EquipTarget {
         player: PlayerId,
         equipment_id: ObjectId,
@@ -346,6 +355,7 @@ impl WaitingFor {
             | WaitingFor::DeclareAttackers { player, .. }
             | WaitingFor::DeclareBlockers { player, .. }
             | WaitingFor::ReplacementChoice { player, .. }
+            | WaitingFor::CopyTargetChoice { player, .. }
             | WaitingFor::EquipTarget { player, .. }
             | WaitingFor::ScryChoice { player, .. }
             | WaitingFor::DigChoice { player, .. }

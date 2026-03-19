@@ -37,6 +37,12 @@ pub enum ChoiceType {
     },
     /// "Choose a land type" — includes basic + common nonbasic land types.
     LandType,
+    /// "Choose an opponent" — selects one opponent player (CR 800.4a).
+    Opponent,
+    /// "Choose a player" — selects any player in the game.
+    Player,
+    /// "Choose two colors" — selects two distinct mana colors.
+    TwoColors,
 }
 
 /// The five basic land types (CR 305.6).
@@ -175,6 +181,10 @@ pub enum ChosenAttribute {
     CardType(CoreType),
     OddOrEven(Parity),
     CardName(String),
+    /// Stores the chosen opponent/player ID (CR 800.4a).
+    Player(PlayerId),
+    /// Stores two chosen colors as a pair.
+    TwoColors([ManaColor; 2]),
 }
 
 impl ChosenAttribute {
@@ -187,6 +197,9 @@ impl ChosenAttribute {
             Self::CardType(_) => ChoiceType::CardType,
             Self::OddOrEven(_) => ChoiceType::OddOrEven,
             Self::CardName(_) => ChoiceType::CardName,
+            // Player covers both Player and Opponent choice types
+            Self::Player(_) => ChoiceType::Player,
+            Self::TwoColors(_) => ChoiceType::TwoColors,
         }
     }
 
@@ -200,6 +213,8 @@ impl ChosenAttribute {
             ChoiceValue::CardType(card_type) => Some(Self::CardType(card_type)),
             ChoiceValue::OddOrEven(parity) => Some(Self::OddOrEven(parity)),
             ChoiceValue::CardName(card_name) => Some(Self::CardName(card_name)),
+            ChoiceValue::Player(id) => Some(Self::Player(id)),
+            ChoiceValue::TwoColors(colors) => Some(Self::TwoColors(colors)),
             ChoiceValue::Number(_) | ChoiceValue::Label(_) | ChoiceValue::LandType(_) => None,
         }
     }
@@ -218,6 +233,8 @@ pub enum ChoiceValue {
     Number(u8),
     Label(String),
     LandType(String),
+    Player(PlayerId),
+    TwoColors([ManaColor; 2]),
 }
 
 impl ChoiceValue {
@@ -234,6 +251,17 @@ impl ChoiceValue {
             ChoiceType::NumberRange { .. } => value.parse::<u8>().ok().map(Self::Number),
             ChoiceType::Labeled { .. } => Some(Self::Label(value.to_string())),
             ChoiceType::LandType => Some(Self::LandType(value.to_string())),
+            // CR 800.4a: Parse player ID from string.
+            ChoiceType::Opponent | ChoiceType::Player => value
+                .parse::<u8>()
+                .ok()
+                .map(|id| Self::Player(PlayerId(id))),
+            ChoiceType::TwoColors => {
+                let (a, b) = value.split_once(", ")?;
+                let c1 = a.parse::<ManaColor>().ok()?;
+                let c2 = b.parse::<ManaColor>().ok()?;
+                Some(Self::TwoColors([c1, c2]))
+            }
         }
     }
 }
@@ -695,6 +723,8 @@ pub enum FilterProp {
     },
     /// CR 702.157a: Matches suspected creatures.
     Suspected,
+    /// CR 510.1c: Matches creatures whose toughness is greater than their power.
+    ToughnessGTPower,
     Other {
         value: String,
     },
@@ -2719,6 +2749,9 @@ pub enum ContinuousModification {
     AddStaticMode {
         mode: StaticMode,
     },
+    /// CR 510.1c: This creature assigns combat damage equal to its toughness
+    /// rather than its power.
+    AssignDamageFromToughness,
 }
 
 // ---------------------------------------------------------------------------

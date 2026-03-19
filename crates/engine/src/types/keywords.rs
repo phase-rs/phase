@@ -7,13 +7,16 @@ use serde::{Deserialize, Serialize};
 use super::ability::{ControllerRef, TargetFilter, TypedFilter};
 use super::mana::{ManaColor, ManaCost};
 
-/// What a Protection keyword protects from.
+/// What a Protection keyword protects from (CR 702.16).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum ProtectionTarget {
     Color(ManaColor),
     CardType(String),
     Quality(String),
     Multicolored,
+    /// CR 702.16: Protection from the chosen color — resolved at runtime from the
+    /// source permanent's `chosen_attributes`.
+    ChosenColor,
 }
 
 /// All MTG keywords as typed enum variants.
@@ -544,6 +547,8 @@ fn parse_protection_target(s: &str) -> ProtectionTarget {
         "red" => ProtectionTarget::Color(ManaColor::Red),
         "green" => ProtectionTarget::Color(ManaColor::Green),
         "multicolored" => ProtectionTarget::Multicolored,
+        // CR 702.16: "the chosen color" resolves at runtime from chosen_attributes
+        "the chosen color" | "chosen color" => ProtectionTarget::ChosenColor,
         _ if lower.starts_with("from ") => ProtectionTarget::Quality(s.to_string()),
         _ => ProtectionTarget::CardType(s.to_string()),
     }
@@ -910,6 +915,15 @@ mod tests {
             Keyword::from_str("Protection:multicolored").unwrap(),
             Keyword::Protection(ProtectionTarget::Multicolored)
         );
+        // CR 702.16: "the chosen color" resolves at runtime
+        assert_eq!(
+            Keyword::from_str("Protection:the chosen color").unwrap(),
+            Keyword::Protection(ProtectionTarget::ChosenColor)
+        );
+        assert_eq!(
+            Keyword::from_str("Protection:chosen color").unwrap(),
+            Keyword::Protection(ProtectionTarget::ChosenColor)
+        );
     }
 
     #[test]
@@ -1054,6 +1068,7 @@ mod tests {
                 generic: 1,
             }),
             Keyword::Protection(ProtectionTarget::Color(ManaColor::Blue)),
+            Keyword::Protection(ProtectionTarget::ChosenColor),
             Keyword::Unknown("CustomKeyword".to_string()),
             Keyword::EtbCounter {
                 counter_type: "P1P1".to_string(),

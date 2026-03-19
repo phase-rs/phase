@@ -16,6 +16,9 @@ const CHOICE_TYPE_LABELS: Record<string, string> = {
   CardType: "Choose a Card Type",
   CardName: "Name a Card",
   LandType: "Choose a Land Type",
+  Opponent: "Choose an Opponent",
+  Player: "Choose a Player",
+  TwoColors: "Choose Two Colors",
   NumberRange: "Choose a Number",
   Labeled: "Make a Choice",
 };

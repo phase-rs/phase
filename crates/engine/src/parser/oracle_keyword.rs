@@ -418,6 +418,34 @@ mod tests {
     }
 
     #[test]
+    fn parse_keyword_from_oracle_protection_from_color() {
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::mana::ManaColor;
+
+        // CR 702.16: "protection from red" parses to Protection(Color(Red))
+        let kw = parse_keyword_from_oracle("protection from red").unwrap();
+        assert_eq!(
+            kw,
+            Keyword::Protection(ProtectionTarget::Color(ManaColor::Red))
+        );
+
+        let kw = parse_keyword_from_oracle("protection from blue").unwrap();
+        assert_eq!(
+            kw,
+            Keyword::Protection(ProtectionTarget::Color(ManaColor::Blue))
+        );
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_protection_from_chosen_color() {
+        use crate::types::keywords::ProtectionTarget;
+
+        // CR 702.16: "protection from the chosen color" parses to Protection(ChosenColor)
+        let kw = parse_keyword_from_oracle("protection from the chosen color").unwrap();
+        assert_eq!(kw, Keyword::Protection(ProtectionTarget::ChosenColor));
+    }
+
+    #[test]
     fn is_keyword_cost_line_new_keywords() {
         assert!(is_keyword_cost_line("toxic 2"));
         assert!(is_keyword_cost_line("saddle 3"));

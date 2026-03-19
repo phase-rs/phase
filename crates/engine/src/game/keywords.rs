@@ -64,6 +64,14 @@ pub fn protection_prevents_from(target: &GameObject, source: &GameObject) -> boo
                         return true;
                     }
                 }
+                // CR 702.16: ChosenColor resolves from the target permanent's chosen_attributes
+                ProtectionTarget::ChosenColor => {
+                    if let Some(color) = target.chosen_color() {
+                        if source.color.contains(&color) {
+                            return true;
+                        }
+                    }
+                }
                 ProtectionTarget::CardType(_) | ProtectionTarget::Quality(_) => {
                     // Not yet implemented for damage prevention
                 }

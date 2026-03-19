@@ -1,6 +1,8 @@
+use crate::game::players;
 use crate::types::ability::{ChoiceType, Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::player::PlayerId;
 
 /// Choose: present the player with a named set of options (creature type, color, etc.).
 /// Sets WaitingFor::NamedChoice so the player can select one.
@@ -23,7 +25,7 @@ pub fn resolve(
         }
     };
 
-    let options = compute_options(state, &choice_type);
+    let options = compute_options(state, &choice_type, ability.controller);
 
     state.waiting_for = WaitingFor::NamedChoice {
         player: ability.controller,
@@ -102,7 +104,11 @@ const LAND_TYPES: &[&str] = &[
 ];
 
 /// Compute the valid options for a given choice type.
-fn compute_options(state: &GameState, choice_type: &ChoiceType) -> Vec<String> {
+fn compute_options(
+    state: &GameState,
+    choice_type: &ChoiceType,
+    controller: PlayerId,
+) -> Vec<String> {
     match choice_type {
         ChoiceType::CreatureType => {
             if state.all_creature_types.is_empty() {
@@ -124,11 +130,30 @@ fn compute_options(state: &GameState, choice_type: &ChoiceType) -> Vec<String> {
         ChoiceType::NumberRange { min, max } => (*min..=*max).map(|n| n.to_string()).collect(),
         ChoiceType::Labeled { options } => options.clone(),
         ChoiceType::LandType => to_strings(LAND_TYPES),
+        // CR 800.4a: An opponent is any other player in the game.
+        ChoiceType::Opponent => players::opponents(state, controller)
+            .iter()
+            .map(|id| id.0.to_string())
+            .collect(),
+        ChoiceType::Player => state.seat_order.iter().map(|id| id.0.to_string()).collect(),
+        ChoiceType::TwoColors => two_color_options(),
     }
 }
 
 fn to_strings(strs: &[&str]) -> Vec<String> {
     strs.iter().map(|&s| s.to_string()).collect()
+}
+
+/// Generate all 10 two-color combinations from the 5 mana colors.
+/// Order within a pair doesn't matter, so we use ordered pairs (i < j).
+fn two_color_options() -> Vec<String> {
+    let mut options = Vec::with_capacity(10);
+    for (i, &c1) in COLORS.iter().enumerate() {
+        for &c2 in &COLORS[i + 1..] {
+            options.push(format!("{c1}, {c2}"));
+        }
+    }
+    options
 }
 
 #[cfg(test)]
@@ -355,6 +380,54 @@ mod tests {
                 assert!(options.contains(&"Sphere".to_string()));
                 assert!(options.contains(&"Urza's".to_string()));
                 assert!(options.len() >= 14);
+            }
+            other => panic!("Expected NamedChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn choose_opponent_lists_opponents() {
+        let mut state = GameState::new_two_player(42);
+        let ability = make_choose_ability(ChoiceType::Opponent);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => {
+                // Player 0 is controller, so opponent is player 1
+                assert_eq!(options, &["1"]);
+            }
+            other => panic!("Expected NamedChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn choose_player_lists_all_players() {
+        let mut state = GameState::new_two_player(42);
+        let ability = make_choose_ability(ChoiceType::Player);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => {
+                assert_eq!(options.len(), 2);
+                assert!(options.contains(&"0".to_string()));
+                assert!(options.contains(&"1".to_string()));
+            }
+            other => panic!("Expected NamedChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn choose_two_colors_offers_ten_combinations() {
+        let mut state = GameState::new_two_player(42);
+        let ability = make_choose_ability(ChoiceType::TwoColors);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => {
+                // C(5,2) = 10 unique pairs
+                assert_eq!(options.len(), 10);
+                assert!(options.contains(&"White, Blue".to_string()));
+                assert!(options.contains(&"Red, Green".to_string()));
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }

@@ -702,7 +702,8 @@ function GamePageContent({
 
       {/* WaitingFor-driven prompt overlays (only for human player) */}
       {(waitingFor?.type === "TargetSelection" ||
-        waitingFor?.type === "TriggerTargetSelection") &&
+        waitingFor?.type === "TriggerTargetSelection" ||
+        waitingFor?.type === "CopyTargetChoice") &&
         waitingFor.data.player === playerId && <TargetingOverlay />}
       {waitingFor?.type === "ManaPayment" &&
         waitingFor.data.player === playerId && <ManaPaymentUI />}
