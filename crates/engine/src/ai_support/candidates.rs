@@ -857,12 +857,7 @@ fn mana_payment_actions(
     if let Some(mode) = convoke_mode {
         // CR 702.6b: Summoning sickness does not restrict tapping for convoke.
         for (obj_id, obj) in &state.objects {
-            if obj.controller == player
-                && obj.zone == crate::types::zones::Zone::Battlefield
-                && !obj.tapped
-                && (obj.card_types.core_types.contains(&CoreType::Creature)
-                    || obj.card_types.core_types.contains(&CoreType::Artifact))
-            {
+            if obj.is_convoke_eligible(player) {
                 match mode {
                     ConvokeMode::Waterbend => {
                         // Waterbend: always colorless

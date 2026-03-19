@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{AbilityCost, AdditionalCost, ResolvedAbility};
-use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ConvokeMode, GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor,
@@ -181,8 +180,9 @@ pub(crate) fn handle_sacrifice_for_cost(
     }
 }
 
-/// Push an activated ability to the stack after all costs are paid.
-/// Shared by `handle_activate_ability` (direct path) and `handle_sacrifice_for_cost` (interactive path).
+/// Push an activated ability to the stack after costs are paid.
+/// Shared by: direct path in `handle_activate_ability`, sacrifice detour, and
+/// waterbend/ManaPayment finalization in the PassPriority handler.
 pub(super) fn push_activated_ability_to_stack(
     state: &mut GameState,
     player: PlayerId,
@@ -210,7 +210,6 @@ pub(super) fn push_activated_ability_to_stack(
             let assigned_targets = flatten_targets_in_chain(&resolved);
             emit_targeting_events(state, &assigned_targets, source_id, player, events);
 
-            // Fall through to push below
             return push_ability_entry(state, player, source_id, ability_index, resolved, events);
         }
 
@@ -495,36 +494,15 @@ pub(super) fn pay_and_push_adventure(
     });
     // Gate on eligible creatures/artifacts being present.
     let convoke_mode = convoke_mode.filter(|_| {
-        state.objects.values().any(|o| {
-            o.controller == player
-                && o.zone == Zone::Battlefield
-                && !o.tapped
-                && (o.card_types.core_types.contains(&CoreType::Creature)
-                    || o.card_types.core_types.contains(&CoreType::Artifact))
-        })
+        state
+            .objects
+            .values()
+            .any(|o| o.is_convoke_eligible(player))
     });
 
-    // Check for X in cost -- if present, return ManaPayment for player input
-    if let crate::types::mana::ManaCost::Cost { shards, .. } = cost {
-        if shards.contains(&ManaCostShard::X) {
-            state.pending_cast = Some(Box::new(PendingCast {
-                object_id,
-                card_id,
-                ability,
-                cost: cost.clone(),
-                activation_cost: None,
-                activation_ability_index: None,
-                target_constraints: vec![],
-            }));
-            return Ok(WaitingFor::ManaPayment {
-                player,
-                convoke_mode,
-            });
-        }
-    }
-
-    // CR 702.6a: If convoke/waterbend is available, enter ManaPayment so the player can tap creatures.
-    if convoke_mode.is_some() {
+    // Enter ManaPayment if the cost has X (needs player input) or convoke/waterbend is available.
+    let has_x = matches!(cost, crate::types::mana::ManaCost::Cost { shards, .. } if shards.contains(&ManaCostShard::X));
+    if has_x || convoke_mode.is_some() {
         state.pending_cast = Some(Box::new(PendingCast {
             object_id,
             card_id,

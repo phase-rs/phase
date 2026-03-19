@@ -8,7 +8,7 @@ use crate::types::ability::{
     SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card::PrintedCardRef;
-use crate::types::card_type::CardType;
+use crate::types::card_type::{CardType, CoreType};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
@@ -314,6 +314,16 @@ impl GameObject {
             .iter()
             .filter_map(|t| t.counter_filter.as_ref().and_then(|f| f.threshold))
             .max()
+    }
+
+    /// CR 702.6a: Whether this object can be tapped for convoke/waterbend mana.
+    /// Requires: on battlefield, untapped, creature or artifact, controlled by `player`.
+    pub fn is_convoke_eligible(&self, player: PlayerId) -> bool {
+        self.controller == player
+            && self.zone == Zone::Battlefield
+            && !self.tapped
+            && (self.card_types.core_types.contains(&CoreType::Creature)
+                || self.card_types.core_types.contains(&CoreType::Artifact))
     }
 
     /// Get the chosen subtype as a string, unified across creature types and basic land types.

@@ -674,19 +674,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 .objects
                 .get(&object_id)
                 .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
-            let is_artifact = obj
-                .card_types
-                .core_types
-                .contains(&crate::types::card_type::CoreType::Artifact);
-            let is_creature = obj
-                .card_types
-                .core_types
-                .contains(&crate::types::card_type::CoreType::Creature);
-            if obj.controller != *player
-                || obj.tapped
-                || obj.zone != crate::types::zones::Zone::Battlefield
-                || (!is_artifact && !is_creature)
-            {
+            if !obj.is_convoke_eligible(*player) {
                 return Err(EngineError::ActionNotAllowed(
                     "Can only tap untapped creatures or artifacts you control for convoke"
                         .to_string(),
