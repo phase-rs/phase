@@ -596,6 +596,57 @@ mod tests {
         );
     }
 
+    /// Regression test: AI with a castable creature in hand and untapped lands
+    /// on the battlefield should cast the creature, not just tap lands for mana.
+    #[test]
+    fn very_hard_casts_creature_instead_of_tapping_lands() {
+        let mut state = make_state();
+        state.lands_played_this_turn = 1; // Already played a land
+
+        // Add two forests on battlefield (untapped, can tap for green)
+        for i in 0..2 {
+            let land_id = engine::game::zones::create_object(
+                &mut state,
+                CardId(200 + i),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&land_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.controller = PlayerId(0);
+            obj.entered_battlefield_turn = Some(1);
+        }
+
+        // Add a 2/2 creature with mana cost {1}{G} in hand
+        let creature_id = engine::game::zones::create_object(
+            &mut state,
+            CardId(300),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&creature_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.mana_cost = engine::types::mana::ManaCost::Cost {
+            shards: vec![engine::types::mana::ManaCostShard::Green],
+            generic: 1,
+        };
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let action = choose_action(&state, PlayerId(0), &config, &mut rng);
+
+        assert!(
+            matches!(action, Some(GameAction::CastSpell { .. })),
+            "AI should cast creature, not tap lands. Got: {:?}",
+            action
+        );
+    }
+
     #[test]
     fn self_targeting_is_penalized() {
         let state = make_state();

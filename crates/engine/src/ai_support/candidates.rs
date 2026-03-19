@@ -453,9 +453,13 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
         }
     }
 
-    // CR 605.3a: Mana abilities can be activated any time a player has priority.
-    // Generate TapLandForMana candidates for untapped lands with activatable mana.
-    actions.extend(mana_tap_actions(state, player));
+    // NOTE: TapLandForMana is intentionally excluded from priority candidates.
+    // The engine auto-taps lands during mana payment (pay_mana_cost → auto_tap_lands),
+    // so the AI never needs to manually tap lands during priority. Including them
+    // pollutes the search tree — shallow evaluations see "hand unchanged" for tapping
+    // vs "hand shrinks" for casting, causing the AI to prefer tapping over casting.
+    // Mana tap candidates are still generated for ManaPayment/UnlessPayment contexts
+    // via mana_payment_actions().
 
     // CR 702.49a: Offer Ninjutsu activations during declare blockers step
     if matches!(state.phase, Phase::DeclareBlockers | Phase::CombatDamage)
@@ -762,7 +766,8 @@ fn bottom_card_actions(state: &GameState, player: PlayerId, count: u8) -> Vec<Ca
 }
 
 /// CR 605.3a: Generate TapLandForMana candidates for untapped lands with activatable mana.
-/// Shared by both priority and mana-payment contexts.
+/// Used for ManaPayment/UnlessPayment contexts only — NOT for priority (the engine
+/// auto-taps lands during spell casting via pay_mana_cost → auto_tap_lands).
 // Note: UntapLandForMana is intentionally omitted — it is a human-only undo action.
 // AI never populates lands_tapped_for_mana, so the handler would reject it anyway.
 fn mana_tap_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction> {

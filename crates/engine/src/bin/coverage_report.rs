@@ -28,8 +28,8 @@ fn main() {
             coverage_pct: 0.0,
             coverage_by_format: Default::default(),
             cards: vec![],
-            missing_handler_frequency: vec![],
             top_gaps: vec![],
+            gap_bundles: vec![],
         };
         println!("{}", serde_json::to_string_pretty(&empty).unwrap());
         process::exit(0);
@@ -51,8 +51,8 @@ fn main() {
                 coverage_pct: 0.0,
                 coverage_by_format: Default::default(),
                 cards: vec![],
-                missing_handler_frequency: vec![],
                 top_gaps: vec![],
+                gap_bundles: vec![],
             };
             println!("{}", serde_json::to_string_pretty(&empty).unwrap());
             process::exit(1);
@@ -79,27 +79,61 @@ fn main() {
         );
     }
 
-    // Print top gaps with format breakdown
+    // Print top gaps with format breakdown, independence ratio, and oracle patterns
     if !summary.top_gaps.is_empty() {
         eprintln!();
         eprintln!("Top gaps by single-gap card unlock potential:");
-        for gap in summary.top_gaps.iter().take(15) {
+        for (i, gap) in summary.top_gaps.iter().take(15).enumerate() {
             if gap.single_gap_cards == 0 {
                 continue;
             }
-            let format_str: String =
-                ["standard", "modern", "pioneer", "pauper", "commander"]
-                    .iter()
-                    .filter_map(|&f| {
-                        gap.single_gap_by_format
-                            .get(f)
-                            .map(|count| format!("{}:{}", &f[..3], count))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
+            let format_str: String = ["standard", "modern", "pioneer", "pauper", "commander"]
+                .iter()
+                .filter_map(|&f| {
+                    gap.single_gap_by_format
+                        .get(f)
+                        .map(|count| format!("{}:{}", &f[..3], count))
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let ratio_str = gap
+                .independence_ratio
+                .map(|r| format!(" (ind: {:.0}%)", r * 100.0))
+                .unwrap_or_default();
             eprintln!(
-                "  {} — {} total, {} single-gap [{}]",
-                gap.handler, gap.total_count, gap.single_gap_cards, format_str
+                "  {} — {} total, {} single-gap{} [{}]",
+                gap.handler, gap.total_count, gap.single_gap_cards, ratio_str, format_str
+            );
+
+            // Show top 3 oracle patterns for the first 5 gaps
+            if i < 5 {
+                for pattern in gap.oracle_patterns.iter().take(3) {
+                    eprintln!(
+                        "    «{}» ×{} (e.g. {})",
+                        pattern.pattern,
+                        pattern.count,
+                        pattern.example_cards.first().unwrap_or(&String::new())
+                    );
+                }
+            }
+        }
+    }
+
+    // Print top gap bundles
+    let two_gap_bundles: Vec<_> = summary
+        .gap_bundles
+        .iter()
+        .filter(|b| b.handlers.len() == 2)
+        .take(5)
+        .collect();
+    if !two_gap_bundles.is_empty() {
+        eprintln!();
+        eprintln!("Top 2-gap bundles (implementing both unlocks cards):");
+        for bundle in two_gap_bundles {
+            eprintln!(
+                "  [{}] — {} cards",
+                bundle.handlers.join(" + "),
+                bundle.unlocked_cards,
             );
         }
     }

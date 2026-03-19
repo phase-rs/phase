@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ModalPanelShell } from "../ui/ModalPanelShell";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 /** Known effect API types supported by the engine. */
 const SUPPORTED_EFFECTS = [
@@ -74,13 +73,46 @@ interface ParsedItem {
   children?: ParsedItem[];
 }
 
+interface GapDetail {
+  handler: string;
+  source_text?: string;
+}
+
 interface CardCoverageResult {
   card_name: string;
   set_code: string;
   supported: boolean;
-  missing_handlers: string[];
+  gap_details?: GapDetail[];
+  gap_count?: number;
   oracle_text?: string;
   parse_details?: ParsedItem[];
+}
+
+interface GapFrequency {
+  handler: string;
+  total_count: number;
+  single_gap_cards: number;
+  single_gap_by_format: Record<string, number>;
+  oracle_patterns?: OraclePattern[];
+  independence_ratio?: number;
+  co_occurrences?: CoOccurrence[];
+}
+
+interface OraclePattern {
+  pattern: string;
+  count: number;
+  example_cards: string[];
+}
+
+interface CoOccurrence {
+  handler: string;
+  shared_cards: number;
+}
+
+interface GapBundle {
+  handlers: string[];
+  unlocked_cards: number;
+  unlocked_by_format: Record<string, number>;
 }
 
 interface CoverageSummary {
@@ -89,7 +121,8 @@ interface CoverageSummary {
   coverage_pct: number;
   coverage_by_format?: Record<string, FormatCoverageSummary>;
   cards: CardCoverageResult[];
-  missing_handler_frequency: [string, number][];
+  top_gaps?: GapFrequency[];
+  gap_bundles?: GapBundle[];
 }
 
 interface FormatCoverageSummary {
@@ -100,43 +133,65 @@ interface FormatCoverageSummary {
 
 const MAX_VISIBLE_CARDS = 200;
 
-type MainView = "card-coverage" | "supported-handlers";
+type MainView = "card-coverage" | "gap-analysis" | "supported-handlers";
 type HandlerTab = "effects" | "triggers" | "keywords" | "statics" | "replacements";
 type StatusFilter = "all" | "supported" | "unsupported";
+type SortMode = "name" | "gaps-desc" | "gaps-asc";
+type FormatFilter = "all" | "standard" | "modern" | "pioneer" | "pauper" | "commander" | "legacy" | "vintage";
 
-interface CardCoverageDashboardProps {
-  onClose: () => void;
-}
+const FORMAT_LABELS: Record<FormatFilter, string> = {
+  all: "All Formats",
+  standard: "Standard",
+  modern: "Modern",
+  pioneer: "Pioneer",
+  pauper: "Pauper",
+  commander: "Commander",
+  legacy: "Legacy",
+  vintage: "Vintage",
+};
 
-export function CardCoverageDashboard({ onClose }: CardCoverageDashboardProps) {
+export function CardCoverageDashboard() {
   const [mainView, setMainView] = useState<MainView>("card-coverage");
 
   return (
-    <ModalPanelShell
-      title="Card Coverage"
-      subtitle="Inspect implementation coverage and supported engine handlers."
-      onClose={onClose}
-      maxWidthClassName="max-w-7xl"
-      bodyClassName="flex flex-col overflow-hidden"
-    >
-        <div className="flex flex-wrap gap-2 border-b border-white/10 px-4 py-3 sm:px-6">
-          {(["card-coverage", "supported-handlers"] as const).map((view) => (
-            <button
-              key={view}
-              onClick={() => setMainView(view)}
-              className={`rounded-[16px] border px-4 py-1.5 text-sm font-semibold transition ${
-                mainView === view
-                  ? "border-sky-400/60 bg-sky-500/14 text-sky-100"
-                  : "border-white/8 bg-black/20 text-slate-400 hover:border-white/14 hover:text-slate-100"
-              }`}
-            >
-              {view === "card-coverage" ? "Card Coverage" : "Supported Handlers"}
-            </button>
-          ))}
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[20px] border border-white/10 bg-[#0b1020]/96 shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md sm:rounded-[24px]">
+      {/* Header */}
+      <div className="border-b border-white/10 px-4 py-4 sm:px-6 sm:py-5">
+        <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
+          Engine Tools
         </div>
+        <h2 className="mt-1 text-lg font-semibold text-white sm:text-xl">Card Coverage</h2>
+        <p className="mt-1 text-xs text-slate-400 sm:text-sm">
+          Inspect implementation coverage and supported engine handlers.
+        </p>
+      </div>
 
-        {mainView === "card-coverage" ? <CardCoverageView /> : <SupportedHandlersView />}
-    </ModalPanelShell>
+      {/* Tab bar */}
+      <div className="flex flex-wrap gap-2 border-b border-white/10 px-4 py-3 sm:px-6">
+        {(["card-coverage", "gap-analysis", "supported-handlers"] as const).map((view) => (
+          <button
+            key={view}
+            onClick={() => setMainView(view)}
+            className={`rounded-[16px] border px-4 py-1.5 text-sm font-semibold transition ${
+              mainView === view
+                ? "border-sky-400/60 bg-sky-500/14 text-sky-100"
+                : "border-white/8 bg-black/20 text-slate-400 hover:border-white/14 hover:text-slate-100"
+            }`}
+          >
+            {view === "card-coverage" ? "Card Coverage" : view === "gap-analysis" ? "Gap Analysis" : "Supported Handlers"}
+          </button>
+        ))}
+      </div>
+
+      {/* Content */}
+      {mainView === "card-coverage" ? (
+        <CardCoverageView />
+      ) : mainView === "gap-analysis" ? (
+        <GapAnalysisView />
+      ) : (
+        <SupportedHandlersView />
+      )}
+    </div>
   );
 }
 
@@ -149,6 +204,10 @@ function CardCoverageView() {
   const [selectedCard, setSelectedCard] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [sortMode, setSortMode] = useState<SortMode>("name");
+  const [focusIndex, setFocusIndex] = useState(-1);
+  const listRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     fetch("/coverage-data.json")
@@ -166,18 +225,67 @@ function CardCoverageView() {
   const filteredCards = useMemo(() => {
     if (!coverage || !hasActiveFilter) return [];
     const lowerSearch = search.toLowerCase();
-    return coverage.cards.filter((card) => {
+    const filtered = coverage.cards.filter((card) => {
       if (statusFilter === "supported" && !card.supported) return false;
       if (statusFilter === "unsupported" && card.supported) return false;
       if (lowerSearch && !card.card_name.toLowerCase().includes(lowerSearch)) return false;
       return true;
     });
-  }, [coverage, search, statusFilter, hasActiveFilter]);
+    switch (sortMode) {
+      case "name":
+        filtered.sort((a, b) => a.card_name.localeCompare(b.card_name));
+        break;
+      case "gaps-desc":
+        filtered.sort((a, b) => (b.gap_count ?? 0) - (a.gap_count ?? 0) || a.card_name.localeCompare(b.card_name));
+        break;
+      case "gaps-asc":
+        filtered.sort((a, b) => (a.gap_count ?? 0) - (b.gap_count ?? 0) || a.card_name.localeCompare(b.card_name));
+        break;
+    }
+    return filtered;
+  }, [coverage, search, statusFilter, hasActiveFilter, sortMode]);
 
   const activeCard = useMemo(() => {
     if (!selectedCard) return null;
     return filteredCards.find((_, i) => `${filteredCards[i].card_name}-${i}` === selectedCard) ?? null;
   }, [selectedCard, filteredCards]);
+
+  // Keyboard navigation handler
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      const cards = filteredCards.slice(0, MAX_VISIBLE_CARDS);
+      if (cards.length === 0) return;
+
+      switch (e.key) {
+        case "ArrowDown": {
+          e.preventDefault();
+          const next = Math.min(focusIndex + 1, cards.length - 1);
+          setFocusIndex(next);
+          setSelectedCard(`${cards[next].card_name}-${next}`);
+          // Scroll into view
+          const el = listRef.current?.children[next] as HTMLElement | undefined;
+          el?.scrollIntoView({ block: "nearest" });
+          break;
+        }
+        case "ArrowUp": {
+          e.preventDefault();
+          const prev = Math.max(focusIndex - 1, 0);
+          setFocusIndex(prev);
+          setSelectedCard(`${cards[prev].card_name}-${prev}`);
+          const el = listRef.current?.children[prev] as HTMLElement | undefined;
+          el?.scrollIntoView({ block: "nearest" });
+          break;
+        }
+        case "Escape":
+          e.preventDefault();
+          setSelectedCard(null);
+          setFocusIndex(-1);
+          searchRef.current?.focus();
+          break;
+      }
+    },
+    [filteredCards, focusIndex],
+  );
 
   if (loading) {
     return (
@@ -246,7 +354,7 @@ function CardCoverageView() {
                 <span className="uppercase">{format.slice(0, 3)}</span>
                 {" "}
                 <span className="text-slate-400">{summary.coverage_pct.toFixed(0)}%</span>
-                <span className="mx-1.5 text-white/10">·</span>
+                <span className="mx-1.5 text-white/10">&middot;</span>
               </span>
             ))}
           </div>
@@ -254,31 +362,45 @@ function CardCoverageView() {
       </div>
 
       {/* Master-detail split */}
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1" onKeyDown={handleKeyDown}>
         {/* Left panel: card list */}
         <div className="flex w-80 shrink-0 flex-col border-r border-white/10">
-          {/* Search & filter */}
-          <div className="flex gap-2 px-3 py-3">
-            <input
-              type="text"
-              placeholder="Search cards..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="min-w-0 flex-1 rounded-[12px] border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white placeholder-slate-500 outline-none focus:border-sky-400/40"
-            />
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-              className="rounded-[12px] border border-white/10 bg-black/18 px-2 py-1.5 text-xs text-white outline-none focus:border-sky-400/40"
-            >
-              <option value="all">All</option>
-              <option value="supported">Supported</option>
-              <option value="unsupported">Unsupported</option>
-            </select>
+          {/* Search, sort & filter */}
+          <div className="space-y-2 px-3 py-3">
+            <div className="flex gap-2">
+              <input
+                ref={searchRef}
+                type="text"
+                placeholder="Search cards..."
+                value={search}
+                onChange={(e) => { setSearch(e.target.value); setFocusIndex(-1); }}
+                className="min-w-0 flex-1 rounded-[12px] border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white placeholder-slate-500 outline-none focus:border-sky-400/40"
+              />
+              <select
+                value={statusFilter}
+                onChange={(e) => { setStatusFilter(e.target.value as StatusFilter); setFocusIndex(-1); }}
+                className="rounded-[12px] border border-white/10 bg-black/18 px-2 py-1.5 text-xs text-white outline-none focus:border-sky-400/40"
+              >
+                <option value="all">All</option>
+                <option value="supported">Supported</option>
+                <option value="unsupported">Unsupported</option>
+              </select>
+            </div>
+            <div className="flex gap-2">
+              <select
+                value={sortMode}
+                onChange={(e) => setSortMode(e.target.value as SortMode)}
+                className="min-w-0 flex-1 rounded-[12px] border border-white/10 bg-black/18 px-2 py-1.5 text-xs text-white outline-none focus:border-sky-400/40"
+              >
+                <option value="name">Sort: A-Z</option>
+                <option value="gaps-desc">Sort: Most Gaps</option>
+                <option value="gaps-asc">Sort: Fewest Gaps</option>
+              </select>
+            </div>
           </div>
 
           {/* Scrollable card list */}
-          <div className="min-h-0 flex-1 overflow-y-auto">
+          <div className="min-h-0 flex-1 overflow-y-auto" ref={listRef} tabIndex={-1}>
             {!hasActiveFilter ? (
               <div className="px-3 py-10 text-center">
                 <div className="text-xs text-slate-500">
@@ -290,14 +412,20 @@ function CardCoverageView() {
                 {visibleCards.map((card, i) => {
                   const cardKey = `${card.card_name}-${i}`;
                   const isSelected = selectedCard === cardKey;
+                  const isFocused = focusIndex === i;
                   return (
                     <button
                       key={cardKey}
-                      onClick={() => setSelectedCard(isSelected ? null : cardKey)}
+                      onClick={() => {
+                        setSelectedCard(isSelected ? null : cardKey);
+                        setFocusIndex(isSelected ? -1 : i);
+                      }}
                       className={`flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] transition ${
                         isSelected
                           ? "bg-sky-500/10 text-white"
-                          : "text-slate-300 hover:bg-white/[0.03]"
+                          : isFocused
+                            ? "bg-white/[0.05] text-white"
+                            : "text-slate-300 hover:bg-white/[0.03]"
                       }`}
                     >
                       <span
@@ -306,9 +434,9 @@ function CardCoverageView() {
                         }`}
                       />
                       <span className="min-w-0 flex-1 truncate">{card.card_name}</span>
-                      {!card.supported && card.missing_handlers.length > 0 && (
+                      {!card.supported && (card.gap_count ?? 0) > 0 && (
                         <span className="shrink-0 text-[10px] tabular-nums text-rose-400/70">
-                          {card.missing_handlers.length}
+                          {card.gap_count}
                         </span>
                       )}
                     </button>
@@ -358,13 +486,13 @@ function DetailEmptyState({ coverage }: { coverage: CoverageSummary }) {
       <div className="mb-8 text-center">
         <div className="text-sm text-slate-400">Select a card to inspect its parse breakdown</div>
         <div className="mt-1 text-xs text-slate-600">
-          Hover over oracle text or tree nodes to see how they connect
+          Use arrow keys to navigate, Escape to deselect
         </div>
       </div>
 
-      {/* Format coverage grid as detail content */}
+      {/* Format coverage grid */}
       {formatCoverage.length > 0 && (
-        <div className="mt-4 w-full max-w-lg">
+        <div className="w-full max-w-lg">
           <div className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
             Coverage by Format
           </div>
@@ -396,26 +524,265 @@ function DetailEmptyState({ coverage }: { coverage: CoverageSummary }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
 
-      {/* Missing handler frequency */}
-      {coverage.missing_handler_frequency.length > 0 && (
-        <div className="mt-6 w-full max-w-lg">
-          <div className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-            Most Common Missing Handlers
+// --- Gap Analysis View ---
+
+function GapAnalysisView() {
+  const [coverage, setCoverage] = useState<CoverageSummary | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [expandedGap, setExpandedGap] = useState<string | null>(null);
+  const [formatFilter, setFormatFilter] = useState<FormatFilter>("all");
+
+  useEffect(() => {
+    fetch("/coverage-data.json")
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((data: CoverageSummary) => setCoverage(data))
+      .catch(() => setCoverage(null))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="flex flex-1 items-center justify-center p-8">
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-sky-300" />
+      </div>
+    );
+  }
+
+  if (!coverage?.top_gaps?.length) {
+    return (
+      <div className="flex-1 p-8 text-center text-sm text-slate-400">
+        No gap analysis data available.
+      </div>
+    );
+  }
+
+  const filteredGaps = coverage.top_gaps.map((gap) => {
+    if (formatFilter === "all") return gap;
+    const formatCount = gap.single_gap_by_format[formatFilter] ?? 0;
+    return { ...gap, single_gap_cards: formatCount };
+  });
+
+  const bundles = coverage.gap_bundles ?? [];
+  const twoBundles = bundles.filter((b) => b.handlers.length === 2);
+  const threeBundles = bundles.filter((b) => b.handlers.length === 3);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+      {/* Format filter bar */}
+      <div className="flex items-center gap-2 border-b border-white/10 px-4 py-3 sm:px-6">
+        <span className="text-xs text-slate-500">Filter by format:</span>
+        <select
+          value={formatFilter}
+          onChange={(e) => setFormatFilter(e.target.value as FormatFilter)}
+          className="rounded-[12px] border border-white/10 bg-black/18 px-3 py-1.5 text-xs text-white outline-none focus:border-sky-400/40"
+        >
+          {Object.entries(FORMAT_LABELS).map(([key, label]) => (
+            <option key={key} value={key}>{label}</option>
+          ))}
+        </select>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6">
+        {/* Top gaps */}
+        <div className="mb-6">
+          <div className="mb-3 flex items-center justify-between">
+            <div className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
+              Top Gaps by Impact (Top 50)
+            </div>
+            <CopyButton
+              text={filteredGaps.map((g) => `${g.handler}\t${g.total_count}\t${g.single_gap_cards}`).join("\n")}
+              label="Copy as TSV"
+            />
           </div>
           <div className="space-y-1">
-            {coverage.missing_handler_frequency.slice(0, 10).map(([handler, count]) => (
-              <div
-                key={handler}
-                className="flex items-center justify-between rounded-[10px] border border-white/5 bg-black/12 px-3 py-1.5 text-[13px]"
-              >
-                <span className="text-slate-300">{handler}</span>
-                <span className="font-mono text-xs text-amber-300/80">{count}</span>
-              </div>
+            {filteredGaps.map((gap) => (
+              <GapRow
+                key={gap.handler}
+                gap={gap}
+                isExpanded={expandedGap === gap.handler}
+                onToggle={() => setExpandedGap(expandedGap === gap.handler ? null : gap.handler)}
+                formatFilter={formatFilter}
+              />
             ))}
           </div>
         </div>
+
+        {/* 2-Gap Bundles */}
+        {twoBundles.length > 0 && (
+          <div className="mb-6">
+            <div className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
+              2-Gap Bundles (implement both to unlock cards)
+            </div>
+            <div className="space-y-1">
+              {twoBundles.slice(0, 15).map((bundle, i) => (
+                <BundleRow key={i} bundle={bundle} formatFilter={formatFilter} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* 3-Gap Bundles */}
+        {threeBundles.length > 0 && (
+          <div className="mb-6">
+            <div className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
+              3-Gap Bundles (implement all three to unlock cards)
+            </div>
+            <div className="space-y-1">
+              {threeBundles.slice(0, 10).map((bundle, i) => (
+                <BundleRow key={i} bundle={bundle} formatFilter={formatFilter} />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function GapRow({
+  gap,
+  isExpanded,
+  onToggle,
+  formatFilter,
+}: {
+  gap: GapFrequency;
+  isExpanded: boolean;
+  onToggle: () => void;
+  formatFilter: FormatFilter;
+}) {
+  const ratioStr = gap.independence_ratio != null
+    ? `${(gap.independence_ratio * 100).toFixed(0)}%`
+    : null;
+
+  return (
+    <div>
+      <button
+        onClick={onToggle}
+        className={`flex w-full items-center gap-3 rounded-[10px] border px-3 py-2 text-left text-[13px] transition ${
+          isExpanded
+            ? "border-sky-400/30 bg-sky-500/8"
+            : "border-white/5 bg-black/12 hover:border-white/10"
+        }`}
+      >
+        <span className={`text-[10px] transition ${isExpanded ? "rotate-90" : ""}`}>&#9654;</span>
+        <span className="min-w-0 flex-1 font-medium text-slate-300">{gap.handler}</span>
+        <span className="shrink-0 font-mono text-xs text-amber-300/80">{gap.total_count} total</span>
+        {gap.single_gap_cards > 0 && (
+          <span className="shrink-0 font-mono text-xs text-emerald-300/80">
+            {gap.single_gap_cards} unlock
+          </span>
+        )}
+        {ratioStr && (
+          <span className="shrink-0 rounded-full bg-sky-500/12 px-2 py-0.5 text-[10px] text-sky-300">
+            {ratioStr} ind
+          </span>
+        )}
+      </button>
+
+      {isExpanded && (
+        <div className="ml-6 mt-1 space-y-2 border-l border-white/8 pl-4 pt-1">
+          {/* Oracle patterns */}
+          {gap.oracle_patterns && gap.oracle_patterns.length > 0 && (
+            <div>
+              <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                Oracle Patterns
+              </div>
+              <div className="space-y-0.5">
+                {gap.oracle_patterns.slice(0, 10).map((pat, i) => (
+                  <div key={i} className="flex items-start gap-2 text-[12px]">
+                    <span className="shrink-0 font-mono text-amber-300/60">&times;{pat.count}</span>
+                    <span className="min-w-0 flex-1 font-mono text-slate-400">
+                      &laquo;{pat.pattern}&raquo;
+                    </span>
+                    {pat.example_cards.length > 0 && (
+                      <span className="shrink-0 truncate text-[11px] text-slate-600">
+                        e.g. {pat.example_cards[0]}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Co-occurrences */}
+          {gap.co_occurrences && gap.co_occurrences.length > 0 && (
+            <div>
+              <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                Co-occurring Gaps
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {gap.co_occurrences.slice(0, 8).map((co) => (
+                  <span
+                    key={co.handler}
+                    className="rounded-[6px] border border-white/6 bg-black/20 px-2 py-0.5 text-[11px] text-slate-400"
+                  >
+                    {co.handler} <span className="text-slate-600">({co.shared_cards})</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Format breakdown */}
+          {formatFilter === "all" && Object.keys(gap.single_gap_by_format).length > 0 && (
+            <div>
+              <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                Single-Gap Unlock by Format
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {Object.entries(gap.single_gap_by_format).map(([fmt, count]) => (
+                  <span
+                    key={fmt}
+                    className="rounded-[6px] border border-white/6 bg-black/20 px-2 py-0.5 text-[11px] text-slate-400"
+                  >
+                    <span className="uppercase">{fmt.slice(0, 3)}</span>:{count}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
       )}
+    </div>
+  );
+}
+
+function BundleRow({
+  bundle,
+  formatFilter,
+}: {
+  bundle: GapBundle;
+  formatFilter: FormatFilter;
+}) {
+  const count = formatFilter === "all"
+    ? bundle.unlocked_cards
+    : (bundle.unlocked_by_format[formatFilter] ?? 0);
+
+  if (count === 0) return null;
+
+  return (
+    <div className="flex items-center gap-3 rounded-[10px] border border-white/5 bg-black/12 px-3 py-2 text-[13px]">
+      <div className="flex min-w-0 flex-1 flex-wrap gap-1">
+        {bundle.handlers.map((h) => (
+          <span
+            key={h}
+            className="rounded-[6px] border border-amber-400/20 bg-amber-500/8 px-2 py-0.5 text-[11px] text-amber-300"
+          >
+            {h}
+          </span>
+        ))}
+      </div>
+      <span className="shrink-0 font-mono text-xs text-emerald-300/80">
+        {count} cards
+      </span>
     </div>
   );
 }
@@ -579,7 +946,7 @@ function CardParseDetail({ card }: { card: CardCoverageResult }) {
   return (
     <div className="px-5 py-4 sm:px-6">
       {/* Card name header */}
-      <div className="mb-4 flex items-baseline gap-3">
+      <div className="mb-4 flex items-center gap-3">
         <h3 className="text-base font-semibold text-white">{card.card_name}</h3>
         {card.supported ? (
           <span className="rounded-full border border-emerald-400/30 bg-emerald-500/12 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-emerald-300">
@@ -589,6 +956,9 @@ function CardParseDetail({ card }: { card: CardCoverageResult }) {
           <span className="rounded-full border border-rose-400/30 bg-rose-500/12 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-rose-300">
             Unsupported
           </span>
+        )}
+        {card.oracle_text && (
+          <CopyButton text={card.oracle_text} label="Copy Oracle" className="ml-auto" />
         )}
       </div>
 
@@ -656,11 +1026,33 @@ function CardParseDetail({ card }: { card: CardCoverageResult }) {
         <div className="text-xs text-slate-500">No parsed items (vanilla card).</div>
       )}
 
-      {/* Missing handlers summary */}
-      {card.missing_handlers.length > 0 && (
-        <div className="mt-3 text-xs text-slate-500">
-          <span className="font-semibold text-rose-400">Missing: </span>
-          {card.missing_handlers.join(", ")}
+      {/* Gap details — vertical list with source text */}
+      {(card.gap_details?.length ?? 0) > 0 && (
+        <div className="mt-4">
+          <div className="mb-2 flex items-center gap-2">
+            <span className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-rose-400">
+              Missing Handlers ({card.gap_count ?? 0})
+            </span>
+            <CopyButton
+              text={card.gap_details!.map((g) => g.source_text ? `${g.handler}: ${g.source_text}` : g.handler).join("\n")}
+              label="Copy"
+            />
+          </div>
+          <div className="space-y-1">
+            {card.gap_details!.map((gap) => (
+              <div
+                key={gap.handler}
+                className="rounded-[8px] border border-rose-400/10 bg-rose-500/5 px-3 py-1.5"
+              >
+                <div className="text-xs font-medium text-rose-300">{gap.handler}</div>
+                {gap.source_text && (
+                  <div className="mt-0.5 font-mono text-[11px] text-rose-300/50">
+                    {gap.source_text}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -748,6 +1140,28 @@ function ParseTreeNode({
           />
         ))}
     </div>
+  );
+}
+
+// --- Copy button utility ---
+
+function CopyButton({ text, label, className = "" }: { text: string; label: string; className?: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(() => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }, [text]);
+
+  return (
+    <button
+      onClick={handleCopy}
+      className={`rounded-[8px] border border-white/8 bg-black/20 px-2 py-0.5 text-[10px] text-slate-500 transition hover:border-white/14 hover:text-slate-300 ${className}`}
+    >
+      {copied ? "Copied!" : label}
+    </button>
   );
 }
 

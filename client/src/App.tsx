@@ -10,6 +10,7 @@ import { GamePage } from "./pages/GamePage";
 import { GameSetupPage } from "./pages/GameSetupPage";
 import { DeckBuilderPage } from "./pages/DeckBuilderPage";
 import { MyDecksPage } from "./pages/MyDecksPage";
+import { CoveragePage } from "./pages/CoveragePage";
 
 export function App() {
   return (
@@ -62,6 +63,7 @@ function AppContent() {
         <Route path="/multiplayer" element={<MultiplayerPage />} />
         <Route path="/my-decks" element={<MyDecksPage />} />
         <Route path="/deck-builder" element={<DeckBuilderPage />} />
+        <Route path="/coverage" element={<CoveragePage />} />
         <Route path="/game/:id" element={<GamePage />} />
       </Routes>
       {!location.pathname.startsWith("/game/") && <BuildBadge />}

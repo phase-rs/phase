@@ -30,6 +30,7 @@ pub fn build_resolved_from_def(
     }
     resolved.optional_targeting = def.optional_targeting;
     resolved.optional = def.optional;
+    resolved.repeat_for = def.repeat_for.clone();
     resolved
 }
 

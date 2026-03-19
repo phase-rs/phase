@@ -3,7 +3,6 @@ import { useNavigate } from "react-router";
 
 import { initAudioOnInteraction } from "../audio/AudioManager";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
-import { CardCoverageDashboard } from "../components/controls/CardCoverageDashboard";
 import { AiDifficultyDropdown } from "../components/menu/AiDifficultyDropdown";
 import { MainMenuActionCard } from "../components/menu/MainMenuActionCard";
 import { MenuLogo } from "../components/menu/MenuLogo";
@@ -34,7 +33,6 @@ function seedStarterDecks(): void {
 
 export function MenuPage() {
   const navigate = useNavigate();
-  const [showCoverage, setShowCoverage] = useState(false);
   const [activeGame, setActiveGame] = useState<ActiveGameMeta | null>(null);
   const [, setDeckCount] = useState(0);
   const [, setActiveDeckName] = useState<string | null>(null);
@@ -169,7 +167,7 @@ export function MenuPage() {
 
         <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
           <button
-            onClick={() => setShowCoverage(true)}
+            onClick={() => navigate("/coverage")}
             className="inline-flex items-center rounded-full border border-white/10 bg-black/20 px-4 py-2 text-sm font-medium text-slate-400 transition-colors hover:border-white/20 hover:text-white"
           >
             View Card Coverage
@@ -182,9 +180,6 @@ export function MenuPage() {
         </div>
       </div>
 
-      {showCoverage && (
-        <CardCoverageDashboard onClose={() => setShowCoverage(false)} />
-      )}
     </div>
   );
 }
