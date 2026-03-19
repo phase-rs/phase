@@ -1,4 +1,5 @@
 import { execSync } from "node:child_process";
+import path from "node:path";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
@@ -16,6 +17,11 @@ function gitHash(): string {
 }
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      "@wasm/engine": path.resolve(__dirname, "src/wasm/engine_wasm"),
+    },
+  },
   plugins: [
     react(),
     tailwindcss(),

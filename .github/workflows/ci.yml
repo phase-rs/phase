@@ -95,7 +95,7 @@ jobs:
             target/wasm32-unknown-unknown/release/engine_wasm.wasm
 
       - name: Optimize WASM
-        run: wasm-opt -Oz wasm-out/engine_wasm_bg.wasm -o wasm-out/engine_wasm_bg.wasm
+        run: wasm-opt -Oz --enable-bulk-memory wasm-out/engine_wasm_bg.wasm -o wasm-out/engine_wasm_bg.wasm
 
       - name: Report WASM binary size
         run: |

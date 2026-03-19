@@ -1,7 +1,7 @@
 import init, {
   evaluate_deck_compatibility_js,
   load_card_database,
-} from "../wasm/engine_wasm";
+} from "@wasm/engine";
 import type { GameFormat, MatchType } from "../adapter/types";
 import type { ParsedDeck } from "./deckParser";
 

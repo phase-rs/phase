@@ -16,7 +16,10 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "noUncheckedSideEffectImports": true
+    "noUncheckedSideEffectImports": true,
+    "paths": {
+      "@wasm/engine": ["./src/wasm/engine_wasm"]
+    }
   },
   "include": ["src"],
   "exclude": ["src/game/__tests__/wasmLegalActions.integration.test.ts"]

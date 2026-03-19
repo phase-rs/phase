@@ -8,7 +8,7 @@ import init, {
   get_legal_actions_js,
   restore_game_state,
   load_card_database,
-} from "../wasm/engine_wasm";
+} from "@wasm/engine";
 import type {
   EngineAdapter,
   FormatConfig,

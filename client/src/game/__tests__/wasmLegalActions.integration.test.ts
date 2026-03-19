@@ -6,7 +6,7 @@ import init, {
   initialize_game,
   get_game_state,
   get_legal_actions_js,
-} from "../../wasm/engine_wasm";
+} from "@wasm/engine";
 
 /**
  * Integration test using the real WASM binary.

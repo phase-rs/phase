@@ -4,7 +4,7 @@ import type { EngineAdapter } from "../types";
 import { AdapterError, AdapterErrorCode } from "../types";
 
 // Mock the WASM module
-vi.mock("../../wasm/engine_wasm", () => {
+vi.mock("@wasm/engine", () => {
   const mockInit = vi.fn().mockResolvedValue(undefined);
   const mockPing = vi.fn().mockReturnValue("phase-rs engine ready");
   const mockCreateInitialState = vi.fn().mockReturnValue({
@@ -69,7 +69,7 @@ describe("WasmAdapter", () => {
     it("is idempotent - second call is a no-op", async () => {
       await adapter.initialize();
       await adapter.initialize();
-      const { default: init } = await import("../../wasm/engine_wasm");
+      const { default: init } = await import("@wasm/engine");
       expect(init).toHaveBeenCalledTimes(1);
     });
   });
@@ -144,7 +144,7 @@ describe("WasmAdapter", () => {
         priority_player: 0,
       } as unknown as import("../../adapter/types").GameState;
 
-      const { restore_game_state } = await import("../../wasm/engine_wasm");
+      const { restore_game_state } = await import("@wasm/engine");
       adapter.restoreState(mockState);
       expect(restore_game_state).toHaveBeenCalledWith(JSON.stringify(mockState));
     });
@@ -176,7 +176,7 @@ describe("WasmAdapter", () => {
         priority_player: 1,
       };
 
-      const { get_game_state } = await import("../../wasm/engine_wasm");
+      const { get_game_state } = await import("@wasm/engine");
       vi.mocked(get_game_state).mockReturnValue(fullState);
 
       await adapter.initialize();
@@ -189,7 +189,7 @@ describe("WasmAdapter", () => {
 
   describe("error normalization", () => {
     it("wraps WASM errors into AdapterError with recoverable flag", async () => {
-      const { create_initial_state, get_game_state } = await import("../../wasm/engine_wasm");
+      const { create_initial_state, get_game_state } = await import("@wasm/engine");
       vi.mocked(get_game_state).mockReturnValue(null);
       vi.mocked(create_initial_state).mockImplementation(() => {
         throw new Error("WASM execution failed");
