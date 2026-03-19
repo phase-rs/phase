@@ -1,4 +1,4 @@
-name: Deploy to GitHub Pages
+name: Deploy Staging (GitHub Pages)
 
 on:
   push:
@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   build-and-deploy:
-    name: Build & Deploy
+    name: Build & Deploy Staging
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment:
@@ -48,12 +48,6 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: client/pnpm-lock.yaml
-
-      - name: Generate card data
-        run: |
-          mkdir -p data/mtgjson
-          curl -L -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
-          cargo run --release --bin oracle-gen -- data/ --stats > client/public/card-data.json
 
       - name: Build WASM
         run: ./scripts/build-wasm.sh release

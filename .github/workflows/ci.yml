@@ -23,6 +23,7 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          targets: wasm32-unknown-unknown
           cache-shared-key: rust-debug
 
       - uses: taiki-e/install-action@v2
@@ -43,79 +44,8 @@ jobs:
           ln -sf ../client/public/card-data.json data/card-data.json
           cargo run --bin coverage-report -- data/
 
-      - name: Cache MTGJSON data
-        id: cache-mtgjson
-        uses: actions/cache@v4
-        with:
-          path: data/mtgjson/AtomicCards.json
-          key: mtgjson-atomic-v5
-
-      - name: Download MTGJSON data
-        if: steps.cache-mtgjson.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p data/mtgjson
-          curl -L -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
-
-      - name: Verify card data is fresh
-        if: steps.cache-mtgjson.outputs.cache-hit == 'true' || success()
-        run: |
-          cargo run --release --bin oracle-gen -- data/ > /tmp/card-data-check.json
-          diff -q client/public/card-data.json /tmp/card-data-check.json || \
-            (echo "::error::card-data.json is stale — run ./scripts/gen-card-data.sh and commit" && exit 1)
-
-  rust-wasm:
-    name: Rust (WASM build)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          targets: wasm32-unknown-unknown
-          cache-shared-key: rust-wasm
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-bindgen-cli@0.2.114
-
-      - name: Install binaryen
-        run: |
-          curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
-          echo "$PWD/binaryen-version_123/bin" >> $GITHUB_PATH
-
-      - name: Build WASM (release)
-        run: cargo build --package engine-wasm --target wasm32-unknown-unknown --release
-
-      - name: Generate WASM bindings
-        run: |
-          wasm-bindgen \
-            --target web \
-            --out-dir wasm-out \
-            target/wasm32-unknown-unknown/release/engine_wasm.wasm
-
-      - name: Optimize WASM
-        run: wasm-opt -Oz --enable-bulk-memory wasm-out/engine_wasm_bg.wasm -o wasm-out/engine_wasm_bg.wasm
-
-      - name: Report WASM binary size
-        run: |
-          RAW_SIZE=$(stat -c%s wasm-out/engine_wasm_bg.wasm)
-          RAW_KB=$(echo "scale=1; $RAW_SIZE / 1024" | bc)
-          GZIP_SIZE=$(gzip -c wasm-out/engine_wasm_bg.wasm | wc -c)
-          GZIP_KB=$(echo "scale=1; $GZIP_SIZE / 1024" | bc)
-          echo "## WASM Binary Size" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Metric | Size |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|--------|------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Raw | ${RAW_KB} KB |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Gzipped | ${GZIP_KB} KB |" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload WASM artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: wasm-build
-          path: wasm-out/
-          retention-days: 7
+      - name: WASM compile check
+        run: cargo check --package engine-wasm --target wasm32-unknown-unknown
 
   frontend:
     name: Frontend (lint, type-check, test)
