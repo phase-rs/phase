@@ -43,9 +43,9 @@ fn effect_polarity(effect: &Effect) -> EffectPolarity {
             power, toughness, ..
         } => {
             let p_ok = matches!(power, PtValue::Fixed(v) if *v >= 0)
-                || matches!(power, PtValue::Variable(_));
+                || matches!(power, PtValue::Variable(_) | PtValue::Quantity(_));
             let t_ok = matches!(toughness, PtValue::Fixed(v) if *v >= 0)
-                || matches!(toughness, PtValue::Variable(_));
+                || matches!(toughness, PtValue::Variable(_) | PtValue::Quantity(_));
             if p_ok && t_ok {
                 EffectPolarity::Beneficial
             } else {
