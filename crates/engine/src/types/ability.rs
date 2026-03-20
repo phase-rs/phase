@@ -495,6 +495,8 @@ pub enum ManaSpendRestriction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Duration {
     UntilEndOfTurn,
+    /// CR 514.2: Effect expires at end of combat phase.
+    UntilEndOfCombat,
     UntilYourNextTurn,
     UntilHostLeavesPlay,
     Permanent,
@@ -877,6 +879,17 @@ pub enum QuantityRef {
     /// Only valid during sub-ability chain resolution; returns 0 outside that context.
     /// The caller (token resolver) is responsible for consuming the tracked set after use.
     TrackedSetSize,
+    /// CR 603.7c: Numeric value from the triggering event.
+    /// Extracts amount/count from DamageDealt, LifeChanged, CardsDrawn, CounterAdded, etc.
+    EventContextAmount,
+    /// CR 603.7c: Power of the source object from the triggering event.
+    /// Falls back to LKI cache for dies/leaves-battlefield triggers.
+    EventContextSourcePower,
+    /// CR 603.7c: Toughness of the source object from the triggering event.
+    /// Falls back to LKI cache for dies/leaves-battlefield triggers.
+    EventContextSourceToughness,
+    /// CR 603.7c: Mana value of the source object from the triggering event.
+    EventContextSourceManaValue,
 }
 
 /// CR 107.2: Rounding direction for "half X" expressions in Magic.
@@ -3408,6 +3421,7 @@ mod tests {
     fn duration_roundtrip() {
         let durations = vec![
             Duration::UntilEndOfTurn,
+            Duration::UntilEndOfCombat,
             Duration::UntilYourNextTurn,
             Duration::UntilHostLeavesPlay,
             Duration::Permanent,

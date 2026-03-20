@@ -308,6 +308,7 @@ fn fmt_quantity(q: &QuantityExpr) -> String {
 fn fmt_duration(d: &Duration) -> String {
     match d {
         Duration::UntilEndOfTurn => "until end of turn",
+        Duration::UntilEndOfCombat => "until end of combat",
         Duration::UntilYourNextTurn => "until your next turn",
         Duration::UntilHostLeavesPlay => "while on battlefield",
         Duration::Permanent => "permanent",

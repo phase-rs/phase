@@ -207,9 +207,7 @@ fn parse_token_count_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
     if let Some(rest) = trimmed.strip_prefix("that many ") {
         return Some((
             QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "that many".to_string(),
-                },
+                qty: QuantityRef::EventContextAmount,
             },
             rest,
         ));

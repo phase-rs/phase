@@ -63,6 +63,8 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.priority_passes.clear();
     state.priority_pass_count = 0;
     state.players_attacked_this_step.clear();
+    // CR 113.7a: LKI persists within a step but is invalidated on step transition.
+    state.lki_cache.clear();
 
     events.push(GameEvent::PhaseChanged { phase: next });
 }
@@ -460,6 +462,8 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
             }
             Phase::EndCombat => {
                 state.combat = None;
+                // CR 514.2: Prune "until end of combat" transient continuous effects.
+                super::layers::prune_end_of_combat_effects(state);
                 advance_phase(state, events);
                 // Continue to PostCombatMain
             }

@@ -48,6 +48,17 @@ pub enum ConvokeMode {
     Waterbend,
 }
 
+/// CR 113.7a: Snapshot of an object's characteristics at the time it left the battlefield.
+/// Used for event-context resolution when the object is no longer in its original zone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LKISnapshot {
+    pub power: Option<i32>,
+    pub toughness: Option<i32>,
+    pub mana_value: u32,
+    pub controller: PlayerId,
+    pub owner: PlayerId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExileLink {
     pub exiled_id: ObjectId,
@@ -715,6 +726,12 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_trigger_event: Option<GameEvent>,
 
+    /// CR 113.7a: Last Known Information cache.
+    /// Populated before zone changes for objects leaving the battlefield.
+    /// Cleared on phase/step transitions via `advance_phase()`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub lki_cache: HashMap<ObjectId, LKISnapshot>,
+
     /// Transient: set by PayCost resolver when payment fails.
     /// Gates IfYouDo sub-abilities. Reset in DecideOptionalEffect handler.
     #[serde(skip)]
@@ -856,6 +873,7 @@ impl GameState {
             monarch: None,
             restrictions: Vec::new(),
             current_trigger_event: None,
+            lki_cache: HashMap::new(),
             cost_payment_failed_flag: false,
             pending_cast: None,
             ring_level: HashMap::new(),
@@ -987,6 +1005,7 @@ impl PartialEq for GameState {
             && self.pending_continuation == other.pending_continuation
             && self.pending_cast == other.pending_cast
             && self.last_named_choice == other.last_named_choice
+            && self.lki_cache == other.lki_cache
     }
 }
 

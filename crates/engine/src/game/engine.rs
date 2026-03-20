@@ -789,6 +789,8 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                     phase: Phase::EndCombat,
                 });
                 state.combat = None;
+                // CR 514.2: Prune "until end of combat" transient continuous effects.
+                super::layers::prune_end_of_combat_effects(state);
                 turns::advance_phase(state, &mut events);
                 turns::auto_advance(state, &mut events)
             } else if !state.stack.is_empty() {
@@ -1847,6 +1849,8 @@ fn handle_empty_attackers(
         phase: Phase::EndCombat,
     });
     state.combat = None;
+    // CR 514.2: Prune "until end of combat" transient continuous effects.
+    super::layers::prune_end_of_combat_effects(state);
     turns::advance_phase(state, events);
     Ok(turns::auto_advance(state, events))
 }

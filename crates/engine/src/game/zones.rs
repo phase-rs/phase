@@ -46,6 +46,19 @@ pub fn move_to_zone(
     let from = obj.zone;
     let owner = obj.owner;
 
+    // CR 113.7a: Snapshot LKI before zone change from battlefield.
+    // obj.power/toughness reflect all layer modifications (Layer 7).
+    if from == Zone::Battlefield {
+        let lki = crate::types::game_state::LKISnapshot {
+            power: obj.power,
+            toughness: obj.toughness,
+            mana_value: obj.mana_cost.mana_value(),
+            controller: obj.controller,
+            owner: obj.owner,
+        };
+        state.lki_cache.insert(object_id, lki);
+    }
+
     remove_from_zone(state, object_id, from, owner);
     add_to_zone(state, object_id, to, owner);
 
@@ -142,6 +155,18 @@ pub fn move_to_library_position(
     let obj = state.objects.get(&object_id).expect("object exists");
     let from = obj.zone;
     let owner = obj.owner;
+
+    // CR 113.7a: Snapshot LKI before zone change from battlefield.
+    if from == Zone::Battlefield {
+        let lki = crate::types::game_state::LKISnapshot {
+            power: obj.power,
+            toughness: obj.toughness,
+            mana_value: obj.mana_cost.mana_value(),
+            controller: obj.controller,
+            owner: obj.owner,
+        };
+        state.lki_cache.insert(object_id, lki);
+    }
 
     remove_from_zone(state, object_id, from, owner);
 

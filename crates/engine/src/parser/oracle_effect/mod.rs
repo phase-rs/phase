@@ -2147,23 +2147,21 @@ fn try_parse_damage(lower: &str, _text: &str) -> Option<Effect> {
     } else if after_lower.starts_with("that much damage") {
         (
             QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "that much".to_string(),
-                },
+                qty: QuantityRef::EventContextAmount,
             },
             &after["that much damage".len()..],
         )
     } else if after_lower.starts_with("damage equal to ") {
         let amount_text = &after["damage equal to ".len()..];
         let to_pos = amount_text.to_lowercase().find(" to ")?;
-        (
-            QuantityExpr::Ref {
+        let qty_text = amount_text[..to_pos].trim();
+        let qty = crate::parser::oracle_util::parse_event_context_quantity(qty_text)
+            .unwrap_or_else(|| QuantityExpr::Ref {
                 qty: QuantityRef::Variable {
-                    name: amount_text[..to_pos].trim().to_string(),
+                    name: qty_text.to_string(),
                 },
-            },
-            &amount_text[to_pos + 4..],
-        )
+            });
+        (qty, &amount_text[to_pos + 4..])
     } else {
         return None;
     };
@@ -3658,10 +3656,8 @@ mod tests {
             effects.push(std::mem::discriminant(&d.effect));
             // Check else_ability on any node with IfYouDo condition
             if d.condition == Some(AbilityCondition::IfYouDo) {
-                if d.else_ability.is_some() {
-                    effects.push(std::mem::discriminant(
-                        &d.else_ability.as_ref().unwrap().effect,
-                    ));
+                if let Some(else_ab) = &d.else_ability {
+                    effects.push(std::mem::discriminant(&else_ab.effect));
                 }
             }
             current = d.sub_ability.as_deref();

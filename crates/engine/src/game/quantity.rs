@@ -139,13 +139,8 @@ fn resolve_ref(
                     state.objects.get(&id).map(|obj| match property {
                         ObjectProperty::Power => obj.power.unwrap_or(0),
                         ObjectProperty::Toughness => obj.toughness.unwrap_or(0),
-                        ObjectProperty::ManaValue => match &obj.mana_cost {
-                            crate::types::mana::ManaCost::NoCost
-                            | crate::types::mana::ManaCost::SelfManaCost => 0,
-                            crate::types::mana::ManaCost::Cost { shards, generic } => {
-                                (*generic + shards.len() as u32) as i32
-                            }
-                        },
+                        // CR 202.3e: Use mana_value() which correctly excludes X.
+                        ObjectProperty::ManaValue => obj.mana_cost.mana_value() as i32,
                     })
                 } else {
                     None
@@ -249,6 +244,52 @@ fn resolve_ref(
             .iter()
             .max_by_key(|(id, _)| id.0)
             .map(|(_, ids)| ids.len() as i32)
+            .unwrap_or(0),
+        // CR 603.7c: Numeric value from the triggering event.
+        QuantityRef::EventContextAmount => state
+            .current_trigger_event
+            .as_ref()
+            .and_then(crate::game::targeting::extract_amount_from_event)
+            .unwrap_or(0),
+        // CR 603.7c: Power of the source object from the triggering event.
+        // CR 113.7a: Falls back to LKI cache for objects that have left the battlefield.
+        QuantityRef::EventContextSourcePower => state
+            .current_trigger_event
+            .as_ref()
+            .and_then(crate::game::targeting::extract_source_from_event)
+            .and_then(|id| {
+                state
+                    .objects
+                    .get(&id)
+                    .and_then(|obj| obj.power)
+                    .or_else(|| state.lki_cache.get(&id).and_then(|lki| lki.power))
+            })
+            .unwrap_or(0),
+        // CR 603.7c: Toughness of the source object from the triggering event.
+        QuantityRef::EventContextSourceToughness => state
+            .current_trigger_event
+            .as_ref()
+            .and_then(crate::game::targeting::extract_source_from_event)
+            .and_then(|id| {
+                state
+                    .objects
+                    .get(&id)
+                    .and_then(|obj| obj.toughness)
+                    .or_else(|| state.lki_cache.get(&id).and_then(|lki| lki.toughness))
+            })
+            .unwrap_or(0),
+        // CR 603.7c: Mana value of the source object from the triggering event.
+        QuantityRef::EventContextSourceManaValue => state
+            .current_trigger_event
+            .as_ref()
+            .and_then(crate::game::targeting::extract_source_from_event)
+            .and_then(|id| {
+                state
+                    .objects
+                    .get(&id)
+                    .map(|obj| obj.mana_cost.mana_value() as i32)
+                    .or_else(|| state.lki_cache.get(&id).map(|lki| lki.mana_value as i32))
+            })
             .unwrap_or(0),
         // CR 305.6: Count distinct basic land types among lands the controller controls.
         QuantityRef::BasicLandTypeCount => {
@@ -674,6 +715,104 @@ mod tests {
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
             12
         );
+    }
+
+    #[test]
+    fn resolve_event_context_amount_from_damage() {
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_event = Some(crate::types::events::GameEvent::DamageDealt {
+            source_id: ObjectId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 5,
+            is_combat: false,
+        });
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 5);
+    }
+
+    #[test]
+    fn resolve_event_context_amount_none_returns_zero() {
+        let state = GameState::new_two_player(42);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
+    }
+
+    #[test]
+    fn resolve_event_context_source_power_live_object() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().power = Some(4);
+        state.objects.get_mut(&source).unwrap().toughness = Some(3);
+        state.current_trigger_event = Some(crate::types::events::GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 4,
+            is_combat: true,
+        });
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextSourcePower,
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(99)),
+            4
+        );
+    }
+
+    #[test]
+    fn resolve_event_context_source_power_lki_fallback() {
+        use crate::types::game_state::LKISnapshot;
+        let mut state = GameState::new_two_player(42);
+        let dead_id = ObjectId(42);
+        // Object is gone from state.objects but has LKI entry
+        state.lki_cache.insert(
+            dead_id,
+            LKISnapshot {
+                power: Some(6),
+                toughness: Some(5),
+                mana_value: 3,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+            },
+        );
+        state.current_trigger_event =
+            Some(crate::types::events::GameEvent::CreatureDestroyed { object_id: dead_id });
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextSourcePower,
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(99)),
+            6
+        );
+    }
+
+    #[test]
+    fn lki_cleared_on_advance_phase() {
+        use crate::types::game_state::LKISnapshot;
+        let mut state = GameState::new_two_player(42);
+        state.lki_cache.insert(
+            ObjectId(1),
+            LKISnapshot {
+                power: Some(3),
+                toughness: Some(3),
+                mana_value: 2,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+            },
+        );
+        assert!(!state.lki_cache.is_empty());
+        let mut events = Vec::new();
+        crate::game::turns::advance_phase(&mut state, &mut events);
+        assert!(state.lki_cache.is_empty());
     }
 
     #[test]

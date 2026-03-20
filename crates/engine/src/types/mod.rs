@@ -31,8 +31,8 @@ pub use card_type::{CardType, CoreType, Supertype};
 pub use events::GameEvent;
 pub use format::{FormatConfig, GameFormat};
 pub use game_state::{
-    ActionResult, CommanderDamageEntry, GameState, PendingReplacement, PlayerDeckPool, StackEntry,
-    StackEntryKind, TransientContinuousEffect, WaitingFor,
+    ActionResult, CommanderDamageEntry, GameState, LKISnapshot, PendingReplacement, PlayerDeckPool,
+    StackEntry, StackEntryKind, TransientContinuousEffect, WaitingFor,
 };
 pub use identifiers::{CardId, ObjectId};
 pub use keywords::{Keyword, ProtectionTarget};

@@ -1,4 +1,4 @@
-use crate::types::ability::TargetFilter;
+use crate::types::ability::{QuantityExpr, QuantityRef, TargetFilter};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 
 /// Strip reminder text (parenthesized) from a line.
@@ -810,9 +810,82 @@ pub fn merge_or_filters(a: TargetFilter, b: TargetFilter) -> TargetFilter {
     TargetFilter::Or { filters }
 }
 
+/// Parse event-context quantity references from Oracle text fragments.
+/// Returns None for unrecognized patterns (caller falls back to Variable).
+pub fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
+    let lower = text.to_lowercase();
+    let lower = lower.trim();
+    match lower {
+        "that much" | "that many" => Some(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        }),
+        "its power" => Some(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextSourcePower,
+        }),
+        "its toughness" => Some(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextSourceToughness,
+        }),
+        _ if lower == "that spell's mana value" || lower == "that spell's converted mana cost" => {
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourceManaValue,
+            })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_event_context_quantity_that_much() {
+        let result = parse_event_context_quantity("that much");
+        assert_eq!(
+            result,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            })
+        );
+    }
+
+    #[test]
+    fn parse_event_context_quantity_its_power() {
+        assert_eq!(
+            parse_event_context_quantity("its power"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourcePower
+            })
+        );
+    }
+
+    #[test]
+    fn parse_event_context_quantity_its_toughness() {
+        assert_eq!(
+            parse_event_context_quantity("its toughness"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourceToughness
+            })
+        );
+    }
+
+    #[test]
+    fn parse_event_context_quantity_spell_mana_value() {
+        assert_eq!(
+            parse_event_context_quantity("that spell's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourceManaValue
+            })
+        );
+    }
+
+    #[test]
+    fn parse_event_context_quantity_unrecognized_returns_none() {
+        assert_eq!(
+            parse_event_context_quantity("the number of creatures you control"),
+            None
+        );
+    }
 
     #[test]
     fn parse_number_digits() {

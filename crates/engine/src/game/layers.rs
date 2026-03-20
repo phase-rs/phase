@@ -27,6 +27,18 @@ pub fn prune_end_of_turn_effects(state: &mut GameState) {
     }
 }
 
+/// Remove transient effects that expire at end of combat.
+/// Called during the EndCombat phase transition per CR 514.2.
+pub fn prune_end_of_combat_effects(state: &mut GameState) {
+    let before = state.transient_continuous_effects.len();
+    state
+        .transient_continuous_effects
+        .retain(|e| e.duration != Duration::UntilEndOfCombat);
+    if state.transient_continuous_effects.len() != before {
+        state.layers_dirty = true;
+    }
+}
+
 /// Remove transient `UntilYourNextTurn` effects whose controller's turn is starting.
 /// Called at the start of the active player's turn (untap step) per CR 514.2.
 pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: PlayerId) {

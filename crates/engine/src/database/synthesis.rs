@@ -3,7 +3,7 @@ use std::str::FromStr;
 use crate::database::mtgjson::AtomicCard;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, ContinuousModification,
-    ControllerRef, Effect, ManaProduction, NinjutsuVariant, PtValue, StaticDefinition,
+    ControllerRef, Duration, Effect, ManaProduction, NinjutsuVariant, PtValue, StaticDefinition,
     TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::card::{CardFace, CardLayout};
@@ -214,7 +214,10 @@ pub fn synthesize_mobilize(face: &mut CardFace) {
 
             face.triggers.push(
                 TriggerDefinition::new(TriggerMode::Attacks)
-                    .execute(AbilityDefinition::new(AbilityKind::Spell, token_effect))
+                    .execute(
+                        AbilityDefinition::new(AbilityKind::Spell, token_effect)
+                            .duration(Duration::UntilEndOfCombat),
+                    )
                     .description(
                         "Mobilize — create Warrior tokens tapped and attacking".to_string(),
                     ),

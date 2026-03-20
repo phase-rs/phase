@@ -347,6 +347,21 @@ impl ManaCost {
             generic: 0,
         }
     }
+
+    /// CR 202.3: Calculate the mana value (converted mana cost) of this cost.
+    /// CR 202.3e: X in a mana cost contributes 0 when not on the stack.
+    pub fn mana_value(&self) -> u32 {
+        match self {
+            ManaCost::NoCost | ManaCost::SelfManaCost => 0,
+            ManaCost::Cost { shards, generic } => {
+                let shard_count = shards
+                    .iter()
+                    .filter(|s| !matches!(s, ManaCostShard::X))
+                    .count() as u32;
+                shard_count + generic
+            }
+        }
+    }
 }
 
 impl Default for ManaCost {

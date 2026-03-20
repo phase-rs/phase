@@ -190,7 +190,9 @@ pub fn resolve_event_context_target(
 }
 
 /// Extract the source object ID from a trigger event.
-fn extract_source_from_event(event: &crate::types::events::GameEvent) -> Option<ObjectId> {
+pub(crate) fn extract_source_from_event(
+    event: &crate::types::events::GameEvent,
+) -> Option<ObjectId> {
     use crate::types::events::GameEvent;
     match event {
         GameEvent::BecomesTarget { source_id, .. } => Some(*source_id),
@@ -222,7 +224,7 @@ fn extract_source_from_event(event: &crate::types::events::GameEvent) -> Option<
 }
 
 /// Extract the relevant player from a trigger event.
-fn extract_player_from_event(
+pub(crate) fn extract_player_from_event(
     event: &crate::types::events::GameEvent,
     state: &GameState,
 ) -> Option<PlayerId> {
@@ -245,6 +247,21 @@ fn extract_player_from_event(
         GameEvent::DamageDealt { source_id, .. } => {
             state.objects.get(source_id).map(|obj| obj.controller)
         }
+        _ => None,
+    }
+}
+
+/// CR 603.7c: Extract a numeric amount from a trigger event.
+/// Returns the quantity relevant to the event type (damage dealt, life changed, etc.).
+pub(crate) fn extract_amount_from_event(event: &crate::types::events::GameEvent) -> Option<i32> {
+    use crate::types::events::GameEvent;
+    match event {
+        GameEvent::DamageDealt { amount, .. } => Some(*amount as i32),
+        GameEvent::LifeChanged { amount, .. } => Some(amount.abs()),
+        GameEvent::CardsDrawn { count, .. } => Some(*count as i32),
+        GameEvent::CounterAdded { count, .. } => Some(*count as i32),
+        GameEvent::CounterRemoved { count, .. } => Some(*count as i32),
+        GameEvent::Discarded { .. } => Some(1),
         _ => None,
     }
 }

@@ -5,14 +5,16 @@ use crate::game::quantity::resolve_quantity;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, PtValue, QuantityExpr, QuantityRef, ResolvedAbility,
+    DelayedTriggerCondition, Duration, Effect, EffectError, EffectKind, PtValue, QuantityExpr,
+    QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{DelayedTrigger, GameState};
 use crate::types::identifiers::CardId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
+use crate::types::phase::Phase;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
@@ -471,6 +473,27 @@ pub fn resolve(
                         object_id: obj_id,
                         name: token_name,
                     });
+
+                    // CR 603.7: Tokens with a limited duration get a delayed sacrifice trigger.
+                    // Used by Mobilize and similar keywords that create temporary attacking tokens.
+                    if matches!(ability.duration, Some(Duration::UntilEndOfCombat)) {
+                        state.delayed_triggers.push(DelayedTrigger {
+                            condition: DelayedTriggerCondition::AtNextPhase {
+                                phase: Phase::EndCombat,
+                            },
+                            ability: ResolvedAbility::new(
+                                Effect::Sacrifice {
+                                    target: TargetFilter::Any,
+                                },
+                                vec![TargetRef::Object(obj_id)],
+                                ability.source_id,
+                                ability.controller,
+                            ),
+                            controller: ability.controller,
+                            source_id: ability.source_id,
+                            one_shot: true,
+                        });
+                    }
                 }
             }
             ReplacementResult::Prevented => {
@@ -902,5 +925,56 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(state.objects[&state.battlefield[0]].tapped);
+    }
+
+    #[test]
+    fn duration_until_end_of_combat_creates_sacrifice_triggers() {
+        use crate::types::ability::DelayedTriggerCondition;
+        use crate::types::phase::Phase;
+
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::Token {
+                name: "r_1_1_warrior".to_string(),
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
+                types: vec![],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 2 },
+                attach_to: None,
+                enters_attacking: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfCombat);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Two tokens → two delayed sacrifice triggers
+        assert_eq!(state.delayed_triggers.len(), 2);
+        for trigger in &state.delayed_triggers {
+            assert_eq!(
+                trigger.condition,
+                DelayedTriggerCondition::AtNextPhase {
+                    phase: Phase::EndCombat
+                }
+            );
+            assert!(trigger.one_shot);
+            assert_eq!(trigger.controller, PlayerId(0));
+        }
+
+        // Each trigger targets a distinct token
+        let target_ids: Vec<_> = state
+            .delayed_triggers
+            .iter()
+            .filter_map(|t| t.ability.targets.first().cloned())
+            .collect();
+        assert_eq!(target_ids.len(), 2);
+        assert_ne!(target_ids[0], target_ids[1]);
     }
 }

@@ -1,5 +1,6 @@
 ---
 source: crates/engine/tests/oracle_parser.rs
+assertion_line: 68
 expression: result
 ---
 {
@@ -41,8 +42,7 @@ expression: result
           "amount": {
             "type": "Ref",
             "qty": {
-              "type": "Variable",
-              "name": "that much"
+              "type": "EventContextAmount"
             }
           },
           "target": {
