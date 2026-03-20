@@ -367,6 +367,18 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
     }
 }
 
+/// CR 503.1 / CR 504.2 / CR 507.1 / CR 513.1: Process phase triggers for the current step.
+/// Fabricates a PhaseChanged event for `state.phase` and runs trigger matching.
+/// Returns `true` if any triggers were placed on the stack or are pending target selection.
+fn process_phase_triggers(state: &mut GameState) -> bool {
+    let phase_event = [GameEvent::PhaseChanged {
+        phase: state.phase,
+    }];
+    let stack_before = state.stack.len();
+    super::triggers::process_triggers(state, &phase_event);
+    state.stack.len() > stack_before || state.pending_trigger.is_some()
+}
+
 pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
     loop {
         if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
@@ -379,12 +391,23 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 advance_phase(state, events);
             }
             Phase::Upkeep => {
-                // No triggers in Phase 3
+                // CR 503.1a: "At the beginning of [your] upkeep" triggers fire here.
+                if process_phase_triggers(state) {
+                    return WaitingFor::Priority {
+                        player: state.active_player,
+                    };
+                }
                 advance_phase(state, events);
             }
             Phase::Draw => {
                 if !should_skip_draw(state) {
                     execute_draw(state, events);
+                }
+                // CR 504.2: "At the beginning of [your] draw step" triggers fire here.
+                if process_phase_triggers(state) {
+                    return WaitingFor::Priority {
+                        player: state.active_player,
+                    };
                 }
                 advance_phase(state, events);
             }
@@ -399,12 +422,23 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 };
             }
             Phase::BeginCombat => {
+                // CR 507.1: "At the beginning of combat" triggers fire here.
+                // Process triggers regardless of attackers — CR 507.1 says the step
+                // happens unconditionally; trigger conditions (e.g., ControlCreatures)
+                // are checked by the trigger system, not by skipping the step.
+                let triggers_fired = process_phase_triggers(state);
+                if triggers_fired {
+                    state.combat = Some(crate::game::combat::CombatState::default());
+                    return WaitingFor::Priority {
+                        player: state.active_player,
+                    };
+                }
                 if combat::has_potential_attackers(state) {
                     state.combat = Some(crate::game::combat::CombatState::default());
                     advance_phase(state, events);
                     // Continue to DeclareAttackers
                 } else {
-                    // Skip all combat phases
+                    // No triggers, no attackers — skip all combat phases.
                     state.combat = None;
                     state.phase = Phase::PostCombatMain;
                     state.priority_player = state.active_player;
@@ -461,13 +495,23 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // Continue to EndCombat
             }
             Phase::EndCombat => {
+                // CR 511.1: "At end of combat" triggers fire here.
+                let triggers_fired = process_phase_triggers(state);
+                // CR 511.3: As the step ends, combat state and effects expire.
                 state.combat = None;
-                // CR 514.2: Prune "until end of combat" transient continuous effects.
                 super::layers::prune_end_of_combat_effects(state);
+                if triggers_fired {
+                    return WaitingFor::Priority {
+                        player: state.active_player,
+                    };
+                }
                 advance_phase(state, events);
                 // Continue to PostCombatMain
             }
             Phase::End => {
+                // CR 513.1a: "At the beginning of [your] end step" triggers fire here.
+                // Always returns Priority — players always get priority at end step.
+                process_phase_triggers(state);
                 return WaitingFor::Priority {
                     player: state.active_player,
                 };

@@ -2,8 +2,10 @@ import type {
   EngineAdapter,
   GameAction,
   GameEvent,
+  GameLogEntry,
   GameState,
   PlayerId,
+  SubmitResult,
 } from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
@@ -57,7 +59,7 @@ export class WebSocketAdapter implements EngineAdapter {
   private _legalActions: GameAction[] = [];
   private playerToken: string | null = null;
   private _gameCode: string | null = null;
-  private pendingResolve: ((events: GameEvent[]) => void) | null = null;
+  private pendingResolve: ((result: SubmitResult) => void) | null = null;
   private pendingReject: ((error: Error) => void) | null = null;
   private initResolve: (() => void) | null = null;
   private initReject: ((error: Error) => void) | null = null;
@@ -101,9 +103,9 @@ export class WebSocketAdapter implements EngineAdapter {
     _formatConfig?: unknown,
     _playerCount?: number,
     _matchConfig?: unknown,
-  ): Promise<GameEvent[]> {
+  ): Promise<SubmitResult> {
     // Server handles deck data via WebSocket protocol during initialize()
-    return [];
+    return { events: [] };
   }
 
   async initialize(): Promise<void> {
@@ -164,12 +166,12 @@ export class WebSocketAdapter implements EngineAdapter {
     });
   }
 
-  async submitAction(action: GameAction): Promise<GameEvent[]> {
+  async submitAction(action: GameAction): Promise<SubmitResult> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
     }
 
-    return new Promise<GameEvent[]>((resolve, reject) => {
+    return new Promise<SubmitResult>((resolve, reject) => {
       this.pendingResolve = resolve;
       this.pendingReject = reject;
       this.send({ type: "Action", data: { action } });
@@ -333,11 +335,11 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "StateUpdate": {
-        const data = msg.data as { state: GameState; events: GameEvent[]; legal_actions?: GameAction[] };
+        const data = msg.data as { state: GameState; events: GameEvent[]; legal_actions?: GameAction[]; log_entries?: GameLogEntry[] };
         this.gameState = data.state;
         this._legalActions = data.legal_actions ?? [];
         if (this.pendingResolve) {
-          this.pendingResolve(data.events);
+          this.pendingResolve({ events: data.events, log_entries: data.log_entries });
           this.pendingResolve = null;
           this.pendingReject = null;
         } else {

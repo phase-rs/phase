@@ -416,10 +416,10 @@ mod tests {
         );
         assert_eq!(
             parsed[1],
-            Keyword::Ward(ManaCost::Cost {
+            Keyword::Ward(crate::types::keywords::WardCost::Mana(ManaCost::Cost {
                 generic: 2,
                 shards: vec![],
-            })
+            }))
         );
     }
 

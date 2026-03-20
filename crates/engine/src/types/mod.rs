@@ -8,6 +8,7 @@ pub mod game_state;
 pub mod identifiers;
 pub mod keywords;
 pub mod layers;
+pub mod log;
 pub mod mana;
 pub mod match_config;
 pub mod phase;
@@ -37,6 +38,7 @@ pub use game_state::{
 pub use identifiers::{CardId, ObjectId};
 pub use keywords::{Keyword, ProtectionTarget};
 pub use layers::{ActiveContinuousEffect, Layer};
+pub use log::{GameLogEntry, LogCategory, LogSegment};
 pub use mana::{
     ManaColor, ManaCost, ManaCostShard, ManaPool, ManaRestriction, ManaType, ManaUnit, SpellMeta,
 };

@@ -4,6 +4,7 @@ use engine::game::engine::apply;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
+use engine::types::log::GameLogEntry;
 use engine::types::player::PlayerId;
 
 use crate::config::AiConfig;
@@ -17,6 +18,7 @@ const MAX_AI_ACTIONS_PER_SEQUENCE: usize = 200;
 pub struct AiActionResult {
     pub action: GameAction,
     pub events: Vec<GameEvent>,
+    pub log_entries: Vec<GameLogEntry>,
 }
 
 /// Run AI actions on the game state until the next actor is human or the game is over.
@@ -66,6 +68,7 @@ pub fn run_ai_actions(
                 results.push(AiActionResult {
                     action,
                     events: result.events,
+                    log_entries: result.log_entries,
                 });
             }
             Err(e) => {

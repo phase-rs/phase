@@ -2,9 +2,9 @@ import type {
   ActionResult,
   EngineAdapter,
   GameAction,
-  GameEvent,
   GameState,
   MatchConfig,
+  SubmitResult,
 } from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
 
@@ -32,7 +32,7 @@ export class TauriAdapter implements EngineAdapter {
     _formatConfig?: unknown,
     _playerCount?: number,
     matchConfig?: MatchConfig,
-  ): Promise<GameEvent[]> {
+  ): Promise<SubmitResult> {
     this.assertInitialized();
     const seed = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
     const result = await this.invoke!("initialize_game", {
@@ -40,14 +40,16 @@ export class TauriAdapter implements EngineAdapter {
       seed,
       matchConfig: matchConfig ?? null,
     });
-    return (result as ActionResult).events ?? [];
+    const ar = result as ActionResult;
+    return { events: ar.events ?? [], log_entries: ar.log_entries ?? [] };
   }
 
-  async submitAction(action: GameAction): Promise<GameEvent[]> {
+  async submitAction(action: GameAction): Promise<SubmitResult> {
     this.assertInitialized();
     try {
       const result = await this.invoke!("submit_action", { action });
-      return (result as ActionResult).events ?? [];
+      const ar = result as ActionResult;
+      return { events: ar.events ?? [], log_entries: ar.log_entries ?? [] };
     } catch (error) {
       throw new AdapterError(
         AdapterErrorCode.INVALID_ACTION,

@@ -529,7 +529,12 @@ async fn handle_client_message(
             }; // lock dropped
 
             match action_result {
-                Ok(((filtered_states, events, legal_actions), ai_results, actor, eliminated)) => {
+                Ok((
+                    (filtered_states, events, legal_actions, log_entries),
+                    ai_results,
+                    actor,
+                    eliminated,
+                )) => {
                     debug!(game = %game_code, events = events.len(), "action applied");
 
                     // Broadcast human action result
@@ -550,6 +555,7 @@ async fn handle_client_message(
                                         events: events.clone(),
                                         legal_actions: player_legals,
                                         eliminated_players: eliminated.clone(),
+                                        log_entries: log_entries.clone(),
                                     });
                                 }
                             }
@@ -559,7 +565,7 @@ async fn handle_client_message(
                     // Broadcast AI follow-up results with delays
                     for (i, result) in ai_results.iter().enumerate() {
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        let (ai_filtered, ai_events, ai_legal) = result;
+                        let (ai_filtered, ai_events, ai_legal, ai_log_entries) = result;
                         let is_last = i == ai_results.len() - 1;
                         let conns = connections.lock().await;
                         if let Some(players) = conns.get(&game_code) {
@@ -575,6 +581,7 @@ async fn handle_client_message(
                                         events: ai_events.clone(),
                                         legal_actions: player_legals,
                                         eliminated_players: eliminated.clone(),
+                                        log_entries: ai_log_entries.clone(),
                                     });
                                 }
                             }
@@ -677,7 +684,7 @@ async fn handle_client_message(
                     // Broadcast AI follow-up results with delays
                     for result in ai_results {
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        let (filtered_states, events, legal_actions) = result;
+                        let (filtered_states, events, legal_actions, log_entries) = result;
                         let actor = {
                             let mgr = state.lock().await;
                             let session = mgr.sessions.get(&game_code).unwrap();
@@ -695,6 +702,7 @@ async fn handle_client_message(
                                     events: events.clone(),
                                     legal_actions: player_legals,
                                     eliminated_players: vec![],
+                                    log_entries: log_entries.clone(),
                                 });
                             }
                         }
@@ -854,7 +862,7 @@ async fn handle_client_message(
                 // Broadcast initial AI actions (e.g. mulligan decisions) with delays
                 for result in ai_results {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    let (filtered_states, events, legal_actions) = result;
+                    let (filtered_states, events, legal_actions, log_entries) = result;
                     let actor = {
                         let mgr = state.lock().await;
                         let session = mgr.sessions.get(&game_code).unwrap();
@@ -872,6 +880,7 @@ async fn handle_client_message(
                                 events: events.clone(),
                                 legal_actions: player_legals,
                                 eliminated_players: vec![],
+                                log_entries: log_entries.clone(),
                             });
                         }
                     }

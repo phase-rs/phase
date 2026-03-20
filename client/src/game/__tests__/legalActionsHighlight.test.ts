@@ -165,8 +165,8 @@ function createMockState(overrides: Partial<GameState> = {}): GameState {
 function createMockAdapter(state: GameState, legalActions: GameAction[]) {
   return {
     initialize: vi.fn().mockResolvedValue(undefined),
-    initializeGame: vi.fn().mockResolvedValue([]),
-    submitAction: vi.fn().mockResolvedValue([]),
+    initializeGame: vi.fn().mockResolvedValue({ events: [] }),
+    submitAction: vi.fn().mockResolvedValue({ events: [] }),
     getState: vi.fn().mockResolvedValue(state),
     getLegalActions: vi.fn().mockResolvedValue(legalActions),
     restoreState: vi.fn(),

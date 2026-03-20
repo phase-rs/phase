@@ -664,10 +664,12 @@ mod tests {
             .get_mut(&c1)
             .unwrap()
             .keywords
-            .push(Keyword::Ward(crate::types::mana::ManaCost::Cost {
-                generic: 2,
-                shards: vec![],
-            }));
+            .push(Keyword::Ward(crate::types::keywords::WardCost::Mana(
+                crate::types::mana::ManaCost::Cost {
+                    generic: 2,
+                    shards: vec![],
+                },
+            )));
 
         // Ward creature can still be targeted (cost enforcement is separate)
         let targets = find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99));

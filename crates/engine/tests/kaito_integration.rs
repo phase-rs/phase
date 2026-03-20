@@ -77,6 +77,7 @@ fn kaito_animation_static() -> StaticDefinition {
                 StaticCondition::HasCounters {
                     counter_type: "loyalty".to_string(),
                     minimum: 1,
+                    maximum: None,
                 },
             ],
         })

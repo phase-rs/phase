@@ -284,6 +284,38 @@ pub fn synthesize_case_solve(face: &mut CardFace) {
     );
 }
 
+/// CR 702.87a: Synthesize level up activated ability — "Pay {cost}: Put a level counter
+/// on this permanent. Activate only as a sorcery."
+pub fn synthesize_level_up(face: &mut CardFace) {
+    use crate::types::ability::ActivationRestriction;
+
+    let level_up_abilities: Vec<AbilityDefinition> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| {
+            if let Keyword::LevelUp(cost) = kw {
+                // CR 702.87a: Level up is an activated ability, sorcery-speed only.
+                Some(
+                    AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::PutCounter {
+                            counter_type: "level".to_string(),
+                            count: 1,
+                            target: TargetFilter::SelfRef,
+                        },
+                    )
+                    .cost(AbilityCost::Mana { cost: cost.clone() })
+                    .activation_restrictions(vec![ActivationRestriction::AsSorcery]),
+                )
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    face.abilities.extend(level_up_abilities);
+}
+
 /// Run all synthesis functions in canonical order on a card face.
 /// Both `oracle_loader.rs` and `oracle_gen.rs` call this to ensure the same
 /// complete set of synthesizers is applied.
@@ -296,4 +328,5 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_case_solve(face);
     // Warp: no synthesis needed — runtime handled by Keyword::Warp directly
     synthesize_mobilize(face);
+    synthesize_level_up(face);
 }

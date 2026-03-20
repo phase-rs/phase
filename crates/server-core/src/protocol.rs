@@ -1,6 +1,7 @@
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
+use engine::types::log::GameLogEntry;
 use engine::types::match_config::MatchConfig;
 use engine::types::player::PlayerId;
 use phase_ai::config::AiDifficulty;
@@ -103,6 +104,8 @@ pub enum ServerMessage {
         legal_actions: Vec<GameAction>,
         #[serde(default)]
         eliminated_players: Vec<PlayerId>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        log_entries: Vec<GameLogEntry>,
     },
     ActionRejected {
         reason: String,

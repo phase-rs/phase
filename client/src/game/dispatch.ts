@@ -56,7 +56,8 @@ async function processAction(action: GameAction): Promise<void> {
   const shouldSaveHistory = UNDOABLE_ACTIONS.has(action.type);
 
   // 3. Call WASM — get events without updating state yet
-  const events: GameEvent[] = await adapter.submitAction(action);
+  const result = await adapter.submitAction(action);
+  const events: GameEvent[] = result.events;
 
   // 4. Flash turn banner directly (bypasses animation queue for reliability)
   const turnEvent = events.find((e) => e.type === "TurnStarted");
@@ -113,10 +114,19 @@ async function processAction(action: GameAction): Promise<void> {
       ? [...prev.stateHistory, gameState].slice(-MAX_UNDO_HISTORY)
       : prev.stateHistory;
 
+    // Assign monotonic sequence numbers to new log entries
+    let seq = prev.nextLogSeq;
+    const newLogEntries = (result.log_entries ?? []).map((entry) => ({
+      ...entry,
+      seq: seq++,
+    }));
+
     return {
       gameState: newState,
       events,
       eventHistory: [...prev.eventHistory, ...events].slice(-1000),
+      logHistory: [...prev.logHistory, ...newLogEntries].slice(-2000),
+      nextLogSeq: seq,
       waitingFor: newState.waiting_for,
       legalActions,
       stateHistory: newHistory,

@@ -777,6 +777,7 @@ mod tests {
         state.lki_cache.insert(
             dead_id,
             LKISnapshot {
+                name: String::new(),
                 power: Some(6),
                 toughness: Some(5),
                 mana_value: 3,
@@ -802,6 +803,7 @@ mod tests {
         state.lki_cache.insert(
             ObjectId(1),
             LKISnapshot {
+                name: String::new(),
                 power: Some(3),
                 toughness: Some(3),
                 mana_value: 2,

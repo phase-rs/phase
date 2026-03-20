@@ -19,6 +19,16 @@ pub enum ProtectionTarget {
     ChosenColor,
 }
 
+/// CR 702.21a: Ward cost — what the targeting player must pay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", content = "data")]
+pub enum WardCost {
+    Mana(ManaCost),
+    PayLife(i32),
+    DiscardCard,
+    SacrificeAPermanent,
+}
+
 /// All MTG keywords as typed enum variants.
 /// Simple (unit) variants for keywords with no parameters.
 /// Parameterized variants carry associated data (ManaCost for costs, amounts, etc.).
@@ -125,7 +135,7 @@ pub enum Keyword {
     Kicker(ManaCost),
     Cycling(ManaCost),
     Flashback(ManaCost),
-    Ward(ManaCost),
+    Ward(WardCost),
     Equip(ManaCost),
     Landwalk(String),
     Rampage(u32),
@@ -163,6 +173,9 @@ pub enum Keyword {
     Craft(ManaCost),
     Offspring(ManaCost),
     Impending(ManaCost),
+    /// CR 702.87a: Level up is an activated ability that puts a level counter
+    /// on this permanent. Activate only as a sorcery.
+    LevelUp(ManaCost),
 
     // Simple keywords (no params)
     Banding,
@@ -171,7 +184,8 @@ pub enum Keyword {
     Fuse,
     Gravestorm,
     Haunt,
-    Hideaway,
+    /// CR 702.74a: Hideaway N — look at top N cards, exile one face down, rest on bottom.
+    Hideaway(u32),
     Improvise,
     Ingest,
     Melee,
@@ -365,7 +379,7 @@ impl FromStr for Keyword {
                 "kicker" => return Ok(Keyword::Kicker(parse_keyword_mana_cost(p))),
                 "cycling" => return Ok(Keyword::Cycling(parse_keyword_mana_cost(p))),
                 "flashback" => return Ok(Keyword::Flashback(parse_keyword_mana_cost(p))),
-                "ward" => return Ok(Keyword::Ward(parse_keyword_mana_cost(p))),
+                "ward" => return Ok(Keyword::Ward(WardCost::Mana(parse_keyword_mana_cost(p)))),
                 "equip" => return Ok(Keyword::Equip(parse_keyword_mana_cost(p))),
                 "landwalk" => return Ok(Keyword::Landwalk(p.clone())),
                 "rampage" => return Ok(Keyword::Rampage(p.parse().unwrap_or(1))),
@@ -416,6 +430,7 @@ impl FromStr for Keyword {
                 "craft" => return Ok(Keyword::Craft(parse_keyword_mana_cost(p))),
                 "offspring" => return Ok(Keyword::Offspring(parse_keyword_mana_cost(p))),
                 "impending" => return Ok(Keyword::Impending(parse_keyword_mana_cost(p))),
+                "levelup" | "level up" => return Ok(Keyword::LevelUp(parse_keyword_mana_cost(p))),
                 "warp" => return Ok(Keyword::Warp(parse_keyword_mana_cost(p))),
                 "sneak" => return Ok(Keyword::Sneak(parse_keyword_mana_cost(p))),
                 "web-slinging" | "webslinging" => {
@@ -459,6 +474,8 @@ impl FromStr for Keyword {
                     return Ok(Keyword::Unknown(s.to_string()));
                 }
                 "firebending" => return Ok(Keyword::Firebending(p.parse().unwrap_or(1))),
+                // CR 702.74a
+                "hideaway" => return Ok(Keyword::Hideaway(p.parse().unwrap_or(4))),
                 "afflict" => return Ok(Keyword::Afflict),
                 "enchant" => return Ok(Keyword::Enchant(parse_enchant_target(p))),
                 "etbcounter" => {
@@ -554,7 +571,7 @@ impl FromStr for Keyword {
             "doubleteam" => Ok(Keyword::DoubleTeam),
             "livingmetal" => Ok(Keyword::LivingMetal),
             "firebending" => Ok(Keyword::Firebending(1)),
-            "hideaway" => Ok(Keyword::Hideaway),
+            "hideaway" => Ok(Keyword::Hideaway(4)),
             "cumulative" => Ok(Keyword::Cumulative),
             "ripple" => Ok(Keyword::Ripple),
             "totem" => Ok(Keyword::Totem),
@@ -676,7 +693,10 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Fuse" => Ok(Keyword::Fuse),
         "Gravestorm" => Ok(Keyword::Gravestorm),
         "Haunt" => Ok(Keyword::Haunt),
-        "Hideaway" => Ok(Keyword::Hideaway),
+        "Hideaway" => {
+            // Accept both unit (legacy null/string) and parameterized u32
+            Ok(Keyword::Hideaway(data.as_u64().unwrap_or(4) as u32))
+        }
         "Improvise" => Ok(Keyword::Improvise),
         "Ingest" => Ok(Keyword::Ingest),
         "Melee" => Ok(Keyword::Melee),
@@ -723,7 +743,14 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Kicker" => Ok(Keyword::Kicker(mana(data)?)),
         "Cycling" => Ok(Keyword::Cycling(mana(data)?)),
         "Flashback" => Ok(Keyword::Flashback(mana(data)?)),
-        "Ward" => Ok(Keyword::Ward(mana(data)?)),
+        "Ward" => {
+            // Accept both legacy ManaCost format and new WardCost tagged format
+            if let Ok(ward_cost) = serde_json::from_value::<WardCost>(data.clone()) {
+                Ok(Keyword::Ward(ward_cost))
+            } else {
+                Ok(Keyword::Ward(WardCost::Mana(mana(data)?)))
+            }
+        }
         "Equip" => Ok(Keyword::Equip(mana(data)?)),
         "Ninjutsu" => Ok(Keyword::Ninjutsu(mana(data)?)),
         "Reconfigure" => Ok(Keyword::Reconfigure(mana(data)?)),
@@ -758,6 +785,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Craft" => Ok(Keyword::Craft(mana(data)?)),
         "Offspring" => Ok(Keyword::Offspring(mana(data)?)),
         "Impending" => Ok(Keyword::Impending(mana(data)?)),
+        "LevelUp" => Ok(Keyword::LevelUp(mana(data)?)),
         // Parameterized: u32
         "Dredge" => Ok(Keyword::Dredge(uint(data))),
         "Modular" => Ok(Keyword::Modular(uint(data))),
@@ -927,7 +955,10 @@ mod tests {
         }
 
         let ward = Keyword::from_str("Ward:2").unwrap();
-        assert!(matches!(ward, Keyword::Ward(ManaCost::Cost { .. })));
+        assert!(matches!(
+            ward,
+            Keyword::Ward(WardCost::Mana(ManaCost::Cost { .. }))
+        ));
 
         let equip = Keyword::from_str("Equip:3").unwrap();
         assert!(matches!(equip, Keyword::Equip(ManaCost::Cost { .. })));
@@ -1076,7 +1107,7 @@ mod tests {
     #[test]
     fn parse_previously_missing_fromstr_arms() {
         // Step 0: These existed in enum + keyword_from_tagged but were missing from FromStr
-        assert_eq!(Keyword::from_str("Hideaway").unwrap(), Keyword::Hideaway);
+        assert_eq!(Keyword::from_str("Hideaway").unwrap(), Keyword::Hideaway(4));
         assert_eq!(
             Keyword::from_str("Cumulative").unwrap(),
             Keyword::Cumulative

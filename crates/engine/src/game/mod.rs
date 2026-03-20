@@ -18,6 +18,7 @@ pub mod filter;
 pub mod game_object;
 pub mod keywords;
 pub mod layers;
+pub mod log;
 pub mod mana_abilities;
 pub mod mana_payment;
 pub mod mana_sources;

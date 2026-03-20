@@ -1,20 +1,40 @@
-use crate::types::ability::{EffectError, EffectKind, ResolvedAbility, TargetRef};
+use crate::types::ability::{
+    ContinuousModification, Duration, EffectError, EffectKind, ResolvedAbility, TargetFilter,
+    TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
-/// GainControl: change target permanent's controller to the ability's controller.
+/// CR 613.2: GainControl creates a transient continuous effect that changes the
+/// target permanent's controller through the layer system (Layer 2).
+///
+/// The duration comes from the resolved ability: "until end of turn" → UntilEndOfTurn,
+/// permanent control change → Permanent (indefinite). The layer system handles
+/// reverting control when the effect expires.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    let duration = ability.duration.clone().unwrap_or(Duration::Permanent);
+
     for target in &ability.targets {
         if let TargetRef::Object(obj_id) = target {
-            let obj = state
-                .objects
-                .get_mut(obj_id)
-                .ok_or(EffectError::ObjectNotFound(*obj_id))?;
-            obj.controller = ability.controller;
+            // Verify target exists
+            if !state.objects.contains_key(obj_id) {
+                return Err(EffectError::ObjectNotFound(*obj_id));
+            }
+
+            // CR 613.2: Create a transient continuous effect at Layer 2 (Control).
+            // The affected filter targets this specific object by ID.
+            state.add_transient_continuous_effect(
+                ability.source_id,
+                ability.controller,
+                duration.clone(),
+                TargetFilter::SpecificObject { id: *obj_id },
+                vec![ContinuousModification::ChangeController],
+                None,
+            );
         }
     }
 
@@ -47,7 +67,7 @@ mod tests {
     }
 
     #[test]
-    fn gain_control_changes_controller() {
+    fn gain_control_creates_transient_effect() {
         let mut state = GameState::new_two_player(42);
         let target_id = create_object(
             &mut state,
@@ -56,14 +76,22 @@ mod tests {
             "Bear".to_string(),
             Zone::Battlefield,
         );
-        assert_eq!(state.objects[&target_id].controller, PlayerId(1));
 
         let ability = make_gain_control_ability(target_id);
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(state.objects[&target_id].controller, PlayerId(0));
+        // Verify a transient continuous effect was created
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+        let tce = &state.transient_continuous_effects[0];
+        assert_eq!(tce.controller, PlayerId(0));
+        assert_eq!(tce.affected, TargetFilter::SpecificObject { id: target_id });
+        assert_eq!(
+            tce.modifications,
+            vec![ContinuousModification::ChangeController]
+        );
+        assert!(state.layers_dirty);
     }
 
     #[test]

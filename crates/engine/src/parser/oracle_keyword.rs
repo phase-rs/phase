@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{Keyword, WardCost};
 
 /// CR 702.16: A permanent may have multiple protection abilities; Oracle text
 /// lists them with "and from" / ", from" separators on a single line.
@@ -76,9 +76,11 @@ pub(crate) fn extract_keyword_line(
         // Check if this part matches or extends an MTGJSON keyword name.
         // Exact match: "flying" == "flying"
         // Prefix match: "protection from multicolored" starts with "protection"
-        let mtgjson_match = mtgjson_keyword_names
-            .iter()
-            .any(|name| lower == *name || lower.starts_with(&format!("{name} ")));
+        let mtgjson_match = mtgjson_keyword_names.iter().any(|name| {
+            lower == *name
+                || lower.starts_with(&format!("{name} "))
+                || lower.starts_with(&format!("{name}\u{2014}"))
+        });
 
         if mtgjson_match {
             any_mtgjson_match = true;
@@ -118,6 +120,35 @@ pub(crate) fn extract_keyword_line(
     }
 }
 
+/// CR 702.21a: Parse a non-mana ward cost from the em-dash remainder.
+/// Handles "pay N life", "discard a card", "sacrifice a permanent/creature/etc."
+fn parse_ward_cost(cost_text: &str) -> Option<Keyword> {
+    let lower = cost_text.trim().trim_end_matches('.').to_lowercase();
+
+    // "pay N life"
+    if let Some(rest) = lower.strip_prefix("pay ") {
+        if let Some(life_str) = rest.strip_suffix(" life") {
+            if let Ok(n) = life_str.trim().parse::<i32>() {
+                return Some(Keyword::Ward(WardCost::PayLife(n)));
+            }
+        }
+    }
+
+    // "discard a card" / "discard two cards" etc.
+    if lower.starts_with("discard") {
+        return Some(Keyword::Ward(WardCost::DiscardCard));
+    }
+
+    // "sacrifice a permanent" / "sacrifice a creature" / etc.
+    if lower.starts_with("sacrifice") {
+        return Some(Keyword::Ward(WardCost::SacrificeAPermanent));
+    }
+
+    // Fall back to mana cost parsing
+    let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_text.trim());
+    Some(Keyword::Ward(WardCost::Mana(cost)))
+}
+
 /// Parse a keyword from Oracle text format (natural language) into a `Keyword`.
 ///
 /// Oracle text uses space-separated format: "protection from red", "ward {2}",
@@ -145,6 +176,28 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
                     }
                 }
             }
+        }
+    }
+
+    // CR 702.21a: Ward with non-mana costs uses em-dash separator (U+2014).
+    // "ward—pay N life", "ward—discard a card", "ward—sacrifice a permanent"
+    if let Some(rest) = text.strip_prefix("ward\u{2014}") {
+        return parse_ward_cost(rest);
+    }
+
+    // CR 702.74a: "hideaway N" — parameterized keyword.
+    if let Some(rest) = text.strip_prefix("hideaway ") {
+        if let Ok(n) = rest.trim().parse::<u32>() {
+            return Some(Keyword::Hideaway(n));
+        }
+    }
+
+    // CR 702.87a: "level up {cost}" — two-word keyword name.
+    if let Some(rest) = text.strip_prefix("level up ") {
+        let cost_str = rest.trim();
+        if !cost_str.is_empty() {
+            let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+            return Some(Keyword::LevelUp(cost));
         }
     }
 
@@ -222,7 +275,6 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Fuse => "fuse".to_string(),
         Keyword::Gravestorm => "gravestorm".to_string(),
         Keyword::Haunt => "haunt".to_string(),
-        Keyword::Hideaway => "hideaway".to_string(),
         Keyword::Improvise => "improvise".to_string(),
         Keyword::Ingest => "ingest".to_string(),
         Keyword::Melee => "melee".to_string(),
@@ -325,6 +377,8 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Craft(_) => "craft".to_string(),
         Keyword::Offspring(_) => "offspring".to_string(),
         Keyword::Impending(_) => "impending".to_string(),
+        Keyword::LevelUp(_) => "level up".to_string(),
+        Keyword::Hideaway(_) => "hideaway".to_string(),
         Keyword::Unknown(s) => s.to_lowercase(),
     }
 }
@@ -400,6 +454,7 @@ pub(crate) fn is_keyword_cost_line(lower: &str) -> bool {
         "sneak",
         "web-slinging",
         "mobilize",
+        "hideaway",
     ];
     keyword_costs.iter().any(|kw| {
         lower.starts_with(kw)

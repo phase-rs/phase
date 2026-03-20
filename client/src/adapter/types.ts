@@ -366,11 +366,35 @@ export type WaitingFor =
   | { type: "UnlessPayment"; data: { player: PlayerId; cost: ManaCost; pending_counter: unknown } }
   | { type: "ChooseRingBearer"; data: { player: PlayerId; candidates: ObjectId[] } };
 
+// ── Log Types ────────────────────────────────────────────────────────────
+
+export type LogCategory =
+  | "Game" | "Turn" | "Stack" | "Combat" | "Zone" | "Life"
+  | "Mana" | "State" | "Token" | "Trigger" | "Special" | "Destroy";
+
+export type LogSegment =
+  | { type: "Text"; value: string }
+  | { type: "CardName"; value: { name: string; object_id: ObjectId } }
+  | { type: "PlayerName"; value: { name: string; player_id: PlayerId } }
+  | { type: "Number"; value: number }
+  | { type: "Mana"; value: string }
+  | { type: "Zone"; value: Zone }
+  | { type: "Keyword"; value: string };
+
+export interface GameLogEntry {
+  seq: number;
+  turn: number;
+  phase: Phase;
+  category: LogCategory;
+  segments: LogSegment[];
+}
+
 // ── Action Result ────────────────────────────────────────────────────────
 
 export interface ActionResult {
   events: GameEvent[];
   waiting_for: WaitingFor;
+  log_entries?: GameLogEntry[];
 }
 
 // ── Game Actions (discriminated union, tag="type", content="data") ───────
@@ -535,6 +559,11 @@ export const AdapterErrorCode = {
  * Phase 1: WasmAdapter (direct WASM calls)
  * Phase 7: TauriAdapter (IPC to native Rust process)
  */
+export interface SubmitResult {
+  events: GameEvent[];
+  log_entries?: GameLogEntry[];
+}
+
 export interface EngineAdapter {
   initialize(): Promise<void>;
   initializeGame(
@@ -542,8 +571,8 @@ export interface EngineAdapter {
     formatConfig?: FormatConfig,
     playerCount?: number,
     matchConfig?: MatchConfig,
-  ): Promise<GameEvent[]> | GameEvent[];
-  submitAction(action: GameAction): Promise<GameEvent[]>;
+  ): Promise<SubmitResult> | SubmitResult;
+  submitAction(action: GameAction): Promise<SubmitResult>;
   getState(): Promise<GameState>;
   getLegalActions(): Promise<GameAction[]>;
   getAiAction(difficulty: string, playerId?: number): Promise<GameAction | null> | GameAction | null;

@@ -8,6 +8,7 @@ use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::log::GameLogEntry;
 use engine::types::match_config::MatchConfig;
 use engine::types::player::PlayerId;
 use phase_ai::config::{AiConfig, AiDifficulty, Platform};
@@ -16,8 +17,13 @@ use rand::Rng;
 use crate::filter::filter_state_for_player;
 use crate::reconnect::ReconnectManager;
 
-/// Result of handling a game action: per-player filtered states, events, and legal actions.
-pub type ActionResult = (Vec<(PlayerId, GameState)>, Vec<GameEvent>, Vec<GameAction>);
+/// Result of handling a game action: per-player filtered states, events, legal actions, and log entries.
+pub type ActionResult = (
+    Vec<(PlayerId, GameState)>,
+    Vec<GameEvent>,
+    Vec<GameAction>,
+    Vec<GameLogEntry>,
+);
 
 /// Returns the player who must act for the given WaitingFor, or None if the game is over.
 pub fn acting_player(waiting_for: &WaitingFor) -> Option<PlayerId> {
@@ -89,7 +95,7 @@ impl GameSession {
                     })
                     .collect();
                 let legal = engine_legal_actions(&self.state);
-                (filtered, r.events, legal)
+                (filtered, r.events, legal, r.log_entries)
             })
             .collect()
     }
@@ -239,6 +245,9 @@ impl SessionManager {
             };
             load_deck_into_state(&mut session.state, &payload);
 
+            // Set player names for log resolution
+            session.state.log_player_names = session.display_names.clone();
+
             // Initialize the game via engine
             let _result = start_game(&mut session.state);
         }
@@ -317,6 +326,7 @@ impl SessionManager {
         };
         load_deck_into_state(&mut session.state, &payload);
         session.state.all_card_names = card_names;
+        session.state.log_player_names = session.display_names.clone();
         let _result = start_game(&mut session.state);
 
         (game_code, player_token)
@@ -351,7 +361,7 @@ impl SessionManager {
                 })
                 .collect();
             let new_legal_actions = engine_legal_actions(&session.state);
-            return Ok((filtered_states, vec![], new_legal_actions));
+            return Ok((filtered_states, vec![], new_legal_actions, vec![]));
         }
 
         // Validate it's this player's turn to act
@@ -374,6 +384,9 @@ impl SessionManager {
             }
         }
 
+        // Set player names for log resolution
+        session.state.log_player_names = session.display_names.clone();
+
         // Apply action
         let result =
             apply(&mut session.state, action).map_err(|e| format!("Engine error: {}", e))?;
@@ -387,7 +400,12 @@ impl SessionManager {
             .collect();
         let new_legal_actions = engine_legal_actions(&session.state);
 
-        Ok((filtered_states, result.events, new_legal_actions))
+        Ok((
+            filtered_states,
+            result.events,
+            new_legal_actions,
+            result.log_entries,
+        ))
     }
 
     /// Mark a player as disconnected.

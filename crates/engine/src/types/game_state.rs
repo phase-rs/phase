@@ -52,6 +52,7 @@ pub enum ConvokeMode {
 /// Used for event-context resolution when the object is no longer in its original zone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LKISnapshot {
+    pub name: String,
     pub power: Option<i32>,
     pub toughness: Option<i32>,
     pub mana_value: u32,
@@ -453,6 +454,8 @@ pub enum AutoPassMode {
 pub struct ActionResult {
     pub events: Vec<GameEvent>,
     pub waiting_for: WaitingFor,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub log_entries: Vec<super::log::GameLogEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -705,6 +708,11 @@ pub struct GameState {
     #[serde(skip)]
     pub all_card_names: Vec<String>,
 
+    /// Display names for log resolution. Set by server; WASM leaves empty (defaults to "Player N").
+    /// Skipped in serialization — runtime context only.
+    #[serde(skip)]
+    pub log_player_names: Vec<String>,
+
     /// Object IDs from the most recently resolved Effect::Token.
     /// Consumed by sub_abilities referencing "it"/"them" via TargetFilter::LastCreated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -869,6 +877,7 @@ impl GameState {
             last_named_choice: None,
             all_creature_types: Vec::new(),
             all_card_names: Vec::new(),
+            log_player_names: Vec::new(),
             last_created_token_ids: Vec::new(),
             monarch: None,
             restrictions: Vec::new(),
@@ -1321,6 +1330,7 @@ mod tests {
             waiting_for: WaitingFor::Priority {
                 player: PlayerId(0),
             },
+            log_entries: vec![],
         };
         assert_eq!(result.events.len(), 1);
     }

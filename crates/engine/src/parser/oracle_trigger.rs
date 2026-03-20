@@ -1069,6 +1069,16 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     } else if phase_text.contains("draw step") {
         def.phase = Some(Phase::Draw);
     }
+
+    // CR 503.1a / CR 507.1: Parse possessive qualifier for turn constraint.
+    // IMPORTANT: Check "opponent" before bare "your" — "your opponents'" contains "your"
+    if phase_text.contains("each opponent") || phase_text.contains("your opponent") {
+        def.constraint = Some(TriggerConstraint::OnlyDuringOpponentsTurn);
+    } else if phase_text.contains("your") {
+        def.constraint = Some(TriggerConstraint::OnlyDuringYourTurn);
+    }
+    // "each player's upkeep" / "each upkeep" / "the end step" → no constraint (fires every turn)
+
     Some((TriggerMode::Phase, def))
 }
 
@@ -2006,6 +2016,10 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::Phase);
         assert_eq!(def.phase, Some(Phase::BeginCombat));
         assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringYourTurn)
+        );
+        assert_eq!(
             def.condition,
             Some(TriggerCondition::ControlCreatures { minimum: 3 })
         );
@@ -2559,5 +2573,71 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZone);
         assert_eq!(def.destination, Some(Zone::Battlefield));
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    // --- Phase trigger possessive qualifier tests ---
+
+    #[test]
+    fn phase_trigger_your_upkeep() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringYourTurn)
+        );
+    }
+
+    #[test]
+    fn phase_trigger_combat_on_your_turn() {
+        let def = parse_trigger_line(
+            "At the beginning of combat on your turn, target creature gets +1/+1 until end of turn.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::BeginCombat));
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringYourTurn)
+        );
+    }
+
+    #[test]
+    fn phase_trigger_each_players_upkeep_no_constraint() {
+        let def = parse_trigger_line(
+            "At the beginning of each player's upkeep, that player draws a card.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        assert_eq!(def.constraint, None);
+    }
+
+    #[test]
+    fn phase_trigger_each_opponents_upkeep() {
+        let def = parse_trigger_line(
+            "At the beginning of each opponent's upkeep, this creature deals 1 damage to that player.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringOpponentsTurn)
+        );
+    }
+
+    #[test]
+    fn phase_trigger_each_combat_no_constraint() {
+        let def = parse_trigger_line(
+            "At the beginning of each combat, create a 1/1 white Soldier creature token.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::BeginCombat));
+        assert_eq!(def.constraint, None);
     }
 }

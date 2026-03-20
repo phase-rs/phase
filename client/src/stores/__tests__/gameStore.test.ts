@@ -32,8 +32,8 @@ function createMockState(overrides: Partial<GameState> = {}): GameState {
 function createMockAdapter(state: GameState): EngineAdapter {
   return {
     initialize: vi.fn().mockResolvedValue(undefined),
-    initializeGame: vi.fn().mockResolvedValue([]),
-    submitAction: vi.fn().mockResolvedValue([]),
+    initializeGame: vi.fn().mockResolvedValue({ events: [] }),
+    submitAction: vi.fn().mockResolvedValue({ events: [] }),
     getState: vi.fn().mockResolvedValue(state),
     getLegalActions: vi.fn().mockResolvedValue([]),
     restoreState: vi.fn(),
@@ -86,7 +86,7 @@ describe("gameStore", () => {
     await act(() => useGameStore.getState().initGame("test-id", adapter));
 
     // Update mock for next calls
-    (adapter.submitAction as ReturnType<typeof vi.fn>).mockResolvedValue(events);
+    (adapter.submitAction as ReturnType<typeof vi.fn>).mockResolvedValue({ events });
     (adapter.getState as ReturnType<typeof vi.fn>).mockResolvedValue(state2);
 
     await act(() => useGameStore.getState().dispatch({ type: "PassPriority" }));

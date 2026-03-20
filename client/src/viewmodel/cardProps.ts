@@ -93,7 +93,7 @@ export function computePTDisplay(obj: GameObject): PTDisplay | null {
 
   return {
     power: obj.power,
-    toughness: obj.toughness,
+    toughness: obj.damage_marked > 0 ? obj.toughness - obj.damage_marked : obj.toughness,
     powerColor,
     toughnessColor,
   };

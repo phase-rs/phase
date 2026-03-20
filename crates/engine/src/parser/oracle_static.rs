@@ -44,6 +44,61 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         );
     }
 
+    // --- "Play with the top card of your library revealed" ---
+    // CR 400.2: Continuous effect making top card public information.
+    if lower.contains("play with the top card") {
+        let all_players = lower.contains("their libraries") || lower.contains("each player");
+        return Some(
+            StaticDefinition::new(StaticMode::RevealTopOfLibrary { all_players })
+                .affected(TargetFilter::SelfRef)
+                .description(text.to_string()),
+        );
+    }
+
+    // --- "You control enchanted creature/permanent" (Control Magic pattern) ---
+    // CR 303.4e + CR 613.2: Aura-based continuous control-changing effects.
+    if lower == "you control enchanted creature" || lower == "you control enchanted creature." {
+        return Some(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                ))
+                .modifications(vec![ContinuousModification::ChangeController])
+                .description(text.to_string()),
+        );
+    }
+    if lower == "you control enchanted permanent" || lower == "you control enchanted permanent." {
+        return Some(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy]),
+                ))
+                .modifications(vec![ContinuousModification::ChangeController])
+                .description(text.to_string()),
+        );
+    }
+    if lower == "you control enchanted land" || lower == "you control enchanted land." {
+        return Some(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    TypedFilter::land().properties(vec![FilterProp::EnchantedBy]),
+                ))
+                .modifications(vec![ContinuousModification::ChangeController])
+                .description(text.to_string()),
+        );
+    }
+    if lower == "you control enchanted artifact" || lower == "you control enchanted artifact." {
+        return Some(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact)
+                        .properties(vec![FilterProp::EnchantedBy]),
+                ))
+                .modifications(vec![ContinuousModification::ChangeController])
+                .description(text.to_string()),
+        );
+    }
+
     // --- "Enchanted creature gets +N/+M" or "has {keyword}" ---
     if lower.starts_with("enchanted creature ") {
         if let Some(def) = parse_continuous_gets_has(
@@ -744,6 +799,7 @@ fn parse_compound_turn_counter_animation(lower: &str, text: &str) -> Option<Stat
                     StaticCondition::HasCounters {
                         counter_type,
                         minimum,
+                        maximum: None,
                     },
                 ],
             })
@@ -3033,6 +3089,7 @@ mod tests {
                 StaticCondition::HasCounters {
                     ref counter_type,
                     minimum: 1,
+                    ..
                 } if counter_type == "loyalty"
             ));
         }

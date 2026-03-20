@@ -15,6 +15,7 @@ use super::oracle_cost::parse_oracle_cost;
 use super::oracle_effect::parse_effect_chain;
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{extract_keyword_line, is_keyword_cost_line};
+use super::oracle_level::parse_level_blocks;
 use super::oracle_modal::{lower_oracle_block, parse_oracle_block, strip_ability_word};
 use super::oracle_replacement::parse_replacement_line;
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
@@ -107,9 +108,21 @@ pub fn parse_oracle_text(
         return parse_class_oracle_text(&lines, card_name, mtgjson_keyword_names, result);
     }
 
+    // CR 710: Pre-parse leveler LEVEL blocks into counter-gated static abilities.
+    let (level_statics, level_consumed) = parse_level_blocks(&lines);
+    if !level_statics.is_empty() {
+        result.statics.extend(level_statics);
+    }
+
     let mut i = 0;
 
     while i < lines.len() {
+        // CR 710: Skip lines already consumed by the leveler pre-parser.
+        if level_consumed.contains(&i) {
+            i += 1;
+            continue;
+        }
+
         let raw_line = lines[i].trim();
         if raw_line.is_empty() {
             i += 1;
@@ -926,6 +939,8 @@ pub(super) fn is_static_pattern(lower: &str) -> bool {
         || lower.starts_with("as long as ")
         || lower.starts_with("enchanted ")
         || lower.starts_with("equipped ")
+        || lower.starts_with("you control enchanted ")
+        || lower.contains("play with the top card")
         || lower.starts_with("all creatures ")
         || lower.starts_with("all permanents ")
         || lower.starts_with("other ")

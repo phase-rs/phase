@@ -111,10 +111,11 @@ fn evaluate_condition(
         StaticCondition::Or { conditions } => conditions
             .iter()
             .any(|c| evaluate_condition(state, c, controller, source_id)),
-        // CR 122.1: Check counters on the source object
+        // CR 122.1 + CR 710.3: Check counters on the source object, with optional maximum.
         StaticCondition::HasCounters {
             counter_type,
             minimum,
+            maximum,
         } => state
             .objects
             .get(&source_id)
@@ -142,7 +143,7 @@ fn evaluate_condition(
                         .copied()
                         .unwrap_or(0),
                 };
-                count >= *minimum
+                count >= *minimum && maximum.is_none_or(|max| count <= max)
             })
             .unwrap_or(false),
         // CR 716.6: Level abilities are active at or above the specified level.
@@ -217,6 +218,8 @@ pub fn evaluate_layers(state: &mut GameState) {
                 obj.static_definitions = obj.base_static_definitions.clone();
             }
             obj.color = obj.base_color.clone();
+            // CR 613.2: Reset controller to owner; Layer 2 re-applies control-changing effects.
+            obj.controller = obj.owner;
             // CR 510.1c: Reset damage-from-toughness flag; re-applied by continuous effects.
             obj.assigns_damage_from_toughness = false;
         }
@@ -562,6 +565,16 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
         None
     };
 
+    // Pre-read source controller for ChangeController (avoids borrow conflict in the loop)
+    let source_controller = if matches!(
+        effect.modification,
+        ContinuousModification::ChangeController
+    ) {
+        state.objects.get(&effect.source_id).map(|o| o.controller)
+    } else {
+        None
+    };
+
     // Pre-compute dynamic P/T values (avoids borrow conflict in the loop)
     let dynamic_pt = match &effect.modification {
         ContinuousModification::SetDynamicPower { value }
@@ -686,6 +699,12 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             // CR 510.1c: Mark creature as assigning combat damage from toughness.
             ContinuousModification::AssignDamageFromToughness => {
                 obj.assigns_damage_from_toughness = true;
+            }
+            // CR 613.2: Change controller to the source permanent's controller.
+            ContinuousModification::ChangeController => {
+                if let Some(new_controller) = source_controller {
+                    obj.controller = new_controller;
+                }
             }
         }
     }
@@ -1764,6 +1783,7 @@ mod tests {
         let cond = StaticCondition::HasCounters {
             counter_type: "loyalty".to_string(),
             minimum: 1,
+            maximum: None,
         };
         assert!(evaluate_condition(&state, &cond, PlayerId(0), id));
     }
@@ -1775,6 +1795,7 @@ mod tests {
         let cond = StaticCondition::HasCounters {
             counter_type: "loyalty".to_string(),
             minimum: 1,
+            maximum: None,
         };
         assert!(!evaluate_condition(&state, &cond, PlayerId(0), id));
     }
@@ -1799,6 +1820,7 @@ mod tests {
                 StaticCondition::HasCounters {
                     counter_type: "loyalty".to_string(),
                     minimum: 1,
+                    maximum: None,
                 },
             ],
         };
@@ -1825,6 +1847,7 @@ mod tests {
                 StaticCondition::HasCounters {
                     counter_type: "loyalty".to_string(),
                     minimum: 1,
+                    maximum: None,
                 },
             ],
         };
@@ -1843,6 +1866,7 @@ mod tests {
                 StaticCondition::HasCounters {
                     counter_type: "loyalty".to_string(),
                     minimum: 1,
+                    maximum: None,
                 },
             ],
         };
@@ -1870,6 +1894,7 @@ mod tests {
                 StaticCondition::HasCounters {
                     counter_type: "loyalty".to_string(),
                     minimum: 1,
+                    maximum: None,
                 },
             ],
         };
@@ -1906,6 +1931,7 @@ mod tests {
                     StaticCondition::HasCounters {
                         counter_type: "loyalty".to_string(),
                         minimum: 1,
+                        maximum: None,
                     },
                 ],
             })
@@ -1980,6 +2006,7 @@ mod tests {
                     StaticCondition::HasCounters {
                         counter_type: "loyalty".to_string(),
                         minimum: 1,
+                        maximum: None,
                     },
                 ],
             })

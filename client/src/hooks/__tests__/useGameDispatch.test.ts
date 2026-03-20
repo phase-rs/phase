@@ -28,7 +28,7 @@ const mockState = {
 const mockAdapter = {
   initialize: vi.fn(),
   initializeGame: vi.fn(),
-  submitAction: vi.fn().mockResolvedValue(mockEvents),
+  submitAction: vi.fn().mockResolvedValue({ events: mockEvents }),
   getState: vi.fn().mockResolvedValue(mockState),
   getLegalActions: vi.fn().mockResolvedValue([]),
   restoreState: vi.fn(),
@@ -54,7 +54,7 @@ describe("useGameDispatch", () => {
     usePreferencesStore.setState({ animationSpeed: "normal" });
 
     vi.clearAllMocks();
-    mockAdapter.submitAction.mockResolvedValue(mockEvents);
+    mockAdapter.submitAction.mockResolvedValue({ events: mockEvents });
     mockAdapter.getState.mockResolvedValue(mockState);
   });
 
@@ -123,11 +123,11 @@ describe("useGameDispatch", () => {
     mockAdapter.submitAction
       .mockImplementationOnce(async () => {
         callOrder.push(1);
-        return mockEvents;
+        return { events: mockEvents };
       })
       .mockImplementationOnce(async () => {
         callOrder.push(2);
-        return mockEvents;
+        return { events: mockEvents };
       });
 
     await act(async () => {

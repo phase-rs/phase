@@ -1,20 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 
-import type { GameEvent } from "../../adapter/types.ts";
+import type { GameLogEntry } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
-import { filterByVerbosity } from "../../viewmodel/logFormatting.ts";
+import { filterLogByVerbosity } from "../../viewmodel/logFormatting.ts";
 import type { LogVerbosity } from "../../viewmodel/logFormatting.ts";
 import { LogEntry } from "./LogEntry.tsx";
 
-const EMPTY_EVENTS: GameEvent[] = [];
+const EMPTY_LOG: GameLogEntry[] = [];
 
 const VERBOSITY_OPTIONS: LogVerbosity[] = ["full", "compact", "minimal"];
 const LOG_PANEL_WIDTH_PX = 320;
 
 export function GameLogPanel() {
-  const eventHistory = useGameStore((s) => s.eventHistory ?? EMPTY_EVENTS);
+  const logHistory = useGameStore((s) => s.logHistory ?? EMPTY_LOG);
   const logDefaultState = usePreferencesStore((s) => s.logDefaultState);
 
   const [isOpen, setIsOpen] = useState(logDefaultState === "open");
@@ -22,14 +22,14 @@ export function GameLogPanel() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
-  const filteredEvents = filterByVerbosity(eventHistory, verbosity);
+  const filteredEntries = filterLogByVerbosity(logHistory, verbosity);
 
   useEffect(() => {
     const el = scrollRef.current;
     if (el) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [filteredEvents.length]);
+  }, [filteredEntries.length]);
 
   // Close panel when clicking outside
   const handleOutsideClick = useCallback(
@@ -117,13 +117,13 @@ export function GameLogPanel() {
               ))}
             </div>
 
-            {/* Event list */}
+            {/* Log entry list */}
             <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-1">
-              {filteredEvents.length === 0 ? (
+              {filteredEntries.length === 0 ? (
                 <p className="py-4 text-center text-xs italic text-gray-600">No events yet</p>
               ) : (
-                filteredEvents.map((event, i) => (
-                  <LogEntry key={i} event={event} />
+                filteredEntries.map((entry) => (
+                  <LogEntry key={entry.seq} entry={entry} />
                 ))
               )}
             </div>

@@ -158,8 +158,8 @@ describe("WasmAdapter", () => {
   describe("initialize_game", () => {
     it("returns events from initialize_game binding", async () => {
       await adapter.initialize();
-      const events = adapter.initializeGame();
-      expect(events).toEqual([{ type: "GameStarted" }]);
+      const result = adapter.initializeGame();
+      expect(result.events).toEqual([{ type: "GameStarted" }]);
     });
   });
 

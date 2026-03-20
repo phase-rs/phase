@@ -13,9 +13,9 @@ import type {
   EngineAdapter,
   FormatConfig,
   GameAction,
-  GameEvent,
   GameState,
   MatchConfig,
+  SubmitResult,
 } from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
 
@@ -76,7 +76,7 @@ export class WasmAdapter implements EngineAdapter {
     }
   }
 
-  async submitAction(action: GameAction): Promise<GameEvent[]> {
+  async submitAction(action: GameAction): Promise<SubmitResult> {
     this.assertInitialized();
     return this.enqueue(() => this.processAction(action));
   }
@@ -131,13 +131,13 @@ export class WasmAdapter implements EngineAdapter {
     return ping();
   }
 
-  /** Initialize a new game and return the initial events. */
+  /** Initialize a new game and return the initial events and log entries. */
   initializeGame(
     deckData?: unknown,
     formatConfig?: FormatConfig,
     playerCount?: number,
     matchConfig?: MatchConfig,
-  ): GameEvent[] {
+  ): SubmitResult {
     this.assertInitialized();
     const seed = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
     const result = initialize_game(
@@ -147,7 +147,7 @@ export class WasmAdapter implements EngineAdapter {
       matchConfig ?? null,
       playerCount ?? undefined,
     );
-    return result.events ?? [];
+    return { events: result.events ?? [], log_entries: result.log_entries ?? [] };
   }
 
   private assertInitialized(): void {
@@ -180,7 +180,7 @@ export class WasmAdapter implements EngineAdapter {
     return result;
   }
 
-  private processAction(action: GameAction): GameEvent[] {
+  private processAction(action: GameAction): SubmitResult {
     const result = submit_action(action);
     if (typeof result === "string") {
       throw new AdapterError(
@@ -189,7 +189,7 @@ export class WasmAdapter implements EngineAdapter {
         true,
       );
     }
-    return result.events ?? [];
+    return { events: result.events ?? [], log_entries: result.log_entries ?? [] };
   }
 
   private fetchState(): GameState {

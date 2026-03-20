@@ -802,6 +802,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::AddColor { color } => format!("add color {color:?}"),
         ContinuousModification::AddStaticMode { mode } => format!("{mode}"),
         ContinuousModification::AssignDamageFromToughness => "damage from toughness".into(),
+        ContinuousModification::ChangeController => "change controller".into(),
     }
 }
 

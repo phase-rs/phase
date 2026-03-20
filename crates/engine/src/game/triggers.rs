@@ -664,6 +664,7 @@ fn check_trigger_constraint(
         TriggerConstraint::OncePerTurn => !state.triggers_fired_this_turn.contains(&key),
         TriggerConstraint::OncePerGame => !state.triggers_fired_this_game.contains(&key),
         TriggerConstraint::OnlyDuringYourTurn => state.active_player == controller,
+        TriggerConstraint::OnlyDuringOpponentsTurn => state.active_player != controller,
         TriggerConstraint::NthSpellThisTurn { n } => state.spells_cast_this_turn as u32 == *n,
         TriggerConstraint::NthDrawThisTurn { n } => state
             .players
@@ -815,6 +816,7 @@ fn record_trigger_fired(
             state.triggers_fired_this_game.insert(key);
         }
         TriggerConstraint::OnlyDuringYourTurn
+        | TriggerConstraint::OnlyDuringOpponentsTurn
         | TriggerConstraint::NthSpellThisTurn { .. }
         | TriggerConstraint::NthDrawThisTurn { .. }
         | TriggerConstraint::AtClassLevel { .. } => {

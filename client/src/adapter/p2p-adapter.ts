@@ -6,6 +6,7 @@ import type {
   GameState,
   MatchConfig,
   PlayerId,
+  SubmitResult,
 } from "./types";
 
 import { AdapterError } from "./types";
@@ -146,7 +147,7 @@ export class P2PHostAdapter implements EngineAdapter {
     _formatConfig?: unknown,
     _playerCount?: number,
     matchConfig?: MatchConfig,
-  ): Promise<GameEvent[]> {
+  ): Promise<SubmitResult> {
     // Await the eagerly-created promise — resolves immediately if
     // guest_deck arrived during initialize(), otherwise waits.
     const guestDeckData = await this.guestDeckPromise;
@@ -160,7 +161,7 @@ export class P2PHostAdapter implements EngineAdapter {
       ai_decks: [],
     };
 
-    const events = this.wasm.initializeGame(deckPayload, undefined, 2, matchConfig);
+    const result = this.wasm.initializeGame(deckPayload, undefined, 2, matchConfig);
     const state = await this.wasm.getState();
     const legalActions = await this.wasm.getLegalActions();
 
@@ -172,15 +173,15 @@ export class P2PHostAdapter implements EngineAdapter {
     this.session.send({
       type: "game_setup",
       state: filteredState,
-      events,
+      events: result.events,
       legalActions,
     });
 
-    return events;
+    return result;
   }
 
-  async submitAction(action: GameAction): Promise<GameEvent[]> {
-    const events = await this.wasm.submitAction(action);
+  async submitAction(action: GameAction): Promise<SubmitResult> {
+    const result = await this.wasm.submitAction(action);
     const state = await this.wasm.getState();
     const legalActions = await this.wasm.getLegalActions();
 
@@ -189,11 +190,11 @@ export class P2PHostAdapter implements EngineAdapter {
     this.session.send({
       type: "state_update",
       state: filteredState,
-      events,
+      events: result.events,
       legalActions,
     });
 
-    return events;
+    return result;
   }
 
   async getState(): Promise<GameState> {
@@ -229,7 +230,7 @@ export class P2PHostAdapter implements EngineAdapter {
 
       case "action": {
         try {
-          const events = await this.wasm.submitAction(msg.action);
+          const result = await this.wasm.submitAction(msg.action);
           const state = await this.wasm.getState();
           const legalActions = await this.wasm.getLegalActions();
 
@@ -238,12 +239,12 @@ export class P2PHostAdapter implements EngineAdapter {
           this.session.send({
             type: "state_update",
             state: filteredState,
-            events,
+            events: result.events,
             legalActions,
           });
 
           // Emit state update locally so host UI updates for opponent actions
-          this.emit({ type: "stateChanged", state, events, legalActions });
+          this.emit({ type: "stateChanged", state, events: result.events, legalActions });
         } catch (err) {
           const reason = err instanceof Error ? err.message : String(err);
           this.session.send({ type: "action_rejected", reason });
@@ -269,21 +270,21 @@ export class P2PGuestAdapter implements EngineAdapter {
   private gameState: GameState | null = null;
   private legalActions: GameAction[] = [];
   private listeners: P2PAdapterEventListener[] = [];
-  private pendingResolve: ((events: GameEvent[]) => void) | null = null;
+  private pendingResolve: ((result: SubmitResult) => void) | null = null;
   private pendingReject: ((error: Error) => void) | null = null;
   private messageUnsub: (() => void) | null = null;
   private disconnectUnsub: (() => void) | null = null;
 
   // Promise + resolver created eagerly so game_setup messages arriving
   // before initializeGame() are captured instead of silently dropped.
-  private gameSetupPromise: Promise<GameEvent[]>;
-  private gameSetupResolve!: (events: GameEvent[]) => void;
+  private gameSetupPromise: Promise<SubmitResult>;
+  private gameSetupResolve!: (result: SubmitResult) => void;
 
   constructor(
     private readonly deckData: unknown,
     private readonly session: PeerSession,
   ) {
-    this.gameSetupPromise = new Promise<GameEvent[]>((resolve) => {
+    this.gameSetupPromise = new Promise<SubmitResult>((resolve) => {
       this.gameSetupResolve = resolve;
     });
   }
@@ -320,7 +321,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     _formatConfig?: unknown,
     _playerCount?: number,
     _matchConfig?: MatchConfig,
-  ): Promise<GameEvent[]> {
+  ): Promise<SubmitResult> {
     // Guest is player 1
     useMultiplayerStore.getState().setActivePlayerId(1);
 
@@ -329,8 +330,8 @@ export class P2PGuestAdapter implements EngineAdapter {
     return this.gameSetupPromise;
   }
 
-  async submitAction(action: GameAction): Promise<GameEvent[]> {
-    return new Promise<GameEvent[]>((resolve, reject) => {
+  async submitAction(action: GameAction): Promise<SubmitResult> {
+    return new Promise<SubmitResult>((resolve, reject) => {
       this.pendingResolve = resolve;
       this.pendingReject = reject;
       this.session.send({ type: "action", action });
@@ -372,7 +373,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       case "game_setup": {
         this.gameState = msg.state;
         this.legalActions = msg.legalActions;
-        this.gameSetupResolve(msg.events);
+        this.gameSetupResolve({ events: msg.events });
         break;
       }
 
@@ -380,7 +381,7 @@ export class P2PGuestAdapter implements EngineAdapter {
         this.gameState = msg.state;
         this.legalActions = msg.legalActions;
         if (this.pendingResolve) {
-          this.pendingResolve(msg.events);
+          this.pendingResolve({ events: msg.events });
           this.pendingResolve = null;
           this.pendingReject = null;
         } else {

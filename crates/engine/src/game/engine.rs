@@ -56,6 +56,7 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
     sync_waiting_for(state, &result.waiting_for);
     run_auto_pass_loop(state, &mut result);
     derive_display_state(state);
+    result.log_entries = super::log::resolve_log_entries(&result.events, state);
     Ok(result)
 }
 
@@ -177,6 +178,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
         return Ok(ActionResult {
             events: vec![],
             waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
         });
     }
 
@@ -779,6 +781,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 return Ok(ActionResult {
                     events,
                     waiting_for,
+                    log_entries: vec![],
                 });
             }
 
@@ -818,6 +821,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 return Ok(ActionResult {
                     events,
                     waiting_for,
+                    log_entries: vec![],
                 });
             }
 
@@ -1554,6 +1558,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                                 target_slots,
                                 selection,
                             },
+                            log_entries: vec![],
                         });
                     }
                 } else {
@@ -1640,6 +1645,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                                 target_constraints,
                                 selection,
                             },
+                            log_entries: vec![],
                         });
                     }
                 } else {
@@ -1739,6 +1745,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
         return Ok(ActionResult {
             events,
             waiting_for: wf,
+            log_entries: vec![],
         });
     }
 
@@ -1752,6 +1759,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
         return Ok(ActionResult {
             events,
             waiting_for: wf,
+            log_entries: vec![],
         });
     }
 
@@ -1760,6 +1768,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
     Ok(ActionResult {
         events,
         waiting_for,
+        log_entries: vec![],
     })
 }
 
@@ -1791,18 +1800,13 @@ fn run_post_action_pipeline(
         return Ok(state.waiting_for.clone());
     }
 
-    // Process triggers after action + SBA + exile return events.
-    // Filter out PhaseChanged events for phases that were auto-advanced past.
-    let current_phase = state.phase;
+    // Phase triggers are now processed inline by auto_advance() at each step
+    // (Upkeep, Draw, BeginCombat, End). Exclude all PhaseChanged events here
+    // to prevent double-firing. Non-phase triggers (ETB, spell cast, zone
+    // changes, etc.) still process normally.
     let filtered_events: Vec<_> = events
         .iter()
-        .filter(|e| {
-            if let GameEvent::PhaseChanged { phase } = e {
-                *phase == current_phase
-            } else {
-                true
-            }
-        })
+        .filter(|e| !matches!(e, GameEvent::PhaseChanged { .. }))
         .cloned()
         .collect();
     let stack_before = state.stack.len();
@@ -2457,9 +2461,11 @@ pub fn start_game_with_starting_player(
     state.waiting_for = waiting_for.clone();
     derive_display_state(state);
 
+    let log_entries = super::log::resolve_log_entries(&events, state);
     ActionResult {
         events,
         waiting_for,
+        log_entries,
     }
 }
 
@@ -2483,9 +2489,11 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     state.waiting_for = waiting_for.clone();
     derive_display_state(state);
 
+    let log_entries = super::log::resolve_log_entries(&events, state);
     ActionResult {
         events,
         waiting_for,
+        log_entries,
     }
 }
 
@@ -5391,7 +5399,7 @@ mod phase_trigger_regression_tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ControllerRef, Effect, FilterProp, GainLifePlayer,
-        QuantityExpr, TargetFilter, TriggerDefinition, TypedFilter,
+        QuantityExpr, TargetFilter, TriggerConstraint, TriggerDefinition, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
@@ -5400,15 +5408,11 @@ mod phase_trigger_regression_tests {
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
-    /// Regression: phase triggers fired for auto-advanced phases.
-    ///
-    /// A creature with "At the beginning of combat..." had its trigger fire
-    /// even when combat was skipped (no attackers), because auto_advance()
-    /// emitted PhaseChanged { BeginCombat } and process_triggers() processed
-    /// ALL accumulated events. The fix filters PhaseChanged events to only
-    /// include the current phase.
+    /// Verify that combat is skipped when there are no attackers and no triggers.
+    /// With no BeginCombat triggers and no potential attackers, auto_advance()
+    /// skips straight to PostCombatMain.
     #[test]
-    fn phase_trigger_does_not_fire_for_skipped_combat() {
+    fn combat_skipped_when_no_attackers_no_triggers() {
         let mut state = new_game(42);
         state.turn_number = 2;
         state.phase = Phase::PreCombatMain;
@@ -5418,13 +5422,172 @@ mod phase_trigger_regression_tests {
             player: PlayerId(0),
         };
 
-        // Create a creature with a "beginning of combat" phase trigger.
-        // The creature is small (0/1) so it has no potential attackers.
+        // Create a 0/1 creature with no triggers — can't attack, no combat triggers.
         let creature_id = create_object(
             &mut state,
             CardId(200),
             PlayerId(0),
-            "Trigger Creature".to_string(),
+            "Wall".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(0);
+            obj.toughness = Some(1);
+        }
+
+        // Pass priority twice (P0 passes, then P1 passes) with empty stack.
+        // This advances from PreCombatMain → BeginCombat → no triggers, no
+        // attackers → skip to PostCombatMain.
+        let result1 = apply(&mut state, GameAction::PassPriority).unwrap();
+        assert!(matches!(
+            result1.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(1)
+            }
+        ));
+
+        let result2 = apply(&mut state, GameAction::PassPriority).unwrap();
+
+        // We should now be at PostCombatMain with empty stack.
+        assert_eq!(state.phase, Phase::PostCombatMain);
+        assert!(
+            state.stack.is_empty(),
+            "Stack should be empty — no triggers exist. Stack: {:?}",
+            state.stack
+        );
+        assert!(
+            state.pending_trigger.is_none(),
+            "No pending trigger should exist"
+        );
+        assert!(matches!(result2.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    /// CR 503.1a: Upkeep triggers fire when the upkeep step begins.
+    #[test]
+    fn upkeep_trigger_fires() {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::Untap;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        // Create creature with "At the beginning of your upkeep, gain 1 life"
+        let creature_id = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Upkeep Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Phase)
+                    .phase(Phase::Upkeep)
+                    .constraint(TriggerConstraint::OnlyDuringYourTurn)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: GainLifePlayer::Controller,
+                        },
+                    ))
+                    .trigger_zones(vec![Zone::Battlefield]),
+            );
+        }
+
+        // auto_advance from Untap should process Upkeep triggers inline
+        let mut events = Vec::new();
+        let wf = crate::game::turns::auto_advance(&mut state, &mut events);
+
+        assert_eq!(state.phase, Phase::Upkeep);
+        assert!(
+            !state.stack.is_empty() || state.pending_trigger.is_some(),
+            "Upkeep trigger should have fired"
+        );
+        assert!(matches!(wf, WaitingFor::Priority { .. }));
+    }
+
+    /// CR 507.1: BeginCombat triggers fire even when there are attackers.
+    #[test]
+    fn begin_combat_trigger_fires_with_attackers() {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // Create a 2/2 creature (can attack) with a BeginCombat trigger
+        let creature_id = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Combat Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Phase)
+                    .phase(Phase::BeginCombat)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: GainLifePlayer::Controller,
+                        },
+                    ))
+                    .trigger_zones(vec![Zone::Battlefield]),
+            );
+        }
+
+        // Pass priority from PreCombatMain
+        let result1 = apply(&mut state, GameAction::PassPriority).unwrap();
+        assert!(matches!(
+            result1.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(1)
+            }
+        ));
+        let _result2 = apply(&mut state, GameAction::PassPriority).unwrap();
+
+        // Should be at BeginCombat with trigger on stack
+        assert_eq!(state.phase, Phase::BeginCombat);
+        assert!(
+            !state.stack.is_empty() || state.pending_trigger.is_some(),
+            "BeginCombat trigger should have fired"
+        );
+    }
+
+    /// CR 507.1: BeginCombat triggers fire even without potential attackers.
+    #[test]
+    fn begin_combat_trigger_fires_without_attackers() {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // Create a 0/1 creature (can't attack) with a BeginCombat trigger
+        let creature_id = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Trigger Wall".to_string(),
             Zone::Battlefield,
         );
         {
@@ -5446,10 +5609,7 @@ mod phase_trigger_regression_tests {
             );
         }
 
-        // Pass priority twice (P0 passes, then P1 passes) with empty stack.
-        // This advances from PreCombatMain → BeginCombat → auto-skip combat
-        // → PostCombatMain. The PhaseChanged { BeginCombat } event should be
-        // filtered out, so the phase trigger should NOT fire.
+        // Pass priority twice to advance from PreCombatMain
         let result1 = apply(&mut state, GameAction::PassPriority).unwrap();
         assert!(matches!(
             result1.waiting_for,
@@ -5457,22 +5617,69 @@ mod phase_trigger_regression_tests {
                 player: PlayerId(1)
             }
         ));
+        let _result2 = apply(&mut state, GameAction::PassPriority).unwrap();
 
-        let result2 = apply(&mut state, GameAction::PassPriority).unwrap();
+        // Should be at BeginCombat with trigger on stack and combat state set
+        assert_eq!(state.phase, Phase::BeginCombat);
+        assert!(
+            state.combat.is_some(),
+            "Combat state should be set when triggers fire"
+        );
+        assert!(
+            !state.stack.is_empty() || state.pending_trigger.is_some(),
+            "BeginCombat trigger should fire even without potential attackers (CR 507.1)"
+        );
+    }
 
-        // We should now be at PostCombatMain with empty stack.
-        assert_eq!(state.phase, Phase::PostCombatMain);
+    /// OnlyDuringYourTurn constraint prevents trigger from firing on opponent's turn.
+    #[test]
+    fn your_turn_constraint_blocks_on_opponents_turn() {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::Untap;
+        // Active player is P1, but the creature is controlled by P0
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(1);
+
+        // Create creature controlled by P0 with "At the beginning of your upkeep"
+        let creature_id = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Your Turn Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Phase)
+                    .phase(Phase::Upkeep)
+                    .constraint(TriggerConstraint::OnlyDuringYourTurn)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: GainLifePlayer::Controller,
+                        },
+                    ))
+                    .trigger_zones(vec![Zone::Battlefield]),
+            );
+        }
+
+        // auto_advance from Untap — it's P1's turn, but the trigger is P0's
+        // with OnlyDuringYourTurn, so it should NOT fire.
+        let mut events = Vec::new();
+        let _wf = crate::game::turns::auto_advance(&mut state, &mut events);
+
+        // Trigger should not have fired — phase should have advanced past Upkeep
         assert!(
             state.stack.is_empty(),
-            "Stack should be empty — phase trigger for skipped BeginCombat should not fire. Stack: {:?}",
-            state.stack
+            "Trigger with OnlyDuringYourTurn should not fire on opponent's turn"
         );
-        // No pending trigger either
-        assert!(
-            state.pending_trigger.is_none(),
-            "No pending trigger should exist for a skipped phase"
-        );
-        assert!(matches!(result2.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.pending_trigger.is_none());
     }
 
     #[test]

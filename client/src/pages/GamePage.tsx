@@ -503,7 +503,7 @@ function GamePageContent({
         <div className="relative z-20 w-full shrink-0" data-debug-label="Opp Top">
           <OpponentHand showCards={showAiHand} />
           <div
-            className="pointer-events-none absolute right-0 top-0 z-10 flex w-fit flex-col items-end gap-1 px-2 py-1 [&>*]:pointer-events-auto [&>div>*]:pointer-events-auto"
+            className="pointer-events-none absolute right-0 top-0 z-10 flex w-fit flex-col items-end gap-2 px-2 py-1 [&>*]:pointer-events-auto [&>div>*]:pointer-events-auto"
             style={playerZoneRailStyle}
             data-debug-label="Opp Zones"
           >
@@ -516,13 +516,15 @@ function GamePageContent({
                 }
               />
             </div>
-            <ZoneIndicator
-              zone="exile"
-              playerId={activeOpponentId}
-              onClick={() =>
-                setViewingZone({ zone: "exile", playerId: activeOpponentId })
-              }
-            />
+            <div className="relative z-10">
+              <ZoneIndicator
+                zone="exile"
+                playerId={activeOpponentId}
+                onClick={() =>
+                  setViewingZone({ zone: "exile", playerId: activeOpponentId })
+                }
+              />
+            </div>
           </div>
         </div>
 

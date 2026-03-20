@@ -1,143 +1,62 @@
-import type { GameEvent } from "../adapter/types";
+import type { GameLogEntry, LogCategory } from "../adapter/types";
 
 export type LogVerbosity = "full" | "compact" | "minimal";
 
-export function formatEvent(event: GameEvent): string {
-  switch (event.type) {
-    case "GameStarted":
-      return "Game started";
-    case "TurnStarted":
-      return `Turn ${event.data.turn_number} -- Player ${event.data.player_id + 1}`;
-    case "PhaseChanged":
-      return `Phase: ${event.data.phase}`;
-    case "PriorityPassed":
-      return `Player ${event.data.player_id + 1} passed priority`;
-    case "SpellCast":
-      return `Spell cast by Player ${event.data.controller + 1}`;
-    case "AbilityActivated":
-      return `Ability activated (source ${event.data.source_id})`;
-    case "ZoneChanged":
-      return `Object ${event.data.object_id} moved ${event.data.from} -> ${event.data.to}`;
-    case "LifeChanged": {
-      const prefix = event.data.amount >= 0 ? "+" : "";
-      return `Player ${event.data.player_id + 1} life: ${prefix}${event.data.amount}`;
-    }
-    case "ManaAdded":
-      return `Player ${event.data.player_id + 1} added ${event.data.mana_type} mana`;
-    case "PermanentTapped":
-      return `Permanent ${event.data.object_id} tapped`;
-    case "PermanentUntapped":
-      return `Permanent ${event.data.object_id} untapped`;
-    case "PlayerLost":
-      return `Player ${event.data.player_id + 1} lost the game`;
-    case "MulliganStarted":
-      return "Mulligan phase";
-    case "CardsDrawn":
-      return `Player ${event.data.player_id + 1} drew ${event.data.count} card(s)`;
-    case "CardDrawn":
-      return `Player ${event.data.player_id + 1} drew a card`;
-    case "LandPlayed":
-      return `Player ${event.data.player_id + 1} played a land`;
-    case "StackPushed":
-      return `Object ${event.data.object_id} pushed to stack`;
-    case "StackResolved":
-      return `Stack entry ${event.data.object_id} resolved`;
-    case "Discarded":
-      return `Player ${event.data.player_id + 1} discarded`;
-    case "DamageCleared":
-      return `Damage cleared from ${event.data.object_id}`;
-    case "GameOver":
-      return event.data.winner != null
-        ? `Game over -- Player ${event.data.winner + 1} wins!`
-        : "Game over -- Draw";
-    case "DamageDealt": {
-      const target =
-        "Player" in event.data.target
-          ? `Player ${event.data.target.Player + 1}`
-          : `object ${event.data.target.Object}`;
-      return `Source ${event.data.source_id} deals ${event.data.amount} damage to ${target}`;
-    }
-    case "SpellCountered":
-      return `Object ${event.data.object_id} countered by ${event.data.countered_by}`;
-    case "CounterAdded":
-      return `${event.data.counter_type} x${event.data.count} added to ${event.data.object_id}`;
-    case "CounterRemoved":
-      return `${event.data.counter_type} x${event.data.count} removed from ${event.data.object_id}`;
-    case "TokenCreated":
-      return `Token "${event.data.name}" created`;
-    case "CreatureDestroyed":
-      return `Creature ${event.data.object_id} destroyed`;
-    case "Regenerated":
-      return `Creature ${event.data.object_id} regenerates`;
-    case "PermanentSacrificed":
-      return `Player ${event.data.player_id + 1} sacrificed ${event.data.object_id}`;
-    case "EffectResolved":
-      return `Effect ${event.data.kind} resolved`;
-    case "AttackersDeclared":
-      return `${event.data.attacker_ids.length} attacker(s) declared`;
-    case "BlockersDeclared":
-      return `${event.data.assignments.length} blocker(s) assigned`;
-    case "BecomesTarget":
-      return `Object ${event.data.object_id} targeted by ${event.data.source_id}`;
-    case "ReplacementApplied":
-      return `Replacement applied: ${event.data.event_type}`;
-    case "CardsRevealed":
-      return `Revealed: ${event.data.card_names.join(", ")}`;
-    case "CreatureSuspected":
-      return `Creature ${event.data.object_id} suspected`;
-    case "CaseSolved":
-      return `Case ${event.data.object_id} solved`;
-    case "ClassLevelGained":
-      return `Class reached level ${event.data.level}`;
-    default:
-      return `Event: ${(event as GameEvent).type}`;
-  }
-}
+const COMPACT_EXCLUDE: Set<LogCategory> = new Set(["Mana", "State", "Turn"]);
 
-const COMBAT_EVENTS = new Set(["AttackersDeclared", "BlockersDeclared", "DamageDealt"]);
-const SPELL_EVENTS = new Set(["SpellCast", "StackPushed", "StackResolved", "SpellCountered"]);
-const ZONE_EVENTS = new Set(["ZoneChanged", "Discarded"]);
-
-export function classifyEventColor(event: GameEvent): string {
-  if (COMBAT_EVENTS.has(event.type)) return "red";
-  if (SPELL_EVENTS.has(event.type)) return "blue";
-  if (ZONE_EVENTS.has(event.type)) return "gray";
-
-  if (event.type === "LifeChanged") {
-    return event.data.amount >= 0 ? "green" : "red";
-  }
-
-  return "gray";
-}
-
-const COMPACT_EXCLUDE = new Set([
-  "PriorityPassed",
-  "ManaAdded",
-  "PermanentTapped",
-  "PermanentUntapped",
-  "DamageCleared",
+const MINIMAL_INCLUDE: Set<LogCategory> = new Set([
+  "Game", "Stack", "Combat", "Life", "Destroy", "Token",
 ]);
 
-const MINIMAL_INCLUDE = new Set([
-  "GameStarted",
-  "TurnStarted",
-  "SpellCast",
-  "DamageDealt",
-  "LifeChanged",
-  "GameOver",
-  "AttackersDeclared",
-  "BlockersDeclared",
-  "CreatureDestroyed",
-  "TokenCreated",
-]);
+/** ZoneChanged entries contain Zone segments ("moves from X to Y"). Other Zone-category
+ *  entries (LandPlayed, CardsDrawn, Discarded, etc.) don't — they're worth keeping. */
+function isZoneChangedEntry(entry: GameLogEntry): boolean {
+  return entry.category === "Zone" && entry.segments.some((s) => s.type === "Zone");
+}
 
-export function filterByVerbosity(events: GameEvent[], level: LogVerbosity): GameEvent[] {
+export function filterLogByVerbosity(
+  entries: GameLogEntry[],
+  level: LogVerbosity,
+): GameLogEntry[] {
   switch (level) {
     case "full":
-      return events;
+      return entries;
     case "compact":
-      return events.filter((e) => !COMPACT_EXCLUDE.has(e.type));
+      return entries.filter((e) => {
+        if (COMPACT_EXCLUDE.has(e.category)) {
+          // Keep TurnStarted entries (category: Turn, first segment is "Turn ")
+          if (e.category === "Turn") {
+            return e.segments.length > 0 && e.segments[0].type === "Text" && e.segments[0].value === "Turn ";
+          }
+          return false;
+        }
+        // Filter out individual ZoneChanged ("X moves from Y to Z") but keep
+        // LandPlayed, CardsDrawn, Discarded, Cycled, CardsRevealed
+        if (isZoneChangedEntry(e)) return false;
+        return true;
+      });
     case "minimal":
-      return events.filter((e) => MINIMAL_INCLUDE.has(e.type));
+      return entries.filter((e) => MINIMAL_INCLUDE.has(e.category));
+  }
+}
+
+/** Get the CSS color class for a log entry based on its category. */
+export function categoryColorClass(entry: GameLogEntry): string {
+  switch (entry.category) {
+    case "Combat":
+    case "Destroy":
+      return "text-red-400";
+    case "Stack":
+      return "text-blue-400";
+    case "Life":
+      // Detect gain vs loss from segments
+      if (entry.segments.some((s) => s.type === "Text" && s.value === " gains ")) {
+        return "text-green-400";
+      }
+      return "text-red-400";
+    case "Special":
+      return "text-amber-400";
+    default:
+      return "text-gray-400";
   }
 }

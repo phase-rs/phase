@@ -51,6 +51,7 @@ pub fn move_to_zone(
     // from exile they will be None (no layer computation), which is correct.
     if from == Zone::Battlefield || from == Zone::Exile {
         let lki = crate::types::game_state::LKISnapshot {
+            name: obj.name.clone(),
             power: obj.power,
             toughness: obj.toughness,
             mana_value: obj.mana_cost.mana_value(),
@@ -160,6 +161,7 @@ pub fn move_to_library_position(
     // CR 400.7: Snapshot LKI before zone change from battlefield or exile.
     if from == Zone::Battlefield || from == Zone::Exile {
         let lki = crate::types::game_state::LKISnapshot {
+            name: obj.name.clone(),
             power: obj.power,
             toughness: obj.toughness,
             mana_value: obj.mana_cost.mana_value(),

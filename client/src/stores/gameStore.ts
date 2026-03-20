@@ -5,6 +5,7 @@ import type {
   FormatConfig,
   GameAction,
   GameEvent,
+  GameLogEntry,
   GameState,
   MatchConfig,
   WaitingFor,
@@ -23,6 +24,8 @@ interface GameStoreState {
   gameState: GameState | null;
   events: GameEvent[];
   eventHistory: GameEvent[];
+  logHistory: GameLogEntry[];
+  nextLogSeq: number;
   adapter: EngineAdapter | null;
   waitingFor: WaitingFor | null;
   legalActions: GameAction[];
@@ -55,6 +58,8 @@ const initialState: GameStoreState = {
   gameState: null,
   events: [],
   eventHistory: [],
+  logHistory: [],
+  nextLogSeq: 0,
   adapter: null,
   waitingFor: null,
   legalActions: [],
@@ -119,9 +124,13 @@ export const useGameStore = create<GameStore>()(
 
     initGame: async (gameId, adapter, deckData, formatConfig, playerCount, matchConfig) => {
       await adapter.initialize();
-      await adapter.initializeGame(deckData, formatConfig, playerCount, matchConfig);
+      const initResult = await adapter.initializeGame(deckData, formatConfig, playerCount, matchConfig);
       const state = await adapter.getState();
       const legalActions = await adapter.getLegalActions();
+      const initLogEntries = (initResult.log_entries ?? []).map((entry, i) => ({
+        ...entry,
+        seq: i,
+      }));
       set({
         gameId,
         adapter,
@@ -130,6 +139,8 @@ export const useGameStore = create<GameStore>()(
         legalActions,
         events: [],
         eventHistory: [],
+        logHistory: initLogEntries,
+        nextLogSeq: initLogEntries.length,
         stateHistory: [],
       });
       saveGame(gameId, state);
@@ -148,6 +159,8 @@ export const useGameStore = create<GameStore>()(
         legalActions,
         events: [],
         eventHistory: [],
+        logHistory: [],
+        nextLogSeq: 0,
         stateHistory: [],
       });
     },
@@ -161,7 +174,7 @@ export const useGameStore = create<GameStore>()(
       // Save current state for undo (only for unrevealed-information actions)
       const shouldSaveHistory = UNDOABLE_ACTIONS.has(action.type);
 
-      const events = await adapter.submitAction(action);
+      const result = await adapter.submitAction(action);
       const newState = await adapter.getState();
       const legalActions = await adapter.getLegalActions();
 
@@ -170,10 +183,19 @@ export const useGameStore = create<GameStore>()(
           ? [...prev.stateHistory, gameState].slice(-MAX_UNDO_HISTORY)
           : prev.stateHistory;
 
+        // Assign monotonic sequence numbers to new log entries
+        let seq = prev.nextLogSeq;
+        const newLogEntries = (result.log_entries ?? []).map((entry) => ({
+          ...entry,
+          seq: seq++,
+        }));
+
         return {
           gameState: newState,
-          events,
-          eventHistory: [...prev.eventHistory, ...events].slice(-1000),
+          events: result.events,
+          eventHistory: [...prev.eventHistory, ...result.events].slice(-1000),
+          logHistory: [...prev.logHistory, ...newLogEntries].slice(-2000),
+          nextLogSeq: seq,
           waitingFor: newState.waiting_for,
           legalActions,
           stateHistory: newHistory,
@@ -182,7 +204,7 @@ export const useGameStore = create<GameStore>()(
 
       if (gameId) saveGame(gameId, newState);
 
-      return events;
+      return result.events;
     },
 
     undo: async () => {

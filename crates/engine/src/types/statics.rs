@@ -29,6 +29,11 @@ pub enum StaticMode {
     ExtraBlockers {
         count: Option<u32>,
     },
+    /// CR 400.2: Play with the top card of your library revealed.
+    /// Variants: "your library" (controller only) or "their libraries" (all players).
+    RevealTopOfLibrary {
+        all_players: bool,
+    },
     /// Fallback for unrecognized static mode strings.
     Other(String),
 }
@@ -56,6 +61,13 @@ impl fmt::Display for StaticMode {
                 None => write!(f, "ExtraBlockers(any)"),
                 Some(n) => write!(f, "ExtraBlockers({n})"),
             },
+            StaticMode::RevealTopOfLibrary { all_players } => {
+                if *all_players {
+                    write!(f, "RevealTopOfLibrary(all)")
+                } else {
+                    write!(f, "RevealTopOfLibrary(you)")
+                }
+            }
             StaticMode::Other(s) => write!(f, "{s}"),
         }
     }

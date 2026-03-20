@@ -1026,10 +1026,13 @@ pub enum StaticCondition {
     Or {
         conditions: Vec<StaticCondition>,
     },
-    /// CR 122.1: True when the source object has at least `minimum` counters of the given type.
+    /// CR 122.1: True when the source object has at least `minimum` (and at most `maximum`,
+    /// if specified) counters of the given type. Used for level-up ranges (CR 710.3).
     HasCounters {
         counter_type: String,
         minimum: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        maximum: Option<u32>,
     },
     /// CR 716.6: True when the source Class enchantment is at or above the given level.
     /// Class level is a dedicated field (not a counter), so proliferate does not interact.
@@ -2389,6 +2392,8 @@ pub enum TriggerConstraint {
     /// "Whenever you draw your Nth card each turn" — fires exactly when
     /// the controller's `cards_drawn_this_turn` equals `n`.
     NthDrawThisTurn { n: u32 },
+    /// "At the beginning of each opponent's [phase]"
+    OnlyDuringOpponentsTurn,
     /// CR 716.5: "When this Class becomes level N" — fire only at the specified level.
     AtClassLevel { level: u8 },
 }
@@ -2860,6 +2865,9 @@ pub enum ContinuousModification {
     /// CR 510.1c: This creature assigns combat damage equal to its toughness
     /// rather than its power.
     AssignDamageFromToughness,
+    /// CR 613.2 (Layer 2): Change the controller of the affected object to the
+    /// controller of the source permanent (e.g., Control Magic auras).
+    ChangeController,
 }
 
 // ---------------------------------------------------------------------------

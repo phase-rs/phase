@@ -77,10 +77,11 @@ describe("computePTDisplay", () => {
     expect(display.powerColor).toBe("red");
   });
 
-  it("returns red toughness color when damaged", () => {
+  it("returns red toughness color and reduced value when damaged", () => {
     const obj = makeGameObject({ damage_marked: 2 });
     const display = computePTDisplay(obj)!;
 
+    expect(display.toughness).toBe(2);
     expect(display.toughnessColor).toBe("red");
   });
 
@@ -103,6 +104,7 @@ describe("computePTDisplay", () => {
     const display = computePTDisplay(obj)!;
 
     // damage_marked > 0 takes priority
+    expect(display.toughness).toBe(5);
     expect(display.toughnessColor).toBe("red");
   });
 });
