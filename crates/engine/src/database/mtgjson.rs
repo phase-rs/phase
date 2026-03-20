@@ -85,7 +85,8 @@ pub fn parse_mtgjson_mana_cost(s: &str) -> ManaCost {
     // Extract symbols between braces
     for segment in s.split('{').filter(|seg| !seg.is_empty()) {
         let symbol = segment.trim_end_matches('}');
-        match symbol {
+        let symbol = symbol.to_ascii_uppercase();
+        match symbol.as_str() {
             "W" => shards.push(ManaCostShard::White),
             "U" => shards.push(ManaCostShard::Blue),
             "B" => shards.push(ManaCostShard::Black),

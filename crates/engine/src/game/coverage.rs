@@ -970,7 +970,13 @@ fn build_ability_item(def: &AbilityDefinition) -> ParsedItem {
         }
         _ => effect_type_name(&def.effect),
     };
-    let supported = !matches!(&def.effect, Effect::Unimplemented { .. });
+    // CR 702.49: NinjutsuFamily abilities use Effect::Unimplemented as a synthesis
+    // marker, but are fully handled by GameAction::ActivateNinjutsu at runtime.
+    let is_ninjutsu = def
+        .cost
+        .as_ref()
+        .is_some_and(|c| matches!(c, AbilityCost::NinjutsuFamily { .. }));
+    let supported = is_ninjutsu || !matches!(&def.effect, Effect::Unimplemented { .. });
     let source_text = def.description.clone().or_else(|| match &def.effect {
         Effect::Unimplemented { description, .. } => description.clone(),
         _ => None,
@@ -1667,6 +1673,15 @@ fn replacement_has_unimplemented_parts(replacement: &ReplacementDefinition) -> b
 }
 
 fn ability_definition_has_unimplemented_parts(def: &AbilityDefinition) -> bool {
+    // CR 702.49: NinjutsuFamily abilities use Effect::Unimplemented as a synthesis
+    // marker, but are fully handled by GameAction::ActivateNinjutsu at runtime.
+    if def
+        .cost
+        .as_ref()
+        .is_some_and(|c| matches!(c, AbilityCost::NinjutsuFamily { .. }))
+    {
+        return false;
+    }
     matches!(def.effect, Effect::Unimplemented { .. })
         || def
             .cost
@@ -1703,6 +1718,14 @@ fn ability_cost_has_unimplemented_parts(cost: &AbilityCost) -> bool {
 }
 
 fn collect_ability_missing_parts(def: &AbilityDefinition, missing: &mut Vec<String>) {
+    // CR 702.49: NinjutsuFamily — runtime-handled, skip.
+    if def
+        .cost
+        .as_ref()
+        .is_some_and(|c| matches!(c, AbilityCost::NinjutsuFamily { .. }))
+    {
+        return;
+    }
     if let Effect::Unimplemented { name, .. } = &def.effect {
         let label = format!("Effect:{name}");
         if !missing.contains(&label) {
