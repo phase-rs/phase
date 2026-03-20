@@ -48,7 +48,7 @@ pub enum ConvokeMode {
     Waterbend,
 }
 
-/// CR 113.7a: Snapshot of an object's characteristics at the time it left the battlefield.
+/// CR 400.7: Snapshot of an object's characteristics at the time it left a public zone.
 /// Used for event-context resolution when the object is no longer in its original zone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LKISnapshot {
@@ -726,7 +726,7 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_trigger_event: Option<GameEvent>,
 
-    /// CR 113.7a: Last Known Information cache.
+    /// CR 400.7: Last Known Information cache.
     /// Populated before zone changes for objects leaving the battlefield.
     /// Cleared on phase/step transitions via `advance_phase()`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]

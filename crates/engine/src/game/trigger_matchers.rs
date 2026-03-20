@@ -635,23 +635,16 @@ pub(super) fn match_spell_cast(
     state: &GameState,
 ) -> bool {
     if let GameEvent::SpellCast {
-        card_id,
         controller,
+        object_id,
+        ..
     } = event
     {
         // Check valid_card filter on the cast spell
-        if let Some(ref _filter) = trigger.valid_card {
-            // Find object by card_id
-            let obj_id = state
-                .objects
-                .iter()
-                .find(|(_, obj)| obj.card_id == *card_id)
-                .map(|(id, _)| *id);
-            if let Some(oid) = obj_id {
-                if !valid_card_matches(trigger, state, oid, source_id) {
-                    return false;
-                }
-            }
+        if trigger.valid_card.is_some()
+            && !valid_card_matches(trigger, state, *object_id, source_id)
+        {
+            return false;
         }
         valid_player_matches(trigger, state, *controller, source_id)
     } else {
@@ -1834,6 +1827,7 @@ mod tests {
         let event = GameEvent::SpellCast {
             card_id: CardId(10),
             controller: PlayerId(0),
+            object_id: ObjectId(10),
         };
         assert!(match_spell_cast(&event, &trigger, ObjectId(1), &state));
     }

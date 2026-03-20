@@ -816,22 +816,86 @@ pub fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     let lower = text.to_lowercase();
     let lower = lower.trim();
     match lower {
-        "that much" | "that many" => Some(QuantityExpr::Ref {
-            qty: QuantityRef::EventContextAmount,
-        }),
-        "its power" => Some(QuantityExpr::Ref {
-            qty: QuantityRef::EventContextSourcePower,
-        }),
-        "its toughness" => Some(QuantityExpr::Ref {
-            qty: QuantityRef::EventContextSourceToughness,
-        }),
-        _ if lower == "that spell's mana value" || lower == "that spell's converted mana cost" => {
-            Some(QuantityExpr::Ref {
+        "that much" | "that many" => {
+            return Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            })
+        }
+        "its power" => {
+            return Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourcePower,
+            })
+        }
+        "its toughness" => {
+            return Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourceToughness,
+            })
+        }
+        "its mana value" | "its converted mana cost" => {
+            return Some(QuantityExpr::Ref {
                 qty: QuantityRef::EventContextSourceManaValue,
             })
         }
-        _ => None,
+        _ => {}
     }
+
+    // CR 603.7c: Decompose possessive noun phrases: "{referent}'s {property}"
+    if let Some((prefix, suffix)) = lower.split_once("'s ") {
+        let suffix = suffix.trim();
+        let qty = match suffix {
+            "power" => Some(QuantityRef::EventContextSourcePower),
+            "toughness" => Some(QuantityRef::EventContextSourceToughness),
+            "mana value" | "converted mana cost" => Some(QuantityRef::EventContextSourceManaValue),
+            _ => None,
+        };
+        if let Some(qty) = qty {
+            let prefix = prefix.trim();
+            if is_event_context_referent(prefix) {
+                return Some(QuantityExpr::Ref { qty });
+            }
+        }
+    }
+
+    None
+}
+
+/// CR 603.7c: Check if a possessive prefix refers to the triggering event's source object.
+/// Matches event-context anaphoric referents like "the sacrificed creature", "that spell", etc.
+fn is_event_context_referent(prefix: &str) -> bool {
+    let event_adjectives = [
+        "sacrificed",
+        "destroyed",
+        "exiled",
+        "discarded",
+        "countered",
+        "returned",
+        "targeted",
+        "revealed",
+        "drawn",
+        "copied",
+    ];
+    if prefix.starts_with("that ") || prefix.starts_with("the ") {
+        let rest = prefix.split_once(' ').map_or("", |x| x.1);
+        // "the sacrificed creature", "the exiled card" — [adjective] [type]
+        if event_adjectives.iter().any(|adj| rest.starts_with(adj)) {
+            return true;
+        }
+        // "that creature", "that spell", "the creature" — bare anaphoric
+        let bare_types = [
+            "creature",
+            "spell",
+            "card",
+            "permanent",
+            "artifact",
+            "enchantment",
+            "planeswalker",
+            "land",
+        ];
+        if bare_types.contains(&rest) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -870,6 +934,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_event_context_quantity_its_mana_value() {
+        assert_eq!(
+            parse_event_context_quantity("its mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourceManaValue
+            })
+        );
+    }
+
+    #[test]
     fn parse_event_context_quantity_spell_mana_value() {
         assert_eq!(
             parse_event_context_quantity("that spell's mana value"),
@@ -883,6 +957,64 @@ mod tests {
     fn parse_event_context_quantity_unrecognized_returns_none() {
         assert_eq!(
             parse_event_context_quantity("the number of creatures you control"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_event_context_possessive_sacrificed_creature_power() {
+        assert_eq!(
+            parse_event_context_quantity("the sacrificed creature's power"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourcePower
+            })
+        );
+    }
+
+    #[test]
+    fn parse_event_context_possessive_that_creature_toughness() {
+        assert_eq!(
+            parse_event_context_quantity("that creature's toughness"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourceToughness
+            })
+        );
+    }
+
+    #[test]
+    fn parse_event_context_possessive_exiled_card_mana_value() {
+        assert_eq!(
+            parse_event_context_quantity("the exiled card's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourceManaValue
+            })
+        );
+    }
+
+    #[test]
+    fn parse_event_context_possessive_destroyed_creature_power() {
+        assert_eq!(
+            parse_event_context_quantity("the destroyed creature's power"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourcePower
+            })
+        );
+    }
+
+    #[test]
+    fn parse_event_context_possessive_rejects_target() {
+        // "target creature" is a targeting referent, not event context
+        assert_eq!(
+            parse_event_context_quantity("target creature's power"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_event_context_possessive_rejects_player() {
+        // Player possessives are not event context
+        assert_eq!(
+            parse_event_context_quantity("each opponent's life total"),
             None
         );
     }

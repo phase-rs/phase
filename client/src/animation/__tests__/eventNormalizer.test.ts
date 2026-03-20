@@ -35,7 +35,7 @@ describe("normalizeEvents", () => {
 
   it("SpellCast always starts a new step", () => {
     const events: GameEvent[] = [
-      { type: "SpellCast", data: { card_id: 1, controller: 0 } },
+      { type: "SpellCast", data: { card_id: 1, controller: 0, object_id: 1 } },
     ];
 
     const steps = normalizeEvents(events);
@@ -115,7 +115,7 @@ describe("normalizeEvents", () => {
 
   it("ZoneChanged groups with preceding cause (SpellCast)", () => {
     const events: GameEvent[] = [
-      { type: "SpellCast", data: { card_id: 1, controller: 0 } },
+      { type: "SpellCast", data: { card_id: 1, controller: 0, object_id: 1 } },
       { type: "ZoneChanged", data: { object_id: 1, from: "Stack", to: "Battlefield" } },
     ];
 
@@ -161,7 +161,7 @@ describe("normalizeEvents", () => {
     const events: GameEvent[] = [
       { type: "BlockersDeclared", data: { assignments: [[3, 1]] } },
       { type: "DamageDealt", data: { source_id: 1, target: { Player: 0 }, amount: 3 } },
-      { type: "SpellCast", data: { card_id: 9, controller: 0 } },
+      { type: "SpellCast", data: { card_id: 9, controller: 0, object_id: 9 } },
     ];
 
     const steps = normalizeEvents(events, { combatPacing: "cinematic" });
@@ -174,7 +174,7 @@ describe("normalizeEvents", () => {
   it("step duration equals max of effect durations", () => {
     // SpellCast (500) + ZoneChanged (400) => step duration = 500
     const events: GameEvent[] = [
-      { type: "SpellCast", data: { card_id: 1, controller: 0 } },
+      { type: "SpellCast", data: { card_id: 1, controller: 0, object_id: 1 } },
       { type: "ZoneChanged", data: { object_id: 1, from: "Hand", to: "Stack" } },
     ];
 
@@ -196,7 +196,7 @@ describe("normalizeEvents", () => {
   it("handles mixed event sequence correctly", () => {
     const events: GameEvent[] = [
       { type: "PriorityPassed", data: { player_id: 0 } },
-      { type: "SpellCast", data: { card_id: 1, controller: 0 } },
+      { type: "SpellCast", data: { card_id: 1, controller: 0, object_id: 1 } },
       { type: "ZoneChanged", data: { object_id: 1, from: "Hand", to: "Stack" } },
       { type: "PriorityPassed", data: { player_id: 1 } },
       // Attacker 1 hits blockers 2 and 3 — each is a separate sequential step

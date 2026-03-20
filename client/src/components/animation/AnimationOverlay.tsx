@@ -211,15 +211,15 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
         }
 
         case "SpellCast": {
-          const { card_id } = event.data;
-          const pos = getObjectPosition(card_id);
+          const { object_id } = event.data;
+          const pos = getObjectPosition(object_id);
           if (pos) {
             const gameState = useGameStore.getState().gameState;
-            const colors = gameState?.objects[card_id]?.color ?? [];
+            const colors = gameState?.objects[object_id]?.color ?? [];
             const burstColor = getCardColors(colors)[0] ?? "#06b6d4";
             if (vfxQuality !== "minimal") {
               particleRef.current?.spellImpact(pos.x, pos.y, hexToRgb(burstColor));
-              const cardName = gameState?.objects[card_id]?.name ?? "";
+              const cardName = gameState?.objects[object_id]?.name ?? "";
               const stackPos = { x: window.innerWidth * 0.75, y: window.innerHeight * 0.4 };
               const id = ++castArcIdCounter;
               setActiveCastArcs((prev) => [...prev, { id, from: pos, to: stackPos, cardName, mode: "cast" }]);

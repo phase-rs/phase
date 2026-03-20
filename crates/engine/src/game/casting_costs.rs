@@ -601,6 +601,7 @@ pub(super) fn finalize_cast(
     events.push(GameEvent::SpellCast {
         card_id,
         controller: player,
+        object_id,
     });
 
     let obj = state

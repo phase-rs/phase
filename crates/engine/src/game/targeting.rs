@@ -196,14 +196,7 @@ pub(crate) fn extract_source_from_event(
     use crate::types::events::GameEvent;
     match event {
         GameEvent::BecomesTarget { source_id, .. } => Some(*source_id),
-        GameEvent::SpellCast { card_id, .. } => {
-            // card_id is a CardId, not an ObjectId — we need the stack entry's object
-            // For SpellCast, the source is the spell on the stack, but we have card_id.
-            // This requires looking up the object by card_id, which is imprecise.
-            // For now, return None — SpellCast triggers should use different resolution.
-            let _ = card_id;
-            None
-        }
+        GameEvent::SpellCast { object_id, .. } => Some(*object_id),
         GameEvent::DamageDealt { source_id, .. } => Some(*source_id),
         GameEvent::AbilityActivated { source_id } => Some(*source_id),
         GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),

@@ -63,7 +63,7 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.priority_passes.clear();
     state.priority_pass_count = 0;
     state.players_attacked_this_step.clear();
-    // CR 113.7a: LKI persists within a step but is invalidated on step transition.
+    // CR 400.7: LKI persists within a step but is invalidated on step transition.
     state.lki_cache.clear();
 
     events.push(GameEvent::PhaseChanged { phase: next });

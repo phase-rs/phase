@@ -35,6 +35,7 @@ pub enum GameEvent {
     SpellCast {
         card_id: CardId,
         controller: PlayerId,
+        object_id: ObjectId, // CR 601.2a: The spell object on the stack
     },
     AbilityActivated {
         source_id: ObjectId,

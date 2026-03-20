@@ -46,9 +46,10 @@ pub fn move_to_zone(
     let from = obj.zone;
     let owner = obj.owner;
 
-    // CR 113.7a: Snapshot LKI before zone change from battlefield.
-    // obj.power/toughness reflect all layer modifications (Layer 7).
-    if from == Zone::Battlefield {
+    // CR 400.7: Snapshot LKI before zone change from battlefield or exile.
+    // Power/toughness reflect layer modifications on battlefield (Layer 7);
+    // from exile they will be None (no layer computation), which is correct.
+    if from == Zone::Battlefield || from == Zone::Exile {
         let lki = crate::types::game_state::LKISnapshot {
             power: obj.power,
             toughness: obj.toughness,
@@ -156,8 +157,8 @@ pub fn move_to_library_position(
     let from = obj.zone;
     let owner = obj.owner;
 
-    // CR 113.7a: Snapshot LKI before zone change from battlefield.
-    if from == Zone::Battlefield {
+    // CR 400.7: Snapshot LKI before zone change from battlefield or exile.
+    if from == Zone::Battlefield || from == Zone::Exile {
         let lki = crate::types::game_state::LKISnapshot {
             power: obj.power,
             toughness: obj.toughness,

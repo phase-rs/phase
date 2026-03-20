@@ -155,17 +155,17 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
             // Cards define Prowess as K:Prowess with no explicit trigger_definition,
             // so we synthetically generate the trigger here.
             if let GameEvent::SpellCast {
-                card_id,
                 controller: caster,
+                object_id: spell_obj_id,
+                ..
             } = event
             {
                 if has_prowess && *caster == controller {
                     // Check if the cast spell is noncreature
                     let is_noncreature = state
                         .objects
-                        .iter()
-                        .find(|(_, obj)| obj.card_id == *card_id)
-                        .map(|(_, obj)| !obj.card_types.core_types.contains(&CoreType::Creature))
+                        .get(spell_obj_id)
+                        .map(|obj| !obj.card_types.core_types.contains(&CoreType::Creature))
                         .unwrap_or(false);
 
                     if is_noncreature {
@@ -1406,6 +1406,7 @@ pub mod tests {
         let events = vec![GameEvent::SpellCast {
             card_id: CardId(10),
             controller: PlayerId(0),
+            object_id: spell,
         }];
 
         process_triggers(&mut state, &events);
@@ -1458,6 +1459,7 @@ pub mod tests {
         let events = vec![GameEvent::SpellCast {
             card_id: CardId(10),
             controller: PlayerId(0),
+            object_id: creature_spell,
         }];
 
         process_triggers(&mut state, &events);
@@ -1510,6 +1512,7 @@ pub mod tests {
         let events = vec![GameEvent::SpellCast {
             card_id: CardId(10),
             controller: PlayerId(1),
+            object_id: spell,
         }];
 
         process_triggers(&mut state, &events);

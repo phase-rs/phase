@@ -252,7 +252,7 @@ fn resolve_ref(
             .and_then(crate::game::targeting::extract_amount_from_event)
             .unwrap_or(0),
         // CR 603.7c: Power of the source object from the triggering event.
-        // CR 113.7a: Falls back to LKI cache for objects that have left the battlefield.
+        // CR 400.7: Falls back to LKI cache for objects that have left their zone.
         QuantityRef::EventContextSourcePower => state
             .current_trigger_event
             .as_ref()

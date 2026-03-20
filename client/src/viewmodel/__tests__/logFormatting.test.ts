@@ -54,7 +54,7 @@ describe("classifyEventColor", () => {
   });
 
   it("classifies spell events as blue", () => {
-    expect(classifyEventColor({ type: "SpellCast", data: { card_id: 1, controller: 0 } })).toBe("blue");
+    expect(classifyEventColor({ type: "SpellCast", data: { card_id: 1, controller: 0, object_id: 1 } })).toBe("blue");
     expect(classifyEventColor({ type: "StackPushed", data: { object_id: 1 } })).toBe("blue");
     expect(classifyEventColor({ type: "StackResolved", data: { object_id: 1 } })).toBe("blue");
     expect(classifyEventColor({ type: "SpellCountered", data: { object_id: 1, countered_by: 2 } })).toBe("blue");
@@ -84,7 +84,7 @@ describe("filterByVerbosity", () => {
     { type: "TurnStarted", data: { player_id: 0, turn_number: 1 } },
     { type: "PriorityPassed", data: { player_id: 0 } },
     { type: "ManaAdded", data: { player_id: 0, mana_type: "Green", source_id: 1 } },
-    { type: "SpellCast", data: { card_id: 1, controller: 0 } },
+    { type: "SpellCast", data: { card_id: 1, controller: 0, object_id: 1 } },
     { type: "PermanentTapped", data: { object_id: 1 } },
     { type: "PermanentUntapped", data: { object_id: 1 } },
     { type: "DamageCleared", data: { object_id: 1 } },
