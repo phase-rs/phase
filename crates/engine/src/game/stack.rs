@@ -1,5 +1,5 @@
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
+use crate::types::game_state::{CastingVariant, GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
@@ -54,14 +54,18 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     }
 
     // Extract the resolved ability from the stack entry
-    let (ability, is_spell, cast_as_adventure) = match &entry.kind {
+    let (ability, is_spell, casting_variant) = match &entry.kind {
         StackEntryKind::Spell {
             ability,
-            cast_as_adventure,
+            casting_variant,
             ..
-        } => (ability.clone(), true, *cast_as_adventure),
-        StackEntryKind::ActivatedAbility { ability, .. } => (ability.clone(), false, false),
-        StackEntryKind::TriggeredAbility { ability, .. } => (ability.clone(), false, false),
+        } => (ability.clone(), true, *casting_variant),
+        StackEntryKind::ActivatedAbility { ability, .. } => {
+            (ability.clone(), false, CastingVariant::Normal)
+        }
+        StackEntryKind::TriggeredAbility { ability, .. } => {
+            (ability.clone(), false, CastingVariant::Normal)
+        }
     };
 
     // Capture targets for Aura attachment after resolution
@@ -88,7 +92,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // CR 608.3: Determine destination zone for spells.
     if is_spell {
-        let dest = if cast_as_adventure {
+        let dest = if casting_variant == CastingVariant::Adventure {
             // CR 715.4: Adventure spell resolves → exile with casting permission.
             Zone::Exile
         } else if is_permanent_type(state, entry.id) {
@@ -102,7 +106,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
         // CR 715.4: When an Adventure spell resolves to exile, restore the creature face
         // and grant AdventureCreature permission so it can be cast from exile.
-        if cast_as_adventure {
+        if casting_variant == CastingVariant::Adventure {
             if let Some(obj) = state.objects.get_mut(&entry.id) {
                 // Restore creature face characteristics (swap back from Adventure face)
                 if let Some(creature_face) = obj.back_face.take() {
@@ -132,6 +136,68 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     }
                     // If target is gone, SBA check_unattached_auras will handle cleanup
                 }
+            }
+
+            // Warp: when a permanent cast via Warp resolves to the battlefield,
+            // create a delayed trigger to exile it at end step with ExileWithAltCost permission.
+            // Only triggers on the initial Warp cast (CastingVariant::Warp), NOT on re-casts
+            // from exile (which use CastingVariant::Normal with ExileWithAltCost).
+            let warp_cost = if casting_variant == CastingVariant::Warp {
+                state.objects.get(&entry.id).and_then(|obj| {
+                    obj.keywords.iter().find_map(|k| match k {
+                        crate::types::keywords::Keyword::Warp(cost) => Some(cost.clone()),
+                        _ => None,
+                    })
+                })
+            } else {
+                None
+            };
+            if let Some(cost) = warp_cost {
+                use crate::types::ability::{
+                    AbilityDefinition, AbilityKind, CastingPermission, DelayedTriggerCondition,
+                    Effect, ResolvedAbility,
+                };
+                use crate::types::phase::Phase;
+
+                // Build the exile effect with chained GrantCastingPermission
+                let exile_def = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        origin: Some(Zone::Battlefield),
+                        destination: Zone::Exile,
+                        target: crate::types::ability::TargetFilter::SelfRef,
+                        owner_library: false,
+                    },
+                )
+                .sub_ability(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GrantCastingPermission {
+                        permission: CastingPermission::ExileWithAltCost { cost },
+                        target: crate::types::ability::TargetFilter::SelfRef,
+                    },
+                ));
+
+                let mut delayed_ability =
+                    ResolvedAbility::new(exile_def.effect, vec![], entry.id, entry.controller);
+                if let Some(sub) = exile_def.sub_ability {
+                    delayed_ability = delayed_ability.sub_ability(ResolvedAbility::new(
+                        sub.effect,
+                        vec![],
+                        entry.id,
+                        entry.controller,
+                    ));
+                }
+
+                // CR 603.7c: Delayed trigger fires once at next end step
+                state
+                    .delayed_triggers
+                    .push(crate::types::game_state::DelayedTrigger {
+                        condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                        ability: delayed_ability,
+                        controller: entry.controller,
+                        source_id: entry.id,
+                        one_shot: true,
+                    });
             }
         }
     }
@@ -233,7 +299,7 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(100),
                 ability: resolved,
-                cast_as_adventure: false,
+                casting_variant: CastingVariant::Normal,
             },
         });
 
@@ -459,7 +525,7 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(60),
                 ability: resolved,
-                cast_as_adventure: false,
+                casting_variant: CastingVariant::Normal,
             },
         });
 
@@ -544,7 +610,7 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(72),
                 ability,
-                cast_as_adventure: false,
+                casting_variant: CastingVariant::Normal,
             },
         });
 

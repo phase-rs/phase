@@ -108,7 +108,7 @@ mod tests {
     use super::*;
     use crate::types::ability::ResolvedAbility;
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::StackEntry;
+    use crate::types::game_state::{CastingVariant, StackEntry};
     use crate::types::identifiers::CardId;
 
     fn setup() -> GameState {
@@ -197,7 +197,7 @@ mod tests {
                     created_id,
                     PlayerId(0),
                 ),
-                cast_as_adventure: false,
+                casting_variant: CastingVariant::Normal,
             },
         });
 

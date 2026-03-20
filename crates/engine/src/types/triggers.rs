@@ -219,6 +219,12 @@ pub enum TriggerMode {
     Immediate,
     Always,
 
+    // Compound triggers
+    /// "Whenever ~ enters or attacks" — fires on both ETB and attack events.
+    EntersOrAttacks,
+    /// "Whenever ~ attacks or blocks" — fires on both attack and block events.
+    AttacksOrBlocks,
+
     // Elemental bending
     Airbend,
     Earthbend,
@@ -304,6 +310,8 @@ impl FromStr for TriggerMode {
             "Earthbend" => TriggerMode::Earthbend,
             "ElementalBend" => TriggerMode::ElementalBend,
             "Enlisted" => TriggerMode::Enlisted,
+            "AttacksOrBlocks" => TriggerMode::AttacksOrBlocks,
+            "EntersOrAttacks" => TriggerMode::EntersOrAttacks,
             "Evolved" => TriggerMode::Evolved,
             "ExcessDamage" => TriggerMode::ExcessDamage,
             "ExcessDamageAll" => TriggerMode::ExcessDamageAll,
@@ -503,6 +511,7 @@ mod tests {
             "AttackerUnblocked",
             "AttackerUnblockedOnce",
             "Attacks",
+            "AttacksOrBlocks",
             "BecomesBlocked",
             "BecomeMonarch",
             "BecomeMonstrous",
@@ -555,6 +564,7 @@ mod tests {
             "Earthbend",
             "ElementalBend",
             "Enlisted",
+            "EntersOrAttacks",
             "Evolved",
             "ExcessDamage",
             "ExcessDamageAll",
@@ -647,8 +657,8 @@ mod tests {
             }
         }
         assert!(
-            known_count >= 141,
-            "Expected 141+ known trigger modes, got {known_count}"
+            known_count >= 143,
+            "Expected 143+ known trigger modes, got {known_count}"
         );
     }
 }

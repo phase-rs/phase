@@ -31,6 +31,7 @@ type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
 
 const BOARD_BACKGROUNDS: { value: string; label: string }[] = [
   { value: "auto-wubrg", label: "Auto (match deck)" },
+  { value: "random", label: "Random" },
   ...BATTLEFIELDS.map((bf) => ({ value: bf.id, label: `${bf.label} (${bf.color})` })),
   { value: "none", label: "None" },
 ];

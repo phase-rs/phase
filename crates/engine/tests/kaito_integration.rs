@@ -250,7 +250,7 @@ fn kaito_ninjutsu_activation() {
     // Activate Ninjutsu
     let result = runner.act(GameAction::ActivateNinjutsu {
         ninjutsu_card_id: kaito_card_id,
-        attacker_to_return: attacker_id,
+        creature_to_return: attacker_id,
     });
     assert!(result.is_ok(), "Ninjutsu activation should succeed");
 

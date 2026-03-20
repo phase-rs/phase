@@ -5,8 +5,8 @@ use crate::game::devotion::count_devotion;
 use crate::game::filter::matches_target_filter;
 use crate::game::game_object::CounterType;
 use crate::types::ability::{
-    ContinuousModification, Duration, DynamicPTValue, QuantityExpr, StaticCondition,
-    StaticDefinition, TargetFilter, TypedFilter,
+    ContinuousModification, Duration, QuantityExpr, StaticCondition, StaticDefinition,
+    TargetFilter, TypedFilter,
 };
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -519,25 +519,6 @@ fn order_by_timestamp(effects: &[&ActiveContinuousEffect]) -> Vec<ActiveContinuo
     sorted
 }
 
-/// Evaluate a dynamic P/T value by inspecting current game state.
-fn evaluate_dynamic_pt(state: &GameState, value: &DynamicPTValue) -> i32 {
-    match value {
-        DynamicPTValue::CardTypesInAllGraveyards { offset } => {
-            let mut seen = std::collections::HashSet::new();
-            for player in &state.players {
-                for &obj_id in &player.graveyard {
-                    if let Some(obj) = state.objects.get(&obj_id) {
-                        for ct in &obj.card_types.core_types {
-                            seen.insert(*ct);
-                        }
-                    }
-                }
-            }
-            seen.len() as i32 + offset
-        }
-    }
-}
-
 /// Apply a single continuous effect to all affected objects.
 fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffect) {
     // Find affected objects
@@ -573,7 +554,17 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
     let dynamic_pt = match &effect.modification {
         ContinuousModification::SetDynamicPower { value }
         | ContinuousModification::SetDynamicToughness { value } => {
-            Some(evaluate_dynamic_pt(state, value))
+            let controller = state
+                .objects
+                .get(&effect.source_id)
+                .map(|o| o.controller)
+                .unwrap_or(PlayerId(0));
+            Some(crate::game::quantity::resolve_quantity(
+                state,
+                value,
+                controller,
+                effect.source_id,
+            ))
         }
         _ => None,
     };
@@ -695,8 +686,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-        Effect, FilterProp, GainLifePlayer, QuantityRef, StaticDefinition, TargetFilter,
-        TypeFilter,
+        CountScope, Effect, FilterProp, GainLifePlayer, QuantityExpr, QuantityRef,
+        StaticDefinition, TargetFilter, TypeFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
@@ -1626,8 +1617,6 @@ mod tests {
 
     #[test]
     fn test_tarmogoyf_cda_counts_card_types_in_graveyards() {
-        use crate::types::ability::DynamicPTValue;
-
         let mut state = setup();
 
         // Create Tarmogoyf with */1+* base P/T and CDA static definition
@@ -1639,10 +1628,21 @@ mod tests {
                     .affected(TargetFilter::SelfRef)
                     .modifications(vec![
                         ContinuousModification::SetDynamicPower {
-                            value: DynamicPTValue::CardTypesInAllGraveyards { offset: 0 },
+                            value: QuantityExpr::Ref {
+                                qty: QuantityRef::CardTypesInGraveyards {
+                                    scope: CountScope::All,
+                                },
+                            },
                         },
                         ContinuousModification::SetDynamicToughness {
-                            value: DynamicPTValue::CardTypesInAllGraveyards { offset: 1 },
+                            value: QuantityExpr::Offset {
+                                inner: Box::new(QuantityExpr::Ref {
+                                    qty: QuantityRef::CardTypesInGraveyards {
+                                        scope: CountScope::All,
+                                    },
+                                }),
+                                offset: 1,
+                            },
                         },
                     ])
                     .cda(),

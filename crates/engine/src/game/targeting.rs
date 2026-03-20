@@ -436,6 +436,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::card_type::CoreType;
+    use crate::types::game_state::CastingVariant;
     use crate::types::identifiers::CardId;
     use crate::types::zones::Zone;
 
@@ -825,7 +826,7 @@ mod tests {
                     spell_id,
                     PlayerId(0),
                 ),
-                cast_as_adventure: false,
+                casting_variant: CastingVariant::Normal,
             },
         });
         let filter = TargetFilter::Typed(TypedFilter::card());
@@ -871,7 +872,7 @@ mod tests {
                     spell_id,
                     PlayerId(1),
                 ),
-                cast_as_adventure: false,
+                casting_variant: CastingVariant::Normal,
             },
         });
         let spell_obj = state.objects.get_mut(&spell_id).unwrap();

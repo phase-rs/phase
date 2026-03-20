@@ -59,7 +59,7 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     let (_, mut def) = parse_trigger_condition(&condition_text);
     def.execute = execute;
     def.optional = optional;
-    def.condition = if_condition;
+    def.condition = if_condition.or(def.condition.take());
 
     // Check for constraint phrases in the full text.
     // Text-based constraints take precedence; fall back to any constraint already set
@@ -486,6 +486,25 @@ fn try_parse_event(
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     let rest = rest.trim_start();
 
+    // "enters or attacks" / "enters the battlefield or attacks" — compound trigger
+    if rest.starts_with("enters or attacks")
+        || rest.starts_with("enters the battlefield or attacks")
+    {
+        let mut def = make_base();
+        def.mode = TriggerMode::EntersOrAttacks;
+        def.destination = Some(Zone::Battlefield);
+        def.valid_card = Some(subject.clone());
+        return Some((TriggerMode::EntersOrAttacks, def));
+    }
+
+    // "attacks or blocks" — compound trigger
+    if rest.starts_with("attacks or blocks") {
+        let mut def = make_base();
+        def.mode = TriggerMode::AttacksOrBlocks;
+        def.valid_card = Some(subject.clone());
+        return Some((TriggerMode::AttacksOrBlocks, def));
+    }
+
     // "enters [the battlefield]"
     if rest.starts_with("enters") {
         let mut def = make_base();
@@ -525,8 +544,30 @@ fn try_parse_event(
         return Some((TriggerMode::DamageDone, def));
     }
 
-    // "attacks"
-    if rest.starts_with("attacks") {
+    // CR 508.1a: "~ and at least N other creatures attack" (Battalion/Pack Tactics)
+    if let Some(after_and) = rest
+        .strip_prefix("and at least ")
+        .or_else(|| rest.strip_prefix("and "))
+    {
+        if after_and.contains("attack") {
+            // Parse N from "two other creatures attack" / "one other creature attacks"
+            if let Some((n, _rest_after_n)) = parse_number(after_and) {
+                let mut def = make_base();
+                def.mode = TriggerMode::Attacks;
+                def.valid_card = Some(subject.clone());
+                def.condition = Some(TriggerCondition::MinCoAttackers { minimum: n });
+                return Some((TriggerMode::Attacks, def));
+            }
+        }
+    }
+
+    // "attacks" (singular) or "attack" (plural — multi-name cards like "Raph & Leo")
+    // Guard against false-matching "attacker"/"attacking".
+    if rest.starts_with("attacks")
+        || (rest.starts_with("attack")
+            && !rest.starts_with("attacker")
+            && !rest.starts_with("attacking"))
+    {
         let mut def = make_base();
         def.mode = TriggerMode::Attacks;
         def.valid_card = Some(subject.clone());
@@ -635,6 +676,14 @@ fn try_parse_event(
         return Some((TriggerMode::Mutates, def));
     }
 
+    // CR 702.110c: "exploits a creature" — exploit trigger
+    if rest.starts_with("exploits a creature") || rest.starts_with("exploits") {
+        let mut def = make_base();
+        def.mode = TriggerMode::Exploited;
+        def.valid_card = Some(subject.clone());
+        return Some((TriggerMode::Exploited, def));
+    }
+
     // Counter-related events: "a +1/+1 counter is put on ~" / "one or more counters are put on ~"
     if let Some(result) = try_parse_counter_trigger(full_lower) {
         return Some(result);
@@ -690,6 +739,10 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         return Some(result);
     }
 
+    if let Some(result) = try_parse_one_or_more_attacks(lower) {
+        return Some(result);
+    }
+
     if matches!(
         lower,
         "whenever you commit a crime" | "when you commit a crime"
@@ -736,6 +789,33 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
                 return Some((TriggerMode::SpellCastOrCopy, def));
             }
         }
+    }
+
+    None
+}
+
+/// Parse "whenever one or more creatures [you control] attack" patterns.
+fn try_parse_one_or_more_attacks(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    for prefix in ["whenever one or more ", "when one or more "] {
+        let Some(rest) = lower.strip_prefix(prefix) else {
+            continue;
+        };
+        let Some(subject_text) = rest
+            .strip_suffix(" attack")
+            .or_else(|| rest.strip_suffix(" attacks"))
+        else {
+            continue;
+        };
+
+        let (filter, remainder) = parse_type_phrase(subject_text);
+        if !remainder.trim().is_empty() {
+            continue;
+        }
+
+        let mut def = make_base();
+        def.mode = TriggerMode::YouAttack;
+        def.valid_card = Some(filter);
+        return Some((TriggerMode::YouAttack, def));
     }
 
     None
@@ -1390,6 +1470,40 @@ mod tests {
             "Goblin Guide",
         );
         assert_eq!(def.mode, TriggerMode::Attacks);
+    }
+
+    #[test]
+    fn trigger_battalion() {
+        let def = parse_trigger_line(
+            "Whenever Boros Elite and at least two other creatures attack, Boros Elite gets +2/+2 until end of turn.",
+            "Boros Elite",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert!(def.condition.is_some());
+        if let Some(TriggerCondition::MinCoAttackers { minimum }) = &def.condition {
+            assert_eq!(*minimum, 2);
+        } else {
+            panic!("Expected MinCoAttackers");
+        }
+    }
+
+    #[test]
+    fn trigger_pack_tactics() {
+        let def = parse_trigger_line(
+            "Whenever Werewolf Pack Leader attacks, if the total power of creatures you control is 6 or greater, draw a card.",
+            "Werewolf Pack Leader",
+        );
+        // Pack tactics is a different pattern (if-condition), not battalion
+        assert_eq!(def.mode, TriggerMode::Attacks);
+    }
+
+    #[test]
+    fn trigger_exploits_a_creature() {
+        let def = parse_trigger_line(
+            "When Sidisi's Faithful exploits a creature, return target creature to its owner's hand.",
+            "Sidisi's Faithful",
+        );
+        assert_eq!(def.mode, TriggerMode::Exploited);
     }
 
     // --- Subject decomposition tests ---

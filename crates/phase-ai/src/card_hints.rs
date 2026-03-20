@@ -283,7 +283,7 @@ mod tests {
                     ObjectId(998),
                     PlayerId(1),
                 ),
-                cast_as_adventure: false,
+                casting_variant: engine::types::game_state::CastingVariant::Normal,
             },
         });
         let card_id = add_spell_to_hand(

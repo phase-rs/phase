@@ -16,16 +16,15 @@ const SHARD_TO_COLOR: Record<string, ManaColor> = {
   G: "Green",
 };
 
-export function getDominantManaColor(
-  battlefieldIds: number[],
+function countColors(
+  ids: number[],
   objects: Record<string, GameObject>,
   playerId: PlayerId,
-): ManaColor | null {
-  const colorCounts = new Map<ManaColor, number>();
-
-  for (const id of battlefieldIds) {
+  colorCounts: Map<ManaColor, number>,
+): void {
+  for (const id of ids) {
     const obj = objects[String(id)];
-    if (!obj || obj.controller !== playerId) continue;
+    if (!obj || obj.owner !== playerId) continue;
 
     const isLand = obj.card_types.core_types.includes("Land");
 
@@ -46,7 +45,9 @@ export function getDominantManaColor(
       }
     }
   }
+}
 
+function resolveMax(colorCounts: Map<ManaColor, number>): ManaColor | null {
   if (colorCounts.size === 0) return null;
 
   let maxColor: ManaColor | null = null;
@@ -60,4 +61,29 @@ export function getDominantManaColor(
   }
 
   return maxColor;
+}
+
+export function getDominantManaColor(
+  battlefieldIds: number[],
+  objects: Record<string, GameObject>,
+  playerId: PlayerId,
+): ManaColor | null {
+  const colorCounts = new Map<ManaColor, number>();
+  countColors(battlefieldIds, objects, playerId, colorCounts);
+  return resolveMax(colorCounts);
+}
+
+/** Determine dominant color from the full deck (library + hand + battlefield). */
+export function getDeckDominantColor(
+  libraryIds: number[],
+  handIds: number[],
+  battlefieldIds: number[],
+  objects: Record<string, GameObject>,
+  playerId: PlayerId,
+): ManaColor | null {
+  const colorCounts = new Map<ManaColor, number>();
+  countColors(libraryIds, objects, playerId, colorCounts);
+  countColors(handIds, objects, playerId, colorCounts);
+  countColors(battlefieldIds, objects, playerId, colorCounts);
+  return resolveMax(colorCounts);
 }

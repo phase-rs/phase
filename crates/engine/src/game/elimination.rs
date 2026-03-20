@@ -149,7 +149,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::ResolvedAbility;
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::{StackEntry, StackEntryKind};
+    use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::CardId;
 
     fn setup_two_player() -> GameState {
@@ -264,7 +264,7 @@ mod tests {
                     obj_id,
                     PlayerId(0),
                 ),
-                cast_as_adventure: false,
+                casting_variant: CastingVariant::Normal,
             },
         });
 

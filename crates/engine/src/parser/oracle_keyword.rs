@@ -1,4 +1,47 @@
+use std::borrow::Cow;
+
 use crate::types::keywords::Keyword;
+
+/// CR 702.16: A permanent may have multiple protection abilities; Oracle text
+/// lists them with "and from" / ", from" separators on a single line.
+/// Expands comma-split parts so each protection becomes its own entry.
+pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>> {
+    // Fast path: skip allocation when no protection expansion is needed
+    if !parts.iter().any(|p| {
+        let l = p.to_ascii_lowercase();
+        l.contains(" and from ") || l.starts_with("from ") || l.starts_with("and from ")
+    }) {
+        return parts.iter().map(|&p| Cow::Borrowed(p)).collect();
+    }
+
+    let mut expanded: Vec<Cow<'a, str>> = Vec::new();
+    let mut in_protection = false;
+
+    for &part in parts {
+        let lower = part.to_ascii_lowercase();
+        if let Some(after) = lower.strip_prefix("protection from ") {
+            // "protection from Demons and from Dragons" → split on " and from "
+            for frag in after.split(" and from ") {
+                expanded.push(Cow::Owned(format!("protection from {}", frag.trim())));
+            }
+            in_protection = true;
+        } else if in_protection {
+            if let Some(rest) = lower.strip_prefix("and from ") {
+                // ", and from Zombies" — Oxford comma continuation
+                expanded.push(Cow::Owned(format!("protection from {}", rest.trim())));
+            } else if let Some(rest) = lower.strip_prefix("from ") {
+                // ", from Werewolves" — comma continuation
+                expanded.push(Cow::Owned(format!("protection from {}", rest.trim())));
+            } else {
+                in_protection = false;
+                expanded.push(Cow::Borrowed(part));
+            }
+        } else {
+            expanded.push(Cow::Borrowed(part));
+        }
+    }
+    expanded
+}
 
 /// Try to extract keywords from a keyword-only line (comma-separated).
 /// Returns `Some(keywords)` if the entire line consists of recognizable keywords
@@ -16,10 +59,13 @@ pub(crate) fn extract_keyword_line(
         return None;
     }
 
-    let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
-    if parts.is_empty() {
+    let raw_parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+    if raw_parts.is_empty() {
         return None;
     }
+
+    // CR 702.16: Expand "protection from X and from Y" into individual parts
+    let parts = expand_protection_parts(&raw_parts);
 
     let mut any_mtgjson_match = false;
     let mut new_keywords = Vec::new();
@@ -190,7 +236,10 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Storm => "storm".to_string(),
         Keyword::Suspend => "suspend".to_string(),
         Keyword::Totem => "totem".to_string(),
-        Keyword::Warp => "warp".to_string(),
+        Keyword::Warp(_) => "warp".to_string(),
+        Keyword::Sneak(_) => "sneak".to_string(),
+        Keyword::WebSlinging(_) => "web-slinging".to_string(),
+        Keyword::Mobilize(_) => "mobilize".to_string(),
         Keyword::Gift => "gift".to_string(),
         Keyword::Spree => "spree".to_string(),
         Keyword::Ravenous => "ravenous".to_string(),
@@ -347,6 +396,10 @@ pub(crate) fn is_keyword_cost_line(lower: &str) -> bool {
         "soulshift",
         "backup",
         "squad",
+        "warp",
+        "sneak",
+        "web-slinging",
+        "mobilize",
     ];
     keyword_costs.iter().any(|kw| {
         lower.starts_with(kw)
@@ -469,6 +522,177 @@ mod tests {
         assert!(is_keyword_cost_line("islandcycling {2}"));
         // Regular cycling still matches (existing behavior)
         assert!(is_keyword_cost_line("cycling {2}"));
+    }
+
+    // --- expand_protection_parts tests ---
+
+    #[test]
+    fn expand_protection_baneslayer_pattern() {
+        // CR 702.16: "protection from Demons and from Dragons" → two Protection keywords
+        let keywords = extract_keyword_line(
+            "Flying, first strike, lifelink, protection from Demons and from Dragons",
+            &[
+                "flying".to_string(),
+                "first strike".to_string(),
+                "lifelink".to_string(),
+                "protection".to_string(),
+            ],
+        )
+        .unwrap();
+        let protection_count = keywords
+            .iter()
+            .filter(|k| matches!(k, Keyword::Protection(_)))
+            .count();
+        assert_eq!(
+            protection_count, 2,
+            "expected two separate Protection keywords"
+        );
+    }
+
+    #[test]
+    fn expand_protection_two_colors() {
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::mana::ManaColor;
+
+        // CR 702.16: "protection from black and from red" → two color protections
+        let keywords = extract_keyword_line(
+            "Flying, protection from black and from red",
+            &["flying".to_string(), "protection".to_string()],
+        )
+        .unwrap();
+        assert!(
+            keywords.contains(&Keyword::Protection(ProtectionTarget::Color(
+                ManaColor::Black
+            )))
+        );
+        assert!(
+            keywords.contains(&Keyword::Protection(ProtectionTarget::Color(
+                ManaColor::Red
+            )))
+        );
+    }
+
+    #[test]
+    fn expand_protection_three_comma_continuation() {
+        // CR 702.16: comma + Oxford comma continuation
+        let keywords = extract_keyword_line(
+            "First strike, protection from Vampires, from Werewolves, and from Zombies",
+            &["first strike".to_string(), "protection".to_string()],
+        )
+        .unwrap();
+        let protection_count = keywords
+            .iter()
+            .filter(|k| matches!(k, Keyword::Protection(_)))
+            .count();
+        assert_eq!(
+            protection_count, 3,
+            "expected three separate Protection keywords"
+        );
+    }
+
+    #[test]
+    fn expand_protection_preserves_qualifier_text() {
+        use crate::types::keywords::ProtectionTarget;
+
+        // Emrakul pattern: qualifier text preserved after split
+        let keywords = extract_keyword_line(
+            "protection from spells and from permanents that were cast this turn",
+            &["protection".to_string()],
+        )
+        .unwrap();
+        assert!(
+            keywords.contains(&Keyword::Protection(ProtectionTarget::CardType(
+                "spells".to_string()
+            )))
+        );
+        assert!(
+            keywords.contains(&Keyword::Protection(ProtectionTarget::CardType(
+                "permanents that were cast this turn".to_string()
+            )))
+        );
+    }
+
+    #[test]
+    fn expand_protection_from_everything_no_split() {
+        use crate::types::keywords::ProtectionTarget;
+
+        // "protection from everything" — no " and from " present, no expansion
+        let keywords =
+            extract_keyword_line("protection from everything", &["protection".to_string()])
+                .unwrap();
+        assert_eq!(keywords.len(), 1);
+        assert_eq!(
+            keywords[0],
+            Keyword::Protection(ProtectionTarget::CardType("everything".to_string()))
+        );
+    }
+
+    #[test]
+    fn expand_protection_single_no_expansion() {
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::mana::ManaColor;
+
+        // Single protection — expansion is a no-op
+        let keywords = extract_keyword_line(
+            "Flying, protection from red",
+            &["flying".to_string(), "protection".to_string()],
+        )
+        .unwrap();
+        let prots: Vec<_> = keywords
+            .iter()
+            .filter(|k| matches!(k, Keyword::Protection(_)))
+            .collect();
+        assert_eq!(prots.len(), 1);
+        assert_eq!(
+            prots[0],
+            &Keyword::Protection(ProtectionTarget::Color(ManaColor::Red))
+        );
+    }
+
+    #[test]
+    fn expand_protection_non_protection_line_unchanged() {
+        // Non-protection keyword line — all matched by MTGJSON, no extracted keywords
+        let keywords = extract_keyword_line(
+            "Flying, first strike, lifelink",
+            &[
+                "flying".to_string(),
+                "first strike".to_string(),
+                "lifelink".to_string(),
+            ],
+        )
+        .unwrap();
+        assert!(
+            keywords.is_empty(),
+            "all keywords matched by MTGJSON, none extracted"
+        );
+    }
+
+    #[test]
+    fn expand_protection_three_way_inline_and_from() {
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::mana::ManaColor;
+
+        // Three-way inline split: "protection from red and from blue and from green"
+        let keywords = extract_keyword_line(
+            "Flying, protection from red and from blue and from green",
+            &["flying".to_string(), "protection".to_string()],
+        )
+        .unwrap();
+        assert!(
+            keywords.contains(&Keyword::Protection(ProtectionTarget::Color(
+                ManaColor::Red
+            )))
+        );
+        assert!(
+            keywords.contains(&Keyword::Protection(ProtectionTarget::Color(
+                ManaColor::Blue
+            )))
+        );
+        assert!(
+            keywords.contains(&Keyword::Protection(ProtectionTarget::Color(
+                ManaColor::Green
+            )))
+        );
     }
 
     #[test]

@@ -32,9 +32,9 @@
       "icons/icon.icns"
     ],
     "externalBin": ["binaries/phase-server"],
-    "resources": [
-      { "src": "../public/card-data.json", "target": "data/card-data.json" }
-    ],
+    "resources": {
+      "../public/card-data.json": "data/card-data.json"
+    },
     "createUpdaterArtifacts": true
   },
   "plugins": {

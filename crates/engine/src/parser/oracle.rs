@@ -158,6 +158,21 @@ pub fn parse_oracle_text(
                 continue;
             }
         }
+
+        // CR 702.6: Named equip variant — "<Flavor Name> — Equip {cost}"
+        if let Some(idx) = lower
+            .find(" \u{2014} equip")
+            .or_else(|| lower.find(" - equip"))
+        {
+            let equip_part = line[idx..]
+                .trim_start_matches(" \u{2014} ")
+                .trim_start_matches(" - ");
+            if let Some(ability) = try_parse_equip(equip_part) {
+                result.abilities.push(ability);
+                i += 1;
+                continue;
+            }
+        }
         // Priority 11: Planeswalker loyalty abilities: +N:, −N:, 0:, [+N]:, [−N]:, [0]:
         if let Some(ability) = try_parse_loyalty_line(&line) {
             result.abilities.push(ability);
@@ -947,6 +962,8 @@ pub(super) fn is_static_pattern(lower: &str) -> bool {
         // Additional land drop
         || lower.contains("play an additional land")
         || lower.contains("play two additional lands")
+        // CR 603.9: Trigger doubling — Panharmonicon-style statics
+        || lower.contains("triggers an additional time")
 }
 
 pub(super) fn is_granted_static_line(lower: &str) -> bool {

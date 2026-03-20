@@ -84,10 +84,11 @@ pub enum GameAction {
     ChooseAdventureFace {
         creature: bool,
     },
-    /// CR 702.49a: Activate Ninjutsu from hand during declare blockers step.
+    /// CR 702.49: Activate a Ninjutsu-family keyword from hand during combat.
     ActivateNinjutsu {
         ninjutsu_card_id: CardId,
-        attacker_to_return: ObjectId,
+        /// The creature to return — unblocked attacker (Ninjutsu/Sneak) or tapped creature (WebSlinging).
+        creature_to_return: ObjectId,
     },
     /// CR 609.3: Accept or decline an optional effect ("You may X").
     DecideOptionalEffect {

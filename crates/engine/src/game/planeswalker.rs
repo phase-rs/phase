@@ -178,6 +178,7 @@ mod tests {
         TypedFilter,
     };
     use crate::types::card_type::CoreType;
+    use crate::types::game_state::CastingVariant;
     use crate::types::identifiers::CardId;
     use crate::types::zones::Zone;
 
@@ -378,7 +379,7 @@ mod tests {
                     ObjectId(99),
                     PlayerId(1),
                 ),
-                cast_as_adventure: false,
+                casting_variant: CastingVariant::Normal,
             },
         });
         let result = handle_activate_loyalty(&mut state, PlayerId(0), pw, 0, &mut events);

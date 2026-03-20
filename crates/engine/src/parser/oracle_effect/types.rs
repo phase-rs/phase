@@ -1,34 +1,12 @@
 use crate::types::ability::{
-    AbilityDefinition, CountValue, DamageAmount, Duration, Effect, ManaProduction,
-    ManaSpendRestriction, PaymentCost, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
+    AbilityDefinition, Duration, Effect, ManaProduction, ManaSpendRestriction, PaymentCost,
+    QuantityExpr, StaticDefinition, TargetFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::mana::ManaCost;
 use crate::types::zones::Zone;
 
-/// Convert a DamageAmount to a QuantityExpr for the DealDamage effect.
-pub(super) fn damage_amount_to_quantity(da: &DamageAmount) -> QuantityExpr {
-    match da {
-        DamageAmount::Fixed(n) => QuantityExpr::Fixed { value: *n },
-        DamageAmount::Variable(s) => QuantityExpr::Ref {
-            qty: QuantityRef::Variable { name: s.clone() },
-        },
-    }
-}
-
-/// Convert a QuantityExpr back to DamageAmount for DamageAll (which still uses DamageAmount).
-pub(super) fn quantity_to_damage_amount(q: &QuantityExpr) -> DamageAmount {
-    match q {
-        QuantityExpr::Fixed { value } => DamageAmount::Fixed(*value),
-        QuantityExpr::Ref {
-            qty: QuantityRef::Variable { name: ref s },
-        } => DamageAmount::Variable(s.clone()),
-        _ => DamageAmount::Variable(format!("{q:?}")),
-    }
-}
-
-/// Convert a LifeAmount to a QuantityExpr for the GainLife effect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ParsedEffectClause {
     pub(super) effect: Effect,
@@ -52,7 +30,7 @@ pub(super) struct TokenDescription {
     pub(super) colors: Vec<ManaColor>,
     pub(super) keywords: Vec<Keyword>,
     pub(super) tapped: bool,
-    pub(super) count: CountValue,
+    pub(super) count: QuantityExpr,
     pub(super) attach_to: Option<TargetFilter>,
 }
 
@@ -126,7 +104,7 @@ pub(super) enum ContinuationAst {
         restriction: ManaSpendRestriction,
     },
     CounterSourceStatic {
-        source_static: StaticDefinition,
+        source_static: Box<StaticDefinition>,
     },
     /// "create a ... token and suspect it" → chain Suspect { target: LastCreated }
     SuspectLastCreated,
@@ -269,7 +247,7 @@ pub(super) enum SearchCreationImperativeAst {
         target: TargetFilter,
     },
     Token {
-        token: TokenDescription,
+        token: Box<TokenDescription>,
     },
 }
 
@@ -352,7 +330,7 @@ pub(super) enum CostResourceImperativeAst {
         restrictions: Vec<ManaSpendRestriction>,
     },
     Damage {
-        amount: DamageAmount,
+        amount: QuantityExpr,
         target: TargetFilter,
         all: bool,
     },

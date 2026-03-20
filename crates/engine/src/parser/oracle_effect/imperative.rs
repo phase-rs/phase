@@ -279,8 +279,9 @@ pub(super) fn parse_search_and_creation_ast(
                 tapped,
                 count,
                 attach_to,
+                ..
             }) => Some(SearchCreationImperativeAst::Token {
-                token: TokenDescription {
+                token: Box::new(TokenDescription {
                     name,
                     power: Some(power),
                     toughness: Some(toughness),
@@ -290,7 +291,7 @@ pub(super) fn parse_search_and_creation_ast(
                     tapped,
                     count,
                     attach_to,
-                },
+                }),
             }),
             _ => None,
         };
@@ -324,6 +325,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             tapped: token.tapped,
             count: token.count,
             attach_to: token.attach_to,
+            enters_attacking: false,
         },
     }
 }
@@ -882,7 +884,7 @@ pub(super) fn parse_cost_resource_ast(
     if let Some(effect) = super::try_parse_damage(lower, text) {
         return match effect {
             Effect::DealDamage { amount, target } => Some(CostResourceImperativeAst::Damage {
-                amount: quantity_to_damage_amount(&amount),
+                amount,
                 target,
                 all: false,
             }),
@@ -921,10 +923,7 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
             if all {
                 Effect::DamageAll { amount, target }
             } else {
-                Effect::DealDamage {
-                    amount: damage_amount_to_quantity(&amount),
-                    target,
-                }
+                Effect::DealDamage { amount, target }
             }
         }
         CostResourceImperativeAst::Pay { cost } => Effect::PayCost { cost },

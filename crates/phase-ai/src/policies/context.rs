@@ -106,15 +106,7 @@ mod tests {
             ObjectId(1),
             PlayerId(0),
         );
-        let pending_cast = PendingCast {
-            object_id: ObjectId(1),
-            card_id: CardId(1),
-            ability,
-            cost: ManaCost::zero(),
-            activation_cost: None,
-            activation_ability_index: None,
-            target_constraints: Vec::new(),
-        };
+        let pending_cast = PendingCast::new(ObjectId(1), CardId(1), ability, ManaCost::zero());
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::TargetSelection {
                 player: PlayerId(0),
@@ -174,15 +166,7 @@ mod tests {
         )
         .sub_ability(sub);
 
-        let pending_cast = PendingCast {
-            object_id: ObjectId(1),
-            card_id: CardId(1),
-            ability,
-            cost: ManaCost::zero(),
-            activation_cost: None,
-            activation_ability_index: None,
-            target_constraints: Vec::new(),
-        };
+        let pending_cast = PendingCast::new(ObjectId(1), CardId(1), ability, ManaCost::zero());
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::TargetSelection {
                 player: PlayerId(0),

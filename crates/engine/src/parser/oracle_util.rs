@@ -73,7 +73,7 @@ pub fn parse_number(text: &str) -> Option<(u32, &str)> {
             return Some((val, rest.trim_start()));
         }
     }
-    // "X" → 0 (caller should check for "X" and use DamageAmount::Variable where applicable)
+    // "X" → 0 (caller should check for "X" and use QuantityRef::Variable where applicable)
     if lower.starts_with('x') {
         let rest = &text[1..];
         if rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace()) {

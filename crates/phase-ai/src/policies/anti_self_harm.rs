@@ -179,15 +179,7 @@ mod tests {
         candidate_target: Option<TargetRef>,
     ) -> (AiDecisionContext, CandidateAction) {
         let ability = ResolvedAbility::new(effect, Vec::new(), ObjectId(100), PlayerId(0));
-        let pending_cast = PendingCast {
-            object_id: ObjectId(100),
-            card_id: CardId(100),
-            ability,
-            cost: ManaCost::zero(),
-            activation_cost: None,
-            activation_ability_index: None,
-            target_constraints: Vec::new(),
-        };
+        let pending_cast = PendingCast::new(ObjectId(100), CardId(100), ability, ManaCost::zero());
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::TargetSelection {
                 player: PlayerId(0),

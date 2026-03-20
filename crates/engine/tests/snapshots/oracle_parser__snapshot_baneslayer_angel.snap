@@ -7,5 +7,16 @@ expression: result
   "triggers": [],
   "statics": [],
   "replacements": [],
-  "extractedKeywords": []
+  "extractedKeywords": [
+    {
+      "Protection": {
+        "CardType": "demons"
+      }
+    },
+    {
+      "Protection": {
+        "CardType": "dragons"
+      }
+    }
+  ]
 }

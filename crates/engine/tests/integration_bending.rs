@@ -8,7 +8,7 @@ use engine::types::ability::{AbilityCost, Effect, QuantityExpr, ResolvedAbility,
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::events::{BendingType, GameEvent};
-use engine::types::game_state::{ConvokeMode, GameState, PendingCast, WaitingFor};
+use engine::types::game_state::{CastingVariant, ConvokeMode, GameState, PendingCast, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -281,6 +281,7 @@ fn test_mana_payment_finalization() {
         activation_cost: None,
         activation_ability_index: None,
         target_constraints: vec![],
+        casting_variant: CastingVariant::Normal,
     }));
     runner.state_mut().waiting_for = WaitingFor::ManaPayment {
         player: P0,
@@ -334,6 +335,7 @@ fn test_mana_payment_cancel_clears_pending_cast() {
         activation_cost: None,
         activation_ability_index: None,
         target_constraints: vec![],
+        casting_variant: CastingVariant::Normal,
     }));
     runner.state_mut().waiting_for = WaitingFor::ManaPayment {
         player: P0,

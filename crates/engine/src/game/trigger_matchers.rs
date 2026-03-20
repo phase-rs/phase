@@ -143,6 +143,15 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 701.52: Ring tempts you trigger
     r.insert(TriggerMode::RingTemptsYou, match_ring_tempts_you);
 
+    // CR 702.110c: Exploit trigger matcher
+    r.insert(TriggerMode::Exploited, match_exploited);
+
+    // Compound: enters or attacks — fires on ETB or attack events
+    r.insert(TriggerMode::EntersOrAttacks, match_enters_or_attacks);
+
+    // Compound: attacks or blocks — fires on attack or block events
+    r.insert(TriggerMode::AttacksOrBlocks, match_attacks_or_blocks);
+
     // Remaining trigger modes: recognized but not yet matched against events.
     let unimplemented_modes = [
         TriggerMode::DamagePreventedOnce,
@@ -169,7 +178,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::Crewed,
         TriggerMode::Saddled,
         TriggerMode::Evolved,
-        TriggerMode::Exploited,
         TriggerMode::Enlisted,
         TriggerMode::ManaExpend,
         TriggerMode::Adapt,
@@ -669,6 +677,38 @@ pub(super) fn match_attacks(
         }
     } else {
         false
+    }
+}
+
+/// Compound matcher for "Whenever ~ enters or attacks" — fires on either
+/// a ZoneChanged-to-Battlefield event or an AttackersDeclared event for the source.
+pub(super) fn match_enters_or_attacks(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    match event {
+        GameEvent::ZoneChanged { to, .. } if *to == Zone::Battlefield => {
+            match_changes_zone(event, trigger, source_id, state)
+        }
+        GameEvent::AttackersDeclared { .. } => match_attacks(event, trigger, source_id, state),
+        _ => false,
+    }
+}
+
+/// Compound matcher for "Whenever ~ attacks or blocks" — fires on either
+/// an AttackersDeclared event or a BlockersDeclared event for the source.
+pub(super) fn match_attacks_or_blocks(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    match event {
+        GameEvent::AttackersDeclared { .. } => match_attacks(event, trigger, source_id, state),
+        GameEvent::BlockersDeclared { .. } => match_blocks(event, trigger, source_id, state),
+        _ => false,
     }
 }
 
@@ -1324,6 +1364,19 @@ pub(super) fn match_explored(
     )
 }
 
+/// CR 702.110c: "When this creature exploits" = source is the exploiter.
+pub(super) fn match_exploited(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    matches!(
+        event,
+        GameEvent::CreatureExploited { exploiter, .. } if *exploiter == source_id
+    )
+}
+
 /// TurnFaceUp: fires when a face-down creature is turned face up.
 pub(super) fn match_turn_face_up(
     event: &GameEvent,
@@ -1654,7 +1707,7 @@ mod tests {
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
-    use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
+    use crate::types::game_state::{CastingVariant, GameState, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -2506,7 +2559,7 @@ mod tests {
                     spell_id,
                     PlayerId(0),
                 ),
-                cast_as_adventure: false,
+                casting_variant: CastingVariant::Normal,
             },
         });
         (state, spell_id)

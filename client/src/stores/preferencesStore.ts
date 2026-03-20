@@ -12,8 +12,9 @@ export type LogDefaultState = "open" | "closed";
 export type BattlefieldCardDisplay = "art_crop" | "full_card";
 export type TapRotation = "mtga" | "classic";
 /** "auto-wubrg" picks a random battlefield matching the dominant mana color.
+ *  "random" picks a random battlefield each game regardless of color.
  *  "none" disables the background image. Any other string is a battlefield ID. */
-export type BoardBackground = "auto-wubrg" | "none" | (string & {});
+export type BoardBackground = "auto-wubrg" | "random" | "none" | (string & {});
 
 interface PreferencesState {
   cardSize: CardSizePreference;

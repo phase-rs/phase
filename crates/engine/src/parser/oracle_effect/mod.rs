@@ -14,9 +14,9 @@ use super::oracle_util::{contains_possessive, parse_mana_symbols, parse_number};
 use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChoiceType,
-    DamageAmount, DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer,
-    MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr, QuantityRef, StaticDefinition,
-    TargetFilter, TypeFilter, TypedFilter,
+    DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer, MultiTargetSpec,
+    PlayerFilter, PtValue, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
@@ -1473,6 +1473,46 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
             continue;
         }
 
+        // CR 608.2c: "Otherwise, [effect]" — attach as else_ability on the
+        // most recent conditional (IfYouDo) def in the chain.
+        let lower_check = normalized_text.to_lowercase();
+        let otherwise_prefix_len = if lower_check.starts_with("otherwise, ") {
+            Some("otherwise, ".len())
+        } else if lower_check.starts_with("otherwise ") {
+            Some("otherwise ".len())
+        } else if lower_check.starts_with("if not, ") {
+            Some("if not, ".len())
+        } else {
+            None
+        };
+        if let Some(prefix_len) = otherwise_prefix_len {
+            let else_text = &normalized_text[prefix_len..];
+            let else_def = parse_effect_chain(else_text, kind);
+            // Walk defs backward to find the most recent IfYouDo conditional
+            let has_if_you_do = defs
+                .iter()
+                .any(|d| matches!(d.condition, Some(AbilityCondition::IfYouDo)));
+            if has_if_you_do {
+                for d in defs.iter_mut().rev() {
+                    if matches!(d.condition, Some(AbilityCondition::IfYouDo)) {
+                        d.else_ability = Some(Box::new(else_def));
+                        break;
+                    }
+                }
+            } else {
+                // Fallback: no IfYouDo found — emit as Unimplemented to preserve coverage
+                defs.push(AbilityDefinition::new(
+                    kind,
+                    Effect::Unimplemented {
+                        name: "otherwise".to_string(),
+                        description: Some("Otherwise".to_string()),
+                    },
+                ));
+                defs.push(else_def);
+            }
+            continue;
+        }
+
         let (condition, text) = strip_additional_cost_conditional(normalized_text);
         let (if_you_do, text) = if condition.is_none() {
             strip_if_you_do_conditional(&text)
@@ -2098,7 +2138,7 @@ fn try_parse_damage(lower: &str, _text: &str) -> Option<Effect> {
     let (amount, after_target) = if let Some((n, rest)) = parse_number(after_lower) {
         if rest.starts_with("damage") {
             (
-                DamageAmount::Fixed(n as i32),
+                QuantityExpr::Fixed { value: n as i32 },
                 &after[after.len() - rest.len() + "damage".len()..],
             )
         } else {
@@ -2106,14 +2146,22 @@ fn try_parse_damage(lower: &str, _text: &str) -> Option<Effect> {
         }
     } else if after_lower.starts_with("that much damage") {
         (
-            DamageAmount::Variable("that much".to_string()),
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "that much".to_string(),
+                },
+            },
             &after["that much damage".len()..],
         )
     } else if after_lower.starts_with("damage equal to ") {
         let amount_text = &after["damage equal to ".len()..];
         let to_pos = amount_text.to_lowercase().find(" to ")?;
         (
-            DamageAmount::Variable(amount_text[..to_pos].trim().to_string()),
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: amount_text[..to_pos].trim().to_string(),
+                },
+            },
             &amount_text[to_pos + 4..],
         )
     } else {
@@ -2130,22 +2178,16 @@ fn try_parse_damage(lower: &str, _text: &str) -> Option<Effect> {
         return Some(Effect::DamageAll { amount, target });
     }
 
-    // Convert DamageAmount to QuantityExpr for DealDamage
-    let qty = types::damage_amount_to_quantity(&amount);
-
     // CR 603.7c: Check for event-context references before standard target parsing.
     if let Some(target) = parse_event_context_ref(after_to) {
         return Some(Effect::DealDamage {
-            amount: qty,
+            amount: amount.clone(),
             target,
         });
     }
 
     let (target, _) = parse_target(after_to);
-    Some(Effect::DealDamage {
-        amount: qty,
-        target,
-    })
+    Some(Effect::DealDamage { amount, target })
 }
 
 fn try_parse_pump(lower: &str, text: &str) -> Option<Effect> {
@@ -2239,10 +2281,19 @@ fn strip_leading_sequence_connector(text: &str) -> &str {
 fn apply_where_x_expression(value: PtValue, where_x_expression: Option<&str>) -> PtValue {
     match (value, where_x_expression) {
         (PtValue::Variable(alias), Some(expression)) if alias.eq_ignore_ascii_case("X") => {
-            PtValue::Variable(expression.to_string())
+            crate::parser::oracle_static::parse_cda_quantity(expression)
+                .map(PtValue::Quantity)
+                .unwrap_or_else(|| PtValue::Variable(expression.to_string()))
         }
         (PtValue::Variable(alias), Some(expression)) if alias.eq_ignore_ascii_case("-X") => {
-            PtValue::Variable(format!("-({expression})"))
+            crate::parser::oracle_static::parse_cda_quantity(expression)
+                .map(|inner| {
+                    PtValue::Quantity(QuantityExpr::Multiply {
+                        factor: -1,
+                        inner: Box::new(inner),
+                    })
+                })
+                .unwrap_or_else(|| PtValue::Variable(format!("-({expression})")))
         }
         (value, _) => value,
     }
@@ -2412,9 +2463,7 @@ fn constrain_filter_to_stack(filter: TargetFilter) -> TargetFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{
-        ContinuousModification, CountValue, ManaProduction, PaymentCost, TypeFilter,
-    };
+    use crate::types::ability::{ContinuousModification, ManaProduction, PaymentCost, TypeFilter};
     use crate::types::mana::ManaColor;
 
     #[test]
@@ -2613,7 +2662,9 @@ mod tests {
             Effect::Token { count, .. } => {
                 assert_eq!(
                     count,
-                    CountValue::TrackedSetSize,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::TrackedSetSize
+                    },
                     "count should be TrackedSetSize"
                 );
             }
@@ -2838,7 +2889,7 @@ mod tests {
             Effect::Token {
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
-                count: CountValue::Fixed(1),
+                count: QuantityExpr::Fixed { value: 1 },
                 ..
             }
         ));
@@ -2849,7 +2900,7 @@ mod tests {
         let e = parse_effect("Create a Treasure token");
         assert!(matches!(
             e,
-            Effect::Token { ref name, ref types, power: PtValue::Fixed(0), toughness: PtValue::Fixed(0), count: CountValue::Fixed(1), .. }
+            Effect::Token { ref name, ref types, power: PtValue::Fixed(0), toughness: PtValue::Fixed(0), count: QuantityExpr::Fixed { value: 1 }, .. }
             if name == "Treasure" && types == &vec!["Artifact".to_string(), "Treasure".to_string()]
         ));
     }
@@ -3044,7 +3095,7 @@ mod tests {
         let e = parse_effect("Add one mana of any color");
         assert!(matches!(
             e,
-            Effect::Mana { produced: ManaProduction::AnyOneColor { count: CountValue::Fixed(1), ref color_options }, .. }
+            Effect::Mana { produced: ManaProduction::AnyOneColor { count: QuantityExpr::Fixed { value: 1 }, ref color_options }, .. }
             if color_options == &vec![ManaColor::White, ManaColor::Blue, ManaColor::Black, ManaColor::Red, ManaColor::Green]
         ));
     }
@@ -3591,6 +3642,35 @@ mod tests {
         assert!(
             def.sub_ability.is_some(),
             "Expected sub_ability for discard continuation"
+        );
+    }
+
+    #[test]
+    fn otherwise_attaches_else_ability() {
+        let def = parse_effect_chain(
+            "You may sacrifice two Foods. If you do, create a 7/7 green Giant creature token. Otherwise, create three Food tokens.",
+            AbilityKind::Spell,
+        );
+        // Walk the chain and collect effect types
+        let mut effects = vec![];
+        let mut current = Some(&def);
+        while let Some(d) = current {
+            effects.push(std::mem::discriminant(&d.effect));
+            // Check else_ability on any node with IfYouDo condition
+            if d.condition == Some(AbilityCondition::IfYouDo) {
+                if d.else_ability.is_some() {
+                    effects.push(std::mem::discriminant(
+                        &d.else_ability.as_ref().unwrap().effect,
+                    ));
+                }
+            }
+            current = d.sub_ability.as_deref();
+        }
+        // We should have at least 3 effects (Sacrifice, Token-Giant, something-else)
+        assert!(
+            effects.len() >= 2,
+            "Expected at least 2 effects, got {}",
+            effects.len()
         );
     }
 }

@@ -93,6 +93,29 @@ pub struct PendingCast {
     pub activation_ability_index: Option<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_constraints: Vec<TargetSelectionConstraint>,
+    /// How this spell was cast — threads through the casting pipeline to finalize_cast.
+    #[serde(default)]
+    pub casting_variant: CastingVariant,
+}
+
+impl PendingCast {
+    pub fn new(
+        object_id: ObjectId,
+        card_id: CardId,
+        ability: ResolvedAbility,
+        cost: ManaCost,
+    ) -> Self {
+        Self {
+            object_id,
+            card_id,
+            ability,
+            cost,
+            activation_cost: None,
+            activation_ability_index: None,
+            target_constraints: Vec::new(),
+            casting_variant: CastingVariant::Normal,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -429,16 +452,32 @@ pub struct StackEntry {
     pub kind: StackEntryKind,
 }
 
+/// How a spell was cast — determines zone routing and post-resolution behavior.
+/// Replaces individual boolean flags (cast_as_adventure, cast_as_warp) with a
+/// single enum that captures the casting context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum CastingVariant {
+    /// Normal spell cast — no special resolution behavior.
+    #[default]
+    Normal,
+    /// CR 715.4: Cast as the Adventure half. On resolution, exiled with
+    /// AdventureCreature permission and creature face restored.
+    Adventure,
+    /// Warp: Cast via Warp alternative cost from hand. On resolution,
+    /// creates a delayed trigger to exile at end step with ExileWithAltCost permission.
+    Warp,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum StackEntryKind {
     Spell {
         card_id: CardId,
         ability: ResolvedAbility,
-        /// CR 715.4: True when this spell was cast as the Adventure half.
-        /// On resolution, exiled with AdventureCreature permission instead of going to graveyard.
+        /// How this spell was cast — determines resolution behavior (zone routing,
+        /// exile permissions, delayed triggers).
         #[serde(default)]
-        cast_as_adventure: bool,
+        casting_variant: CastingVariant,
     },
     ActivatedAbility {
         source_id: ObjectId,
@@ -1134,6 +1173,7 @@ mod tests {
                     activation_cost: None,
                     activation_ability_index: None,
                     target_constraints: vec![],
+                    casting_variant: CastingVariant::Normal,
                 }),
             },
             WaitingFor::DiscardToHandSize {
@@ -1162,6 +1202,7 @@ mod tests {
                     activation_cost: None,
                     activation_ability_index: None,
                     target_constraints: vec![],
+                    casting_variant: CastingVariant::Normal,
                 }),
             },
             WaitingFor::AbilityModeChoice {
@@ -1199,6 +1240,7 @@ mod tests {
                     activation_cost: None,
                     activation_ability_index: None,
                     target_constraints: vec![],
+                    casting_variant: CastingVariant::Normal,
                 }),
             },
             WaitingFor::SacrificeForCost {
@@ -1221,6 +1263,7 @@ mod tests {
                     activation_cost: None,
                     activation_ability_index: None,
                     target_constraints: vec![],
+                    casting_variant: CastingVariant::Normal,
                 }),
             },
         ];
@@ -1245,7 +1288,7 @@ mod tests {
                     ObjectId(2),
                     PlayerId(0),
                 ),
-                cast_as_adventure: false,
+                casting_variant: CastingVariant::Normal,
             },
         };
         assert_eq!(entry.id, ObjectId(1));

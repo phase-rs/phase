@@ -47,7 +47,7 @@ pub fn resolve_mana_ability(
     }
 
     let produced_mana = match &ability_def.effect {
-        Effect::Mana { produced, .. } => resolve_mana_types(produced),
+        Effect::Mana { produced, .. } => resolve_mana_types(produced, &*state, player, source_id),
         _ => Vec::new(),
     };
 
@@ -63,7 +63,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityKind, CountValue, Effect, ManaProduction, QuantityExpr, TargetFilter,
+        AbilityCost, AbilityKind, Effect, ManaProduction, QuantityExpr, TargetFilter,
     };
     use crate::types::identifiers::CardId;
     use crate::types::mana::{ManaColor, ManaType};
@@ -177,7 +177,7 @@ mod tests {
             AbilityKind::Activated,
             Effect::Mana {
                 produced: ManaProduction::Colorless {
-                    count: CountValue::Fixed(1),
+                    count: QuantityExpr::Fixed { value: 1 },
                 },
                 restrictions: vec![],
                 expiry: None,

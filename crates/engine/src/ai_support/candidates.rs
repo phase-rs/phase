@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 
 use crate::game::casting;
-use crate::game::combat;
 use crate::game::combat::AttackTarget;
 use crate::game::deck_loading::DeckEntry;
 use crate::game::keywords;
@@ -363,7 +362,7 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
                     actions.push(candidate(
                         GameAction::ActivateNinjutsu {
                             ninjutsu_card_id: card_id,
-                            attacker_to_return: attacker_id,
+                            creature_to_return: attacker_id,
                         },
                         TacticalClass::Ability,
                         Some(*player),
@@ -508,22 +507,23 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
     // Mana tap candidates are still generated for ManaPayment/UnlessPayment contexts
     // via mana_payment_actions().
 
-    // CR 702.49a: Offer Ninjutsu activations during declare blockers step
-    if matches!(state.phase, Phase::DeclareBlockers | Phase::CombatDamage)
-        && state.active_player == player
-    {
-        let ninjutsu_cards = keywords::ninjutsu_cards_in_hand(state, player);
-        let unblocked = combat::unblocked_attackers(state);
-        for card_id in &ninjutsu_cards {
-            for &attacker_id in &unblocked {
-                actions.push(candidate(
-                    GameAction::ActivateNinjutsu {
-                        ninjutsu_card_id: *card_id,
-                        attacker_to_return: attacker_id,
-                    },
-                    TacticalClass::Ability,
-                    Some(player),
-                ));
+    // CR 702.49: Offer Ninjutsu-family activations during combat
+    if state.active_player == player {
+        let family_cards = keywords::ninjutsu_family_cards_in_hand(state, player);
+        for (card_id, variant) in &family_cards {
+            let returnable = keywords::returnable_creatures_for_variant(state, player, variant);
+            let timing_ok = keywords::ninjutsu_timing_ok(&state.phase, variant);
+            if timing_ok {
+                for &creature_id in &returnable {
+                    actions.push(candidate(
+                        GameAction::ActivateNinjutsu {
+                            ninjutsu_card_id: *card_id,
+                            creature_to_return: creature_id,
+                        },
+                        TacticalClass::Ability,
+                        Some(player),
+                    ));
+                }
             }
         }
     }

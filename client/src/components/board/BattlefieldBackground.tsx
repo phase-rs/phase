@@ -5,7 +5,7 @@ import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import type { BoardBackground } from "../../stores/preferencesStore.ts";
-import { getDominantManaColor } from "../../viewmodel/dominantColor.ts";
+import { getDeckDominantColor } from "../../viewmodel/dominantColor.ts";
 import { BATTLEFIELDS, BATTLEFIELD_MAP, getRandomBattlefield } from "./battlefields.ts";
 
 function pickRandomImage(): string {
@@ -14,24 +14,24 @@ function pickRandomImage(): string {
 
 function resolveBattlefieldImage(
   boardBackground: BoardBackground,
-  dominantColor: ManaColor | null,
-  colorMatchedRef: React.RefObject<string | null>,
-  fallbackRef: React.RefObject<string | null>,
+  deckColor: ManaColor | null,
+  lockedRef: React.RefObject<string | null>,
 ): string | null {
   if (boardBackground === "none") return null;
 
-  if (boardBackground === "auto-wubrg") {
-    // Once we have a dominant color, lock in a color-matched image
-    if (dominantColor && !colorMatchedRef.current) {
-      colorMatchedRef.current = getRandomBattlefield(dominantColor).image;
+  if (boardBackground === "random") {
+    if (!lockedRef.current) {
+      lockedRef.current = pickRandomImage();
     }
-    if (colorMatchedRef.current) return colorMatchedRef.current;
+    return lockedRef.current;
+  }
 
-    // No lands played yet — show a random background instead of nothing
-    if (!fallbackRef.current) {
-      fallbackRef.current = pickRandomImage();
+  if (boardBackground === "auto-wubrg") {
+    // Lock in a color-matched image on first color detection (includes full deck)
+    if (deckColor && !lockedRef.current) {
+      lockedRef.current = getRandomBattlefield(deckColor).image;
     }
-    return fallbackRef.current;
+    return lockedRef.current;
   }
 
   return BATTLEFIELD_MAP[boardBackground]?.image ?? null;
@@ -40,17 +40,24 @@ function resolveBattlefieldImage(
 /** Full-screen battlefield background image. */
 export function BattlefieldBackground() {
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
-  const colorMatchedRef = useRef<string | null>(null);
-  const fallbackRef = useRef<string | null>(null);
+  const lockedRef = useRef<string | null>(null);
 
   const playerId = usePlayerId();
   const gameState = useGameStore((s) => s.gameState);
-  const dominantColor = useMemo(() => {
+  const deckColor = useMemo(() => {
     if (!gameState) return null;
-    return getDominantManaColor(gameState.battlefield, gameState.objects, playerId);
+    const player = gameState.players[playerId];
+    if (!player) return null;
+    return getDeckDominantColor(
+      player.library,
+      player.hand,
+      gameState.battlefield,
+      gameState.objects,
+      playerId,
+    );
   }, [gameState, playerId]);
 
-  const bgImage = resolveBattlefieldImage(boardBackground, dominantColor, colorMatchedRef, fallbackRef);
+  const bgImage = resolveBattlefieldImage(boardBackground, deckColor, lockedRef);
 
   if (!bgImage) return null;
 

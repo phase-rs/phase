@@ -182,7 +182,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{Effect, TargetFilter};
-    use crate::types::game_state::{StackEntry, StackEntryKind};
+    use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
@@ -215,7 +215,7 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
                 ability: make_dummy_ability(obj_id, PlayerId(1)),
-                cast_as_adventure: false,
+                casting_variant: CastingVariant::Normal,
             },
         });
 
@@ -269,7 +269,7 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
                 ability: make_dummy_ability(obj_id, PlayerId(1)),
-                cast_as_adventure: false,
+                casting_variant: CastingVariant::Normal,
             },
         });
 
@@ -408,7 +408,7 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
                 ability: make_dummy_ability(spell_id, PlayerId(1)),
-                cast_as_adventure: false,
+                casting_variant: CastingVariant::Normal,
             },
         });
 

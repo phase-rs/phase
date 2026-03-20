@@ -224,6 +224,11 @@ pub enum GameEvent {
         source_id: ObjectId,
         controller: PlayerId,
     },
+    /// CR 702.110: A creature exploited another creature (sacrificed via exploit ETB).
+    CreatureExploited {
+        exploiter: ObjectId,
+        sacrificed: ObjectId,
+    },
 }
 
 #[cfg(test)]

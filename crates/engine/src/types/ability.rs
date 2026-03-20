@@ -275,23 +275,20 @@ pub enum ChosenSubtypeKind {
     BasicLandType,
 }
 
-/// A dynamically computed power/toughness value, evaluated at layer application time.
-/// Used by CDA static abilities (layer 7a) where P/T depends on game state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub enum DynamicPTValue {
-    /// Count distinct card types among cards in all graveyards, plus a fixed offset.
-    /// Tarmogoyf: power = count + 0, toughness = count + 1.
-    CardTypesInAllGraveyards {
-        #[serde(default)]
-        offset: i32,
-    },
+/// Which players' zones to count across for zone-based quantity references.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum CountScope {
+    Controller,
+    All,
+    Opponents,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", content = "value")]
-pub enum DamageAmount {
-    Fixed(i32),
-    Variable(String),
+/// Which zone to count cards in (for `QuantityRef::ZoneCardCount`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum ZoneRef {
+    Graveyard,
+    Exile,
+    Library,
 }
 
 /// Who gains life from a GainLife effect.
@@ -324,6 +321,7 @@ pub enum LifeAmount {
 pub enum PtValue {
     Fixed(i32),
     Variable(String),
+    Quantity(QuantityExpr),
 }
 
 impl<'de> serde::Deserialize<'de> for PtValue {
@@ -344,66 +342,22 @@ impl<'de> serde::Deserialize<'de> for PtValue {
             serde_json::Value::Object(_) => {
                 // New tagged format: {"type":"Fixed","value":2}
                 #[derive(serde::Deserialize)]
-                #[serde(tag = "type", content = "value")]
+                #[serde(tag = "type")]
                 enum PtValueHelper {
-                    Fixed(i32),
-                    Variable(String),
+                    Fixed { value: i32 },
+                    Variable { value: String },
+                    Quantity { value: QuantityExpr },
                 }
                 let helper: PtValueHelper =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
                 match helper {
-                    PtValueHelper::Fixed(n) => Ok(PtValue::Fixed(n)),
-                    PtValueHelper::Variable(s) => Ok(PtValue::Variable(s)),
+                    PtValueHelper::Fixed { value: n } => Ok(PtValue::Fixed(n)),
+                    PtValueHelper::Variable { value: s } => Ok(PtValue::Variable(s)),
+                    PtValueHelper::Quantity { value: q } => Ok(PtValue::Quantity(q)),
                 }
             }
             _ => Err(serde::de::Error::custom(
                 "expected string, number, or object for PtValue",
-            )),
-        }
-    }
-}
-
-/// Token count value -- either a fixed integer or a variable reference (e.g. "X").
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
-#[serde(tag = "type", content = "value")]
-pub enum CountValue {
-    Fixed(u32),
-    Variable(String),
-    /// CR 609.3: Count of objects moved by the preceding effect in the sub_ability chain.
-    /// Resolves to the size of the most recent tracked set recorded by `resolve_ability_chain`.
-    TrackedSetSize,
-}
-
-impl<'de> serde::Deserialize<'de> for CountValue {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        match &value {
-            serde_json::Value::String(s) => match s.parse::<u32>() {
-                Ok(n) => Ok(CountValue::Fixed(n)),
-                Err(_) => Ok(CountValue::Variable(s.clone())),
-            },
-            serde_json::Value::Number(n) => Ok(CountValue::Fixed(n.as_u64().unwrap_or(0) as u32)),
-            serde_json::Value::Object(_) => {
-                #[derive(serde::Deserialize)]
-                #[serde(tag = "type", content = "value")]
-                enum CountValueHelper {
-                    Fixed(u32),
-                    Variable(String),
-                    TrackedSetSize,
-                }
-                let helper: CountValueHelper =
-                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-                match helper {
-                    CountValueHelper::Fixed(n) => Ok(CountValue::Fixed(n)),
-                    CountValueHelper::Variable(s) => Ok(CountValue::Variable(s)),
-                    CountValueHelper::TrackedSetSize => Ok(CountValue::TrackedSetSize),
-                }
-            }
-            _ => Err(serde::de::Error::custom(
-                "expected string, number, or object for CountValue",
             )),
         }
     }
@@ -423,27 +377,27 @@ pub enum ManaProduction {
     },
     /// Produce N colorless mana (e.g. `{C}`, `{C}{C}`).
     Colorless {
-        #[serde(default = "default_count_value_one")]
-        count: CountValue,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
     },
     /// Produce N mana of one chosen color from the provided set.
     AnyOneColor {
-        #[serde(default = "default_count_value_one")]
-        count: CountValue,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
         #[serde(default = "default_all_mana_colors")]
         color_options: Vec<ManaColor>,
     },
     /// Produce N mana where each unit can be chosen independently from the provided set.
     AnyCombination {
-        #[serde(default = "default_count_value_one")]
-        count: CountValue,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
         #[serde(default = "default_all_mana_colors")]
         color_options: Vec<ManaColor>,
     },
     /// Produce N mana of a previously chosen color.
     ChosenColor {
-        #[serde(default = "default_count_value_one")]
-        count: CountValue,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
     },
 }
 
@@ -470,24 +424,24 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
                         colors: Vec<ManaColor>,
                     },
                     Colorless {
-                        #[serde(default = "default_count_value_one")]
-                        count: CountValue,
+                        #[serde(default = "default_quantity_one")]
+                        count: QuantityExpr,
                     },
                     AnyOneColor {
-                        #[serde(default = "default_count_value_one")]
-                        count: CountValue,
+                        #[serde(default = "default_quantity_one")]
+                        count: QuantityExpr,
                         #[serde(default = "default_all_mana_colors")]
                         color_options: Vec<ManaColor>,
                     },
                     AnyCombination {
-                        #[serde(default = "default_count_value_one")]
-                        count: CountValue,
+                        #[serde(default = "default_quantity_one")]
+                        count: QuantityExpr,
                         #[serde(default = "default_all_mana_colors")]
                         color_options: Vec<ManaColor>,
                     },
                     ChosenColor {
-                        #[serde(default = "default_count_value_one")]
-                        count: CountValue,
+                        #[serde(default = "default_quantity_one")]
+                        count: QuantityExpr,
                     },
                 }
                 let helper: ManaProductionHelper =
@@ -888,12 +842,41 @@ pub enum QuantityRef {
     CountersOnSelf { counter_type: String },
     /// A variable reference (e.g. "X") resolved from spell payment or "that much" from prior effect.
     Variable { name: String },
+    /// CR 208.3: The current power of the source object (post-layer).
+    SelfPower,
+    /// CR 208.3: The current toughness of the source object (post-layer).
+    SelfToughness,
+    /// CR 107.3e: Aggregate query (max/min/sum) over a property of battlefield objects.
+    Aggregate {
+        function: AggregateFunction,
+        property: ObjectProperty,
+        filter: TargetFilter,
+    },
     /// The power of the targeted permanent. Used for "equal to target's power".
     TargetPower,
     /// CR 119.3 + CR 107.2: The life total of the targeted player.
     TargetLifeTotal,
     /// CR 700.5: Devotion to one or more colors.
     Devotion { colors: Vec<ManaColor> },
+    /// CR 604.3: Count distinct card types (CoreType) across graveyards.
+    /// Scope controls which players' graveyards are counted.
+    /// Tarmogoyf: scope=All. "card types in your graveyard": scope=Controller.
+    CardTypesInGraveyards { scope: CountScope },
+    /// CR 604.3: Count cards in a zone matching optional type filters.
+    /// Empty card_types means all cards. Multiple entries = OR (any match).
+    /// "creature cards in your graveyard" → zone=Graveyard, card_types=[Creature], scope=Controller
+    ZoneCardCount {
+        zone: ZoneRef,
+        card_types: Vec<TypeFilter>,
+        scope: CountScope,
+    },
+    /// CR 305.6: Count distinct basic land types (Plains/Island/Swamp/Mountain/Forest)
+    /// among lands the controller controls. Used by Domain.
+    BasicLandTypeCount,
+    /// CR 609.3: Count of objects moved by the preceding effect in the sub_ability chain.
+    /// Only valid during sub-ability chain resolution; returns 0 outside that context.
+    /// The caller (token resolver) is responsible for consuming the tracked set after use.
+    TrackedSetSize,
 }
 
 /// CR 107.2: Rounding direction for "half X" expressions in Magic.
@@ -901,6 +884,22 @@ pub enum QuantityRef {
 pub enum RoundingMode {
     Up,
     Down,
+}
+
+/// CR 107.3e: Aggregate function applied over a set of objects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum AggregateFunction {
+    Max,
+    Min,
+    Sum,
+}
+
+/// A measurable property of a game object for aggregate queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum ObjectProperty {
+    Power,
+    Toughness,
+    ManaValue,
 }
 
 /// A filter matching players by game-state conditions.
@@ -930,6 +929,17 @@ pub enum QuantityExpr {
     HalfRounded {
         inner: Box<QuantityExpr>,
         rounding: RoundingMode,
+    },
+    /// CR 604.3: Base expression plus a fixed integer offset.
+    /// "N plus the number of X" / "that number plus N" patterns.
+    Offset {
+        inner: Box<QuantityExpr>,
+        offset: i32,
+    },
+    /// "Twice the number of X" / "N times X" / negation via factor: -1.
+    Multiply {
+        factor: i32,
+        inner: Box<QuantityExpr>,
     },
 }
 
@@ -1045,6 +1055,17 @@ pub enum PaymentCost {
 // AbilityCost -- expanded typed variants
 // ---------------------------------------------------------------------------
 
+/// CR 702.49: Ninjutsu-family keyword variants that share the "swap creature in combat" pattern.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum NinjutsuVariant {
+    /// CR 702.49a: Return unblocked attacker, declare blockers or later.
+    Ninjutsu,
+    /// CR 702.49 variant: Return unblocked attacker, declare blockers step only.
+    Sneak,
+    /// CR 702.49 variant: Return any tapped creature you control.
+    WebSlinging,
+}
+
 /// Cost to activate an ability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
@@ -1114,9 +1135,10 @@ pub enum AbilityCost {
     Waterbend {
         cost: ManaCost,
     },
-    /// CR 702.49a: Ninjutsu compound cost — pay mana and return an unblocked attacker.
-    /// The return-attacker part is implicit in the ActivateNinjutsu action (player selects which).
-    Ninjutsu {
+    /// CR 702.49: Pay mana and return a creature (variant-dependent) to put this card
+    /// onto the battlefield tapped and attacking.
+    NinjutsuFamily {
+        variant: NinjutsuVariant,
         mana_cost: ManaCost,
     },
     Unimplemented {
@@ -1268,12 +1290,15 @@ pub enum Effect {
         keywords: Vec<Keyword>,
         #[serde(default)]
         tapped: bool,
-        #[serde(default = "default_count_value_one")]
-        count: CountValue,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
         /// CR 303.7: When a Role token or Aura token is created "attached to" a
         /// target, this field captures that attachment target.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attach_to: Option<TargetFilter>,
+        /// CR 508.4: Token enters the battlefield attacking (not declared as attacker).
+        #[serde(default)]
+        enters_attacking: bool,
     },
     GainLife {
         #[serde(default = "default_quantity_one")]
@@ -1337,7 +1362,7 @@ pub enum Effect {
         target: TargetFilter,
     },
     DamageAll {
-        amount: DamageAmount,
+        amount: QuantityExpr,
         #[serde(default = "default_target_filter_none")]
         target: TargetFilter,
     },
@@ -1674,6 +1699,12 @@ pub enum Effect {
         /// Which zone the cards are in (usually Exile).
         zone: Zone,
     },
+    /// CR 702.110b: Exploit — sacrifice a creature you control (optional).
+    /// The controller may sacrifice any creature they control, including the exploiter itself.
+    Exploit {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
     /// Semantic marker for effects the engine has not yet implemented a handler for.
     /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.
     Unimplemented {
@@ -1697,10 +1728,6 @@ fn default_quantity_one() -> QuantityExpr {
 
 fn default_pt_value_zero() -> PtValue {
     PtValue::Fixed(0)
-}
-
-fn default_count_value_one() -> CountValue {
-    CountValue::Fixed(1)
 }
 
 fn default_mana_production() -> ManaProduction {
@@ -1811,6 +1838,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::RingTemptsYou => "RingTemptsYou",
         Effect::GrantCastingPermission { .. } => "GrantCastingPermission",
         Effect::ChooseFromZone { .. } => "ChooseFromZone",
+        Effect::Exploit { .. } => "Exploit",
         Effect::Unimplemented { name, .. } => name,
     }
 }
@@ -1893,6 +1921,7 @@ pub enum EffectKind {
     RingTemptsYou,
     GrantCastingPermission,
     ChooseFromZone,
+    Exploit,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
     Equip,
@@ -1976,6 +2005,7 @@ impl From<&Effect> for EffectKind {
             Effect::RingTemptsYou => EffectKind::RingTemptsYou,
             Effect::GrantCastingPermission { .. } => EffectKind::GrantCastingPermission,
             Effect::ChooseFromZone { .. } => EffectKind::ChooseFromZone,
+            Effect::Exploit { .. } => EffectKind::Exploit,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,
         }
     }
@@ -2108,6 +2138,10 @@ pub struct AbilityDefinition {
     pub cost: Option<AbilityCost>,
     #[serde(default)]
     pub sub_ability: Option<Box<AbilityDefinition>>,
+    /// CR 608.2c: Alternative branch executed when the condition on this ability is NOT met.
+    /// Populated by "Otherwise, [effect]" Oracle text clauses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub else_ability: Option<Box<AbilityDefinition>>,
     #[serde(default)]
     pub duration: Option<Duration>,
     #[serde(default)]
@@ -2155,6 +2189,7 @@ impl AbilityDefinition {
             effect,
             cost: None,
             sub_ability: None,
+            else_ability: None,
             duration: None,
             description: None,
             target_prompt: None,
@@ -2289,6 +2324,10 @@ pub enum TriggerCondition {
     Descended,
     /// "if you control N or more creatures"
     ControlCreatures { minimum: u32 },
+    /// CR 508.1a: "Whenever ~ and at least N other creatures attack."
+    /// True when combat is active and at least `minimum` other creatures
+    /// controlled by the same player are also attacking.
+    MinCoAttackers { minimum: u32 },
     /// CR 719.2: Intervening-if for Case auto-solve.
     /// True when the source Case is unsolved AND its solve condition is met.
     SolveConditionMet,
@@ -2777,11 +2816,11 @@ pub enum ContinuousModification {
     },
     /// Set power to a dynamically computed value (CDA, layer 7a).
     SetDynamicPower {
-        value: DynamicPTValue,
+        value: QuantityExpr,
     },
     /// Set toughness to a dynamically computed value (CDA, layer 7a).
     SetDynamicToughness {
-        value: DynamicPTValue,
+        value: QuantityExpr,
     },
     /// Grants every creature type (Changeling CDA). Expanded at runtime
     /// using `GameState::all_creature_types`.
@@ -2839,6 +2878,9 @@ pub struct ResolvedAbility {
     pub kind: AbilityKind,
     #[serde(default)]
     pub sub_ability: Option<Box<ResolvedAbility>>,
+    /// CR 608.2c: Alternative branch ("Otherwise") executed when condition is not met.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub else_ability: Option<Box<ResolvedAbility>>,
     #[serde(default)]
     pub duration: Option<Duration>,
     /// Condition that must be met for this ability to execute during resolution.
@@ -2873,6 +2915,7 @@ impl ResolvedAbility {
             controller,
             kind: AbilityKind::default(),
             sub_ability: None,
+            else_ability: None,
             duration: None,
             condition: None,
             context: SpellContext::default(),
@@ -2889,6 +2932,11 @@ impl ResolvedAbility {
 
     pub fn sub_ability(mut self, ability: ResolvedAbility) -> Self {
         self.sub_ability = Some(Box::new(ability));
+        self
+    }
+
+    pub fn else_ability(mut self, ability: ResolvedAbility) -> Self {
+        self.else_ability = Some(Box::new(ability));
         self
     }
 
@@ -3382,19 +3430,6 @@ mod tests {
     }
 
     #[test]
-    fn count_value_roundtrip() {
-        let values = vec![
-            CountValue::Fixed(3),
-            CountValue::Variable("X".to_string()),
-            CountValue::Variable("the number of creatures you control".to_string()),
-            CountValue::TrackedSetSize,
-        ];
-        let json = serde_json::to_string(&values).unwrap();
-        let deserialized: Vec<CountValue> = serde_json::from_str(&json).unwrap();
-        assert_eq!(values, deserialized);
-    }
-
-    #[test]
     fn effect_token_roundtrip() {
         let effect = Effect::Token {
             name: "Soldier".to_string(),
@@ -3404,8 +3439,13 @@ mod tests {
             colors: vec![ManaColor::White],
             keywords: vec![Keyword::Vigilance],
             tapped: true,
-            count: CountValue::Variable("the number of creatures you control".to_string()),
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "the number of creatures you control".to_string(),
+                },
+            },
             attach_to: None,
+            enters_attacking: false,
         };
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();

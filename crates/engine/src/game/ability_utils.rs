@@ -22,6 +22,11 @@ pub fn build_resolved_from_def(
     if let Some(sub) = &def.sub_ability {
         resolved = resolved.sub_ability(build_resolved_from_def(sub, source_id, controller));
     }
+    if let Some(else_ab) = &def.else_ability {
+        resolved.else_ability = Some(Box::new(build_resolved_from_def(
+            else_ab, source_id, controller,
+        )));
+    }
     if let Some(duration) = def.duration.clone() {
         resolved = resolved.duration(duration);
     }
@@ -323,6 +328,9 @@ pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
     if let Some(sub_ability) = ability.sub_ability.as_deref() {
         targets.extend(flatten_targets_in_chain(sub_ability));
     }
+    if let Some(else_ability) = ability.else_ability.as_deref() {
+        targets.extend(flatten_targets_in_chain(else_ability));
+    }
     targets
 }
 
@@ -348,6 +356,9 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
     };
     if let Some(sub_ability) = validated.sub_ability.as_mut() {
         **sub_ability = validate_targets_in_chain(state, sub_ability);
+    }
+    if let Some(else_ability) = validated.else_ability.as_mut() {
+        **else_ability = validate_targets_in_chain(state, else_ability);
     }
     validated
 }

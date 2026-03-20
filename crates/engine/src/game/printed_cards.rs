@@ -244,7 +244,8 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
 fn parse_pt(val: &Option<PtValue>) -> Option<i32> {
     val.as_ref().map(|pt| match pt {
         PtValue::Fixed(n) => *n,
-        PtValue::Variable(_) => 0,
+        // No game state at deck-load time; dynamic P/T resolves to 0.
+        PtValue::Variable(_) | PtValue::Quantity(_) => 0,
     })
 }
 
@@ -304,7 +305,7 @@ fn shard_colors(shard: &ManaCostShard) -> Vec<ManaColor> {
     }
 }
 
-pub(crate) fn derive_colors_from_mana_cost(mana_cost: &ManaCost) -> Vec<ManaColor> {
+pub fn derive_colors_from_mana_cost(mana_cost: &ManaCost) -> Vec<ManaColor> {
     match mana_cost {
         ManaCost::NoCost | ManaCost::SelfManaCost => vec![],
         ManaCost::Cost { shards, .. } => {

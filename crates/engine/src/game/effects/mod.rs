@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use crate::types::ability::{
-    AbilityCondition, AbilityKind, CountValue, Effect, EffectError, ResolvedAbility,
+    AbilityCondition, AbilityKind, Effect, EffectError, QuantityExpr, QuantityRef, ResolvedAbility,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -31,6 +31,7 @@ pub mod dig;
 pub mod discard;
 pub mod draw;
 pub mod effect;
+pub mod exploit;
 pub mod explore;
 pub mod fight;
 pub mod flip_coin;
@@ -141,6 +142,7 @@ pub fn resolve_effect(
         Effect::RingTemptsYou => ring::resolve(state, ability, events),
         Effect::GrantCastingPermission { .. } => grant_permission::resolve(state, ability, events),
         Effect::ChooseFromZone { .. } => choose_from_zone::resolve(state, ability, events),
+        Effect::Exploit { .. } => exploit::resolve(state, ability, events),
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);
@@ -164,7 +166,9 @@ fn next_sub_needs_tracked_set(ability: &ResolvedAbility) -> bool {
                 uses_tracked_set: true,
                 ..
             } | Effect::Token {
-                count: CountValue::TrackedSetSize,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                },
                 ..
             }
         )
@@ -266,6 +270,7 @@ pub fn resolve_ability_chain(
             }
             // The override sub is consumed; its own sub_ability becomes the new chain tail.
             overridden.sub_ability = sub.sub_ability.clone();
+            overridden.else_ability = sub.else_ability.clone();
             Cow::Owned(overridden)
         } else {
             Cow::Borrowed(ability)
@@ -379,6 +384,15 @@ pub fn resolve_ability_chain(
                 }
             };
             if !condition_met {
+                // CR 608.2c: Execute else branch if present ("Otherwise, [effect]")
+                if let Some(ref else_branch) = sub.else_ability {
+                    let mut else_resolved = else_branch.as_ref().clone();
+                    if else_resolved.targets.is_empty() && !ability.targets.is_empty() {
+                        else_resolved.targets = ability.targets.clone();
+                    }
+                    else_resolved.context = ability.context.clone();
+                    resolve_ability_chain(state, &else_resolved, events, depth + 1)?;
+                }
                 return Ok(());
             }
         }

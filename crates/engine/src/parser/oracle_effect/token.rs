@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use super::types::*;
-use crate::types::ability::{CountValue, Effect, PtValue};
+use crate::types::ability::{Effect, PtValue, QuantityExpr, QuantityRef};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 
@@ -35,6 +35,7 @@ pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
         tapped: token.tapped,
         count: token.count,
         attach_to: token.attach_to,
+        enters_attacking: false,
     })
 }
 
@@ -55,7 +56,7 @@ pub(super) fn parse_token_description(text: &str) -> Option<TokenDescription> {
         if let Some((count, rest)) = parse_token_count_prefix(text) {
             (count, None, rest)
         } else if let Some((name, rest)) = parse_named_token_preamble(text) {
-            (CountValue::Fixed(1), Some(name), rest)
+            (QuantityExpr::Fixed { value: 1 }, Some(name), rest)
         } else {
             return None;
         };
@@ -95,20 +96,41 @@ pub(super) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     }
 
     if let Some(where_expression) = extract_token_where_x_expression(suffix) {
-        if matches!(&count, CountValue::Variable(alias) if alias == "X") {
-            count = CountValue::Variable(where_expression.clone());
+        if matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "X")
+        {
+            count = crate::parser::oracle_static::parse_cda_quantity(&where_expression)
+                .unwrap_or_else(|| QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: where_expression.clone(),
+                    },
+                });
         }
         if matches!(&power, Some(PtValue::Variable(alias)) if alias == "X") {
-            power = Some(PtValue::Variable(where_expression.clone()));
+            power = Some(
+                crate::parser::oracle_static::parse_cda_quantity(&where_expression)
+                    .map(PtValue::Quantity)
+                    .unwrap_or_else(|| PtValue::Variable(where_expression.clone())),
+            );
         }
         if matches!(&toughness, Some(PtValue::Variable(alias)) if alias == "X") {
-            toughness = Some(PtValue::Variable(where_expression));
+            toughness = Some(
+                crate::parser::oracle_static::parse_cda_quantity(&where_expression)
+                    .map(PtValue::Quantity)
+                    .unwrap_or_else(|| PtValue::Variable(where_expression)),
+            );
         }
     }
 
     if let Some(count_expression) = extract_token_count_expression(suffix) {
-        if matches!(&count, CountValue::Variable(alias) if alias == "count") {
-            count = CountValue::Variable(count_expression);
+        if matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "count")
+        {
+            count = crate::parser::oracle_static::parse_cda_quantity(&count_expression).unwrap_or(
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: count_expression,
+                    },
+                },
+            );
         }
     }
 
@@ -118,14 +140,26 @@ pub(super) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     {
         let suffix_lower = suffix.to_lowercase();
         if suffix_lower.contains("for each") && suffix_lower.contains("this way") {
-            count = CountValue::TrackedSetSize;
+            count = QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            };
         }
     }
 
     if power.is_none() || toughness.is_none() {
         if let Some(pt_expression) = extract_token_pt_expression(suffix) {
-            power = Some(PtValue::Variable(pt_expression.clone()));
-            toughness = Some(PtValue::Variable(pt_expression));
+            let parsed = crate::parser::oracle_static::parse_cda_quantity(&pt_expression);
+            power = Some(
+                parsed
+                    .clone()
+                    .map(PtValue::Quantity)
+                    .unwrap_or_else(|| PtValue::Variable(pt_expression.clone())),
+            );
+            toughness = Some(
+                parsed
+                    .map(PtValue::Quantity)
+                    .unwrap_or_else(|| PtValue::Variable(pt_expression)),
+            );
         }
     }
 
@@ -147,26 +181,59 @@ pub(super) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     })
 }
 
-fn parse_token_count_prefix(text: &str) -> Option<(CountValue, &str)> {
+fn parse_token_count_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
     let trimmed = text.trim_start();
     let lower = trimmed.to_lowercase();
     if let Some(rest) = trimmed.strip_prefix("X ") {
-        return Some((CountValue::Variable("X".to_string()), rest));
+        return Some((
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+            rest,
+        ));
     }
     if let Some(rest) = trimmed.strip_prefix("x ") {
-        return Some((CountValue::Variable("X".to_string()), rest));
+        return Some((
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+            rest,
+        ));
     }
     if let Some(rest) = trimmed.strip_prefix("that many ") {
-        return Some((CountValue::Variable("that many".to_string()), rest));
+        return Some((
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "that many".to_string(),
+                },
+            },
+            rest,
+        ));
     }
     if let Some(rest) = trimmed.strip_prefix("a number of ") {
-        return Some((CountValue::Variable("count".to_string()), rest));
+        return Some((
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "count".to_string(),
+                },
+            },
+            rest,
+        ));
     }
     let (count, rest) = parse_number(trimmed)?;
     if count == 0 && lower.starts_with('x') {
         return None;
     }
-    Some((CountValue::Fixed(count), rest))
+    Some((
+        QuantityExpr::Fixed {
+            value: count as i32,
+        },
+        rest,
+    ))
 }
 
 fn parse_named_token_preamble(text: &str) -> Option<(String, &str)> {

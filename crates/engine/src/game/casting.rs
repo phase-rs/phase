@@ -3,7 +3,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ConvokeMode, GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor,
+    CastingVariant, ConvokeMode, GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::{ManaCost, SpellMeta};
@@ -70,6 +70,7 @@ struct PreparedSpellCast {
     ability_def: AbilityDefinition,
     mana_cost: crate::types::mana::ManaCost,
     modal: Option<crate::types::ability::ModalChoice>,
+    casting_variant: CastingVariant,
 }
 
 fn default_spell_ability_def() -> AbilityDefinition {
@@ -229,7 +230,24 @@ fn prepare_spell_cast(
     } else {
         None
     };
-    let mut mana_cost = alt_cost_from_exile.unwrap_or_else(|| obj.mana_cost.clone());
+
+    // Warp: when casting from hand with Keyword::Warp, use the warp mana cost.
+    let warp_cost = if obj.zone == Zone::Hand {
+        obj.keywords.iter().find_map(|k| match k {
+            crate::types::keywords::Keyword::Warp(cost) => Some(cost.clone()),
+            _ => None,
+        })
+    } else {
+        None
+    };
+    let casting_variant = if warp_cost.is_some() {
+        CastingVariant::Warp
+    } else {
+        CastingVariant::Normal
+    };
+    let mut mana_cost = alt_cost_from_exile
+        .or(warp_cost)
+        .unwrap_or_else(|| obj.mana_cost.clone());
     if let Err(base_timing_error) =
         restrictions::check_spell_timing(state, player, obj, &ability_def, false)
     {
@@ -276,6 +294,7 @@ fn prepare_spell_cast(
         ability_def,
         mana_cost,
         modal: obj.modal.clone(),
+        casting_variant,
     })
 }
 
@@ -362,6 +381,7 @@ pub fn handle_adventure_choice(
                     prepared.card_id,
                     resolved,
                     &prepared.mana_cost,
+                    prepared.casting_variant,
                     events,
                 );
             } else {
@@ -372,28 +392,23 @@ pub fn handle_adventure_choice(
                     prepared.card_id,
                     resolved,
                     &prepared.mana_cost,
-                    true,
+                    CastingVariant::Adventure,
                     events,
                 );
             }
         }
 
         let selection = begin_target_selection(&target_slots, &[])?;
-        // TODO: For adventure spells with targets, we'd need to pass cast_as_adventure
-        // through PendingCast. For now, the target selection path falls through to
-        // pay_and_push which uses cast_as_adventure: false. This is a known limitation
-        // for Adventure spells that require target selection.
+        let mut pending_adv = PendingCast::new(
+            prepared.object_id,
+            prepared.card_id,
+            resolved,
+            prepared.mana_cost.clone(),
+        );
+        pending_adv.casting_variant = prepared.casting_variant;
         return Ok(WaitingFor::TargetSelection {
             player,
-            pending_cast: Box::new(PendingCast {
-                object_id: prepared.object_id,
-                card_id: prepared.card_id,
-                ability: resolved,
-                cost: prepared.mana_cost.clone(),
-                activation_cost: None,
-                activation_ability_index: None,
-                target_constraints: Vec::new(),
-            }),
+            pending_cast: Box::new(pending_adv),
             target_slots,
             selection,
         });
@@ -408,6 +423,7 @@ pub fn handle_adventure_choice(
             prepared.card_id,
             resolved,
             &prepared.mana_cost,
+            prepared.casting_variant,
             events,
         )
     } else {
@@ -418,7 +434,7 @@ pub fn handle_adventure_choice(
             prepared.card_id,
             resolved,
             &prepared.mana_cost,
-            true,
+            CastingVariant::Adventure,
             events,
         )
     }
@@ -459,18 +475,18 @@ pub fn handle_cast_spell(
             prepared.object_id,
             player,
         );
+        let mut pending_modal = PendingCast::new(
+            prepared.object_id,
+            prepared.card_id,
+            placeholder,
+            prepared.mana_cost.clone(),
+        );
+        pending_modal.casting_variant = prepared.casting_variant;
+        pending_modal.target_constraints = target_constraints;
         return Ok(WaitingFor::ModeChoice {
             player,
             modal: capped,
-            pending_cast: Box::new(PendingCast {
-                object_id: prepared.object_id,
-                card_id: prepared.card_id,
-                ability: placeholder,
-                cost: prepared.mana_cost.clone(),
-                activation_cost: None,
-                activation_ability_index: None,
-                target_constraints,
-            }),
+            pending_cast: Box::new(pending_modal),
         });
     }
 
@@ -528,21 +544,21 @@ pub fn handle_cast_spell(
                     prepared.card_id,
                     resolved,
                     &prepared.mana_cost,
+                    prepared.casting_variant,
                     events,
                 );
             } else {
                 let selection = begin_target_selection(&target_slots, &[])?;
+                let mut pending_aura = PendingCast::new(
+                    prepared.object_id,
+                    prepared.card_id,
+                    resolved,
+                    prepared.mana_cost.clone(),
+                );
+                pending_aura.casting_variant = prepared.casting_variant;
                 return Ok(WaitingFor::TargetSelection {
                     player,
-                    pending_cast: Box::new(PendingCast {
-                        object_id: prepared.object_id,
-                        card_id: prepared.card_id,
-                        ability: resolved,
-                        cost: prepared.mana_cost.clone(),
-                        activation_cost: None,
-                        activation_ability_index: None,
-                        target_constraints: Vec::new(),
-                    }),
+                    pending_cast: Box::new(pending_aura),
                     target_slots,
                     selection,
                 });
@@ -562,22 +578,22 @@ pub fn handle_cast_spell(
                 prepared.card_id,
                 resolved,
                 &prepared.mana_cost,
+                prepared.casting_variant,
                 events,
             );
         }
 
         let selection = begin_target_selection(&target_slots, &[])?;
+        let mut pending_targets = PendingCast::new(
+            prepared.object_id,
+            prepared.card_id,
+            resolved,
+            prepared.mana_cost.clone(),
+        );
+        pending_targets.casting_variant = prepared.casting_variant;
         return Ok(WaitingFor::TargetSelection {
             player,
-            pending_cast: Box::new(PendingCast {
-                object_id: prepared.object_id,
-                card_id: prepared.card_id,
-                ability: resolved,
-                cost: prepared.mana_cost.clone(),
-                activation_cost: None,
-                activation_ability_index: None,
-                target_constraints: Vec::new(),
-            }),
+            pending_cast: Box::new(pending_targets),
             target_slots,
             selection,
         });
@@ -591,6 +607,7 @@ pub fn handle_cast_spell(
         prepared.card_id,
         resolved,
         &prepared.mana_cost,
+        prepared.casting_variant,
         events,
     )
 }
@@ -1080,33 +1097,24 @@ pub fn handle_activate_ability(
                     "No eligible permanents to sacrifice".into(),
                 ));
             }
+            let mut pending_sac =
+                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending_sac.activation_cost = Some(cost.clone());
+            pending_sac.activation_ability_index = Some(ability_index);
             return Ok(WaitingFor::SacrificeForCost {
                 player,
                 count: 1,
                 permanents: eligible,
-                pending_cast: Box::new(PendingCast {
-                    object_id: source_id,
-                    card_id: CardId(0),
-                    ability: resolved,
-                    cost: ManaCost::NoCost,
-                    activation_cost: Some(cost.clone()),
-                    activation_ability_index: Some(ability_index),
-                    target_constraints: Vec::new(),
-                }),
+                pending_cast: Box::new(pending_sac),
             });
         }
 
         // Waterbend cost: detour to ManaPayment with Waterbend mode.
         if let Some(wb_cost) = find_waterbend_cost(cost) {
-            state.pending_cast = Some(Box::new(PendingCast {
-                object_id: source_id,
-                card_id: CardId(0),
-                ability: resolved,
-                cost: wb_cost.clone(),
-                activation_cost: Some(cost.clone()),
-                activation_ability_index: Some(ability_index),
-                target_constraints: Vec::new(),
-            }));
+            let mut pending_wb = PendingCast::new(source_id, CardId(0), resolved, wb_cost.clone());
+            pending_wb.activation_cost = Some(cost.clone());
+            pending_wb.activation_ability_index = Some(ability_index);
+            state.pending_cast = Some(Box::new(pending_wb));
             return Ok(WaitingFor::ManaPayment {
                 player,
                 convoke_mode: Some(ConvokeMode::Waterbend),
@@ -1152,17 +1160,17 @@ pub fn handle_activate_ability(
         }
 
         let selection = begin_target_selection(&target_slots, &[])?;
+        let mut pending_target = PendingCast::new(
+            source_id,
+            CardId(0),
+            resolved,
+            crate::types::mana::ManaCost::NoCost,
+        );
+        pending_target.activation_cost = ability_def.cost.clone();
+        pending_target.activation_ability_index = Some(ability_index);
         return Ok(WaitingFor::TargetSelection {
             player,
-            pending_cast: Box::new(PendingCast {
-                object_id: source_id,
-                card_id: CardId(0),
-                ability: resolved,
-                cost: crate::types::mana::ManaCost::NoCost,
-                activation_cost: ability_def.cost.clone(),
-                activation_ability_index: Some(ability_index),
-                target_constraints: Vec::new(),
-            }),
+            pending_cast: Box::new(pending_target),
             target_slots,
             selection,
         });
@@ -1457,7 +1465,7 @@ mod tests {
                     ObjectId(99),
                     PlayerId(1),
                 ),
-                cast_as_adventure: false,
+                casting_variant: CastingVariant::Normal,
             },
         });
 
@@ -2288,6 +2296,7 @@ mod tests {
                 shards: vec![ManaCostShard::Red],
                 generic: 0,
             },
+            CastingVariant::Normal,
             &mut events,
         )
         .expect("spell with chained targets should cast");
@@ -2664,7 +2673,7 @@ mod tests {
                     obj_id,
                     PlayerId(0),
                 ),
-                cast_as_adventure: true,
+                casting_variant: CastingVariant::Adventure,
             },
         });
 
@@ -2712,7 +2721,7 @@ mod tests {
                     obj_id,
                     PlayerId(0),
                 ),
-                cast_as_adventure: true,
+                casting_variant: CastingVariant::Adventure,
             },
         });
 

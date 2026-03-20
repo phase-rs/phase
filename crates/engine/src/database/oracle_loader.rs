@@ -1,202 +1,19 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 use crate::database::card_db::CardDatabase;
 use crate::database::legality::normalize_legalities;
 use crate::database::mtgjson::{load_atomic_cards, parse_mtgjson_mana_cost, AtomicCard};
+use crate::database::synthesis::{
+    build_card_type, layout_faces, map_layout, map_mtgjson_color, parse_pt_value, synthesize_all,
+    LayoutKind,
+};
 use crate::game::printed_cards::derive_colors_from_mana_cost;
 use crate::parser::oracle::parse_oracle_text;
-use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, ContinuousModification,
-    ControllerRef, Effect, ManaProduction, PtValue, StaticDefinition, TargetFilter, TypedFilter,
-};
 use crate::types::card::{CardFace, CardLayout, CardRules};
-use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
-
-/// Internal layout classification from MTGJSON layout strings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LayoutKind {
-    Single,
-    Split,
-    Flip,
-    Transform,
-    Meld,
-    Adventure,
-    Modal,
-}
-
-fn map_layout(layout_str: &str) -> LayoutKind {
-    match layout_str {
-        "normal" | "saga" | "class" | "case" | "leveler" => LayoutKind::Single,
-        "split" => LayoutKind::Split,
-        "flip" => LayoutKind::Flip,
-        "transform" => LayoutKind::Transform,
-        "meld" => LayoutKind::Meld,
-        "adventure" => LayoutKind::Adventure,
-        "modal_dfc" => LayoutKind::Modal,
-        _ => LayoutKind::Single,
-    }
-}
-
-fn build_card_type(mtgjson: &AtomicCard) -> CardType {
-    let supertypes = mtgjson
-        .supertypes
-        .iter()
-        .filter_map(|s| Supertype::from_str(s).ok())
-        .collect();
-    let core_types = mtgjson
-        .types
-        .iter()
-        .filter_map(|s| CoreType::from_str(s).ok())
-        .collect();
-    let subtypes = mtgjson.subtypes.clone();
-    CardType {
-        supertypes,
-        core_types,
-        subtypes,
-    }
-}
-
-fn map_mtgjson_color(code: &str) -> Option<ManaColor> {
-    match code {
-        "W" => Some(ManaColor::White),
-        "U" => Some(ManaColor::Blue),
-        "B" => Some(ManaColor::Black),
-        "R" => Some(ManaColor::Red),
-        "G" => Some(ManaColor::Green),
-        _ => None,
-    }
-}
-
-fn parse_pt_value(s: &str) -> PtValue {
-    match s.parse::<i32>() {
-        Ok(n) => PtValue::Fixed(n),
-        Err(_) => PtValue::Variable(s.to_string()),
-    }
-}
-
-fn synthesize_basic_land_mana(face: &mut CardFace) {
-    let land_mana: Vec<(&str, ManaColor)> = vec![
-        ("Plains", ManaColor::White),
-        ("Island", ManaColor::Blue),
-        ("Swamp", ManaColor::Black),
-        ("Mountain", ManaColor::Red),
-        ("Forest", ManaColor::Green),
-    ];
-
-    for (subtype, color) in land_mana {
-        if face.card_type.subtypes.iter().any(|s| s == subtype) {
-            face.abilities.push(
-                AbilityDefinition::new(
-                    AbilityKind::Activated,
-                    Effect::Mana {
-                        produced: ManaProduction::Fixed {
-                            colors: vec![color],
-                        },
-                        restrictions: vec![],
-                        expiry: None,
-                    },
-                )
-                .cost(AbilityCost::Tap),
-            );
-        }
-    }
-}
-
-fn synthesize_equip(face: &mut CardFace) {
-    let equip_abilities: Vec<AbilityDefinition> = face
-        .keywords
-        .iter()
-        .filter_map(|kw| {
-            if let Keyword::Equip(cost) = kw {
-                Some(
-                    AbilityDefinition::new(
-                        AbilityKind::Activated,
-                        Effect::Attach {
-                            target: TargetFilter::Typed(
-                                TypedFilter::creature().controller(ControllerRef::You),
-                            ),
-                        },
-                    )
-                    .cost(AbilityCost::Mana { cost: cost.clone() }),
-                )
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    face.abilities.extend(equip_abilities);
-}
-
-/// CR 702.49a: Synthesize a marker activated ability from Keyword::Ninjutsu so that
-/// legal_actions can enumerate it. The actual activation is handled by the
-/// GameAction::ActivateNinjutsu path, not by the normal activated ability resolution.
-fn synthesize_ninjutsu(face: &mut CardFace) {
-    let ninjutsu_abilities: Vec<AbilityDefinition> = face
-        .keywords
-        .iter()
-        .filter_map(|kw| {
-            if let Keyword::Ninjutsu(cost) = kw {
-                Some(
-                    AbilityDefinition::new(
-                        AbilityKind::Activated,
-                        Effect::Unimplemented {
-                            name: "Ninjutsu".to_string(),
-                            description: None,
-                        },
-                    )
-                    .cost(AbilityCost::Ninjutsu {
-                        mana_cost: cost.clone(),
-                    }),
-                )
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    face.abilities.extend(ninjutsu_abilities);
-}
-
-/// If the card has Changeling as a printed keyword, emit a characteristic-defining
-/// static ability that grants all creature types (expanded at runtime via
-/// `GameState::all_creature_types`).
-fn synthesize_changeling_cda(face: &mut CardFace) {
-    if face
-        .keywords
-        .iter()
-        .any(|k| matches!(k, Keyword::Changeling))
-    {
-        face.static_abilities.push(
-            StaticDefinition::continuous()
-                .affected(TargetFilter::SelfRef)
-                .modifications(vec![ContinuousModification::AddAllCreatureTypes])
-                .cda(),
-        );
-    }
-}
-
-/// Synthesize `additional_cost` from `Keyword::Kicker(ManaCost)`.
-///
-/// If the card has Kicker and no additional_cost was already parsed from Oracle text
-/// (blight takes precedence since it's parsed from the "as an additional cost" line),
-/// set `additional_cost = Some(AdditionalCost::Optional(AbilityCost::Mana { cost }))`.
-fn synthesize_kicker(face: &mut CardFace) {
-    if face.additional_cost.is_some() {
-        return;
-    }
-    if let Some(cost) = face.keywords.iter().find_map(|k| match k {
-        Keyword::Kicker(cost) => Some(cost.clone()),
-        _ => None,
-    }) {
-        face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Mana { cost }));
-    }
-}
 
 fn build_oracle_face(mtgjson: &AtomicCard, oracle_id: Option<String>) -> CardFace {
     let card_type = build_card_type(mtgjson);
@@ -280,30 +97,8 @@ fn build_oracle_face(mtgjson: &AtomicCard, oracle_id: Option<String>) -> CardFac
         solve_condition: parsed.solve_condition,
     };
 
-    synthesize_basic_land_mana(&mut face);
-    synthesize_equip(&mut face);
-    synthesize_ninjutsu(&mut face);
-    synthesize_changeling_cda(&mut face);
-    synthesize_kicker(&mut face);
+    synthesize_all(&mut face);
     face
-}
-
-fn layout_faces(layout: &CardLayout) -> Vec<&CardFace> {
-    match layout {
-        CardLayout::Single(face) => vec![face],
-        CardLayout::Split(a, b)
-        | CardLayout::Flip(a, b)
-        | CardLayout::Transform(a, b)
-        | CardLayout::Meld(a, b)
-        | CardLayout::Adventure(a, b)
-        | CardLayout::Modal(a, b)
-        | CardLayout::Omen(a, b) => vec![a, b],
-        CardLayout::Specialize(base, variants) => {
-            let mut faces = vec![base];
-            faces.extend(variants);
-            faces
-        }
-    }
 }
 
 /// Load a card database from MTGJSON, running the Oracle text parser on each card.

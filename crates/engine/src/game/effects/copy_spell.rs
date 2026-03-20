@@ -45,7 +45,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::types::ability::{Effect, QuantityExpr, TargetFilter};
-    use crate::types::game_state::{StackEntry, StackEntryKind};
+    use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
@@ -71,7 +71,7 @@ mod tests {
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
                 ability: original_ability.clone(),
-                cast_as_adventure: false,
+                casting_variant: CastingVariant::Normal,
             },
         });
 

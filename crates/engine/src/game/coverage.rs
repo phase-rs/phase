@@ -4,9 +4,9 @@ use crate::game::game_object::GameObject;
 use crate::game::static_abilities::{build_static_registry, StaticAbilityHandler};
 use crate::game::triggers::build_trigger_registry;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, ControllerRef, DamageAmount,
-    Duration, Effect, FilterProp, PtValue, QuantityExpr, ReplacementDefinition, ReplacementMode,
-    StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, ControllerRef, Duration, Effect,
+    FilterProp, PtValue, QuantityExpr, ReplacementDefinition, ReplacementMode, StaticDefinition,
+    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::keywords::Keyword;
@@ -281,13 +281,7 @@ fn fmt_pt(p: &PtValue) -> String {
     match p {
         PtValue::Fixed(n) => format!("{n:+}"),
         PtValue::Variable(s) => format!("+{s}"),
-    }
-}
-
-fn fmt_damage_amount(a: &DamageAmount) -> String {
-    match a {
-        DamageAmount::Fixed(n) => n.to_string(),
-        DamageAmount::Variable(s) => s.clone(),
+        PtValue::Quantity(q) => format!("+{}", fmt_quantity(q)),
     }
 }
 
@@ -301,6 +295,12 @@ fn fmt_quantity(q: &QuantityExpr) -> String {
                 crate::types::ability::RoundingMode::Down => "down",
             };
             format!("half({}, rounded {})", fmt_quantity(inner), dir)
+        }
+        QuantityExpr::Offset { inner, offset } => {
+            format!("{}+{}", fmt_quantity(inner), offset)
+        }
+        QuantityExpr::Multiply { factor, inner } => {
+            format!("{}*{}", factor, fmt_quantity(inner))
         }
     }
 }
@@ -379,7 +379,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("filter".into(), fmt_target(target)));
             }
             if let Effect::DamageAll { amount, .. } = effect {
-                d.push(("amount".into(), fmt_damage_amount(amount)));
+                d.push(("amount".into(), fmt_quantity(amount)));
             }
         }
         Effect::Counter {
@@ -402,14 +402,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             count,
             tapped,
             attach_to,
+            ..
         } => {
             let mut desc = String::new();
             match count {
-                crate::types::ability::CountValue::Fixed(n) if *n != 1 => {
+                QuantityExpr::Fixed { value: n } if *n != 1 => {
                     desc.push_str(&format!("{n}× "));
                 }
-                crate::types::ability::CountValue::Variable(v) => {
-                    desc.push_str(&format!("{v}× "));
+                QuantityExpr::Ref { qty } => {
+                    desc.push_str(&format!("{qty:?}× "));
                 }
                 _ => {}
             }
@@ -597,13 +598,25 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
         }
         Effect::GenericEffect {
-            duration, target, ..
+            static_abilities,
+            duration,
+            target,
         } => {
             if let Some(dur) = duration {
                 d.push(("duration".into(), fmt_duration(dur)));
             }
             if let Some(t) = target {
                 d.push(("target".into(), fmt_target(t)));
+            }
+            for stat in static_abilities {
+                for modification in &stat.modifications {
+                    d.push(("grants".into(), fmt_modification(modification)));
+                }
+                if let Some(affected) = &stat.affected {
+                    if !matches!(affected, TargetFilter::None) {
+                        d.push(("affects".into(), fmt_target(affected)));
+                    }
+                }
             }
         }
         Effect::SetClassLevel { level } => {
@@ -650,6 +663,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             } else {
                 d.push(("counter".into(), "all".into()));
             }
+            d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::Exploit { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::Unimplemented { .. }
@@ -749,6 +765,65 @@ fn trigger_details(trig: &TriggerDefinition) -> Vec<(String, String)> {
         d.push(("condition".into(), "yes".into()));
     }
     d
+}
+
+/// Format a single `ContinuousModification` as a human-readable string.
+fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String {
+    use crate::types::ability::ContinuousModification;
+    match m {
+        ContinuousModification::AddPower { value } => format!("power {:+}", value),
+        ContinuousModification::AddToughness { value } => format!("toughness {:+}", value),
+        ContinuousModification::SetPower { value } => format!("base power {value}"),
+        ContinuousModification::SetToughness { value } => format!("base toughness {value}"),
+        ContinuousModification::AddKeyword { keyword } => {
+            format!("grant {}", keyword_label(keyword))
+        }
+        ContinuousModification::RemoveKeyword { keyword } => {
+            format!("remove {}", keyword_label(keyword))
+        }
+        ContinuousModification::GrantAbility { .. } => "grant ability".into(),
+        ContinuousModification::RemoveAllAbilities => "remove all abilities".into(),
+        ContinuousModification::AddType { core_type } => format!("add type {core_type:?}"),
+        ContinuousModification::RemoveType { core_type } => format!("remove type {core_type:?}"),
+        ContinuousModification::AddSubtype { subtype } => format!("add subtype {subtype}"),
+        ContinuousModification::RemoveSubtype { subtype } => {
+            format!("remove subtype {subtype}")
+        }
+        ContinuousModification::SetDynamicPower { .. } => "dynamic power".into(),
+        ContinuousModification::SetDynamicToughness { .. } => "dynamic toughness".into(),
+        ContinuousModification::AddAllCreatureTypes => "all creature types".into(),
+        ContinuousModification::AddChosenSubtype { .. } => "add chosen subtype".into(),
+        ContinuousModification::AddChosenColor => "add chosen color".into(),
+        ContinuousModification::SetColor { colors } => {
+            let c: Vec<_> = colors.iter().map(|c| format!("{c:?}")).collect();
+            format!("set color {}", c.join("/"))
+        }
+        ContinuousModification::AddColor { color } => format!("add color {color:?}"),
+        ContinuousModification::AddStaticMode { mode } => format!("{mode}"),
+        ContinuousModification::AssignDamageFromToughness => "damage from toughness".into(),
+    }
+}
+
+/// Derive a descriptive label for a `GenericEffect` from its static abilities.
+///
+/// Instead of showing "GenericEffect", surfaces the actual mechanics being granted
+/// (e.g. "MustBeBlocked", "grant Flying + Haste", "power +2, toughness +2").
+fn generic_effect_label(statics: &[StaticDefinition]) -> String {
+    let mod_labels: Vec<String> = statics
+        .iter()
+        .flat_map(|s| s.modifications.iter().map(fmt_modification))
+        .collect();
+
+    if mod_labels.is_empty() {
+        // Fall back to static modes if no modifications
+        let modes: Vec<String> = statics.iter().map(|s| format!("{}", s.mode)).collect();
+        if modes.is_empty() {
+            return "GenericEffect".into();
+        }
+        return modes.join(" + ");
+    }
+
+    mod_labels.join(", ")
 }
 
 /// Extract detail pairs from a `StaticDefinition`.
@@ -882,6 +957,16 @@ pub fn build_parse_details(
 fn build_ability_item(def: &AbilityDefinition) -> ParsedItem {
     let label = match &def.effect {
         Effect::Unimplemented { name, .. } => name.clone(),
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => {
+            let derived = generic_effect_label(static_abilities);
+            if derived == "GenericEffect" && def.modal.is_some() {
+                "Modal".into()
+            } else {
+                derived
+            }
+        }
         _ => effect_type_name(&def.effect),
     };
     let supported = !matches!(&def.effect, Effect::Unimplemented { .. });
@@ -2121,5 +2206,74 @@ mod tests {
         assert_eq!(gaps[1].handler, "Trigger:ChangesZone");
         assert_eq!(gaps[2].handler, "Static:Prevention");
         assert_eq!(gaps[3].handler, "Cost:sacrifice a creature");
+    }
+
+    #[test]
+    fn generic_effect_label_shows_static_modes() {
+        use crate::types::ability::ContinuousModification;
+
+        let def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition {
+                    mode: StaticMode::Other("MustBeBlocked".to_string()),
+                    affected: None,
+                    modifications: vec![ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Other("MustBeBlocked".to_string()),
+                    }],
+                    condition: None,
+                    affected_zone: None,
+                    effect_zone: None,
+                    characteristic_defining: false,
+                    description: None,
+                }],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            },
+        );
+
+        let item = build_ability_item(&def);
+        assert_eq!(item.label, "MustBeBlocked");
+        assert!(item
+            .details
+            .iter()
+            .any(|(k, v)| k == "grants" && v == "MustBeBlocked"));
+        assert!(item
+            .details
+            .iter()
+            .any(|(k, v)| k == "duration" && v == "until end of turn"));
+    }
+
+    #[test]
+    fn generic_effect_label_shows_keyword_grants() {
+        use crate::types::ability::ContinuousModification;
+
+        let def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition {
+                    mode: StaticMode::Continuous,
+                    affected: None,
+                    modifications: vec![
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Flying,
+                        },
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Haste,
+                        },
+                    ],
+                    condition: None,
+                    affected_zone: None,
+                    effect_zone: None,
+                    characteristic_defining: false,
+                    description: None,
+                }],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            },
+        );
+
+        let item = build_ability_item(&def);
+        assert_eq!(item.label, "grant Flying, grant Haste");
     }
 }

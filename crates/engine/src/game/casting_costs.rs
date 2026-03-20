@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::types::ability::{AbilityCost, AdditionalCost, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ConvokeMode, GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor,
+    CastingVariant, ConvokeMode, GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -75,6 +75,7 @@ pub(crate) fn handle_decide_additional_cost(
             updated_pending.card_id,
             updated_pending.ability,
             &updated_pending.cost,
+            CastingVariant::Normal,
             events,
         )
     }
@@ -121,6 +122,7 @@ pub(crate) fn handle_discard_for_cost(
         pending.card_id,
         pending.ability,
         &pending.cost,
+        CastingVariant::Normal,
         events,
     )
 }
@@ -175,6 +177,7 @@ pub(crate) fn handle_sacrifice_for_cost(
             pending.card_id,
             pending.ability,
             &pending.cost,
+            CastingVariant::Normal,
             events,
         )
     }
@@ -215,17 +218,17 @@ pub(super) fn push_activated_ability_to_stack(
 
         // Targets need interactive selection
         let selection = begin_target_selection(&target_slots, &[])?;
+        let mut pending_act = PendingCast::new(
+            source_id,
+            CardId(0),
+            resolved,
+            crate::types::mana::ManaCost::NoCost,
+        );
+        pending_act.activation_cost = remaining_cost.cloned();
+        pending_act.activation_ability_index = Some(ability_index);
         return Ok(WaitingFor::TargetSelection {
             player,
-            pending_cast: Box::new(PendingCast {
-                object_id: source_id,
-                card_id: CardId(0),
-                ability: resolved,
-                cost: crate::types::mana::ManaCost::NoCost,
-                activation_cost: remaining_cost.cloned(),
-                activation_ability_index: Some(ability_index),
-                target_constraints: Vec::new(),
-            }),
+            pending_cast: Box::new(pending_act),
             target_slots,
             selection,
         });
@@ -277,6 +280,7 @@ fn push_ability_entry(
 ///
 /// This function sits between targeting and payment in the casting pipeline:
 /// `CastSpell → [ModeChoice] → [TargetSelection] → [AdditionalCostChoice] → pay_and_push → Stack`
+#[allow(clippy::too_many_arguments)]
 pub(super) fn check_additional_cost_or_pay(
     state: &mut GameState,
     player: PlayerId,
@@ -284,6 +288,7 @@ pub(super) fn check_additional_cost_or_pay(
     card_id: CardId,
     ability: ResolvedAbility,
     cost: &crate::types::mana::ManaCost,
+    casting_variant: CastingVariant,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let additional = state
@@ -295,36 +300,32 @@ pub(super) fn check_additional_cost_or_pay(
         match &additional_cost {
             AdditionalCost::Required(req_cost) => {
                 // Required additional costs bypass the choice prompt — pay directly.
-                let pending = PendingCast {
-                    object_id,
-                    card_id,
-                    ability,
-                    cost: cost.clone(),
-                    activation_cost: None,
-                    activation_ability_index: None,
-                    target_constraints: Vec::new(),
-                };
+                let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+                pending.casting_variant = casting_variant;
                 return pay_additional_cost(state, player, req_cost.clone(), pending, events);
             }
             AdditionalCost::Optional(_) | AdditionalCost::Choice(_, _) => {
+                let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+                pending.casting_variant = casting_variant;
                 return Ok(WaitingFor::OptionalCostChoice {
                     player,
                     cost: additional_cost,
-                    pending_cast: Box::new(PendingCast {
-                        object_id,
-                        card_id,
-                        ability,
-                        cost: cost.clone(),
-                        activation_cost: None,
-                        activation_ability_index: None,
-                        target_constraints: Vec::new(),
-                    }),
+                    pending_cast: Box::new(pending),
                 });
             }
         }
     }
 
-    pay_and_push(state, player, object_id, card_id, ability, cost, events)
+    pay_and_push(
+        state,
+        player,
+        object_id,
+        card_id,
+        ability,
+        cost,
+        casting_variant,
+        events,
+    )
 }
 
 /// CR 601.2b: Pay an additional cost, returning a WaitingFor if interactive input is needed
@@ -400,6 +401,7 @@ fn pay_additional_cost(
                 pending.card_id,
                 pending.ability,
                 &combined,
+                CastingVariant::Normal,
                 events,
             );
         }
@@ -453,10 +455,12 @@ fn pay_additional_cost(
         pending.card_id,
         pending.ability,
         &pending.cost,
+        CastingVariant::Normal,
         events,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn pay_and_push(
     state: &mut GameState,
     player: PlayerId,
@@ -464,10 +468,18 @@ pub(super) fn pay_and_push(
     card_id: CardId,
     ability: ResolvedAbility,
     cost: &crate::types::mana::ManaCost,
+    casting_variant: CastingVariant,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     pay_and_push_adventure(
-        state, player, object_id, card_id, ability, cost, false, events,
+        state,
+        player,
+        object_id,
+        card_id,
+        ability,
+        cost,
+        casting_variant,
+        events,
     )
 }
 
@@ -479,7 +491,7 @@ pub(super) fn pay_and_push_adventure(
     card_id: CardId,
     ability: ResolvedAbility,
     cost: &crate::types::mana::ManaCost,
-    cast_as_adventure: bool,
+    casting_variant: CastingVariant,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     // CR 702.6a: Check for Convoke or Waterbend keyword on the spell.
@@ -503,15 +515,12 @@ pub(super) fn pay_and_push_adventure(
     // Enter ManaPayment if the cost has X (needs player input) or convoke/waterbend is available.
     let has_x = matches!(cost, crate::types::mana::ManaCost::Cost { shards, .. } if shards.contains(&ManaCostShard::X));
     if has_x || convoke_mode.is_some() {
-        state.pending_cast = Some(Box::new(PendingCast {
+        state.pending_cast = Some(Box::new(PendingCast::new(
             object_id,
             card_id,
             ability,
-            cost: cost.clone(),
-            activation_cost: None,
-            activation_ability_index: None,
-            target_constraints: vec![],
-        }));
+            cost.clone(),
+        )));
         return Ok(WaitingFor::ManaPayment {
             player,
             convoke_mode,
@@ -525,7 +534,7 @@ pub(super) fn pay_and_push_adventure(
         card_id,
         ability,
         cost,
-        cast_as_adventure,
+        casting_variant,
         events,
     )
 }
@@ -541,7 +550,7 @@ pub(super) fn finalize_cast(
     card_id: CardId,
     ability: ResolvedAbility,
     cost: &crate::types::mana::ManaCost,
-    cast_as_adventure: bool,
+    casting_variant: CastingVariant,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     super::casting::pay_mana_cost(state, player, object_id, cost, events)?;
@@ -580,7 +589,7 @@ pub(super) fn finalize_cast(
             kind: StackEntryKind::Spell {
                 card_id,
                 ability,
-                cast_as_adventure,
+                casting_variant,
             },
         },
         events,
@@ -778,6 +787,7 @@ mod tests {
             activation_cost: None,
             activation_ability_index: Some(0),
             target_constraints: Vec::new(),
+            casting_variant: CastingVariant::Normal,
         }
     }
 

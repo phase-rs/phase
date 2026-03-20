@@ -3,10 +3,12 @@ use std::str::FromStr;
 use crate::game::combat::AttackerInfo;
 use crate::game::game_object::GameObject;
 use crate::game::zones;
+use crate::types::ability::NinjutsuVariant;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{Keyword, ProtectionTarget};
+use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -90,49 +92,70 @@ pub fn parse_keywords(keyword_strings: &[String]) -> Vec<Keyword> {
         .collect()
 }
 
-/// CR 702.49a-c: Resolve Ninjutsu activation.
+/// CR 702.49: Check if the current phase allows activation of a Ninjutsu-family variant.
+pub fn ninjutsu_timing_ok(phase: &Phase, variant: &NinjutsuVariant) -> bool {
+    match variant {
+        // CR 702.49a: Ninjutsu can be activated during declare blockers step or later
+        NinjutsuVariant::Ninjutsu | NinjutsuVariant::WebSlinging => {
+            matches!(phase, Phase::DeclareBlockers | Phase::CombatDamage)
+        }
+        // Sneak: declare blockers step only
+        NinjutsuVariant::Sneak => matches!(phase, Phase::DeclareBlockers),
+    }
+}
+
+/// CR 702.49: Return the creatures that can be returned for this variant.
+/// - Ninjutsu/Sneak: unblocked attackers controlled by `player`
+/// - WebSlinging: any tapped creature controlled by `player`
+pub fn returnable_creatures_for_variant(
+    state: &GameState,
+    player: PlayerId,
+    variant: &NinjutsuVariant,
+) -> Vec<ObjectId> {
+    match variant {
+        NinjutsuVariant::Ninjutsu | NinjutsuVariant::Sneak => {
+            super::combat::unblocked_attackers(state)
+                .into_iter()
+                .filter(|&id| {
+                    state
+                        .objects
+                        .get(&id)
+                        .is_some_and(|o| o.controller == player)
+                })
+                .collect()
+        }
+        NinjutsuVariant::WebSlinging => state
+            .objects
+            .values()
+            .filter(|o| {
+                o.controller == player
+                    && o.zone == Zone::Battlefield
+                    && o.tapped
+                    && o.card_types
+                        .core_types
+                        .contains(&crate::types::card_type::CoreType::Creature)
+            })
+            .map(|o| o.id)
+            .collect(),
+    }
+}
+
+/// CR 702.49a-c: Resolve Ninjutsu-family activation.
 ///
-/// Validates the activation, returns the specified attacker to its owner's hand,
+/// Validates the activation, returns the specified creature to its owner's hand,
 /// and puts the Ninjutsu creature onto the battlefield tapped and attacking the
-/// same player/planeswalker as the returned creature.
+/// same player/planeswalker as the returned creature (or active player's opponent
+/// for WebSlinging when the returned creature isn't an attacker).
 ///
-/// CR 702.49c: The Ninjutsu creature is never "declared as an attacker" so it
+/// CR 702.49c: The creature is never "declared as an attacker" so it
 /// does not fire "whenever ~ attacks" triggers.
 pub fn activate_ninjutsu(
     state: &mut GameState,
     player: PlayerId,
     ninjutsu_card_id: CardId,
-    attacker_to_return: ObjectId,
+    creature_to_return: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), String> {
-    // Validate: must be in combat (declare blockers or later)
-    let combat = state.combat.as_ref().ok_or("No active combat")?;
-
-    // Validate: attacker must be in combat and unblocked
-    let attacker_info = combat
-        .attackers
-        .iter()
-        .find(|a| a.object_id == attacker_to_return)
-        .ok_or("Specified creature is not an attacker")?
-        .clone();
-
-    let is_blocked = combat
-        .blocker_assignments
-        .get(&attacker_to_return)
-        .is_some_and(|blockers| !blockers.is_empty());
-    if is_blocked {
-        return Err("Attacker is blocked".to_string());
-    }
-
-    // Validate: attacker controlled by player
-    let attacker_obj = state
-        .objects
-        .get(&attacker_to_return)
-        .ok_or("Attacker not found")?;
-    if attacker_obj.controller != player {
-        return Err("You don't control that attacker".to_string());
-    }
-
     // Find the ninjutsu card in player's hand
     let p = &state.players[player.0 as usize];
     let ninjutsu_obj_id = p
@@ -145,32 +168,99 @@ pub fn activate_ninjutsu(
                 .is_some_and(|o| o.card_id == ninjutsu_card_id)
         })
         .copied()
-        .ok_or("Ninjutsu card not in hand")?;
+        .ok_or("Ninjutsu-family card not in hand")?;
 
-    // Validate: card has Ninjutsu keyword
+    // Determine which variant from the card's keywords
     let ninjutsu_obj = state
         .objects
         .get(&ninjutsu_obj_id)
-        .ok_or("Ninjutsu card object not found")?;
-    if !ninjutsu_obj.has_keyword(&Keyword::Ninjutsu(Default::default())) {
-        return Err("Card does not have Ninjutsu".to_string());
+        .ok_or("Ninjutsu-family card object not found")?;
+    let variant = ninjutsu_family_variant(ninjutsu_obj)
+        .ok_or("Card does not have a Ninjutsu-family keyword")?;
+
+    // Validate timing
+    if !ninjutsu_timing_ok(&state.phase, &variant) {
+        return Err(format!(
+            "{variant:?} can only be activated during the declare blockers step"
+        ));
     }
 
-    // Get the defending player from the attacker's combat info
-    let defending_player = attacker_info.defending_player;
+    // Validate: must be in combat
+    let combat = state.combat.as_ref().ok_or("No active combat")?;
 
-    // 1. Return attacker to owner's hand
-    zones::move_to_zone(state, attacker_to_return, Zone::Hand, events);
+    // Validate the creature to return based on variant
+    let defending_player = match variant {
+        NinjutsuVariant::Ninjutsu | NinjutsuVariant::Sneak => {
+            // Must be an unblocked attacker
+            let attacker_info = combat
+                .attackers
+                .iter()
+                .find(|a| a.object_id == creature_to_return)
+                .ok_or("Specified creature is not an attacker")?
+                .clone();
 
-    // Remove the returned attacker from combat state
+            let is_blocked = combat
+                .blocker_assignments
+                .get(&creature_to_return)
+                .is_some_and(|blockers| !blockers.is_empty());
+            if is_blocked {
+                return Err("Attacker is blocked".to_string());
+            }
+
+            attacker_info.defending_player
+        }
+        NinjutsuVariant::WebSlinging => {
+            // Must be a tapped creature controlled by player
+            let obj = state
+                .objects
+                .get(&creature_to_return)
+                .ok_or("Creature not found")?;
+            if !obj.tapped {
+                return Err("WebSlinging requires a tapped creature".to_string());
+            }
+            if !obj
+                .card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Creature)
+            {
+                return Err("WebSlinging requires a creature".to_string());
+            }
+
+            // If the tapped creature is an attacker, use its defending player;
+            // otherwise use the opponent of the active player
+            combat
+                .attackers
+                .iter()
+                .find(|a| a.object_id == creature_to_return)
+                .map(|a| a.defending_player)
+                .unwrap_or_else(|| {
+                    // Default to the opponent (player who isn't the active player)
+                    PlayerId(1 - player.0)
+                })
+        }
+    };
+
+    // Validate: creature controlled by player
+    let creature_obj = state
+        .objects
+        .get(&creature_to_return)
+        .ok_or("Creature not found")?;
+    if creature_obj.controller != player {
+        return Err("You don't control that creature".to_string());
+    }
+
+    // 1. Return creature to owner's hand
+    zones::move_to_zone(state, creature_to_return, Zone::Hand, events);
+
+    // Remove the returned creature from combat state if it was an attacker
     if let Some(combat) = state.combat.as_mut() {
         combat
             .attackers
-            .retain(|a| a.object_id != attacker_to_return);
-        combat.blocker_assignments.remove(&attacker_to_return);
+            .retain(|a| a.object_id != creature_to_return);
+        combat.blocker_assignments.remove(&creature_to_return);
     }
 
-    // 2. Move Ninjutsu card from hand to battlefield
+    // 2. Move Ninjutsu-family card from hand to battlefield
     zones::move_to_zone(state, ninjutsu_obj_id, Zone::Battlefield, events);
 
     // 3. Set tapped, entered_battlefield_turn (summoning sickness)
@@ -193,19 +283,41 @@ pub fn activate_ninjutsu(
     Ok(())
 }
 
-/// Returns the CardIds of cards in the player's hand that have the Ninjutsu keyword.
-pub fn ninjutsu_cards_in_hand(state: &GameState, player: PlayerId) -> Vec<CardId> {
+/// Detect which NinjutsuVariant a game object has, if any.
+fn ninjutsu_family_variant(obj: &GameObject) -> Option<NinjutsuVariant> {
+    for kw in &obj.keywords {
+        match kw {
+            Keyword::Ninjutsu(_) => return Some(NinjutsuVariant::Ninjutsu),
+            Keyword::Sneak(_) => return Some(NinjutsuVariant::Sneak),
+            Keyword::WebSlinging(_) => return Some(NinjutsuVariant::WebSlinging),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Returns the CardIds + variant of cards in the player's hand that have a Ninjutsu-family keyword.
+pub fn ninjutsu_family_cards_in_hand(
+    state: &GameState,
+    player: PlayerId,
+) -> Vec<(CardId, NinjutsuVariant)> {
     let p = &state.players[player.0 as usize];
     p.hand
         .iter()
         .filter_map(|&obj_id| {
             let obj = state.objects.get(&obj_id)?;
-            if obj.has_keyword(&Keyword::Ninjutsu(Default::default())) {
-                Some(obj.card_id)
-            } else {
-                None
-            }
+            let variant = ninjutsu_family_variant(obj)?;
+            Some((obj.card_id, variant))
         })
+        .collect()
+}
+
+/// Returns the CardIds of cards in the player's hand that have the Ninjutsu keyword.
+/// (Legacy compatibility — used by WaitingFor::NinjutsuActivation.)
+pub fn ninjutsu_cards_in_hand(state: &GameState, player: PlayerId) -> Vec<CardId> {
+    ninjutsu_family_cards_in_hand(state, player)
+        .into_iter()
+        .map(|(card_id, _)| card_id)
         .collect()
 }
 

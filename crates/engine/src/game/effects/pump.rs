@@ -1,4 +1,5 @@
 use crate::game::filter;
+use crate::game::quantity::resolve_quantity;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, PtValue, ResolvedAbility, TargetFilter, TargetRef,
 };
@@ -17,7 +18,11 @@ pub fn resolve(
             power,
             toughness,
             target,
-        } => (resolve_pt_value(power), resolve_pt_value(toughness), target),
+        } => (
+            resolve_pt_value(power, state, ability),
+            resolve_pt_value(toughness, state, ability),
+            target,
+        ),
         _ => return Ok(()),
     };
 
@@ -73,8 +78,8 @@ pub fn resolve_all(
             toughness,
             target,
         } => (
-            resolve_pt_value(power),
-            resolve_pt_value(toughness),
+            resolve_pt_value(power, state, ability),
+            resolve_pt_value(toughness, state, ability),
             target.clone(),
         ),
         _ => (0, 0, TargetFilter::None),
@@ -115,10 +120,13 @@ pub fn resolve_all(
     Ok(())
 }
 
-fn resolve_pt_value(value: &PtValue) -> i32 {
+fn resolve_pt_value(value: &PtValue, state: &GameState, ability: &ResolvedAbility) -> i32 {
     match value {
         PtValue::Fixed(n) => *n,
         PtValue::Variable(_) => 0,
+        PtValue::Quantity(expr) => {
+            resolve_quantity(state, expr, ability.controller, ability.source_id)
+        }
     }
 }
 

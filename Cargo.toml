@@ -2,7 +2,8 @@ cargo-features = ["codegen-backend"]
 
 [workspace]
 resolver = "2"
-members = ["crates/*", "client/src-tauri"]
+members = ["crates/*"]
+exclude = ["client/src-tauri"]
 
 [workspace.package]
 license = "MIT OR Apache-2.0"

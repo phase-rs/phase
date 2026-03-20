@@ -1,6 +1,6 @@
+use crate::game::quantity::resolve_quantity;
 use crate::types::ability::{
-    CountValue, Effect, EffectError, EffectKind, ManaProduction, ManaSpendRestriction,
-    ResolvedAbility,
+    Effect, EffectError, EffectKind, ManaProduction, ManaSpendRestriction, ResolvedAbility,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -23,7 +23,8 @@ pub fn resolve(
     // ChosenColor needs to read from the source object's chosen_attributes
     let mana_types = match produced {
         ManaProduction::ChosenColor { count } => {
-            let amount = resolve_count_value(count) as usize;
+            let amount = resolve_quantity(&*state, count, ability.controller, ability.source_id)
+                .max(0) as usize;
             state
                 .objects
                 .get(&ability.source_id)
@@ -31,7 +32,7 @@ pub fn resolve(
                 .map(|color| vec![mana_color_to_type(&color); amount])
                 .unwrap_or_default()
         }
-        other => resolve_mana_types(other),
+        other => resolve_mana_types(other, &*state, ability.controller, ability.source_id),
     };
 
     // Resolve restriction templates into concrete restrictions
@@ -94,17 +95,25 @@ fn resolve_restrictions(
 /// Current limitations:
 /// - Variable counts resolve to 0 units.
 /// - Chosen-color production resolves to 0 units (chosen-color runtime binding is not implemented).
-pub(crate) fn resolve_mana_types(produced: &ManaProduction) -> Vec<ManaType> {
+pub(crate) fn resolve_mana_types(
+    produced: &ManaProduction,
+    state: &GameState,
+    controller: crate::types::player::PlayerId,
+    source_id: crate::types::identifiers::ObjectId,
+) -> Vec<ManaType> {
     match produced {
         ManaProduction::Fixed { colors } => colors.iter().map(mana_color_to_type).collect(),
         ManaProduction::Colorless { count } => {
-            vec![ManaType::Colorless; resolve_count_value(count) as usize]
+            vec![
+                ManaType::Colorless;
+                resolve_quantity(state, count, controller, source_id).max(0) as usize
+            ]
         }
         ManaProduction::AnyOneColor {
             count,
             color_options,
         } => {
-            let amount = resolve_count_value(count) as usize;
+            let amount = resolve_quantity(state, count, controller, source_id).max(0) as usize;
             let Some(mana_type) = color_options.first().map(mana_color_to_type) else {
                 return Vec::new();
             };
@@ -114,7 +123,7 @@ pub(crate) fn resolve_mana_types(produced: &ManaProduction) -> Vec<ManaType> {
             count,
             color_options,
         } => {
-            let amount = resolve_count_value(count) as usize;
+            let amount = resolve_quantity(state, count, controller, source_id).max(0) as usize;
             if color_options.is_empty() {
                 return Vec::new();
             }
@@ -123,13 +132,6 @@ pub(crate) fn resolve_mana_types(produced: &ManaProduction) -> Vec<ManaType> {
                 .collect()
         }
         ManaProduction::ChosenColor { .. } => Vec::new(),
-    }
-}
-
-fn resolve_count_value(value: &CountValue) -> u32 {
-    match value {
-        CountValue::Fixed(n) => *n,
-        CountValue::Variable(_) | CountValue::TrackedSetSize => 0,
     }
 }
 
@@ -147,6 +149,7 @@ fn mana_color_to_type(color: &ManaColor) -> ManaType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::QuantityExpr;
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
 
@@ -317,7 +320,7 @@ mod tests {
         resolve(
             &mut state,
             &make_mana_ability(ManaProduction::Colorless {
-                count: CountValue::Fixed(2),
+                count: QuantityExpr::Fixed { value: 2 },
             }),
             &mut events,
         )
@@ -337,7 +340,7 @@ mod tests {
         resolve(
             &mut state,
             &make_mana_ability(ManaProduction::AnyOneColor {
-                count: CountValue::Fixed(2),
+                count: QuantityExpr::Fixed { value: 2 },
                 color_options: vec![ManaColor::Blue, ManaColor::Red],
             }),
             &mut events,
@@ -356,7 +359,7 @@ mod tests {
         resolve(
             &mut state,
             &make_mana_ability(ManaProduction::AnyCombination {
-                count: CountValue::Fixed(3),
+                count: QuantityExpr::Fixed { value: 3 },
                 color_options: vec![ManaColor::Black, ManaColor::Green],
             }),
             &mut events,
@@ -389,7 +392,7 @@ mod tests {
 
         let mut events = Vec::new();
         let ability = make_mana_ability(ManaProduction::ChosenColor {
-            count: CountValue::Fixed(1),
+            count: QuantityExpr::Fixed { value: 1 },
         });
         // Override source_id to match our object
         let ability = ResolvedAbility {
@@ -411,7 +414,7 @@ mod tests {
         resolve(
             &mut state,
             &make_mana_ability(ManaProduction::ChosenColor {
-                count: CountValue::Fixed(1),
+                count: QuantityExpr::Fixed { value: 1 },
             }),
             &mut events,
         )
@@ -428,7 +431,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Mana {
                 produced: ManaProduction::AnyOneColor {
-                    count: CountValue::Fixed(1),
+                    count: QuantityExpr::Fixed { value: 1 },
                     color_options: vec![ManaColor::Green],
                 },
                 restrictions: vec![ManaSpendRestriction::SpellType("Creature".to_string())],
@@ -472,7 +475,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Mana {
                 produced: ManaProduction::AnyOneColor {
-                    count: CountValue::Fixed(1),
+                    count: QuantityExpr::Fixed { value: 1 },
                     color_options: vec![ManaColor::Green],
                 },
                 restrictions: vec![ManaSpendRestriction::ChosenCreatureType],

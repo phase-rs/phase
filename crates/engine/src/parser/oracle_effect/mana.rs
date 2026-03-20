@@ -1,4 +1,6 @@
-use crate::types::ability::{CountValue, Effect, ManaProduction, ManaSpendRestriction};
+use crate::types::ability::{
+    Effect, ManaProduction, ManaSpendRestriction, QuantityExpr, QuantityRef,
+};
 use crate::types::mana::ManaColor;
 
 use super::super::oracle_util::{parse_mana_production, parse_number};
@@ -80,7 +82,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
     let clause_lower = clause.to_lowercase();
     let fallback_count = parse_mana_count_prefix(clause)
         .map(|(count, _)| count)
-        .unwrap_or(CountValue::Fixed(1));
+        .unwrap_or(QuantityExpr::Fixed { value: 1 });
     let fallback_count =
         apply_where_x_count_expression(fallback_count, where_x_expression.as_deref());
 
@@ -165,7 +167,7 @@ pub(super) fn parse_mana_production_clause(text: &str) -> Option<ManaProduction>
     if let Some(color_options) = parse_mana_color_set(text) {
         if color_options.len() > 1 {
             return Some(ManaProduction::AnyOneColor {
-                count: CountValue::Fixed(1),
+                count: QuantityExpr::Fixed { value: 1 },
                 color_options,
             });
         }
@@ -182,9 +184,9 @@ pub(super) fn parse_mana_production_clause(text: &str) -> Option<ManaProduction>
     None
 }
 
-pub(super) fn parse_colorless_mana_production(text: &str) -> Option<(CountValue, &str)> {
+pub(super) fn parse_colorless_mana_production(text: &str) -> Option<(QuantityExpr, &str)> {
     let mut rest = text.trim_start();
-    let mut count = 0u32;
+    let mut count = 0i32;
 
     while rest.starts_with('{') {
         let end = rest.find('}')?;
@@ -200,30 +202,60 @@ pub(super) fn parse_colorless_mana_production(text: &str) -> Option<(CountValue,
         return None;
     }
 
-    Some((CountValue::Fixed(count), rest))
+    Some((QuantityExpr::Fixed { value: count }, rest))
 }
 
-pub(super) fn parse_mana_count_prefix(text: &str) -> Option<(CountValue, &str)> {
+pub(super) fn parse_mana_count_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
     let trimmed = text.trim_start();
     if let Some(rest) = trimmed.strip_prefix("X ") {
-        return Some((CountValue::Variable("X".to_string()), rest.trim_start()));
+        return Some((
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+            rest.trim_start(),
+        ));
     }
     if let Some(rest) = trimmed.strip_prefix("x ") {
-        return Some((CountValue::Variable("X".to_string()), rest.trim_start()));
+        return Some((
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+            rest.trim_start(),
+        ));
     }
     let (count, rest) = parse_number(trimmed)?;
-    Some((CountValue::Fixed(count), rest))
+    Some((
+        QuantityExpr::Fixed {
+            value: count as i32,
+        },
+        rest,
+    ))
 }
 
 pub(super) fn apply_where_x_count_expression(
-    count: CountValue,
+    count: QuantityExpr,
     where_x_expression: Option<&str>,
-) -> CountValue {
-    match (count, where_x_expression) {
-        (CountValue::Variable(alias), Some(expression)) if alias.eq_ignore_ascii_case("X") => {
-            CountValue::Variable(expression.to_string())
+) -> QuantityExpr {
+    match (&count, where_x_expression) {
+        (
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable { ref name },
+            },
+            Some(expression),
+        ) if name.eq_ignore_ascii_case("X") => {
+            crate::parser::oracle_static::parse_cda_quantity(expression).unwrap_or_else(|| {
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: expression.to_string(),
+                    },
+                }
+            })
         }
-        (count, _) => count,
+        _ => count,
     }
 }
 

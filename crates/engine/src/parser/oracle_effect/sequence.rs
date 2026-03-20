@@ -231,7 +231,7 @@ pub(super) fn apply_clause_continuation(
                 ..
             } = &mut previous.effect
             {
-                *existing = Some(source_static);
+                *existing = Some(*source_static);
             }
         }
         ContinuationAst::SuspectLastCreated => {
@@ -326,9 +326,9 @@ pub(super) fn parse_followup_continuation_ast(
             if lower.contains("countered this way") && lower.contains("loses all abilities") =>
         {
             Some(ContinuationAst::CounterSourceStatic {
-                source_static: StaticDefinition::continuous().modifications(vec![
+                source_static: Box::new(StaticDefinition::continuous().modifications(vec![
                     crate::types::ability::ContinuousModification::RemoveAllAbilities,
-                ]),
+                ])),
             })
         }
         // "create a ... token and suspect it" → chain suspect on last created token

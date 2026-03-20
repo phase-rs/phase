@@ -4,7 +4,7 @@ use std::str::FromStr;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::ability::{ControllerRef, TargetFilter, TypedFilter};
+use super::ability::{ControllerRef, QuantityExpr, TargetFilter, TypedFilter};
 use super::mana::{ManaColor, ManaCost};
 
 /// What a Protection keyword protects from (CR 702.16).
@@ -185,7 +185,16 @@ pub enum Keyword {
     Storm,
     Suspend,
     Totem,
-    Warp,
+    /// Warp {cost}: alternative casting cost. Cast from hand for warp cost,
+    /// exile at next end step, then may cast from exile later.
+    Warp(ManaCost),
+    /// CR 702.49 variant: Sneak — return unblocked attacker, cast during declare blockers.
+    Sneak(ManaCost),
+    /// CR 702.49 variant: Web-slinging — return a tapped creature to cast.
+    WebSlinging(ManaCost),
+    /// Mobilize N — when this creature attacks, create N 1/1 red Warrior tokens
+    /// tapped and attacking, sacrifice them at end of combat.
+    Mobilize(QuantityExpr),
     Gift,
     Spree,
     Ravenous,
@@ -407,6 +416,15 @@ impl FromStr for Keyword {
                 "craft" => return Ok(Keyword::Craft(parse_keyword_mana_cost(p))),
                 "offspring" => return Ok(Keyword::Offspring(parse_keyword_mana_cost(p))),
                 "impending" => return Ok(Keyword::Impending(parse_keyword_mana_cost(p))),
+                "warp" => return Ok(Keyword::Warp(parse_keyword_mana_cost(p))),
+                "sneak" => return Ok(Keyword::Sneak(parse_keyword_mana_cost(p))),
+                "web-slinging" | "webslinging" => {
+                    return Ok(Keyword::WebSlinging(parse_keyword_mana_cost(p)))
+                }
+                "mobilize" => {
+                    let n: i32 = p.parse().unwrap_or(1);
+                    return Ok(Keyword::Mobilize(QuantityExpr::Fixed { value: n }));
+                }
                 "poisonous" => return Ok(Keyword::Poisonous(p.parse().unwrap_or(1))),
                 "bloodthirst" => return Ok(Keyword::Bloodthirst(p.parse().unwrap_or(1))),
                 "amplify" => return Ok(Keyword::Amplify(p.parse().unwrap_or(1))),
@@ -540,7 +558,6 @@ impl FromStr for Keyword {
             "cumulative" => Ok(Keyword::Cumulative),
             "ripple" => Ok(Keyword::Ripple),
             "totem" => Ok(Keyword::Totem),
-            "warp" => Ok(Keyword::Warp),
             _ => Ok(Keyword::Unknown(s.to_string())),
         }
     }
@@ -687,7 +704,21 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Cumulative" => Ok(Keyword::Cumulative),
         "Ripple" => Ok(Keyword::Ripple),
         "Totem" => Ok(Keyword::Totem),
-        "Warp" => Ok(Keyword::Warp),
+        // Parameterized: ManaCost (new keywords)
+        "Warp" => Ok(Keyword::Warp(mana(data)?)),
+        "Sneak" => Ok(Keyword::Sneak(mana(data)?)),
+        "WebSlinging" => Ok(Keyword::WebSlinging(mana(data)?)),
+        // Parameterized: u32 (new keywords)
+        "Mobilize" => {
+            // Accept both integer (legacy) and QuantityExpr object
+            if let Some(n) = data.as_u64() {
+                Ok(Keyword::Mobilize(QuantityExpr::Fixed { value: n as i32 }))
+            } else {
+                let expr: QuantityExpr =
+                    serde_json::from_value(data.clone()).map_err(|e| format!("Mobilize: {e}"))?;
+                Ok(Keyword::Mobilize(expr))
+            }
+        }
         // Parameterized: ManaCost
         "Kicker" => Ok(Keyword::Kicker(mana(data)?)),
         "Cycling" => Ok(Keyword::Cycling(mana(data)?)),
@@ -1052,7 +1083,11 @@ mod tests {
         );
         assert_eq!(Keyword::from_str("Ripple").unwrap(), Keyword::Ripple);
         assert_eq!(Keyword::from_str("Totem").unwrap(), Keyword::Totem);
-        assert_eq!(Keyword::from_str("Warp").unwrap(), Keyword::Warp);
+        // Warp is now parameterized — bare "Warp" without cost falls through to Unknown
+        assert!(matches!(
+            Keyword::from_str("Warp").unwrap(),
+            Keyword::Unknown(_)
+        ));
     }
 
     #[test]

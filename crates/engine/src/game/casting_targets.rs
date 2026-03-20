@@ -1,6 +1,8 @@
 use crate::types::ability::TargetRef;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor};
+use crate::types::game_state::{
+    CastingVariant, GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
@@ -83,22 +85,18 @@ pub(crate) fn handle_select_modes(
                 pending.card_id,
                 resolved,
                 &total_cost,
+                CastingVariant::Normal,
                 events,
             );
         }
 
         let selection = begin_target_selection(&target_slots, &pending.target_constraints)?;
+        let mut pending_sel =
+            PendingCast::new(pending.object_id, pending.card_id, resolved, total_cost);
+        pending_sel.target_constraints = pending.target_constraints;
         return Ok(WaitingFor::TargetSelection {
             player,
-            pending_cast: Box::new(PendingCast {
-                object_id: pending.object_id,
-                card_id: pending.card_id,
-                ability: resolved,
-                cost: total_cost,
-                activation_cost: None,
-                activation_ability_index: None,
-                target_constraints: pending.target_constraints,
-            }),
+            pending_cast: Box::new(pending_sel),
             target_slots,
             selection,
         });
@@ -112,6 +110,7 @@ pub(crate) fn handle_select_modes(
         pending.card_id,
         resolved,
         &total_cost,
+        CastingVariant::Normal,
         events,
     )
 }
@@ -183,6 +182,7 @@ pub(crate) fn handle_select_targets(
         pending.card_id,
         ability,
         &pending.cost,
+        CastingVariant::Normal,
         events,
     )
 }
@@ -267,6 +267,7 @@ pub(crate) fn handle_choose_target(
                 pending.card_id,
                 ability,
                 &pending.cost,
+                CastingVariant::Normal,
                 events,
             )
         }

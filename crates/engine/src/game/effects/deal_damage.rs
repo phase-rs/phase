@@ -1,10 +1,11 @@
 use std::collections::HashSet;
 
 use crate::game::filter;
+use crate::game::quantity::resolve_quantity;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    DamageAmount, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -116,10 +117,8 @@ pub fn resolve_all(
 ) -> Result<(), EffectError> {
     let (num_dmg, target_filter): (u32, TargetFilter) = match &ability.effect {
         Effect::DamageAll { amount, target } => {
-            let dmg = match amount {
-                DamageAmount::Fixed(n) => *n as u32,
-                DamageAmount::Variable(_) => 0,
-            };
+            let dmg = resolve_quantity(state, amount, ability.controller, ability.source_id).max(0)
+                as u32;
             (dmg, target.clone())
         }
         _ => return Err(EffectError::MissingParam("DamageAll amount".to_string())),
@@ -165,7 +164,7 @@ pub fn resolve_all(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{DamageAmount, QuantityExpr, TargetFilter, TypedFilter};
+    use crate::types::ability::{QuantityExpr, TargetFilter, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -265,7 +264,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::DamageAll {
-                amount: DamageAmount::Fixed(2),
+                amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Typed(TypedFilter {
                     card_type: Some(crate::types::ability::TypeFilter::Creature),
                     subtype: None,

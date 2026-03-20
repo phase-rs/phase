@@ -2,8 +2,8 @@ use rand::Rng;
 use thiserror::Error;
 
 use crate::types::ability::{
-    AbilityDefinition, ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind,
-    ResolvedAbility, TargetFilter, TargetRef,
+    AbilityCondition, AbilityDefinition, ChoiceType, ChoiceValue, ChosenAttribute, Effect,
+    EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::actions::GameAction;
 use crate::types::events::{BendingType, GameEvent};
@@ -440,6 +440,23 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                     ability.context.optional_effect_performed = true;
                     effects::resolve_ability_chain(state, &ability, &mut events, 0)
                         .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                } else {
+                    // CR 608.2c: Walk sub_ability chain to execute "Otherwise" branches
+                    if let Some(ref sub) = ability.sub_ability {
+                        if matches!(sub.condition, Some(AbilityCondition::IfYouDo)) {
+                            if let Some(ref else_branch) = sub.else_ability {
+                                let mut else_resolved = else_branch.as_ref().clone();
+                                else_resolved.context = ability.context.clone();
+                                effects::resolve_ability_chain(
+                                    state,
+                                    &else_resolved,
+                                    &mut events,
+                                    0,
+                                )
+                                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                            }
+                        }
+                    }
                 }
             }
             // Resume with pending continuation if one was stashed (from resolve_ability_chain).
@@ -584,7 +601,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                     pending.card_id,
                     pending.ability,
                     &pending.cost,
-                    false, // TODO: adventure support for ManaPayment path
+                    pending.casting_variant,
                     &mut events,
                 )?
             }
@@ -963,26 +980,20 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             super::transform::transform_permanent(state, object_id, &mut events)?;
             WaitingFor::Priority { player: p }
         }
-        // CR 702.49a: Ninjutsu activation during combat
+        // CR 702.49: Ninjutsu-family activation during combat
         (
             WaitingFor::Priority { player },
             GameAction::ActivateNinjutsu {
                 ninjutsu_card_id,
-                attacker_to_return,
+                creature_to_return,
             },
         ) => {
             let p = *player;
-            // Validate timing: must be in declare blockers step or later in combat
-            if !matches!(state.phase, Phase::DeclareBlockers | Phase::CombatDamage) {
-                return Err(EngineError::ActionNotAllowed(
-                    "Ninjutsu can only be activated during the declare blockers step".to_string(),
-                ));
-            }
             super::keywords::activate_ninjutsu(
                 state,
                 p,
                 ninjutsu_card_id,
-                attacker_to_return,
+                creature_to_return,
                 &mut events,
             )
             .map_err(EngineError::InvalidAction)?;
@@ -993,7 +1004,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             WaitingFor::NinjutsuActivation { player, .. },
             GameAction::ActivateNinjutsu {
                 ninjutsu_card_id,
-                attacker_to_return,
+                creature_to_return,
             },
         ) => {
             let p = *player;
@@ -1001,7 +1012,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 state,
                 p,
                 ninjutsu_card_id,
-                attacker_to_return,
+                creature_to_return,
                 &mut events,
             )
             .map_err(EngineError::InvalidAction)?;
@@ -1524,19 +1535,20 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                         }
                     } else {
                         let selection = begin_target_selection(&target_slots, &target_constraints)?;
+                        let mut pending_eng = crate::types::game_state::PendingCast::new(
+                            sid,
+                            CardId(0),
+                            resolved,
+                            crate::types::mana::ManaCost::NoCost,
+                        );
+                        pending_eng.activation_cost = ability_cost.clone();
+                        pending_eng.activation_ability_index = *ability_index;
+                        pending_eng.target_constraints = target_constraints;
                         return Ok(ActionResult {
                             events,
                             waiting_for: WaitingFor::TargetSelection {
                                 player: p,
-                                pending_cast: Box::new(crate::types::game_state::PendingCast {
-                                    object_id: sid,
-                                    card_id: CardId(0),
-                                    ability: resolved,
-                                    cost: crate::types::mana::ManaCost::NoCost,
-                                    activation_cost: ability_cost.clone(),
-                                    activation_ability_index: *ability_index,
-                                    target_constraints,
-                                }),
+                                pending_cast: Box::new(pending_eng),
                                 target_slots,
                                 selection,
                             },
@@ -2007,6 +2019,14 @@ fn resolved_ability_from_definition(
             controller,
             Vec::new(),
         ));
+    }
+    if let Some(else_ab) = &def.else_ability {
+        resolved.else_ability = Some(Box::new(resolved_ability_from_definition(
+            else_ab,
+            source_id,
+            controller,
+            Vec::new(),
+        )));
     }
     if let Some(d) = def.duration.clone() {
         resolved = resolved.duration(d);
@@ -2821,7 +2841,7 @@ mod tests {
     #[test]
     fn stack_push_and_lifo_resolve() {
         use crate::game::stack;
-        use crate::types::game_state::{StackEntry, StackEntryKind};
+        use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
 
         let mut state = setup_game_at_main_phase();
         let mut events = Vec::new();
@@ -2875,7 +2895,7 @@ mod tests {
                         id1,
                         PlayerId(0),
                     ),
-                    cast_as_adventure: false,
+                    casting_variant: CastingVariant::Normal,
                 },
             },
             &mut events,
@@ -2897,7 +2917,7 @@ mod tests {
                         id2,
                         PlayerId(0),
                     ),
-                    cast_as_adventure: false,
+                    casting_variant: CastingVariant::Normal,
                 },
             },
             &mut events,
@@ -4170,7 +4190,7 @@ mod tests {
                         ObjectId(99),
                         PlayerId(1),
                     ),
-                    cast_as_adventure: false,
+                    casting_variant: crate::types::game_state::CastingVariant::Normal,
                 },
             });
             let result = apply(
@@ -5491,7 +5511,7 @@ mod phase_trigger_regression_tests {
                     creature_spell,
                     PlayerId(0),
                 ),
-                cast_as_adventure: false,
+                casting_variant: crate::types::game_state::CastingVariant::Normal,
             },
         });
 

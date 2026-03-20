@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    AbilityDefinition, Effect, ModalChoice, ResolvedAbility, TargetFilter, TargetRef,
-    TriggerCondition, TriggerDefinition,
+    AbilityDefinition, ControllerRef, Effect, ModalChoice, ResolvedAbility, TargetFilter,
+    TargetRef, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -11,10 +11,12 @@ use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::phase::Phase;
 use crate::types::player::{Player, PlayerId};
+use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 use super::ability_utils::build_resolved_from_def;
+use super::filter::matches_target_filter;
 use super::stack;
 
 // Re-export so existing `use crate::game::triggers::build_trigger_registry` paths still work.
@@ -114,7 +116,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
         // Scan all permanents on the battlefield for matching triggers
         let battlefield_ids: Vec<ObjectId> = state.battlefield.clone();
         for obj_id in battlefield_ids {
-            let (controller, trigger_defs, timestamp, has_prowess, firebending_n) = {
+            let (controller, trigger_defs, timestamp, has_prowess, has_exploit, firebending_n) = {
                 let obj = match state.objects.get(&obj_id) {
                     Some(o) => o,
                     None => continue,
@@ -131,6 +133,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     obj.trigger_definitions.clone(),
                     obj.entered_battlefield_turn.unwrap_or(0),
                     obj.has_keyword(&Keyword::Prowess),
+                    obj.has_keyword(&Keyword::Exploit),
                     fb_n,
                 )
             };
@@ -225,6 +228,46 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                                 .bending_types_this_turn
                                 .insert(crate::types::events::BendingType::Fire);
                         }
+                    }
+                }
+            }
+
+            // Keyword-based triggers: Exploit
+            // CR 702.110a: When a creature with exploit enters, the controller may sacrifice a creature.
+            if has_exploit {
+                if let GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } = event
+                {
+                    if *object_id == obj_id {
+                        let exploit_target = TargetFilter::Typed(TypedFilter {
+                            card_type: Some(TypeFilter::Creature),
+                            controller: Some(ControllerRef::You),
+                            ..Default::default()
+                        });
+                        let exploit_effect = Effect::Exploit {
+                            target: exploit_target,
+                        };
+                        let mut exploit_ability = ResolvedAbility::new(
+                            exploit_effect,
+                            Vec::new(),
+                            *object_id,
+                            controller,
+                        );
+                        exploit_ability.optional = true;
+                        pending.push(PendingTrigger {
+                            source_id: *object_id,
+                            controller,
+                            condition: None,
+                            ability: exploit_ability,
+                            timestamp,
+                            target_constraints: Vec::new(),
+                            trigger_event: Some(event.clone()),
+                            modal: None,
+                            mode_abilities: vec![],
+                        });
                     }
                 }
             }
@@ -325,6 +368,11 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
         }
     }
 
+    // CR 603.9: Trigger doubling — Panharmonicon-style effects.
+    // Scan battlefield for objects with StaticMode::Panharmonicon statics,
+    // then clone matching pending triggers.
+    apply_trigger_doubling(state, &mut pending);
+
     if pending.is_empty() {
         return;
     }
@@ -408,6 +456,62 @@ pub fn push_pending_trigger_to_stack(
         },
     };
     stack::push_to_stack(state, entry, events);
+}
+
+/// CR 603.9: Apply trigger doubling from Panharmonicon-style static abilities.
+/// Scans battlefield for permanents with `StaticMode::Panharmonicon` statics,
+/// then clones matching pending triggers an additional time.
+fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTrigger>) {
+    // Collect doubling sources: (controller, source_id, affected filter)
+    let doublers: Vec<(PlayerId, ObjectId, Option<TargetFilter>)> = state
+        .battlefield
+        .iter()
+        .filter_map(|&obj_id| {
+            let obj = state.objects.get(&obj_id)?;
+            let has_panharmonicon = obj
+                .static_definitions
+                .iter()
+                .any(|sd| matches!(sd.mode, StaticMode::Panharmonicon));
+            if has_panharmonicon {
+                // Use the first Panharmonicon static's affected filter
+                let affected = obj
+                    .static_definitions
+                    .iter()
+                    .find(|sd| matches!(sd.mode, StaticMode::Panharmonicon))
+                    .and_then(|sd| sd.affected.clone());
+                Some((obj.controller, obj_id, affected))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if doublers.is_empty() {
+        return;
+    }
+
+    let mut extra: Vec<PendingTrigger> = Vec::new();
+    for (doubler_controller, doubler_id, ref affected) in &doublers {
+        for trigger in pending.iter() {
+            // Controller match: trigger source must be controlled by the doubler's controller
+            if trigger.controller != *doubler_controller {
+                continue;
+            }
+            // Self-exclusion: don't double triggers from the Panharmonicon itself entering
+            if trigger.source_id == *doubler_id {
+                continue;
+            }
+            // CR 603.9: If the doubler specifies an affected filter (e.g. "creature you
+            // control of the chosen type"), only double triggers from matching sources.
+            if let Some(filter) = affected {
+                if !matches_target_filter(state, trigger.source_id, filter, *doubler_id) {
+                    continue;
+                }
+            }
+            extra.push(trigger.clone());
+        }
+    }
+    pending.extend(extra);
 }
 
 /// CR 603.7: Check if any delayed triggers should fire based on recent events.
@@ -610,6 +714,23 @@ pub(crate) fn check_trigger_condition(
                 .count();
             count >= *minimum as usize
         }
+        // CR 508.1a: Count co-attackers excluding the source creature.
+        TriggerCondition::MinCoAttackers { minimum } => {
+            state.combat.as_ref().is_some_and(|combat| {
+                let co_attacker_count = combat
+                    .attackers
+                    .iter()
+                    .filter(|a| {
+                        a.object_id != source_id.unwrap_or(ObjectId(0))
+                            && state
+                                .objects
+                                .get(&a.object_id)
+                                .is_some_and(|obj| obj.controller == controller)
+                    })
+                    .count();
+                co_attacker_count >= *minimum as usize
+            })
+        }
         // CR 719.2: True when the source Case is unsolved and its solve condition is met.
         TriggerCondition::SolveConditionMet => source_id
             .and_then(|id| state.objects.get(&id))
@@ -754,7 +875,8 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
         | Effect::MoveCounters { target, .. }
         | Effect::Transform { target, .. }
         | Effect::RevealHand { target, .. }
-        | Effect::PreventDamage { target, .. } => {
+        | Effect::PreventDamage { target, .. }
+        | Effect::Exploit { target, .. } => {
             if matches!(
                 target,
                 TargetFilter::None

@@ -1,10 +1,11 @@
 use std::collections::HashSet;
 use std::str::FromStr;
 
+use crate::game::quantity::resolve_quantity;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    CountValue, Effect, EffectError, EffectKind, PtValue, ResolvedAbility,
+    Effect, EffectError, EffectKind, PtValue, QuantityExpr, QuantityRef, ResolvedAbility,
 };
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
@@ -310,6 +311,7 @@ pub fn resolve(
         fallback_keywords,
         tapped,
         count,
+        enters_attacking,
     ) = match &ability.effect {
         Effect::Token {
             name,
@@ -320,6 +322,7 @@ pub fn resolve(
             keywords,
             tapped,
             count,
+            enters_attacking,
             ..
         } => (
             name.clone(),
@@ -329,7 +332,8 @@ pub fn resolve(
             colors.clone(),
             keywords.clone(),
             *tapped,
-            resolve_count_value(count, state),
+            resolve_quantity(state, count, ability.controller, ability.source_id).max(0) as u32,
+            *enters_attacking,
         ),
         _ => (
             "Token".to_string(),
@@ -340,6 +344,7 @@ pub fn resolve(
             vec![],
             false,
             1,
+            false,
         ),
     };
 
@@ -351,6 +356,9 @@ pub fn resolve(
             &fallback_types,
             &fallback_colors,
             &fallback_keywords,
+            state,
+            ability.controller,
+            ability.source_id,
         )
     });
 
@@ -382,6 +390,23 @@ pub fn resolve(
                         Zone::Battlefield,
                     );
 
+                    let fallback_pt = if parsed.is_none() {
+                        let rp = resolve_pt_value(
+                            &fallback_power,
+                            state,
+                            ability.controller,
+                            ability.source_id,
+                        );
+                        let rt = resolve_pt_value(
+                            &fallback_toughness,
+                            state,
+                            ability.controller,
+                            ability.source_id,
+                        );
+                        Some((rp, rt))
+                    } else {
+                        None
+                    };
                     if let Some(obj) = state.objects.get_mut(&obj_id) {
                         if let Some(attrs) = &parsed {
                             obj.power = attrs.power;
@@ -399,8 +424,8 @@ pub fn resolve(
                             obj.keywords = attrs.keywords.clone();
                             obj.base_keywords = attrs.keywords.clone();
                         } else {
-                            let resolved_power = resolve_pt_value(&fallback_power);
-                            let resolved_toughness = resolve_pt_value(&fallback_toughness);
+                            let (resolved_power, resolved_toughness) =
+                                fallback_pt.unwrap_or((0, 0));
                             if resolved_power != 0 || resolved_toughness != 0 {
                                 obj.power = Some(resolved_power);
                                 obj.toughness = Some(resolved_toughness);
@@ -411,6 +436,31 @@ pub fn resolve(
                             }
                         }
                         obj.tapped = tapped;
+
+                        // CR 508.4: Token enters attacking — not declared as attacker
+                        if enters_attacking {
+                            obj.tapped = true;
+                            obj.entered_battlefield_turn = Some(state.turn_number);
+                        }
+                    }
+
+                    // CR 508.4: Push token into combat.attackers directly
+                    if enters_attacking {
+                        if let Some(combat) = state.combat.as_mut() {
+                            // Determine defending player from the source creature's combat info
+                            let defending_player = combat
+                                .attackers
+                                .iter()
+                                .find(|a| a.object_id == ability.source_id)
+                                .map(|a| a.defending_player)
+                                .unwrap_or_else(|| {
+                                    crate::types::player::PlayerId(1 - ability.controller.0)
+                                });
+                            combat.attackers.push(crate::game::combat::AttackerInfo {
+                                object_id: obj_id,
+                                defending_player,
+                            });
+                        }
                     }
 
                     state.layers_dirty = true;
@@ -439,7 +489,9 @@ pub fn resolve(
     if matches!(
         &ability.effect,
         Effect::Token {
-            count: CountValue::TrackedSetSize,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize
+            },
             ..
         }
     ) {
@@ -456,6 +508,7 @@ pub fn resolve(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_token_attrs_from_effect(
     name: &str,
     power: &PtValue,
@@ -463,6 +516,9 @@ fn build_token_attrs_from_effect(
     types: &[String],
     colors: &[ManaColor],
     keywords: &[Keyword],
+    state: &GameState,
+    controller: crate::types::player::PlayerId,
+    source_id: crate::types::identifiers::ObjectId,
 ) -> Option<TokenAttrs> {
     if types.is_empty()
         && colors.is_empty()
@@ -487,8 +543,8 @@ fn build_token_attrs_from_effect(
         }
     }
 
-    let resolved_power = resolve_pt_value(power);
-    let resolved_toughness = resolve_pt_value(toughness);
+    let resolved_power = resolve_pt_value(power, state, controller, source_id);
+    let resolved_toughness = resolve_pt_value(toughness, state, controller, source_id);
     if core_types.is_empty() && (resolved_power != 0 || resolved_toughness != 0) {
         core_types.push(CoreType::Creature);
     }
@@ -509,24 +565,16 @@ fn build_token_attrs_from_effect(
     })
 }
 
-fn resolve_pt_value(value: &PtValue) -> i32 {
+fn resolve_pt_value(
+    value: &PtValue,
+    state: &GameState,
+    controller: crate::types::player::PlayerId,
+    source_id: crate::types::identifiers::ObjectId,
+) -> i32 {
     match value {
         PtValue::Fixed(n) => *n,
         PtValue::Variable(_) => 0,
-    }
-}
-
-fn resolve_count_value(value: &CountValue, state: &GameState) -> u32 {
-    match value {
-        CountValue::Fixed(n) => *n,
-        CountValue::Variable(_) => 0,
-        // CR 609.3: "for each [thing] this way" — read the most recent tracked set size.
-        CountValue::TrackedSetSize => state
-            .tracked_object_sets
-            .iter()
-            .max_by_key(|(id, _)| id.0)
-            .map(|(_, ids)| ids.len() as u32)
-            .unwrap_or(0),
+        PtValue::Quantity(expr) => resolve_quantity(state, expr, controller, source_id),
     }
 }
 
@@ -642,8 +690,9 @@ mod tests {
                 colors: vec![],
                 keywords: vec![],
                 tapped: false,
-                count: CountValue::Fixed(1),
+                count: QuantityExpr::Fixed { value: 1 },
                 attach_to: None,
+                enters_attacking: false,
             },
             vec![],
             ObjectId(100),
@@ -718,8 +767,9 @@ mod tests {
                 colors: vec![],
                 keywords: vec![],
                 tapped: false,
-                count: CountValue::Fixed(1),
+                count: QuantityExpr::Fixed { value: 1 },
                 attach_to: None,
+                enters_attacking: false,
             },
             vec![],
             ObjectId(100),
@@ -768,8 +818,9 @@ mod tests {
                 colors: vec![],
                 keywords: vec![],
                 tapped: false,
-                count: CountValue::Fixed(2),
+                count: QuantityExpr::Fixed { value: 2 },
                 attach_to: None,
+                enters_attacking: false,
             },
             vec![],
             ObjectId(100),
@@ -808,8 +859,9 @@ mod tests {
                 colors: vec![],
                 keywords: vec![],
                 tapped: false,
-                count: CountValue::Fixed(1),
+                count: QuantityExpr::Fixed { value: 1 },
                 attach_to: None,
+                enters_attacking: false,
             },
             vec![],
             ObjectId(100),
@@ -838,8 +890,9 @@ mod tests {
                 colors: vec![],
                 keywords: vec![],
                 tapped: true,
-                count: CountValue::Fixed(1),
+                count: QuantityExpr::Fixed { value: 1 },
                 attach_to: None,
+                enters_attacking: false,
             },
             vec![],
             ObjectId(100),
