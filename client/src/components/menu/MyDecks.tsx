@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 
 import type { GameFormat, MatchType } from "../../adapter/types";
-import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX, listSavedDeckNames } from "../../constants/storage";
+import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX, listSavedDeckNames, stampDeckMeta, getDeckMeta } from "../../constants/storage";
 import { COMMANDER_PRECONS } from "../../data/commanderPrecons";
 import { STARTER_DECKS } from "../../data/starterDecks";
 import { useCardImage } from "../../hooks/useCardImage";
@@ -27,12 +27,19 @@ const COLOR_DOT_CLASS: Record<string, string> = {
 
 const PRECON_PREFIX = "[Pre-built] ";
 const PRECON_NAMES = new Set(COMMANDER_PRECONS.map((p) => PRECON_PREFIX + p.name));
+const STARTER_NAMES = new Set(STARTER_DECKS.map((s) => s.name));
+
+function isBundledDeck(deckName: string): boolean {
+  return PRECON_NAMES.has(deckName) || STARTER_NAMES.has(deckName);
+}
 
 type DeckFilter = "all" | "standard" | "commander" | "bo3";
+type DeckSort = "alpha" | "recent";
 
 function seedCommanderPrecons(): void {
   for (const precon of COMMANDER_PRECONS) {
-    const key = STORAGE_KEY_PREFIX + PRECON_PREFIX + precon.name;
+    const deckName = PRECON_PREFIX + precon.name;
+    const key = STORAGE_KEY_PREFIX + deckName;
     if (localStorage.getItem(key)) continue;
     const deck: ParsedDeck = {
       main: precon.cards,
@@ -40,6 +47,7 @@ function seedCommanderPrecons(): void {
       commander: [precon.commander],
     };
     localStorage.setItem(key, JSON.stringify(deck));
+    stampDeckMeta(deckName, 0);
   }
 }
 
@@ -108,6 +116,102 @@ function StatusBadge({ label, active }: { label: string; active: boolean }) {
   );
 }
 
+interface DeckTileProps {
+  deckName: string;
+  isActive: boolean;
+  compatibility: DeckCompatibilityResult | undefined;
+  onClick: () => void;
+}
+
+function DeckTile({ deckName, isActive, compatibility, onClick }: DeckTileProps) {
+  const colors = compatibility?.color_identity ?? getDeckColorIdentity(deckName);
+  const count = getDeckCardCount(deckName);
+  const representativeCard = getRepresentativeCard(deckName);
+  const isPrecon = PRECON_NAMES.has(deckName);
+  const displayName = isPrecon ? deckName.slice(PRECON_PREFIX.length) : deckName;
+
+  return (
+    <button
+      onClick={onClick}
+      className={`group relative flex aspect-[4/3] flex-col justify-end overflow-hidden rounded-xl text-left transition ${
+        isActive
+          ? "ring-2 ring-white/30 ring-offset-2 ring-offset-[#060a16]"
+          : "ring-1 ring-white/10 hover:ring-white/20"
+      }`}
+    >
+      <DeckArtTile cardName={representativeCard} />
+
+      {isPrecon && (
+        <span className="absolute right-2 top-2 z-10 rounded-full bg-amber-500/80 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-black">
+          Pre-built
+        </span>
+      )}
+
+      <div className="relative z-10 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-3 pb-3 pt-8">
+        <p className="text-sm font-semibold text-white">{displayName}</p>
+        <div className="mt-1 flex items-center gap-2">
+          <div className="flex gap-1">
+            {colors.map((color) => (
+              <span
+                key={color}
+                className={`inline-block h-2.5 w-2.5 rounded-full ${COLOR_DOT_CLASS[color] ?? "bg-gray-400"}`}
+              />
+            ))}
+            {colors.length === 0 && (
+              <span className="inline-block h-2.5 w-2.5 rounded-full bg-gray-500" />
+            )}
+          </div>
+          <span className="text-xs text-gray-300">{count} cards</span>
+        </div>
+        {compatibility && (
+          <div className="mt-2 flex flex-wrap gap-1">
+            {compatibility.standard.compatible && <StatusBadge label="STD" active />}
+            {compatibility.commander.compatible && <StatusBadge label="CMD" active />}
+            {compatibility.bo3_ready && <StatusBadge label="BO3" active />}
+            {compatibility.unknown_cards.length > 0 && (
+              <span
+                className="rounded bg-amber-500/80 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-black"
+                title={`Unknown cards:\n${compatibility.unknown_cards.join("\n")}`}
+              >
+                Unknown {compatibility.unknown_cards.length}
+              </span>
+            )}
+            {compatibility.coverage && (() => {
+              const { supported_unique, total_unique, unsupported_cards } = compatibility.coverage;
+              const pct = total_unique > 0 ? (supported_unique / total_unique) * 100 : 0;
+              const barColor =
+                pct === 100 ? "bg-emerald-500"
+                : pct >= 75 ? "bg-lime-500"
+                : pct >= 50 ? "bg-amber-500"
+                : "bg-red-500";
+              return (
+                <div
+                  className="flex w-full items-center gap-1.5"
+                  title={
+                    unsupported_cards.length === 0
+                      ? "All cards fully supported by the engine"
+                      : `Unsupported (${unsupported_cards.length}):\n${unsupported_cards.map((c) => `${c.name}: ${c.gaps.join(", ")}`).join("\n")}`
+                  }
+                >
+                  <div className="h-1 flex-1 overflow-hidden rounded-full bg-white/10">
+                    <div
+                      className={`h-full rounded-full ${barColor}`}
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <span className="shrink-0 text-[10px] tabular-nums text-gray-400">
+                    {supported_unique}/{total_unique}
+                  </span>
+                </div>
+              );
+            })()}
+          </div>
+        )}
+      </div>
+    </button>
+  );
+}
+
 interface MyDecksProps {
   mode: "manage" | "select";
   selectedFormat?: GameFormat;
@@ -145,6 +249,8 @@ export function MyDecks({
     return null;
   }, [selectedFormat]);
   const [activeFilter, setActiveFilter] = useState<DeckFilter>(contextualFilter ?? "all");
+  const [activeSort, setActiveSort] = useState<DeckSort>("alpha");
+  const [sortAsc, setSortAsc] = useState(true);
 
   useEffect(() => {
     setActiveFilter(contextualFilter ?? "all");
@@ -236,6 +342,29 @@ export function MyDecks({
     });
   }, [deckNames, compatibilities, activeFilter, contextualFilter]);
 
+  const { userDecks, bundledDecks } = useMemo(() => {
+    const dir = sortAsc ? 1 : -1;
+    const sortNames = (names: string[]): string[] => {
+      if (activeSort === "alpha") return [...names].sort((a, b) => a.localeCompare(b) * dir);
+      return [...names].sort((a, b) => {
+        const metaA = getDeckMeta(a);
+        const metaB = getDeckMeta(b);
+        return ((metaA?.addedAt ?? 0) - (metaB?.addedAt ?? 0)) * dir;
+      });
+    };
+
+    const user: string[] = [];
+    const bundled: string[] = [];
+    for (const name of filteredDeckNames) {
+      if (isBundledDeck(name)) {
+        bundled.push(name);
+      } else {
+        user.push(name);
+      }
+    }
+    return { userDecks: sortNames(user), bundledDecks: sortNames(bundled) };
+  }, [filteredDeckNames, activeSort, sortAsc]);
+
   const noDeckSelected = mode === "select"
     ? !activeDeckName || !filteredDeckNames.includes(activeDeckName)
     : false;
@@ -326,6 +455,35 @@ export function MyDecks({
         {isEvaluating && (
           <span className="text-xs text-gray-500">Evaluating compatibility…</span>
         )}
+
+        <div className="ml-auto flex items-center gap-1">
+          <select
+            value={activeSort}
+            onChange={(e) => {
+              const next = e.target.value as DeckSort;
+              setActiveSort(next);
+              setSortAsc(next === "alpha");
+            }}
+            className="rounded bg-black/30 px-2 py-1 text-xs text-slate-300 outline-none ring-1 ring-white/10 focus:ring-white/20"
+          >
+            <option value="alpha">Name</option>
+            <option value="recent">Date Added</option>
+          </select>
+          <button
+            onClick={() => setSortAsc((prev) => !prev)}
+            className="rounded p-1 text-slate-400 ring-1 ring-white/10 transition-colors hover:bg-white/5 hover:text-white"
+            title={sortAsc ? "Ascending" : "Descending"}
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 16 16"
+              fill="currentColor"
+              className={`h-3.5 w-3.5 transition-transform duration-150 ${sortAsc ? "" : "rotate-180"}`}
+            >
+              <path fillRule="evenodd" d="M8 3.5a.5.5 0 0 1 .354.146l4 4a.5.5 0 0 1-.708.708L8 4.707 4.354 8.354a.5.5 0 1 1-.708-.708l4-4A.5.5 0 0 1 8 3.5ZM3.5 10a.5.5 0 0 1 .5-.5h8a.5.5 0 0 1 0 1H4a.5.5 0 0 1-.5-.5Z" clipRule="evenodd" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       {compatibilityError && (
@@ -348,86 +506,65 @@ export function MyDecks({
           </button>
         </div>
       ) : (
-        <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-          {filteredDeckNames.map((deckName) => {
-          const isActive = deckName === activeDeckName;
-          const compatibility = compatibilities[deckName];
-          const colors = compatibility?.color_identity ?? getDeckColorIdentity(deckName);
-          const count = getDeckCardCount(deckName);
-          const representativeCard = getRepresentativeCard(deckName);
-          const isPrecon = PRECON_NAMES.has(deckName);
-          const displayName = isPrecon ? deckName.slice(PRECON_PREFIX.length) : deckName;
+        <div className="flex w-full flex-col gap-6">
+          {/* User decks section */}
+          <div>
+            <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-400">
+              My Decks
+              {userDecks.length > 0 && (
+                <span className="ml-2 text-slate-600">{userDecks.length}</span>
+              )}
+            </h3>
+            <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+              {userDecks.map((deckName) => (
+                <DeckTile
+                  key={deckName}
+                  deckName={deckName}
+                  isActive={deckName === activeDeckName}
+                  compatibility={compatibilities[deckName]}
+                  onClick={() => handleTileClick(deckName)}
+                />
+              ))}
 
-            return (
               <button
-                key={deckName}
-                onClick={() => handleTileClick(deckName)}
-                className={`group relative flex aspect-[4/3] flex-col justify-end overflow-hidden rounded-xl text-left transition ${
-                  isActive
-                    ? "ring-2 ring-white/30 ring-offset-2 ring-offset-[#060a16]"
-                    : "ring-1 ring-white/10 hover:ring-white/20"
-                }`}
+                onClick={() => setShowImport(true)}
+                className="group relative flex aspect-[4/3] flex-col items-center justify-center gap-2 overflow-hidden rounded-xl ring-1 ring-white/10 transition hover:bg-white/5 hover:ring-white/20"
               >
-                <DeckArtTile cardName={representativeCard} />
-
-                {isPrecon && (
-                  <span className="absolute right-2 top-2 z-10 rounded-full bg-amber-500/80 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-black">
-                    Pre-built
-                  </span>
-                )}
-
-                <div className="relative z-10 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-3 pb-3 pt-8">
-                  <p className="text-sm font-semibold text-white">{displayName}</p>
-                  <div className="mt-1 flex items-center gap-2">
-                    <div className="flex gap-1">
-                      {colors.map((color) => (
-                        <span
-                          key={color}
-                          className={`inline-block h-2.5 w-2.5 rounded-full ${COLOR_DOT_CLASS[color] ?? "bg-gray-400"}`}
-                        />
-                      ))}
-                      {colors.length === 0 && (
-                        <span className="inline-block h-2.5 w-2.5 rounded-full bg-gray-500" />
-                      )}
-                    </div>
-                    <span className="text-xs text-gray-300">{count} cards</span>
-                  </div>
-                  {compatibility && (
-                    <div className="mt-2 flex flex-wrap gap-1">
-                      {compatibility.standard.compatible && <StatusBadge label="STD" active />}
-                      {compatibility.commander.compatible && <StatusBadge label="CMD" active />}
-                      {compatibility.bo3_ready && <StatusBadge label="BO3" active />}
-                      {compatibility.unknown_cards.length > 0 && (
-                        <span
-                          className="rounded bg-amber-500/80 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-black"
-                          title={`Unknown cards:\n${compatibility.unknown_cards.join("\n")}`}
-                        >
-                          Unknown {compatibility.unknown_cards.length}
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </div>
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 20 20"
+                  fill="currentColor"
+                  className="h-8 w-8 text-gray-500 transition-colors group-hover:text-gray-300"
+                >
+                  <path d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z" />
+                </svg>
+                <span className="text-xs font-medium text-gray-500 transition-colors group-hover:text-gray-300">
+                  Import Deck
+                </span>
               </button>
-            );
-          })}
+            </div>
+          </div>
 
-          <button
-            onClick={() => setShowImport(true)}
-            className="group relative flex aspect-[4/3] flex-col items-center justify-center gap-2 overflow-hidden rounded-xl ring-1 ring-white/10 transition hover:bg-white/5 hover:ring-white/20"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              viewBox="0 0 20 20"
-              fill="currentColor"
-              className="h-8 w-8 text-gray-500 transition-colors group-hover:text-gray-300"
-            >
-              <path d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z" />
-            </svg>
-            <span className="text-xs font-medium text-gray-500 transition-colors group-hover:text-gray-300">
-              Import Deck
-            </span>
-          </button>
+          {/* Bundled decks section */}
+          {bundledDecks.length > 0 && (
+            <div>
+              <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-400">
+                Starter Decks
+                <span className="ml-2 text-slate-600">{bundledDecks.length}</span>
+              </h3>
+              <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+                {bundledDecks.map((deckName) => (
+                  <DeckTile
+                    key={deckName}
+                    deckName={deckName}
+                    isActive={deckName === activeDeckName}
+                    compatibility={compatibilities[deckName]}
+                    onClick={() => handleTileClick(deckName)}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

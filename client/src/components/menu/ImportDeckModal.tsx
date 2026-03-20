@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 
 import { menuButtonClass } from "./buttonStyles";
-import { STORAGE_KEY_PREFIX, listSavedDeckNames } from "../../constants/storage";
+import { STORAGE_KEY_PREFIX, listSavedDeckNames, stampDeckMeta } from "../../constants/storage";
 import { detectAndParseDeck } from "../../services/deckParser";
 
 type ImportTab = "paste" | "file";
@@ -24,6 +24,7 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
     if (!name || !pasteText.trim()) return;
     const deck = detectAndParseDeck(pasteText);
     localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(deck));
+    stampDeckMeta(name);
     const names = listSavedDeckNames();
     onImported(name, names);
     resetAndClose();
@@ -38,6 +39,7 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
       const deck = detectAndParseDeck(content);
       const name = file.name.replace(/\.(dck|dec|txt)$/i, "");
       localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(deck));
+      stampDeckMeta(name);
       const names = listSavedDeckNames();
       onImported(name, names);
       resetAndClose();

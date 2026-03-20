@@ -10,6 +10,7 @@ import {
   ACTIVE_DECK_KEY,
   listSavedDeckNames,
   STORAGE_KEY_PREFIX,
+  stampDeckMeta,
 } from "../constants/storage";
 import { STARTER_DECKS } from "../data/starterDecks";
 import type { ParsedDeck } from "../services/deckParser";
@@ -25,6 +26,7 @@ function seedStarterDecks(): void {
   for (const starter of STARTER_DECKS) {
     const deck: ParsedDeck = { main: starter.cards, sideboard: [] };
     localStorage.setItem(STORAGE_KEY_PREFIX + starter.name, JSON.stringify(deck));
+    stampDeckMeta(starter.name, 0);
   }
 }
 

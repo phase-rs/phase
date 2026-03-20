@@ -8,7 +8,7 @@ import { WaitingScreen } from "../components/lobby/WaitingScreen";
 import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuShell } from "../components/menu/MenuShell";
 import { MyDecks } from "../components/menu/MyDecks";
-import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX, listSavedDeckNames } from "../constants/storage";
+import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX, listSavedDeckNames, stampDeckMeta } from "../constants/storage";
 import { STARTER_DECKS } from "../data/starterDecks";
 import { parseRoomCode } from "../network/connection";
 import type { ParsedDeck } from "../services/deckParser";
@@ -20,6 +20,7 @@ function seedStarterDecks(): void {
   for (const starter of STARTER_DECKS) {
     const deck: ParsedDeck = { main: starter.cards, sideboard: [] };
     localStorage.setItem(STORAGE_KEY_PREFIX + starter.name, JSON.stringify(deck));
+    stampDeckMeta(starter.name, 0);
   }
 }
 

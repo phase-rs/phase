@@ -1,9 +1,10 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { useNavigate } from "react-router";
 import type { ScryfallCard } from "../../services/scryfall";
 import type { ParsedDeck } from "../../services/deckParser";
 import { deduplicateEntries } from "../../services/deckParser";
-import { STORAGE_KEY_PREFIX } from "../../constants/storage";
+import { evaluateDeckCompatibility, type DeckCompatibilityResult } from "../../services/deckCompatibility";
+import { STORAGE_KEY_PREFIX, stampDeckMeta } from "../../constants/storage";
 import { useDeckCardData } from "../../hooks/useDeckCardData";
 import { CardSearch } from "./CardSearch";
 import { CardGrid } from "./CardGrid";
@@ -65,6 +66,30 @@ export function DeckBuilder({
     ...deck.sideboard.map((entry) => entry.name),
     ...commanders,
   ]);
+
+  const [compatibility, setCompatibility] = useState<DeckCompatibilityResult | null>(null);
+
+  // Stable key for deck contents to debounce compatibility evaluation
+  const deckKey = useMemo(
+    () => [...deck.main.map((e) => `${e.count}x${e.name}`), "//", ...deck.sideboard.map((e) => `${e.count}x${e.name}`)].join("|"),
+    [deck],
+  );
+
+  useEffect(() => {
+    if (deck.main.length === 0 && deck.sideboard.length === 0) {
+      setCompatibility(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      evaluateDeckCompatibility(deck).then((result) => {
+        if (!cancelled) setCompatibility(result);
+      }).catch(() => {
+        // WASM may not be loaded yet; silently ignore
+      });
+    }, 300);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [deckKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const isCommander = format === "commander";
   const maxCopies = isCommander ? 1 : 4;
@@ -148,6 +173,7 @@ export function DeckBuilder({
     if (!deckName.trim()) return;
     const data = JSON.stringify({ ...deck, commander: commanders, format });
     localStorage.setItem(STORAGE_KEY_PREFIX + deckName.trim(), data);
+    stampDeckMeta(deckName.trim());
     setSavedDecks(listSavedDecks());
   };
 
@@ -351,6 +377,7 @@ export function DeckBuilder({
               onCardHover={onCardHover}
               warnings={warnings}
               format={format}
+              compatibility={compatibility}
             />
           </div>
 

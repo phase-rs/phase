@@ -1575,6 +1575,30 @@ pub fn card_face_has_unimplemented_parts(face: &CardFace) -> bool {
             .any(replacement_has_unimplemented_parts)
 }
 
+/// Returns the list of unsupported handler labels for a card face (e.g.
+/// "Effect:Unimplemented", "Trigger:ChangesZone", "Keyword:someKeyword").
+/// Empty means the card is fully supported.
+pub fn card_face_gaps(face: &CardFace) -> Vec<String> {
+    let trigger_registry = build_trigger_registry();
+    let static_registry = build_static_registry();
+    let mut missing = Vec::new();
+    check_keywords(&face.keywords, &mut missing);
+    check_abilities(&face.abilities, &mut missing);
+    check_triggers(&face.triggers, &trigger_registry, &mut missing);
+    check_statics(&face.static_abilities, &static_registry, &mut missing);
+    check_additional_cost(&face.additional_cost, &mut missing);
+    check_replacements(&face.replacements, &mut missing);
+    missing
+}
+
+/// Convenience wrapper that builds the registries internally so callers
+/// don't need to construct them.
+pub fn build_parse_details_for_face(face: &CardFace) -> Vec<ParsedItem> {
+    let trigger_registry = build_trigger_registry();
+    let static_registry = build_static_registry();
+    build_parse_details(face, &trigger_registry, &static_registry)
+}
+
 fn check_abilities(abilities: &[AbilityDefinition], missing: &mut Vec<String>) {
     for def in abilities {
         collect_ability_missing_parts(def, missing);

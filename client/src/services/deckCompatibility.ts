@@ -10,6 +10,30 @@ export interface CompatibilityCheck {
   reasons: string[];
 }
 
+export type ParseCategory = "keyword" | "ability" | "trigger" | "static" | "replacement" | "cost";
+
+export interface ParsedItem {
+  category: ParseCategory;
+  label: string;
+  source_text?: string;
+  supported: boolean;
+  details?: [string, string][];
+  children?: ParsedItem[];
+}
+
+export interface UnsupportedCard {
+  name: string;
+  gaps: string[];
+  oracle_text?: string;
+  parse_details?: ParsedItem[];
+}
+
+export interface DeckCoverage {
+  total_unique: number;
+  supported_unique: number;
+  unsupported_cards: UnsupportedCard[];
+}
+
 export interface DeckCompatibilityResult {
   standard: CompatibilityCheck;
   commander: CompatibilityCheck;
@@ -19,6 +43,10 @@ export interface DeckCompatibilityResult {
   selected_format_reasons: string[];
   /** Combined color identity of all cards in the deck, in WUBRG order (e.g. ["W", "U", "R"]). */
   color_identity: string[];
+  /** Engine coverage summary — how many unique cards are fully supported. */
+  coverage?: DeckCoverage | null;
+  /** Per-format legality: maps format key (e.g. "standard", "modern") to status ("legal", "not_legal", "banned"). */
+  format_legality?: Record<string, string>;
 }
 
 interface DeckCompatibilityRequest {

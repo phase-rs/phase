@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +49,35 @@ pub struct DeckCompatibilityResult {
     /// Each entry is a single-letter color code: "W", "U", "B", "R", or "G".
     #[serde(default)]
     pub color_identity: Vec<String>,
+    /// Engine coverage summary for the deck's unique cards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<DeckCoverage>,
+    /// Per-format legality: maps format key (e.g. "standard", "modern") to the
+    /// deck's aggregate status ("legal", "not_legal", or "banned").
+    /// A deck is "legal" only if every card is legal in that format.
+    #[serde(default)]
+    pub format_legality: BTreeMap<String, String>,
+}
+
+/// Per-card engine coverage gap info with detailed parse breakdown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnsupportedCard {
+    pub name: String,
+    pub gaps: Vec<String>,
+    /// Original Oracle text for the card face.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oracle_text: Option<String>,
+    /// Hierarchical parse tree — same structure used by the coverage dashboard.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub parse_details: Vec<crate::game::coverage::ParsedItem>,
+}
+
+/// Engine coverage summary for a deck: how many unique cards are fully supported.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeckCoverage {
+    pub total_unique: usize,
+    pub supported_unique: usize,
+    pub unsupported_cards: Vec<UnsupportedCard>,
 }
 
 pub fn evaluate_deck_compatibility(
@@ -64,6 +93,9 @@ pub fn evaluate_deck_compatibility(
     let (selected_format_compatible, selected_format_reasons) =
         evaluate_selected_format(request, &standard, &commander, bo3_ready);
 
+    let coverage = evaluate_deck_coverage(db, request);
+    let format_legality = evaluate_format_legality(db, request);
+
     DeckCompatibilityResult {
         standard,
         commander,
@@ -72,6 +104,8 @@ pub fn evaluate_deck_compatibility(
         selected_format_compatible,
         selected_format_reasons,
         color_identity,
+        coverage: Some(coverage),
+        format_legality,
     }
 }
 
@@ -290,6 +324,77 @@ fn evaluate_selected_format(
     }
 
     (Some(compatible), reasons)
+}
+
+fn evaluate_deck_coverage(db: &CardDatabase, request: &DeckCompatibilityRequest) -> DeckCoverage {
+    let unique_names: HashSet<&str> = all_deck_cards(request).collect();
+    let mut unsupported_cards = Vec::new();
+    let mut supported_count = 0usize;
+
+    for name in &unique_names {
+        let resolved = resolve_card_name(db, name);
+        if let Some(face) = db.get_face_by_name(resolved) {
+            let gaps = crate::game::coverage::card_face_gaps(face);
+            if gaps.is_empty() {
+                supported_count += 1;
+            } else {
+                let parse_details =
+                    crate::game::coverage::build_parse_details_for_face(face);
+                unsupported_cards.push(UnsupportedCard {
+                    name: face.name.clone(),
+                    gaps,
+                    oracle_text: face.oracle_text.clone(),
+                    parse_details,
+                });
+            }
+        }
+        // Unknown cards are already tracked separately; skip them here.
+    }
+
+    unsupported_cards.sort_by(|a, b| a.name.cmp(&b.name));
+
+    DeckCoverage {
+        total_unique: unique_names.len(),
+        supported_unique: supported_count,
+        unsupported_cards,
+    }
+}
+
+/// Check deck legality across all known formats. A deck is "legal" in a format
+/// only if every card is legal there. If any card is banned, the deck is "banned".
+/// Otherwise if any card is not legal, the deck is "not_legal".
+fn evaluate_format_legality(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+) -> BTreeMap<String, String> {
+    let unique_names: HashSet<&str> = all_deck_cards(request).collect();
+    let mut result = BTreeMap::new();
+
+    for format in LegalityFormat::ALL {
+        let mut worst = LegalityStatus::Legal;
+        for name in &unique_names {
+            let resolved = resolve_card_name(db, name);
+            let status = db
+                .legality_status(resolved, format)
+                .unwrap_or(LegalityStatus::NotLegal);
+            // Banned is worse than NotLegal is worse than Legal
+            match status {
+                LegalityStatus::Banned => {
+                    worst = LegalityStatus::Banned;
+                    break; // Can't get worse
+                }
+                LegalityStatus::NotLegal => {
+                    if worst != LegalityStatus::Banned {
+                        worst = LegalityStatus::NotLegal;
+                    }
+                }
+                LegalityStatus::Restricted | LegalityStatus::Legal => {}
+            }
+        }
+        result.insert(format.as_key().to_string(), worst.as_export_str().to_string());
+    }
+
+    result
 }
 
 fn collect_unknown_cards(
