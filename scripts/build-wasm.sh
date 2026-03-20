@@ -24,7 +24,7 @@ wasm-bindgen \
 # Step 3: Optimize (release only)
 if [ "$PROFILE" = "release" ] && command -v wasm-opt &> /dev/null; then
   echo "Optimizing WASM binary..."
-  wasm-opt -Oz --enable-bulk-memory \
+  wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int \
     "$WASM_OUT/engine_wasm_bg.wasm" \
     -o "$WASM_OUT/engine_wasm_bg.wasm"
 fi
