@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { useAnimationStore } from "../animationStore";
 import type { AnimationStep } from "../../animation/types";
+import type { GameEvent } from "../../adapter/types";
 
 describe("animationStore", () => {
   beforeEach(() => {
@@ -8,7 +9,7 @@ describe("animationStore", () => {
   });
 
   const makeStep = (duration = 300): AnimationStep => ({
-    effects: [{ type: "DamageDealt", data: { amount: 3 }, duration }],
+    effects: [{ event: { type: "DamageDealt", data: { amount: 3 } } as GameEvent, duration }],
     duration,
   });
 

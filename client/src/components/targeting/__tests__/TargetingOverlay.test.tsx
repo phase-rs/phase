@@ -97,7 +97,7 @@ describe("TargetingOverlay", () => {
           pending_cast: {
             object_id: 5,
             card_id: 10,
-            ability: {},
+            ability: { targets: [] },
             cost: { type: "NoCost" },
           },
           target_slots: [{ legal_targets: [], optional: true }],

@@ -146,7 +146,6 @@ export function MenuPage() {
               accent={action.accent}
               onClick={action.onClick}
               icon={action.icon}
-              aside={action.aside}
             />
           ))}
         </div>

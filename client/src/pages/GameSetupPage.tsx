@@ -13,7 +13,7 @@ import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import { MyDecks } from "../components/menu/MyDecks";
 import { menuButtonClass } from "../components/menu/buttonStyles";
-import { getAiDifficultyLabel } from "../constants/ai";
+import { getAiDifficultyLabel, type AIDifficulty } from "../constants/ai";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX, listSavedDeckNames } from "../constants/storage";
 import { STARTER_DECKS } from "../data/starterDecks";
 import { parseRoomCode } from "../network/connection";
@@ -172,7 +172,7 @@ export function GameSetupPage() {
     setFormatConfig({ ...defaults, ...preset.formatConfig });
     setPlayerCount(preset.playerCount);
     if (preset.aiDifficulty) {
-      setDifficulty(preset.aiDifficulty);
+      setDifficulty(preset.aiDifficulty as AIDifficulty);
     }
     if (preset.deckId) {
       setActiveDeckName(preset.deckId);

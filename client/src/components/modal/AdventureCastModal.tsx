@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
 
-import type { WaitingFor } from "../../adapter/types.ts";
+import type { GameAction, WaitingFor } from "../../adapter/types.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 
@@ -24,7 +24,7 @@ function AdventureCastContent({
   dispatch,
 }: {
   objectId: number;
-  dispatch: (action: Parameters<typeof dispatch>[0]) => Promise<unknown>;
+  dispatch: (action: GameAction) => Promise<unknown>;
 }) {
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
 

@@ -214,8 +214,6 @@ export function PermanentCard({ objectId }: PermanentCardProps) {
       data-object-id={objectId}
       layoutId={`permanent-${objectId}`}
       className="relative inline-flex w-fit cursor-pointer rounded-lg self-start"
-      originX={0.5}
-      originY={0.5}
       style={{
         filter: sicknessFilter,
         boxShadow: sicknessGlow,

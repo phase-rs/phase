@@ -39,7 +39,7 @@ let cardDbLoadPromise: Promise<void> | null = null;
 
 function ensureWasmInit(): Promise<void> {
   if (!wasmInitPromise) {
-    wasmInitPromise = init();
+    wasmInitPromise = init().then(() => {});
   }
   return wasmInitPromise;
 }
