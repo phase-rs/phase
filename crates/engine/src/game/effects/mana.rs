@@ -61,7 +61,7 @@ pub fn resolve(
             player_id: ability.controller,
             mana_type,
             source_id: ability.source_id,
-            from_mana_ability: false,
+            tapped_for_mana: false,
         });
     }
 

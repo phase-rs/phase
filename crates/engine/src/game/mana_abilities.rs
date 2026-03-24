@@ -8,6 +8,7 @@ use crate::types::player::PlayerId;
 use super::effects::mana::resolve_mana_types;
 use super::engine::EngineError;
 use super::mana_payment;
+use super::mana_sources;
 use super::sacrifice;
 
 /// Check if a typed ability definition represents a mana ability (CR 605).
@@ -54,8 +55,9 @@ pub fn resolve_mana_ability(
         },
     };
 
+    let tapped = mana_sources::has_tap_component(&ability_def.cost);
     for mana_type in produced_mana {
-        mana_payment::produce_mana(state, source_id, mana_type, player, events);
+        mana_payment::produce_mana(state, source_id, mana_type, player, tapped, events);
     }
 
     Ok(())

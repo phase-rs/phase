@@ -100,6 +100,7 @@ pub fn produce_mana(
     source_id: ObjectId,
     mana_type: ManaType,
     player_id: PlayerId,
+    tapped_for_mana: bool,
     events: &mut Vec<GameEvent>,
 ) {
     let unit = ManaUnit {
@@ -121,7 +122,7 @@ pub fn produce_mana(
         player_id,
         mana_type,
         source_id,
-        from_mana_ability: true,
+        tapped_for_mana,
     });
 }
 
@@ -558,6 +559,7 @@ mod tests {
             ObjectId(1),
             ManaType::Green,
             PlayerId(0),
+            true,
             &mut events,
         );
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
@@ -572,6 +574,7 @@ mod tests {
             ObjectId(5),
             ManaType::Blue,
             PlayerId(1),
+            true,
             &mut events,
         );
         assert_eq!(events.len(), 1);
@@ -581,7 +584,7 @@ mod tests {
                 player_id: PlayerId(1),
                 mana_type: ManaType::Blue,
                 source_id: ObjectId(5),
-                from_mana_ability: true,
+                tapped_for_mana: true,
             }
         ));
     }

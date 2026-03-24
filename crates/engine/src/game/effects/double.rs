@@ -207,7 +207,7 @@ fn resolve_double_mana(
                 player_id,
                 mana_type,
                 source_id: ability.source_id,
-                from_mana_ability: false,
+                tapped_for_mana: false,
             });
         }
     }

@@ -25,7 +25,7 @@ pub struct ManaSourceOption {
 
 /// Check whether an ability cost includes a tap component.
 /// Matches both `AbilityCost::Tap` and `Composite` costs containing `Tap`.
-fn has_tap_component(cost: &Option<AbilityCost>) -> bool {
+pub(crate) fn has_tap_component(cost: &Option<AbilityCost>) -> bool {
     match cost {
         Some(AbilityCost::Tap) => true,
         Some(AbilityCost::Composite { costs }) => {

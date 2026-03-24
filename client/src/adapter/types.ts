@@ -511,7 +511,7 @@ export type GameEvent =
   | { type: "AbilityActivated"; data: { source_id: ObjectId } }
   | { type: "ZoneChanged"; data: { object_id: ObjectId; from: Zone; to: Zone } }
   | { type: "LifeChanged"; data: { player_id: PlayerId; amount: number } }
-  | { type: "ManaAdded"; data: { player_id: PlayerId; mana_type: ManaType; source_id: ObjectId; from_mana_ability?: boolean } }
+  | { type: "ManaAdded"; data: { player_id: PlayerId; mana_type: ManaType; source_id: ObjectId; tapped_for_mana?: boolean } }
   | { type: "PermanentTapped"; data: { object_id: ObjectId } }
   | { type: "PlayerLost"; data: { player_id: PlayerId } }
   | { type: "MulliganStarted" }

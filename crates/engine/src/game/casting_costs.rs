@@ -1088,7 +1088,7 @@ pub(super) fn auto_tap_mana_sources(
                     });
                 }
             }
-            mana_payment::produce_mana(state, option.object_id, option.mana_type, player, events);
+            mana_payment::produce_mana(state, option.object_id, option.mana_type, player, true, events);
         }
     }
 }

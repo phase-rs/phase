@@ -1268,7 +1268,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 player_id: *player,
                 mana_type: resolved_mana_type,
                 source_id: object_id,
-                from_mana_ability: false,
+                tapped_for_mana: false,
             });
             // Only emit waterbend event for Waterbend mode
             if mode == ConvokeMode::Waterbend {
@@ -3359,6 +3359,7 @@ fn handle_tap_land_for_mana(
             object_id,
             mana_option.mana_type,
             state.priority_player,
+            true,
             events,
         );
     }
