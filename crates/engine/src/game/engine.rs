@@ -2674,24 +2674,15 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 )));
             }
 
-            // CR 510.1c: Validate lethal-before-excess ordering.
-            let mut remaining = total;
-            for (i, slot) in blockers.iter().enumerate() {
-                let assigned = assignments
-                    .iter()
-                    .find(|(id, _)| *id == slot.blocker_id)
-                    .map(|(_, a)| *a)
-                    .unwrap_or(0);
-                if i < blockers.len() - 1
-                    && assigned < slot.lethal_minimum
-                    && remaining >= slot.lethal_minimum
-                {
+            // Validate all assignment targets are actual blockers of this attacker.
+            let valid_blocker_ids: Vec<ObjectId> = blockers.iter().map(|s| s.blocker_id).collect();
+            for (bid, _) in &assignments {
+                if !valid_blocker_ids.contains(bid) {
                     return Err(EngineError::InvalidAction(format!(
-                        "Blocker {:?} must receive at least {} lethal damage",
-                        slot.blocker_id, slot.lethal_minimum
+                        "{:?} is not a blocker of attacker {:?}",
+                        bid, aid
                     )));
                 }
-                remaining = remaining.saturating_sub(assigned);
             }
 
             // CR 702.19b: Trample damage only allowed with trample.
@@ -2701,37 +2692,65 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 ));
             }
 
-            // Build DamageAssignment structs and delegate to the shared combat damage
-            // pipeline — handles protection, lifelink, deathtouch, infect, replacement.
+            // CR 702.19b: Trample requires lethal to ALL blockers.
+            // Enforced regardless of whether excess goes to the player.
+            if trample {
+                for slot in blockers {
+                    let assigned = assignments
+                        .iter()
+                        .find(|(id, _)| *id == slot.blocker_id)
+                        .map(|(_, a)| *a)
+                        .unwrap_or(0);
+                    if assigned < slot.lethal_minimum {
+                        return Err(EngineError::InvalidAction(format!(
+                            "Trample: blocker {:?} must receive at least {} lethal damage before excess to player",
+                            slot.blocker_id, slot.lethal_minimum
+                        )));
+                    }
+                }
+            }
+
+            // Store assignments in pending_damage and advance the damage step index.
             use crate::game::combat::{DamageAssignment, DamageTarget};
-            let mut damage_assignments: Vec<(ObjectId, DamageAssignment)> = Vec::new();
-            for (blocker_id, amount) in &assignments {
-                if *amount > 0 {
-                    damage_assignments.push((
+            if let Some(combat) = &mut state.combat {
+                for (blocker_id, amount) in &assignments {
+                    if *amount > 0 {
+                        combat.pending_damage.push((
+                            aid,
+                            DamageAssignment {
+                                target: DamageTarget::Object(*blocker_id),
+                                amount: *amount,
+                            },
+                        ));
+                    }
+                }
+                if trample_damage > 0 {
+                    combat.pending_damage.push((
                         aid,
                         DamageAssignment {
-                            target: DamageTarget::Object(*blocker_id),
-                            amount: *amount,
+                            target: DamageTarget::Player(dp),
+                            amount: trample_damage,
                         },
                     ));
                 }
+                // Advance past this attacker so resolve_combat_damage continues from next.
+                combat.damage_step_index = Some(combat.damage_step_index.unwrap_or(0) + 1);
             }
-            if trample_damage > 0 {
-                damage_assignments.push((
-                    aid,
-                    DamageAssignment {
-                        target: DamageTarget::Player(dp),
-                        amount: trample_damage,
-                    },
-                ));
-            }
-            let damage_events =
-                super::combat_damage::apply_combat_damage(state, &damage_assignments);
-            events.extend(damage_events);
 
-            state.waiting_for = WaitingFor::Priority { player: p };
-            state.priority_player = p;
-            state.waiting_for.clone()
+            // Resume the combat damage state machine — may return another
+            // WaitingFor::AssignCombatDamage for the next attacker, or None if all done.
+            if let Some(waiting) = super::combat_damage::resolve_combat_damage(state, &mut events) {
+                state.waiting_for = waiting.clone();
+                return Ok(ActionResult {
+                    events,
+                    waiting_for: waiting,
+                    log_entries: vec![],
+                });
+            }
+
+            // All combat damage resolved — return to priority.
+            super::priority::reset_priority(state);
+            WaitingFor::Priority { player: p }
         }
         // CR 601.2d: Distribute among targets (casting-time distribution).
         (

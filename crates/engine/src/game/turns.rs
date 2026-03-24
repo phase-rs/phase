@@ -521,9 +521,11 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
             }
             Phase::CombatDamage => {
                 // CR 510.1 / CR 510.2: Combat damage assigned and dealt as a turn-based action.
-                // resolve_combat_damage handles the full CR 704.3 SBA/trigger loop inline,
-                // including DamageReceived triggers and dies triggers from SBA-generated events.
-                combat_damage::resolve_combat_damage(state, events);
+                // resolve_combat_damage may pause for interactive assignment (2+ blockers).
+                if let Some(waiting) = combat_damage::resolve_combat_damage(state, events) {
+                    state.waiting_for = waiting.clone();
+                    return waiting;
+                }
                 // CR 704.3 / CR 800.4: SBAs may have ended the game during combat damage.
                 if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
                     return state.waiting_for.clone();

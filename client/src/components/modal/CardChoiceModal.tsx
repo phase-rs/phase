@@ -9,6 +9,7 @@ import type { ObjectId, WaitingFor } from "../../adapter/types.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
+import { DamageAssignmentModal } from "../combat/DamageAssignmentModal.tsx";
 import { DistributeAmongModal } from "./DistributeAmongModal.tsx";
 import { RetargetChoiceModal } from "./RetargetChoiceModal.tsx";
 
@@ -89,6 +90,9 @@ export function CardChoiceModal() {
     case "WardSacrificeChoice":
       if (waitingFor.data.player !== playerId) return null;
       return <WardSacrificeModal data={waitingFor.data} />;
+    case "AssignCombatDamage":
+      if (waitingFor.data.player !== playerId) return null;
+      return <DamageAssignmentModal data={waitingFor.data} />;
     case "DistributeAmong":
       if (waitingFor.data.player !== playerId) return null;
       return <DistributeAmongModal data={waitingFor.data} />;

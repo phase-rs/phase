@@ -25,7 +25,6 @@ import { CombatPhaseIndicator } from "../components/controls/PhaseStopBar.tsx";
 import { OpponentHand } from "../components/hand/OpponentHand.tsx";
 import { PlayerHand } from "../components/hand/PlayerHand.tsx";
 import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
-import { DamageAssignmentModal } from "../components/combat/DamageAssignmentModal.tsx";
 import { ManaPaymentUI } from "../components/mana/ManaPaymentUI.tsx";
 import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.tsx";
 import { AdventureCastModal } from "../components/modal/AdventureCastModal.tsx";
@@ -760,9 +759,6 @@ function GamePageContent({
 
       {/* Block assignment lines (animated SVG overlay for combat) */}
       <BlockAssignmentLines />
-
-      {/* Damage assignment review (read-only for v1.1) */}
-      <DamageAssignmentModal />
 
       {/* Unified action button (combat + priority controls) */}
       <ActionButton />

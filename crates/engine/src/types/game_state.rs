@@ -606,8 +606,8 @@ pub enum WaitingFor {
         copy_id: ObjectId,
         target_slots: Vec<CopyTargetSlot>,
     },
-    /// CR 510.1c/d: Attacker with multiple blockers must assign damage in blocking order.
-    /// Each blocker must receive at least lethal damage before excess goes to the next.
+    /// CR 510.1c: Attacker with multiple blockers — controller divides damage as they choose.
+    /// CR 702.19b: Trample requires lethal to each blocker before excess to defending player.
     AssignCombatDamage {
         player: PlayerId,
         attacker_id: ObjectId,
@@ -646,12 +646,13 @@ pub struct CopyTargetSlot {
     pub legal_alternatives: Vec<TargetRef>,
 }
 
-/// CR 510.1c: A blocker in damage assignment order with its lethal damage threshold.
+/// CR 510.1c: A blocker with its lethal damage threshold for UI display.
+/// `lethal_minimum` is only enforced as a hard constraint for trample (CR 702.19b).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DamageSlot {
     pub blocker_id: ObjectId,
-    /// Minimum damage needed before excess can go to the next blocker.
-    /// CR 702.2c: With deathtouch, lethal = 1.
+    /// Lethal damage threshold. CR 702.2c: With deathtouch, lethal = 1.
+    /// Informational for non-trample; enforced for trample (CR 702.19b).
     pub lethal_minimum: u32,
 }
 

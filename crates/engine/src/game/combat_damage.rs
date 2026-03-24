@@ -5,7 +5,7 @@ use crate::game::sba;
 use crate::game::triggers;
 use crate::types::ability::TargetRef;
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{DamageSlot, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
@@ -60,11 +60,23 @@ fn process_combat_damage_triggers(
 /// Resolve combat damage with first strike / double strike support (CR 510.1).
 /// CR 702.7b: If any creature has first strike or double strike, two damage sub-steps run.
 /// Between sub-steps: SBAs are checked and triggers processed.
-pub fn resolve_combat_damage(state: &mut GameState, events: &mut Vec<GameEvent>) {
+///
+/// Returns `Some(WaitingFor)` when an attacker with 2+ blockers needs interactive
+/// damage assignment. Returns `None` when all damage for the current phase is resolved.
+/// Re-entrant: call again after the player submits `GameAction::AssignCombatDamage`.
+pub fn resolve_combat_damage(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
     let combat = match &state.combat {
         Some(c) => c.clone(),
-        None => return,
+        None => return None,
     };
+
+    // Guard: regular damage already applied (re-entry from triggers during regular step).
+    if combat.regular_damage_done {
+        return None;
+    }
 
     let has_first_or_double = combat.attackers.iter().any(|a| {
         state
@@ -80,169 +92,198 @@ pub fn resolve_combat_damage(state: &mut GameState, events: &mut Vec<GameEvent>)
             .unwrap_or(false)
     });
 
-    if has_first_or_double {
-        // First strike damage step
-        let first_strike_events = first_strike_damage_step(state);
-        events.extend(first_strike_events.iter().cloned());
+    // --- First strike sub-step ---
+    if has_first_or_double && !combat.first_strike_done {
+        if let Some(waiting) = collect_damage_assignments(state, SubStep::FirstStrike) {
+            return Some(waiting);
+        }
+        // All first-strike assignments collected — apply simultaneously (CR 510.2).
+        let pending = take_pending_damage(state);
+        let damage_events = apply_combat_damage(state, &pending);
+        events.extend(damage_events.iter().cloned());
 
-        // Mark first strike done
         if let Some(c) = &mut state.combat {
             c.first_strike_done = true;
+            c.damage_step_index = None;
         }
 
         // CR 510.4: SBAs and triggers run between first-strike and regular damage sub-steps.
-        process_combat_damage_triggers(state, &first_strike_events, events);
-
-        // Regular damage step
-        let regular_events = regular_damage_step(state);
-        events.extend(regular_events.iter().cloned());
-        process_combat_damage_triggers(state, &regular_events, events);
-    } else {
-        // Single damage step
-        let regular_events = regular_damage_step(state);
-        events.extend(regular_events.iter().cloned());
-        process_combat_damage_triggers(state, &regular_events, events);
+        process_combat_damage_triggers(state, &damage_events, events);
     }
+
+    // --- Regular damage sub-step ---
+    if let Some(waiting) = collect_damage_assignments(state, SubStep::Regular) {
+        return Some(waiting);
+    }
+    // All regular assignments collected — apply simultaneously (CR 510.2).
+    let pending = take_pending_damage(state);
+    let damage_events = apply_combat_damage(state, &pending);
+    events.extend(damage_events.iter().cloned());
+
+    if let Some(c) = &mut state.combat {
+        c.regular_damage_done = true;
+        c.damage_step_index = None;
+    }
+
+    process_combat_damage_triggers(state, &damage_events, events);
+    None
 }
 
-/// CR 702.7b: First strike damage step — only FirstStrike and DoubleStrike creatures deal damage.
-fn first_strike_damage_step(state: &mut GameState) -> Vec<GameEvent> {
-    let combat = match &state.combat {
-        Some(c) => c.clone(),
-        None => return Vec::new(),
-    };
-
-    let mut all_assignments: Vec<(ObjectId, DamageAssignment)> = Vec::new();
-
-    // Attackers with first/double strike
-    for attacker_info in &combat.attackers {
-        let obj = match state.objects.get(&attacker_info.object_id) {
-            Some(o)
-                if o.zone == crate::types::zones::Zone::Battlefield
-                    && (o.has_keyword(&Keyword::FirstStrike)
-                        || o.has_keyword(&Keyword::DoubleStrike)) =>
-            {
-                o
-            }
-            _ => continue,
-        };
-        let power = combat_damage_amount(obj);
-        if power == 0 {
-            continue;
-        }
-        let has_deathtouch = obj.has_keyword(&Keyword::Deathtouch);
-        let has_trample = obj.has_keyword(&Keyword::Trample);
-        let assignments = assign_attacker_damage(
-            state,
-            attacker_info.object_id,
-            &combat,
-            power,
-            has_deathtouch,
-            has_trample,
-        );
-        for a in assignments {
-            all_assignments.push((attacker_info.object_id, a));
-        }
-    }
-
-    // Blockers with first/double strike
-    for (blocker_id, attacker_ids) in &combat.blocker_to_attacker {
-        let obj = match state.objects.get(blocker_id) {
-            Some(o)
-                if o.zone == crate::types::zones::Zone::Battlefield
-                    && (o.has_keyword(&Keyword::FirstStrike)
-                        || o.has_keyword(&Keyword::DoubleStrike)) =>
-            {
-                o
-            }
-            _ => continue,
-        };
-        let power = combat_damage_amount(obj);
-        if power == 0 {
-            continue;
-        }
-        // CR 510.1c: Blocker assigns combat damage among the attackers it blocks.
-        let blocker_assignments = distribute_blocker_damage(*blocker_id, power, attacker_ids);
-        all_assignments.extend(blocker_assignments);
-    }
-
-    apply_combat_damage(state, &all_assignments)
+/// Which sub-step of combat damage we're collecting assignments for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubStep {
+    FirstStrike,
+    Regular,
 }
 
-/// CR 510.4: Regular damage step — creatures without FirstStrike (already dealt) + DoubleStrike creatures deal damage.
-fn regular_damage_step(state: &mut GameState) -> Vec<GameEvent> {
-    let combat = match &state.combat {
-        Some(c) => c.clone(),
-        None => return Vec::new(),
-    };
+/// Drain pending_damage from CombatState, resetting it to empty.
+fn take_pending_damage(state: &mut GameState) -> Vec<(ObjectId, DamageAssignment)> {
+    state
+        .combat
+        .as_mut()
+        .map(|c| std::mem::take(&mut c.pending_damage))
+        .unwrap_or_default()
+}
+
+/// Iterate attackers (and blockers) for a sub-step, collecting auto-assigned damage
+/// into `combat.pending_damage`. Returns `Some(WaitingFor::AssignCombatDamage)` when
+/// an attacker has 2+ blockers and needs interactive assignment.
+fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Option<WaitingFor> {
+    let combat = state.combat.as_ref()?.clone();
+    let start_index = combat.damage_step_index.unwrap_or(0);
     let first_strike_was_done = combat.first_strike_done;
 
-    let mut all_assignments: Vec<(ObjectId, DamageAssignment)> = Vec::new();
-
-    // Attackers: those without FirstStrike (they haven't dealt yet), plus DoubleStrike (deal again)
-    for attacker_info in &combat.attackers {
+    // --- Attackers ---
+    for (i, attacker_info) in combat.attackers.iter().enumerate().skip(start_index) {
         let obj = match state.objects.get(&attacker_info.object_id) {
             Some(o) if o.zone == crate::types::zones::Zone::Battlefield => o,
             _ => continue,
         };
 
-        // Skip if this creature has FirstStrike only (already dealt) and first strike step ran
-        if first_strike_was_done
-            && obj.has_keyword(&Keyword::FirstStrike)
-            && !obj.has_keyword(&Keyword::DoubleStrike)
-        {
-            continue;
+        // Sub-step filter
+        match sub_step {
+            SubStep::FirstStrike => {
+                if !obj.has_keyword(&Keyword::FirstStrike)
+                    && !obj.has_keyword(&Keyword::DoubleStrike)
+                {
+                    continue;
+                }
+            }
+            SubStep::Regular => {
+                // Skip FirstStrike-only creatures that already dealt in first-strike step
+                if first_strike_was_done
+                    && obj.has_keyword(&Keyword::FirstStrike)
+                    && !obj.has_keyword(&Keyword::DoubleStrike)
+                {
+                    continue;
+                }
+            }
         }
-
-        // Skip if no first strike step happened and creature doesn't need to deal
-        // (all creatures deal in regular step if no first strike step)
 
         let power = combat_damage_amount(obj);
         if power == 0 {
             continue;
         }
+
         let has_deathtouch = obj.has_keyword(&Keyword::Deathtouch);
         let has_trample = obj.has_keyword(&Keyword::Trample);
+
+        // CR 510.1c: Check if interactive assignment is needed (2+ blockers).
+        if needs_interactive_assignment(&combat, attacker_info.object_id) {
+            // Pause iteration — player must choose damage division.
+            if let Some(c) = &mut state.combat {
+                c.damage_step_index = Some(i);
+            }
+
+            let blockers: Vec<DamageSlot> = combat
+                .blocker_assignments
+                .get(&attacker_info.object_id)
+                .unwrap()
+                .iter()
+                .map(|&bid| DamageSlot {
+                    blocker_id: bid,
+                    lethal_minimum: lethal_damage_needed(state, bid, has_deathtouch),
+                })
+                .collect();
+
+            // The player who assigns damage is the attacker's controller.
+            let controller = state
+                .objects
+                .get(&attacker_info.object_id)
+                .map(|o| o.controller)
+                .unwrap_or(state.active_player);
+
+            return Some(WaitingFor::AssignCombatDamage {
+                player: controller,
+                attacker_id: attacker_info.object_id,
+                total_damage: power,
+                blockers,
+                has_trample,
+                defending_player: attacker_info.defending_player,
+            });
+        }
+
+        // Auto-assign for unblocked, single blocker, or blocked-but-no-current-blockers.
         let assignments = assign_attacker_damage(
             state,
-            attacker_info.object_id,
+            attacker_info,
             &combat,
             power,
             has_deathtouch,
             has_trample,
         );
-        for a in assignments {
-            all_assignments.push((attacker_info.object_id, a));
+        if let Some(c) = &mut state.combat {
+            for a in assignments {
+                c.pending_damage.push((attacker_info.object_id, a));
+            }
         }
     }
 
-    // Blockers: same logic
+    // --- Blockers ---
+    // CR 510.1d: Blocker damage division among multiple blocked attackers.
+    // Currently auto-assigned with even split (known simplification — multi-block is rare).
     for (blocker_id, attacker_ids) in &combat.blocker_to_attacker {
         let obj = match state.objects.get(blocker_id) {
             Some(o) if o.zone == crate::types::zones::Zone::Battlefield => o,
             _ => continue,
         };
 
-        if first_strike_was_done
-            && obj.has_keyword(&Keyword::FirstStrike)
-            && !obj.has_keyword(&Keyword::DoubleStrike)
-        {
-            continue;
+        match sub_step {
+            SubStep::FirstStrike => {
+                if !obj.has_keyword(&Keyword::FirstStrike)
+                    && !obj.has_keyword(&Keyword::DoubleStrike)
+                {
+                    continue;
+                }
+            }
+            SubStep::Regular => {
+                if first_strike_was_done
+                    && obj.has_keyword(&Keyword::FirstStrike)
+                    && !obj.has_keyword(&Keyword::DoubleStrike)
+                {
+                    continue;
+                }
+            }
         }
 
         let power = combat_damage_amount(obj);
         if power == 0 {
             continue;
         }
-        // CR 510.1c: Blocker assigns combat damage among the attackers it blocks.
         let blocker_assignments = distribute_blocker_damage(*blocker_id, power, attacker_ids);
-        all_assignments.extend(blocker_assignments);
+        if let Some(c) = &mut state.combat {
+            c.pending_damage.extend(blocker_assignments);
+        }
     }
 
-    apply_combat_damage(state, &all_assignments)
+    // All done for this sub-step — reset index.
+    if let Some(c) = &mut state.combat {
+        c.damage_step_index = None;
+    }
+    None
 }
 
-/// CR 510.1c: Distribute a blocker's combat damage among the attackers it blocks.
+/// CR 510.1d: Distribute a blocker's combat damage among the attackers it blocks.
 /// When blocking multiple attackers, damage is split evenly (first attacker gets remainder).
 fn distribute_blocker_damage(
     blocker_id: ObjectId,
@@ -285,17 +326,9 @@ fn distribute_blocker_damage(
         .collect()
 }
 
-/// Determine attacker damage assignments (CR 510.1b for unblocked, CR 510.1c for blocked).
 /// CR 510.1c: Check if an attacker needs interactive damage assignment.
 /// Returns true when there are 2+ blockers — the attacking player should choose
 /// how to divide damage. Single-blocker and unblocked scenarios are auto-assigned.
-///
-/// Note: The combat damage step currently auto-assigns damage in blocking order
-/// (lethal to each before excess). Interactive assignment (WaitingFor::AssignCombatDamage)
-/// is wired in engine.rs but the damage step does not yet pause mid-iteration to
-/// prompt the player. This is a UX enhancement — the auto-assignment produces
-/// CR-legal results (lethal in declared order).
-#[allow(dead_code)] // Infrastructure for WaitingFor::AssignCombatDamage — not yet called from damage step
 pub(crate) fn needs_interactive_assignment(combat: &CombatState, attacker_id: ObjectId) -> bool {
     combat
         .blocker_assignments
@@ -304,27 +337,31 @@ pub(crate) fn needs_interactive_assignment(combat: &CombatState, attacker_id: Ob
         .unwrap_or(false)
 }
 
+/// Auto-assign damage for unblocked or single-blocker attackers.
+/// Multi-blocker cases (2+) are handled interactively via WaitingFor::AssignCombatDamage.
 fn assign_attacker_damage(
     state: &GameState,
-    attacker_id: ObjectId,
+    attacker_info: &crate::game::combat::AttackerInfo,
     combat: &CombatState,
     power: u32,
     has_deathtouch: bool,
     has_trample: bool,
 ) -> Vec<DamageAssignment> {
-    let defending_player = combat
-        .attackers
-        .iter()
-        .find(|a| a.object_id == attacker_id)
-        .map(|a| a.defending_player)
-        .unwrap_or(crate::types::player::PlayerId(1));
+    let attacker_id = attacker_info.object_id;
+    let defending_player = attacker_info.defending_player;
 
-    let blockers = combat.blocker_assignments.get(&attacker_id);
-
-    let blockers = blockers.filter(|b| !b.is_empty());
+    let blockers = combat
+        .blocker_assignments
+        .get(&attacker_id)
+        .filter(|b| !b.is_empty());
 
     match blockers {
         None => {
+            // CR 509.1h + CR 510.1c: If the creature was declared blocked but all
+            // blockers have since been removed, it's still "blocked" and assigns no damage.
+            if attacker_info.blocked {
+                return Vec::new();
+            }
             // CR 510.1b: Unblocked creature assigns all combat damage to the player/planeswalker it's attacking.
             vec![DamageAssignment {
                 target: DamageTarget::Player(defending_player),
@@ -357,51 +394,11 @@ fn assign_attacker_damage(
                     }]
                 }
             } else {
-                // Multiple blockers (ordered)
-                let mut remaining = power;
-                let mut result = Vec::new();
-
-                for (i, &blocker_id) in blockers.iter().enumerate() {
-                    if remaining == 0 {
-                        break;
-                    }
-                    let lethal = lethal_damage_needed(state, blocker_id, has_deathtouch);
-                    let is_last = i == blockers.len() - 1;
-
-                    if has_trample && is_last {
-                        // Trample: assign lethal to last blocker, excess to player
-                        let to_blocker = remaining.min(lethal);
-                        result.push(DamageAssignment {
-                            target: DamageTarget::Object(blocker_id),
-                            amount: to_blocker,
-                        });
-                        let excess = remaining.saturating_sub(to_blocker);
-                        if excess > 0 {
-                            result.push(DamageAssignment {
-                                target: DamageTarget::Player(defending_player),
-                                amount: excess,
-                            });
-                        }
-                        remaining = 0;
-                    } else if !has_trample && is_last {
-                        // Without trample: dump all remaining to last blocker
-                        result.push(DamageAssignment {
-                            target: DamageTarget::Object(blocker_id),
-                            amount: remaining,
-                        });
-                        remaining = 0;
-                    } else {
-                        // Assign lethal to this blocker, move on
-                        let to_blocker = remaining.min(lethal);
-                        result.push(DamageAssignment {
-                            target: DamageTarget::Object(blocker_id),
-                            amount: to_blocker,
-                        });
-                        remaining = remaining.saturating_sub(to_blocker);
-                    }
-                }
-
-                result
+                // 2+ blockers: handled interactively via WaitingFor::AssignCombatDamage.
+                // This branch should never be reached — needs_interactive_assignment
+                // returns true for 2+ blockers and collect_damage_assignments pauses.
+                debug_assert!(false, "multi-blocker auto-assignment should not be reached");
+                Vec::new()
             }
         }
     }
@@ -578,6 +575,16 @@ mod tests {
             ..Default::default()
         };
         for (attacker_id, blockers) in blocker_assignments {
+            // CR 509.1h: Mark the attacker as blocked.
+            if let Some(info) = combat
+                .attackers
+                .iter_mut()
+                .find(|a| a.object_id == attacker_id)
+            {
+                if !blockers.is_empty() {
+                    info.blocked = true;
+                }
+            }
             for &blocker_id in &blockers {
                 combat
                     .blocker_to_attacker
@@ -724,7 +731,40 @@ mod tests {
         );
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        // 2+ blockers → returns WaitingFor::AssignCombatDamage.
+        let waiting = resolve_combat_damage(&mut state, &mut events);
+        assert!(matches!(
+            waiting,
+            Some(WaitingFor::AssignCombatDamage { .. })
+        ));
+
+        // Submit: 1 to each blocker (deathtouch lethal), 3 trample to player.
+        if let Some(combat) = &mut state.combat {
+            combat.pending_damage.push((
+                attacker,
+                DamageAssignment {
+                    target: DamageTarget::Object(blocker1),
+                    amount: 1,
+                },
+            ));
+            combat.pending_damage.push((
+                attacker,
+                DamageAssignment {
+                    target: DamageTarget::Object(blocker2),
+                    amount: 1,
+                },
+            ));
+            combat.pending_damage.push((
+                attacker,
+                DamageAssignment {
+                    target: DamageTarget::Player(PlayerId(1)),
+                    amount: 3,
+                },
+            ));
+            combat.damage_step_index = Some(combat.damage_step_index.unwrap_or(0) + 1);
+        }
+        let result = resolve_combat_damage(&mut state, &mut events);
+        assert!(result.is_none(), "All damage should be resolved");
 
         // With deathtouch, 1 to each blocker is lethal; 3 excess tramples to player
         assert_eq!(state.objects[&blocker1].damage_marked, 1);
@@ -763,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_blockers_without_trample_all_damage_to_blockers() {
+    fn multiple_blockers_returns_waiting_for_assignment() {
         let mut state = setup();
         let attacker = create_creature(&mut state, PlayerId(0), "Fatty", 5, 5);
         let blocker1 = create_creature(&mut state, PlayerId(1), "Bear1", 2, 2);
@@ -775,11 +815,39 @@ mod tests {
         );
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        // CR 510.1c: 2+ blockers → interactive assignment required.
+        let waiting = resolve_combat_damage(&mut state, &mut events);
+        match &waiting {
+            Some(WaitingFor::AssignCombatDamage {
+                total_damage,
+                blockers,
+                has_trample,
+                ..
+            }) => {
+                assert_eq!(*total_damage, 5);
+                assert_eq!(blockers.len(), 2);
+                assert!(!has_trample);
+            }
+            other => panic!("Expected AssignCombatDamage, got {:?}", other),
+        }
 
-        // Without trample: 2 lethal to first blocker, remaining 3 to second blocker
-        assert_eq!(state.objects[&blocker1].damage_marked, 2);
-        assert_eq!(state.objects[&blocker2].damage_marked, 3);
+        // Submit: free division — all 5 to blocker1, 0 to blocker2 (legal under current rules).
+        if let Some(combat) = &mut state.combat {
+            combat.pending_damage.push((
+                attacker,
+                DamageAssignment {
+                    target: DamageTarget::Object(blocker1),
+                    amount: 5,
+                },
+            ));
+            combat.damage_step_index = Some(combat.damage_step_index.unwrap_or(0) + 1);
+        }
+        let result = resolve_combat_damage(&mut state, &mut events);
+        assert!(result.is_none(), "All damage should be resolved");
+
+        // All 5 to blocker1, none to blocker2
+        assert_eq!(state.objects[&blocker1].damage_marked, 5);
+        assert_eq!(state.objects[&blocker2].damage_marked, 0);
         // No damage to player
         assert_eq!(state.players[1].life, 20);
     }

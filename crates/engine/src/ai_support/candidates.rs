@@ -611,7 +611,7 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             )]
         }
-        // CR 510.1c/d: Assign combat damage — greedy (lethal to each in order).
+        // CR 510.1c/d: Assign combat damage — greedy (lethal to each in order, remainder to last).
         WaitingFor::AssignCombatDamage {
             player,
             total_damage,
@@ -625,6 +625,13 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
                 let assign = remaining.min(slot.lethal_minimum);
                 assignments.push((slot.blocker_id, assign));
                 remaining = remaining.saturating_sub(assign);
+            }
+            // Non-trample: dump remainder to last blocker so total == power.
+            if !has_trample && remaining > 0 {
+                if let Some(last) = assignments.last_mut() {
+                    last.1 += remaining;
+                    remaining = 0;
+                }
             }
             let trample = if *has_trample { remaining } else { 0 };
             vec![candidate(

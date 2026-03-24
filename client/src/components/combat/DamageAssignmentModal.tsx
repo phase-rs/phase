@@ -1,81 +1,128 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 
-import type { DamageAssignment } from "../../adapter/types.ts";
+import type { WaitingFor } from "../../adapter/types.ts";
+import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { ChoiceOverlay, ConfirmButton } from "../modal/ChoiceOverlay.tsx";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 
-export function DamageAssignmentModal() {
-  const combat = useGameStore((s) => s.gameState?.combat ?? null);
-  const objects = useGameStore((s) => s.gameState?.objects ?? null);
-  const phase = useGameStore((s) => s.gameState?.phase ?? null);
-  const [open, setOpen] = useState(false);
+type AssignCombatDamage = Extract<WaitingFor, { type: "AssignCombatDamage" }>;
 
-  const isCombatDamage = phase === "CombatDamage";
-  const hasDamage =
-    combat !== null &&
-    Object.keys(combat.damage_assignments).length > 0;
+export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data"] }) {
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
 
-  if (!isCombatDamage || !hasDamage) return null;
+  const [amounts, setAmounts] = useState<number[]>(() =>
+    data.blockers.map(() => 0),
+  );
+  const [trampleDamage, setTrampleDamage] = useState(0);
+
+  const blockerTotal = amounts.reduce((acc, n) => acc + n, 0);
+  const total = blockerTotal + trampleDamage;
+  const remaining = data.total_damage - total;
+  // CR 702.19b: Trample requires lethal to every blocker.
+  const trampleLethalMet = !data.has_trample ||
+    data.blockers.every((b, i) => amounts[i] >= b.lethal_minimum);
+  const isValid = total === data.total_damage && trampleLethalMet;
 
   const getName = (id: number): string =>
-    objects?.[id]?.name ?? `Object ${id}`;
+    objects?.[String(id)]?.name ?? `Object ${id}`;
 
-  if (!open) {
-    return (
-      <button
-        onClick={() => setOpen(true)}
-        className={gameButtonClass({ tone: "slate", size: "xs" }) + " fixed bottom-20 right-4 z-30"}
-      >
-        Review Damage
-      </button>
-    );
-  }
+  const setAmount = useCallback((index: number, value: number) => {
+    setAmounts((prev) => {
+      const next = [...prev];
+      next[index] = Math.max(0, value);
+      return next;
+    });
+  }, []);
+
+  const handleConfirm = useCallback(() => {
+    if (!isValid) return;
+    const assignments: [number, number][] = data.blockers.map((b, i) => [
+      b.blocker_id,
+      amounts[i],
+    ]);
+    dispatch({
+      type: "AssignCombatDamage",
+      data: { assignments, trample_damage: trampleDamage },
+    });
+  }, [dispatch, data.blockers, amounts, trampleDamage, isValid]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
-      <div className="relative z-10 w-full max-w-md rounded-xl bg-gray-900/95 p-6 shadow-2xl ring-1 ring-gray-700">
-        <h2 className="mb-4 text-center text-lg font-bold text-white">
-          Combat Damage Distribution
-        </h2>
+    <ChoiceOverlay
+      title={`Assign ${data.total_damage} Combat Damage`}
+      subtitle={`${getName(data.attacker_id)} — Remaining: ${remaining}`}
+    >
+      <div className="mb-4 space-y-3">
+        {data.blockers.map((blocker, i) => {
+          const isLethal = amounts[i] >= blocker.lethal_minimum;
+          return (
+            <div
+              key={blocker.blocker_id}
+              className="flex items-center justify-between gap-3 rounded-lg bg-gray-800/60 p-3"
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-gray-200">
+                  {getName(blocker.blocker_id)}
+                </span>
+                {isLethal && (
+                  <span className="rounded bg-red-700/80 px-1.5 py-0.5 text-xs font-bold text-red-100">
+                    Lethal
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  className={gameButtonClass({ tone: "neutral", size: "xs" })}
+                  onClick={() => setAmount(i, amounts[i] - 1)}
+                  disabled={amounts[i] <= 0}
+                >
+                  −
+                </button>
+                <span className="w-8 text-center text-sm font-bold text-white">
+                  {amounts[i]}
+                </span>
+                <button
+                  className={gameButtonClass({ tone: "neutral", size: "xs" })}
+                  onClick={() => setAmount(i, amounts[i] + 1)}
+                  disabled={remaining <= 0}
+                >
+                  +
+                </button>
+              </div>
+            </div>
+          );
+        })}
 
-        <div className="mb-4 space-y-3">
-          {Object.entries(combat!.damage_assignments).map(
-            ([attackerIdStr, assignments]: [string, DamageAssignment[]]) => {
-              const attackerId = Number(attackerIdStr);
-              return (
-                <div key={attackerIdStr} className="rounded-lg bg-gray-800/60 p-3">
-                  <p className="mb-1 text-sm font-semibold text-amber-300">
-                    {getName(attackerId)}
-                  </p>
-                  <ul className="space-y-0.5 text-sm text-gray-300">
-                    {assignments.map((a, i) => {
-                      const targetName =
-                        "Object" in a.target
-                          ? getName(a.target.Object)
-                          : `Player ${a.target.Player}`;
-                      return (
-                        <li key={i}>
-                          {a.amount} damage to {targetName}
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </div>
-              );
-            },
-          )}
-        </div>
-
-        <div className="flex justify-center">
-          <button
-            onClick={() => setOpen(false)}
-            className={gameButtonClass({ tone: "neutral", size: "md" })}
-          >
-            Close
-          </button>
-        </div>
+        {data.has_trample && (
+          <div className="flex items-center justify-between gap-3 rounded-lg bg-gray-800/60 p-3 ring-1 ring-amber-600/40">
+            <span className="text-sm font-medium text-amber-300">
+              Defending Player (Trample)
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                className={gameButtonClass({ tone: "neutral", size: "xs" })}
+                onClick={() => setTrampleDamage(Math.max(0, trampleDamage - 1))}
+                disabled={trampleDamage <= 0}
+              >
+                −
+              </button>
+              <span className="w-8 text-center text-sm font-bold text-amber-200">
+                {trampleDamage}
+              </span>
+              <button
+                className={gameButtonClass({ tone: "neutral", size: "xs" })}
+                onClick={() => setTrampleDamage(trampleDamage + 1)}
+                disabled={remaining <= 0}
+              >
+                +
+              </button>
+            </div>
+          </div>
+        )}
       </div>
-    </div>
+
+      <ConfirmButton onClick={handleConfirm} disabled={!isValid} label="Assign Damage" />
+    </ChoiceOverlay>
   );
 }

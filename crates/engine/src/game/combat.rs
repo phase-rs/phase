@@ -25,12 +25,18 @@ pub enum AttackTarget {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CombatState {
     pub attackers: Vec<AttackerInfo>,
-    /// attacker_id -> ordered list of blocker ids
+    /// attacker_id -> list of blocker ids
     pub blocker_assignments: HashMap<ObjectId, Vec<ObjectId>>,
     /// blocker_id -> attacker_ids (reverse lookup; Vec supports multi-blocking via ExtraBlockers)
     pub blocker_to_attacker: HashMap<ObjectId, Vec<ObjectId>>,
     pub damage_assignments: HashMap<ObjectId, Vec<DamageAssignment>>,
     pub first_strike_done: bool,
+    /// Index into attacker list for resumable damage assignment iteration.
+    pub damage_step_index: Option<usize>,
+    /// CR 510.2: Collected assignments awaiting simultaneous application.
+    pub pending_damage: Vec<(ObjectId, DamageAssignment)>,
+    /// Whether regular damage has been applied (guards against re-entry from triggers).
+    pub regular_damage_done: bool,
 }
 
 impl PartialEq for CombatState {

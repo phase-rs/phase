@@ -7,7 +7,7 @@ pub use engine::game::combat::AttackTarget;
 pub use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 pub use engine::types::actions::GameAction;
 pub use engine::types::events::GameEvent;
-pub use engine::types::game_state::{ActionResult, WaitingFor};
+pub use engine::types::game_state::{ActionResult, DamageSlot, WaitingFor};
 pub use engine::types::identifiers::ObjectId;
 pub use engine::types::keywords::Keyword;
 pub use engine::types::phase::Phase;
@@ -53,6 +53,37 @@ pub fn run_combat(
         if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
             runner.pass_both_players();
         }
+    }
+
+    // CR 510.1c: Handle interactive damage assignment for 2+ blocker scenarios.
+    while let WaitingFor::AssignCombatDamage {
+        blockers,
+        total_damage,
+        has_trample,
+        ..
+    } = &runner.state().waiting_for
+    {
+        let mut remaining = *total_damage;
+        let mut assignments: Vec<(ObjectId, u32)> = Vec::new();
+        for slot in blockers {
+            let assign = remaining.min(slot.lethal_minimum);
+            assignments.push((slot.blocker_id, assign));
+            remaining = remaining.saturating_sub(assign);
+        }
+        // Non-trample: dump remainder to last blocker so total == power.
+        if !has_trample && remaining > 0 {
+            if let Some(last) = assignments.last_mut() {
+                last.1 += remaining;
+                remaining = 0;
+            }
+        }
+        let trample_damage = if *has_trample { remaining } else { 0 };
+        runner
+            .act(GameAction::AssignCombatDamage {
+                assignments,
+                trample_damage,
+            })
+            .expect("AssignCombatDamage should succeed");
     }
 }
 

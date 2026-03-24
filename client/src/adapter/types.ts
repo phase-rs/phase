@@ -291,6 +291,9 @@ export interface CombatState {
   blocker_to_attacker: Record<string, ObjectId[]>;
   damage_assignments: Record<string, DamageAssignment[]>;
   first_strike_done: boolean;
+  damage_step_index: number | null;
+  pending_damage: [ObjectId, DamageAssignment][];
+  regular_damage_done: boolean;
 }
 
 // ── Resolved Ability (structural type for stack/pending cast abilities) ──
@@ -405,6 +408,7 @@ export type WaitingFor =
   | { type: "TopOrBottomChoice"; data: { player: PlayerId; object_id: ObjectId } }
   | { type: "CompanionReveal"; data: { player: PlayerId; eligible_companions: [string, number][] } }
   | { type: "ChooseLegend"; data: { player: PlayerId; legend_name: string; candidates: ObjectId[] } }
+  | { type: "AssignCombatDamage"; data: { player: PlayerId; attacker_id: ObjectId; total_damage: number; blockers: { blocker_id: ObjectId; lethal_minimum: number }[]; has_trample: boolean; defending_player: PlayerId } }
   | { type: "DistributeAmong"; data: { player: PlayerId; total: number; targets: TargetRef[]; unit: DistributionUnit } }
   | { type: "ChooseFromZoneChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; source_id: ObjectId } }
   | { type: "RetargetChoice"; data: { player: PlayerId; stack_entry_index: number; scope: RetargetScope; current_targets: TargetRef[]; legal_new_targets: TargetRef[] } }
@@ -497,6 +501,7 @@ export type GameAction =
   | { type: "ChooseTopOrBottom"; data: { top: boolean } }
   | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn" } } }
   | { type: "CancelAutoPass" }
+  | { type: "AssignCombatDamage"; data: { assignments: [ObjectId, number][]; trample_damage: number } }
   | { type: "DistributeAmong"; data: { distribution: [TargetRef, number][] } }
   | { type: "RetargetSpell"; data: { new_targets: TargetRef[] } };
 

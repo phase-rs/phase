@@ -307,52 +307,6 @@ pub fn get_ai_action(difficulty: &str, player_id: u8) -> Result<JsValue, JsValue
 
 #[derive(Tsify, Serialize, Deserialize)]
 #[tsify(into_wasm_abi, from_wasm_abi)]
-#[serde(tag = "type", content = "data")]
-pub enum WasmAttackTarget {
-    Player(u64),
-    Planeswalker(u64),
-}
-
-#[derive(Tsify, Serialize, Deserialize)]
-#[tsify(into_wasm_abi, from_wasm_abi)]
-#[serde(tag = "type", content = "data")]
-pub enum WasmGameAction {
-    PassPriority,
-    PlayLand {
-        object_id: u64,
-        card_id: u64,
-    },
-    CastSpell {
-        object_id: u64,
-        card_id: u64,
-        targets: Vec<u64>,
-    },
-    ActivateAbility {
-        source_id: u64,
-        ability_index: usize,
-    },
-    DeclareAttackers {
-        attacks: Vec<(u64, WasmAttackTarget)>,
-    },
-    DeclareBlockers {
-        assignments: Vec<(u64, u64)>,
-    },
-    MulliganDecision {
-        keep: bool,
-    },
-    TapLandForMana {
-        object_id: u64,
-    },
-    SelectCards {
-        cards: Vec<u64>,
-    },
-    ChooseReplacement {
-        index: usize,
-    },
-}
-
-#[derive(Tsify, Serialize, Deserialize)]
-#[tsify(into_wasm_abi, from_wasm_abi)]
 pub enum WasmManaColor {
     White,
     Blue,
