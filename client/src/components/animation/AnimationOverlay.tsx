@@ -2,7 +2,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 
 import type { StepEffect } from "../../animation/types.ts";
-import { PROJECTILE_TRAVEL_MS, SPEED_MULTIPLIERS } from "../../animation/types.ts";
+import { SPEED_MULTIPLIERS } from "../../animation/types.ts";
 import { getCardColors } from "../../animation/wubrgColors.ts";
 import { currentSnapshot } from "../../hooks/useGameDispatch.ts";
 import { fetchCardImageUrl } from "../../services/scryfall.ts";
@@ -107,8 +107,6 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     [],
   );
 
-  const pendingTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
-
   const processEffect = useCallback(
     (effect: StepEffect, stepEffects: StepEffect[]) => {
       const { event } = effect;
@@ -175,36 +173,39 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             break;
           }
 
-          // Creature-to-player (or minimal vfx): keep existing projectile animation
-          const travelMs = PROJECTILE_TRAVEL_MS * speedMultiplier;
-          if (vfxQuality !== "minimal" && sourcePos) {
-            particleRef.current?.attackBurst(sourcePos.x, sourcePos.y);
-            particleRef.current?.projectile(sourcePos.x, sourcePos.y, pos.x, pos.y, travelMs);
+          // Creature-to-player: card slam at the player HUD
+          {
+            const sourceEl = document.querySelector<HTMLElement>(
+              `[data-object-id="${source_id}"]`,
+            );
+            if (sourceEl && vfxQuality !== "minimal") {
+              applyCardSlam(sourceEl, pos.x, pos.y, speedMultiplier, () => {
+                particleRef.current?.playerDamage(pos.x, pos.y, amount);
+
+                const fid = ++floatIdCounter;
+                setActiveFloats((prev) => [
+                  ...prev,
+                  { id: fid, value: -amount, position: pos, color: "#ef4444" },
+                ]);
+
+                if (vfxQuality === "full" && containerRef.current) {
+                  const intensity = amount >= 7 ? "heavy" : amount >= 4 ? "medium" : "light";
+                  applyScreenShake(containerRef.current, intensity, speedMultiplier);
+                }
+
+                if (isPlayerTarget) {
+                  setActiveVignette({ damageAmount: amount });
+                  setTimeout(() => setActiveVignette(null), 500 * speedMultiplier);
+                }
+              });
+            } else {
+              const fid = ++floatIdCounter;
+              setActiveFloats((prev) => [
+                ...prev,
+                { id: fid, value: -amount, position: pos, color: "#ef4444" },
+              ]);
+            }
           }
-
-          // Delay impact effects until projectile arrives
-          const impactTimer = setTimeout(() => {
-            if (vfxQuality !== "minimal") {
-              particleRef.current?.playerDamage(pos.x, pos.y, amount);
-            }
-
-            const id = ++floatIdCounter;
-            setActiveFloats((prev) => [
-              ...prev,
-              { id, value: -amount, position: pos, color: "#ef4444" },
-            ]);
-
-            if (vfxQuality === "full" && containerRef.current) {
-              const intensity = amount >= 7 ? "heavy" : amount >= 4 ? "medium" : "light";
-              applyScreenShake(containerRef.current, intensity, speedMultiplier);
-            }
-
-            if (isPlayerTarget) {
-              setActiveVignette({ damageAmount: amount });
-              setTimeout(() => setActiveVignette(null), 500 * speedMultiplier);
-            }
-          }, travelMs);
-          pendingTimeoutsRef.current.push(impactTimer);
           break;
         }
 
@@ -295,22 +296,17 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           if (vfxQuality === "minimal") break;
 
           for (const [blockerId, attackerId] of event.data.assignments) {
-            const blockerPos = getObjectPosition(blockerId);
             const attackerPos = getObjectPosition(attackerId);
-            if (!blockerPos || !attackerPos) continue;
+            if (!attackerPos) continue;
 
-            particleRef.current?.projectile(
-              blockerPos.x,
-              blockerPos.y,
-              attackerPos.x,
-              attackerPos.y,
-              260,
+            const blockerEl = document.querySelector<HTMLElement>(
+              `[data-object-id="${blockerId}"]`,
             );
-
-            particleRef.current?.blockClash(
-              (blockerPos.x + attackerPos.x) / 2,
-              (blockerPos.y + attackerPos.y) / 2,
-            );
+            if (blockerEl) {
+              applyCardSlam(blockerEl, attackerPos.x, attackerPos.y, speedMultiplier, () => {
+                particleRef.current?.blockClash(attackerPos.x, attackerPos.y);
+              });
+            }
           }
           break;
         }
@@ -395,9 +391,6 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     const timer = setTimeout(advanceStep, activeStep.duration * speedMultiplier);
     return () => {
       clearTimeout(timer);
-      // Clear any pending impact timeouts if the step advances early
-      for (const t of pendingTimeoutsRef.current) clearTimeout(t);
-      pendingTimeoutsRef.current = [];
     };
   }, [activeStep, advanceStep, processEffect, speedMultiplier]);
 
