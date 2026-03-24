@@ -10,7 +10,7 @@ use super::oracle_util::{
     strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, BasicLandType, ChosenSubtypeKind, Comparator,
+    AbilityDefinition, AbilityKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, Comparator,
     ContinuousModification, ControllerRef, CountScope, FilterProp, QuantityExpr, QuantityRef,
     StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
@@ -273,6 +273,13 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         if let Some(def) = parse_continuous_gets_has(predicate_text, filter, &text) {
             return Some(def);
         }
+    }
+
+    // CR 305.7: "[Subject] lands are [type]" — land type-changing statics.
+    // Must come before parse_subject_continuous_static (which splits on "gets/has/gains"
+    // verbs and would not match "are" predicates).
+    if let Some(def) = parse_land_type_change(&tp, &text) {
+        return Some(def);
     }
 
     if let Some(def) = parse_subject_continuous_static(&text) {
@@ -2718,10 +2725,29 @@ fn parse_cda_pt_equality(lower: &str, text: &str) -> Option<StaticDefinition> {
     )
 }
 
-/// CR 604.3 + CR 601.2a: Parse "Once during each of your turns, you may cast [filter] from your graveyard."
-/// Extracts the filter from the middle text and emits a GraveyardCastPermission static.
+/// CR 604.2 + CR 601.2a + CR 305.1: Parse graveyard play/cast permission statics.
+/// Handles three patterns:
+/// 1. "Once during each of your turns, you may cast [filter] from your graveyard." (Lurrus, Karador)
+/// 2. "You may play [filter] from your graveyard." (Crucible of Worlds, Icetill Explorer)
+/// 3. "You may cast [filter] from your graveyard." (Conduit of Worlds)
 fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
-    let rest = lower.strip_prefix("once during each of your turns, you may cast ")?;
+    // Determine pattern and extract the rest after the prefix
+    let (rest, once_per_turn, play_mode) =
+        if let Some(r) = lower.strip_prefix("once during each of your turns, you may cast ") {
+            (r, true, CardPlayMode::Cast)
+        } else if let Some(r) = lower.strip_prefix("you may play ") {
+            (r, false, CardPlayMode::Play)
+        } else if let Some(r) = lower.strip_prefix("you may cast ") {
+            // Only match if "from your graveyard" follows — avoid catching other "you may cast" statics
+            if r.contains("from your graveyard") {
+                (r, false, CardPlayMode::Cast)
+            } else {
+                return None;
+            }
+        } else {
+            return None;
+        };
+
     let gy_idx = rest.find(" from your graveyard")?;
     let filter_text = &rest[..gy_idx];
 
@@ -2732,8 +2758,7 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
         .unwrap_or(filter_text);
 
     // Remove " spell"/" spells" — parse_type_phrase expects bare type words.
-    // May appear mid-text ("permanent spell with mana value 2 or less"),
-    // so suffix-stripping alone is insufficient.
+    // "lands" is already a valid type phrase, so no stripping needed for Play mode.
     let cleaned: Cow<str> = if filter_text.contains(" spells") {
         Cow::Owned(filter_text.replacen(" spells", "", 1))
     } else if filter_text.contains(" spell") {
@@ -2745,9 +2770,12 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
     let (filter, _) = parse_type_phrase(&cleaned);
 
     Some(
-        StaticDefinition::new(StaticMode::GraveyardCastPermission)
-            .affected(filter)
-            .description(text.to_string()),
+        StaticDefinition::new(StaticMode::GraveyardCastPermission {
+            once_per_turn,
+            play_mode,
+        })
+        .affected(filter)
+        .description(text.to_string()),
     )
 }
 
@@ -2892,6 +2920,94 @@ fn parse_basic_land_type(name: &str) -> Option<BasicLandType> {
         "forest" => Some(BasicLandType::Forest),
         _ => None,
     }
+}
+
+/// Parse a basic land type name, accepting both singular and plural forms.
+/// "Mountains" → Mountain, "Islands" → Island. "Plains" is already valid singular.
+fn parse_basic_land_type_plural(name: &str) -> Option<BasicLandType> {
+    parse_basic_land_type(name).or_else(|| name.strip_suffix('s').and_then(parse_basic_land_type))
+}
+
+/// CR 305.7: Parse "[Subject] lands are [type]" land type-changing static abilities.
+/// Handles replacement ("Nonbasic lands are Mountains"), additive ("Each land is a
+/// Swamp in addition to its other land types"), and all-basic-types ("Lands you control
+/// are every basic land type in addition to their other types").
+fn parse_land_type_change(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+    let (subject, rest) = if let Some(pos) = tp.lower.find(" are ") {
+        (&tp.original[..pos], &tp.original[pos + 5..])
+    } else if let Some(pos) = tp.lower.find(" is a ") {
+        (&tp.original[..pos], &tp.original[pos + 6..])
+    } else {
+        return None;
+    };
+    let rest = rest.trim().trim_end_matches('.');
+
+    // Only proceed if subject is a land-type-change subject (avoids matching non-land patterns).
+    let affected = parse_land_type_change_subject(subject)?;
+    let lower_rest = rest.to_lowercase();
+
+    // "every basic land type in addition to their other types"
+    if lower_rest.starts_with("every basic land type") && lower_rest.contains("in addition to") {
+        return Some(
+            StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AddAllBasicLandTypes])
+                .description(text.to_string()),
+        );
+    }
+
+    // "[Type] in addition to {its/their} other {land }types" → AddSubtype (additive)
+    if let Some(type_part) = strip_in_addition_suffix(&lower_rest) {
+        let basic_type = parse_basic_land_type_plural(type_part.trim())?;
+        return Some(
+            StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AddSubtype {
+                    subtype: basic_type.as_subtype_str().to_string(),
+                }])
+                .description(text.to_string()),
+        );
+    }
+
+    // CR 305.7: Replacement semantics — "[Type]" or "[Types]" → SetBasicLandType
+    let basic_type = parse_basic_land_type_plural(rest.trim())?;
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(vec![ContinuousModification::SetBasicLandType {
+                land_type: basic_type,
+            }])
+            .description(text.to_string()),
+    )
+}
+
+/// Parse the subject of a land type-change line into a TargetFilter.
+fn parse_land_type_change_subject(subject: &str) -> Option<TargetFilter> {
+    match subject.to_lowercase().as_str() {
+        "nonbasic lands" => Some(TargetFilter::Typed(TypedFilter::land().properties(vec![
+            FilterProp::NotSupertype {
+                value: "Basic".to_string(),
+            },
+        ]))),
+        "lands you control" => Some(TargetFilter::Typed(
+            TypedFilter::land().controller(ControllerRef::You),
+        )),
+        "each land" | "all lands" => Some(TargetFilter::Typed(TypedFilter::land())),
+        _ => None,
+    }
+}
+
+/// Strip "in addition to {its/their} other {land }types" suffix,
+/// returning the type name before it.
+fn strip_in_addition_suffix(text: &str) -> Option<&str> {
+    [
+        " in addition to its other land types",
+        " in addition to its other types",
+        " in addition to their other land types",
+        " in addition to their other types",
+    ]
+    .iter()
+    .find_map(|suffix| text.strip_suffix(suffix))
 }
 
 #[cfg(test)]
@@ -4374,7 +4490,13 @@ mod tests {
     fn graveyard_cast_permission_lurrus() {
         let text = "Once during each of your turns, you may cast a permanent spell with mana value 2 or less from your graveyard.";
         let def = parse_static_line(text).expect("should parse Lurrus text");
-        assert_eq!(def.mode, StaticMode::GraveyardCastPermission);
+        assert!(matches!(
+            def.mode,
+            StaticMode::GraveyardCastPermission {
+                once_per_turn: true,
+                play_mode: CardPlayMode::Cast,
+            }
+        ));
         let filter = def.affected.expect("should have affected filter");
         if let TargetFilter::Typed(tf) = &filter {
             assert!(tf.type_filters.contains(&TypeFilter::Permanent));
@@ -4396,7 +4518,13 @@ mod tests {
             "Once during each of your turns, you may cast a creature spell from your graveyard.",
         )
         .unwrap();
-        assert_eq!(def.mode, StaticMode::GraveyardCastPermission);
+        assert!(matches!(
+            def.mode,
+            StaticMode::GraveyardCastPermission {
+                once_per_turn: true,
+                play_mode: CardPlayMode::Cast,
+            }
+        ));
         match &def.affected {
             Some(TargetFilter::Typed(tf)) => {
                 assert!(tf.type_filters.contains(&TypeFilter::Creature));
@@ -4410,7 +4538,13 @@ mod tests {
         let def = parse_static_line(
             "Once during each of your turns, you may cast an instant or sorcery spell from your graveyard."
         ).unwrap();
-        assert_eq!(def.mode, StaticMode::GraveyardCastPermission);
+        assert!(matches!(
+            def.mode,
+            StaticMode::GraveyardCastPermission {
+                once_per_turn: true,
+                play_mode: CardPlayMode::Cast,
+            }
+        ));
         // Should parse as a union or typed filter covering instant/sorcery
         assert!(def.affected.is_some());
     }
@@ -4421,7 +4555,13 @@ mod tests {
         let lower = text.to_lowercase();
         let def = try_parse_graveyard_cast_permission(text, &lower)
             .expect("should parse Gisa+Geralf text");
-        assert_eq!(def.mode, StaticMode::GraveyardCastPermission);
+        assert!(matches!(
+            def.mode,
+            StaticMode::GraveyardCastPermission {
+                once_per_turn: true,
+                play_mode: CardPlayMode::Cast,
+            }
+        ));
         // "zombie creature" → parse_type_phrase recognizes "zombie" as subtype.
         // card_type may be None (subtype alone) or Creature depending on parser —
         // either is functionally correct since Zombie is exclusively a creature subtype.
@@ -4429,6 +4569,50 @@ mod tests {
             assert_eq!(tf.get_subtype(), Some("Zombie"));
         } else {
             panic!("Expected Typed filter with Zombie subtype");
+        }
+    }
+
+    // --- Graveyard play permission tests (Crucible of Worlds / Icetill Explorer) ---
+
+    #[test]
+    fn graveyard_play_permission_crucible() {
+        let text = "You may play lands from your graveyard.";
+        let def = parse_static_line(text).expect("should parse Crucible text");
+        assert!(matches!(
+            def.mode,
+            StaticMode::GraveyardCastPermission {
+                once_per_turn: false,
+                play_mode: CardPlayMode::Play,
+            }
+        ));
+        if let Some(TargetFilter::Typed(tf)) = &def.affected {
+            assert!(tf.type_filters.contains(&TypeFilter::Land));
+        } else {
+            panic!(
+                "Expected Typed filter with Land type, got: {:?}",
+                def.affected
+            );
+        }
+    }
+
+    #[test]
+    fn graveyard_cast_permission_conduit_of_worlds() {
+        let text = "You may cast permanent spells from your graveyard.";
+        let def = parse_static_line(text).expect("should parse Conduit text");
+        assert!(matches!(
+            def.mode,
+            StaticMode::GraveyardCastPermission {
+                once_per_turn: false,
+                play_mode: CardPlayMode::Cast,
+            }
+        ));
+        if let Some(TargetFilter::Typed(tf)) = &def.affected {
+            assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+        } else {
+            panic!(
+                "Expected Typed filter with Permanent type, got: {:?}",
+                def.affected
+            );
         }
     }
 
@@ -5049,6 +5233,106 @@ mod tests {
                 subtype: "Swamp".to_string(),
             }]
         );
+    }
+
+    // --- Land type-changing statics (CR 305.7) ---
+
+    #[test]
+    fn nonbasic_lands_are_mountains_blood_moon() {
+        let def = parse_static_line("Nonbasic lands are Mountains.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(matches!(
+            def.modifications.as_slice(),
+            [ContinuousModification::SetBasicLandType { land_type }]
+            if *land_type == BasicLandType::Mountain
+        ));
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Land));
+                assert!(tf.properties.contains(&FilterProp::NotSupertype {
+                    value: "Basic".to_string(),
+                }));
+            }
+            _ => panic!("Expected Typed nonbasic land filter"),
+        }
+    }
+
+    #[test]
+    fn nonbasic_lands_are_islands_harbinger() {
+        let def = parse_static_line("Nonbasic lands are Islands.").unwrap();
+        assert!(matches!(
+            def.modifications.as_slice(),
+            [ContinuousModification::SetBasicLandType { land_type }]
+            if *land_type == BasicLandType::Island
+        ));
+    }
+
+    #[test]
+    fn lands_you_control_are_plains_celestial_dawn() {
+        let def = parse_static_line("Lands you control are Plains.").unwrap();
+        assert!(matches!(
+            def.modifications.as_slice(),
+            [ContinuousModification::SetBasicLandType { land_type }]
+            if *land_type == BasicLandType::Plains
+        ));
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Land));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            _ => panic!("Expected Typed land filter with you-control"),
+        }
+    }
+
+    #[test]
+    fn each_land_is_a_swamp_in_addition_urborg() {
+        let def =
+            parse_static_line("Each land is a Swamp in addition to its other land types.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::AddSubtype {
+                subtype: "Swamp".to_string(),
+            }]
+        );
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Land));
+                assert!(tf.controller.is_none());
+            }
+            _ => panic!("Expected Typed land filter (all lands)"),
+        }
+    }
+
+    #[test]
+    fn all_lands_are_islands_in_addition_stormtide() {
+        let def =
+            parse_static_line("All lands are Islands in addition to their other types.").unwrap();
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::AddSubtype {
+                subtype: "Island".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn lands_you_control_every_basic_land_type_prismatic_omen() {
+        let def = parse_static_line(
+            "Lands you control are every basic land type in addition to their other types.",
+        )
+        .unwrap();
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::AddAllBasicLandTypes]
+        );
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Land));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            _ => panic!("Expected Typed land filter with you-control"),
+        }
     }
 
     // --- CantCastDuring: turn/phase-scoped casting prohibitions ---

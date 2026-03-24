@@ -1,3 +1,5 @@
+use std::fmt;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -85,6 +87,17 @@ impl BasicLandType {
             Self::Mountain => ManaColor::Red,
             Self::Forest => ManaColor::Green,
         }
+    }
+
+    /// All five basic land types in WUBRG order (CR 305.6).
+    pub fn all() -> &'static [BasicLandType] {
+        &[
+            Self::Plains,
+            Self::Island,
+            Self::Swamp,
+            Self::Mountain,
+            Self::Forest,
+        ]
     }
 
     /// The subtype string as it appears in card type lines.
@@ -188,6 +201,26 @@ pub enum CardPlayMode {
     Cast,
     /// CR 305.1: Play a card — cast if it's a spell, play as a land if it's a land.
     Play,
+}
+
+impl fmt::Display for CardPlayMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CardPlayMode::Cast => write!(f, "Cast"),
+            CardPlayMode::Play => write!(f, "Play"),
+        }
+    }
+}
+
+impl std::str::FromStr for CardPlayMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Cast" => Ok(CardPlayMode::Cast),
+            "Play" => Ok(CardPlayMode::Play),
+            _ => Err(format!("Unknown CardPlayMode: {s}")),
+        }
+    }
 }
 
 /// A typed choice stored on a permanent (e.g., "choose a color" → Color(Red)).
@@ -3584,6 +3617,9 @@ pub enum ContinuousModification {
     /// Grants every creature type (Changeling CDA). Expanded at runtime
     /// using `GameState::all_creature_types`.
     AddAllCreatureTypes,
+    /// CR 305.6 + CR 305.7: Adds all five basic land types in addition to
+    /// existing types. Used by Prismatic Omen, Dryad of the Ilysian Grove.
+    AddAllBasicLandTypes,
     /// Adds the source object's chosen subtype (creature type or basic land type).
     /// Resolved at layer evaluation time from the source's `chosen_attributes`.
     AddChosenSubtype {

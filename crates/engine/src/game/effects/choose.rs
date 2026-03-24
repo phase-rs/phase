@@ -88,20 +88,24 @@ const CARD_TYPES: &[&str] = &[
     "Sorcery",
 ];
 
+/// CR 205.3i: All land subtypes. Derived from `is_land_subtype()` in `types/card_type.rs`.
 const LAND_TYPES: &[&str] = &[
-    "Plains",
-    "Island",
-    "Swamp",
-    "Mountain",
-    "Forest",
+    "Cave",
     "Desert",
+    "Forest",
     "Gate",
+    "Island",
     "Lair",
     "Locus",
     "Mine",
+    "Mountain",
+    "Plains",
+    "Planet",
     "Power-Plant",
     "Sphere",
+    "Swamp",
     "Tower",
+    "Town",
     "Urza's",
 ];
 

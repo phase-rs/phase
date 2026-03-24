@@ -1191,8 +1191,10 @@ pub(super) fn is_static_pattern(lower: &str) -> bool {
         || lower.contains("play two additional lands")
         // CR 603.9: Trigger doubling — Panharmonicon-style statics
         || lower.contains("triggers an additional time")
-        // CR 604.3 + CR 601.2a: Once-per-turn graveyard cast permission (Lurrus, Karador, etc.)
+        // CR 604.2 + CR 601.2a: Graveyard cast/play permission (Lurrus, Crucible of Worlds, etc.)
         || lower.starts_with("once during each of your turns, you may cast")
+        || (lower.starts_with("you may play") && lower.contains("from your graveyard"))
+        || (lower.starts_with("you may cast") && lower.contains("from your graveyard"))
         // CR 604.3: Zone-based restrictions (Grafdigger's Cage, Rest in Peace, etc.)
         || lower.contains("can't enter the battlefield")
         || lower.contains("can't cast spells from")
@@ -1216,6 +1218,11 @@ pub(super) fn is_static_pattern(lower: &str) -> bool {
         // Various CDA patterns
         || lower.starts_with("nonland ")
         || lower.starts_with("noncreature ")
+        // CR 305.7: Land type-changing statics (Blood Moon, Urborg, Prismatic Omen, etc.)
+        || lower.starts_with("nonbasic lands are ")
+        || lower.starts_with("each land is a ")
+        || lower.starts_with("all lands are ")
+        || lower.starts_with("lands you control are ")
 }
 
 pub(super) fn is_granted_static_line(lower: &str) -> bool {

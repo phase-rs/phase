@@ -5,9 +5,10 @@ use crate::game::devotion::count_devotion;
 use crate::game::filter::matches_target_filter;
 use crate::game::game_object::CounterType;
 use crate::types::ability::{
-    ContinuousModification, Duration, QuantityExpr, StaticCondition, StaticDefinition,
-    TargetFilter, TypedFilter,
+    BasicLandType, ContinuousModification, Duration, QuantityExpr, StaticCondition,
+    StaticDefinition, TargetFilter, TypedFilter,
 };
+use crate::types::card_type::is_land_subtype;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -506,7 +507,9 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::AddSubtype { .. }
             | ContinuousModification::RemoveSubtype { .. }
             | ContinuousModification::AddAllCreatureTypes
+            | ContinuousModification::AddAllBasicLandTypes
             | ContinuousModification::AddChosenSubtype { .. }
+            | ContinuousModification::SetBasicLandType { .. }
     );
 
     if b_changes_types && filter_references_type(&a.affected_filter) {
@@ -700,6 +703,15 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                     }
                 }
             }
+            // CR 305.6 + CR 305.7: Add all five basic land types (additive).
+            ContinuousModification::AddAllBasicLandTypes => {
+                for land_type in BasicLandType::all() {
+                    let subtype = land_type.as_subtype_str().to_string();
+                    if !obj.card_types.subtypes.iter().any(|s| s == &subtype) {
+                        obj.card_types.subtypes.push(subtype);
+                    }
+                }
+            }
             ContinuousModification::AddChosenSubtype { .. } => {
                 if let Some(ref subtype) = chosen_subtype {
                     if !obj.card_types.subtypes.iter().any(|s| s == subtype) {
@@ -753,18 +765,21 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                     obj.controller = new_controller;
                 }
             }
-            // CR 305.7: Setting a land's subtype replaces old land types and mana abilities.
-            // The intrinsic mana ability system derives abilities from subtypes, so
-            // removing old subtypes and adding the new one handles the ability swap.
+            // CR 305.7: Setting a land's subtype removes all old land subtypes
+            // (CR 205.3i) and all abilities generated from its rules text. Non-land
+            // subtypes (e.g., creature subtypes on Land Creatures) are preserved.
+            // Abilities granted by other effects are re-added in Layer 6.
+            // Intrinsic mana abilities are derived from subtypes in mana_sources.rs.
             ContinuousModification::SetBasicLandType { land_type } => {
-                let basic_subtypes = ["Plains", "Island", "Swamp", "Mountain", "Forest"];
+                obj.card_types.subtypes.retain(|s| !is_land_subtype(s));
                 obj.card_types
                     .subtypes
-                    .retain(|s| !basic_subtypes.contains(&s.as_str()));
-                let subtype_str = land_type.as_subtype_str().to_string();
-                if !obj.card_types.subtypes.iter().any(|s| s == &subtype_str) {
-                    obj.card_types.subtypes.push(subtype_str);
-                }
+                    .push(land_type.as_subtype_str().to_string());
+                obj.abilities.clear();
+                obj.trigger_definitions.clear();
+                obj.replacement_definitions.clear();
+                obj.static_definitions.clear();
+                obj.keywords.clear();
             }
         }
     }
@@ -776,9 +791,9 @@ mod tests {
     use crate::game::scenario::GameScenario;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-        CountScope, Duration, Effect, FilterProp, GainLifePlayer, QuantityExpr, QuantityRef,
-        StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+        AbilityDefinition, AbilityKind, BasicLandType, ChosenSubtypeKind, ContinuousModification,
+        ControllerRef, CountScope, Duration, Effect, FilterProp, GainLifePlayer, QuantityExpr,
+        QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::TransientContinuousEffect;
@@ -2351,5 +2366,196 @@ mod tests {
             !effects.is_empty(),
             "effect should be gathered when source is tapped"
         );
+    }
+
+    // --- CR 305.7: SetBasicLandType tests ---
+
+    fn make_land(state: &mut GameState, name: &str, player: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(0),
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let ts = state.next_timestamp();
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.base_card_types = obj.card_types.clone();
+        obj.timestamp = ts;
+        id
+    }
+
+    #[test]
+    fn set_basic_land_type_removes_rules_text_abilities() {
+        // CR 305.7: A land whose type is set loses rules-text abilities.
+        let mut state = setup();
+        let p0 = PlayerId(0);
+
+        let land_id = make_land(&mut state, "Test Land", p0);
+        {
+            let obj = state.objects.get_mut(&land_id).unwrap();
+            obj.card_types.subtypes.push("Desert".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_abilities.push(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: GainLifePlayer::Controller,
+                },
+            ));
+            obj.abilities = obj.base_abilities.clone();
+        }
+
+        // Source: enchantment with SetBasicLandType static
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "Blood Moon".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = ts;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(TypedFilter::land()))
+                    .modifications(vec![ContinuousModification::SetBasicLandType {
+                        land_type: BasicLandType::Mountain,
+                    }]),
+            );
+        }
+
+        evaluate_layers(&mut state);
+
+        let land = state.objects.get(&land_id).unwrap();
+        assert!(
+            land.abilities.is_empty(),
+            "CR 305.7: Rules-text abilities should be removed"
+        );
+        assert!(land.card_types.subtypes.contains(&"Mountain".to_string()));
+        assert!(
+            !land.card_types.subtypes.contains(&"Desert".to_string()),
+            "CR 305.7: Old land subtypes should be removed"
+        );
+    }
+
+    #[test]
+    fn set_basic_land_type_preserves_creature_subtypes() {
+        // CR 305.7: "Setting a land's subtype doesn't add or remove any card types."
+        // Land Creature with "Forest Dryad" → SetBasicLandType Mountain →
+        // keeps "Dryad" creature subtype, loses "Forest" land subtype, gains "Mountain".
+        let mut state = setup();
+        let p0 = PlayerId(0);
+
+        let land_id = make_land(&mut state, "Dryad Arbor", p0);
+        {
+            let obj = state.objects.get_mut(&land_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.card_types.subtypes.push("Dryad".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+        }
+
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "Blood Moon".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = ts;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(TypedFilter::land()))
+                    .modifications(vec![ContinuousModification::SetBasicLandType {
+                        land_type: BasicLandType::Mountain,
+                    }]),
+            );
+        }
+
+        evaluate_layers(&mut state);
+
+        let land = state.objects.get(&land_id).unwrap();
+        assert!(
+            land.card_types.subtypes.contains(&"Mountain".to_string()),
+            "Should gain Mountain"
+        );
+        assert!(
+            land.card_types.subtypes.contains(&"Dryad".to_string()),
+            "CR 305.7: Creature subtypes must be preserved"
+        );
+        assert!(
+            !land.card_types.subtypes.contains(&"Forest".to_string()),
+            "Forest land subtype should be removed"
+        );
+        assert!(
+            land.card_types.core_types.contains(&CoreType::Creature),
+            "CR 305.7: Core types must be preserved"
+        );
+    }
+
+    #[test]
+    fn add_all_basic_land_types_adds_five_subtypes() {
+        // Prismatic Omen: "Lands you control are every basic land type in addition
+        // to their other types."
+        let mut state = setup();
+        let p0 = PlayerId(0);
+
+        let land_id = make_land(&mut state, "Guildgate", p0);
+        {
+            let obj = state.objects.get_mut(&land_id).unwrap();
+            obj.card_types.subtypes.push("Gate".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "Prismatic Omen".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = ts;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::land().controller(ControllerRef::You),
+                    ))
+                    .modifications(vec![ContinuousModification::AddAllBasicLandTypes]),
+            );
+        }
+
+        evaluate_layers(&mut state);
+
+        let land = state.objects.get(&land_id).unwrap();
+        assert!(
+            land.card_types.subtypes.contains(&"Gate".to_string()),
+            "Original subtype should be preserved (additive)"
+        );
+        for name in ["Plains", "Island", "Swamp", "Mountain", "Forest"] {
+            assert!(
+                land.card_types.subtypes.contains(&name.to_string()),
+                "Missing basic land type: {name}"
+            );
+        }
     }
 }

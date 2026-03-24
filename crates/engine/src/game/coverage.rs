@@ -31,6 +31,7 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::ReduceCost { .. }
             | StaticMode::RaiseCost { .. }
             | StaticMode::CantCastDuring { .. }
+            | StaticMode::GraveyardCastPermission { .. }
     )
 }
 
@@ -1175,6 +1176,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::AddDynamicPower { .. } => "add dynamic power".into(),
         ContinuousModification::AddDynamicToughness { .. } => "add dynamic toughness".into(),
         ContinuousModification::AddAllCreatureTypes => "all creature types".into(),
+        ContinuousModification::AddAllBasicLandTypes => "all basic land types".into(),
         ContinuousModification::AddChosenSubtype { .. } => "add chosen subtype".into(),
         ContinuousModification::AddChosenColor => "add chosen color".into(),
         ContinuousModification::SetColor { colors } => {

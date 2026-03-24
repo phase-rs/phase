@@ -28,7 +28,7 @@ pub use ability::{
 };
 pub use actions::GameAction;
 pub use card::{CardFace, CardLayout, CardRules};
-pub use card_type::{CardType, CoreType, Supertype};
+pub use card_type::{is_land_subtype, CardType, CoreType, Supertype};
 pub use events::GameEvent;
 pub use format::{FormatConfig, GameFormat};
 pub use game_state::{

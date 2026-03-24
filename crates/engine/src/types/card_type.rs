@@ -78,3 +78,29 @@ pub struct CardType {
     pub core_types: Vec<CoreType>,
     pub subtypes: Vec<String>,
 }
+
+/// CR 205.3i: Returns true if the given string is a land subtype.
+/// Used by `SetBasicLandType` to remove only land subtypes while preserving
+/// non-land subtypes (e.g., creature subtypes on Land Creatures like Dryad Arbor).
+pub fn is_land_subtype(s: &str) -> bool {
+    matches!(
+        s,
+        "Cave"
+            | "Desert"
+            | "Forest"
+            | "Gate"
+            | "Island"
+            | "Lair"
+            | "Locus"
+            | "Mine"
+            | "Mountain"
+            | "Plains"
+            | "Planet"
+            | "Power-Plant"
+            | "Sphere"
+            | "Swamp"
+            | "Tower"
+            | "Town"
+            | "Urza's"
+    )
+}
