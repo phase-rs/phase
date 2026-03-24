@@ -270,6 +270,10 @@ async fn main() {
             .allow_origin(origin.parse::<HeaderValue>().expect("invalid CORS origin")),
     };
 
+    // Keep references for shutdown flush (Arcs are cheap to clone)
+    let shutdown_state = state.clone();
+    let shutdown_game_db = game_db.clone();
+
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(health))
@@ -292,6 +296,28 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server error");
+
+    // Flush all active sessions to SQLite before exiting so they survive restart
+    let mgr = shutdown_state.lock().await;
+    let mut persisted = 0u32;
+    for (game_code, session) in &mgr.sessions {
+        let snapshot = session.to_persisted(None);
+        match serde_json::to_string(&snapshot) {
+            Ok(json) => {
+                if let Err(e) = shutdown_game_db.save_session(game_code, &json) {
+                    error!(game = %game_code, error = %e, "failed to persist session on shutdown");
+                } else {
+                    persisted += 1;
+                }
+            }
+            Err(e) => {
+                error!(game = %game_code, error = %e, "failed to serialize session on shutdown");
+            }
+        }
+    }
+    if persisted > 0 {
+        info!(count = persisted, "flushed active sessions to disk on shutdown");
+    }
 }
 
 async fn shutdown_signal() {

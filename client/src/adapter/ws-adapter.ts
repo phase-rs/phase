@@ -72,7 +72,7 @@ export class WebSocketAdapter implements EngineAdapter {
   private initReject: ((error: Error) => void) | null = null;
   private listeners: WsAdapterEventListener[] = [];
   private reconnectAttempt = 0;
-  private readonly maxReconnectAttempts = 3;
+  private readonly maxReconnectAttempts = 8;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
   private gameEnded = false;
@@ -302,7 +302,7 @@ export class WebSocketAdapter implements EngineAdapter {
       return;
     }
     this.reconnectAttempt++;
-    const delay = Math.pow(2, this.reconnectAttempt - 1) * 1000;
+    const delay = Math.min(Math.pow(2, this.reconnectAttempt - 1) * 1000, 5000);
     this.emit({
       type: "reconnecting",
       attempt: this.reconnectAttempt,
