@@ -21,6 +21,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 
 serde_json = "1"
 schemars = "1"
+strum = { version = "0.27", features = ["derive"] }
 
 [[bin]]
 name = "coverage-report"

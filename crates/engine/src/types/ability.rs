@@ -1276,9 +1276,9 @@ pub enum StaticCondition {
     /// CR 400.7: True when the source permanent entered the battlefield this turn.
     /// Used for "as long as this [permanent] entered this turn" conditional statics.
     SourceEnteredThisTurn,
-    /// CR 701.52: True when this creature is the ring-bearer for its controller.
+    /// CR 701.54a: True when this creature is the ring-bearer for its controller.
     IsRingBearer,
-    /// CR 701.52: True when the controller's ring level is at least this value (0-indexed).
+    /// CR 701.54c: True when the controller's ring level is at least this value (0-indexed).
     RingLevelAtLeast {
         level: u8,
     },
@@ -1547,7 +1547,7 @@ pub enum DamageSource {
 
 /// The typed effect enum. Each variant corresponds to an effect handler.
 /// Zero HashMap<String, String> fields.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, strum::IntoStaticStr)]
 #[serde(tag = "type")]
 pub enum Effect {
     DealDamage {
@@ -1733,6 +1733,8 @@ pub enum Effect {
         #[serde(default = "default_target_filter_none")]
         target: TargetFilter,
     },
+    /// CR 701.20e + CR 608.2c: Look at top N cards (shown only to the looking player),
+    /// select some to keep per the effect's instructions, rest go elsewhere.
     Dig {
         #[serde(default = "default_one")]
         count: u32,
@@ -1942,11 +1944,11 @@ pub enum Effect {
         target: TargetFilter,
         #[serde(default = "default_target_filter_any")]
         card_filter: TargetFilter,
-        /// None = reveal entire hand. Some = reveal this many cards. CR 701.16a.
+        /// None = reveal entire hand. Some = reveal this many cards. CR 701.20a.
         #[serde(default)]
         count: Option<QuantityExpr>,
     },
-    /// CR 701.16a: Reveal the top N card(s) of a player's library.
+    /// CR 701.20a: Reveal the top N card(s) of a player's library.
     RevealTop {
         /// The player whose library to reveal from.
         #[serde(default = "default_target_filter_any")]
@@ -2070,7 +2072,7 @@ pub enum Effect {
     FlipCoinUntilLose {
         win_effect: Box<AbilityDefinition>,
     },
-    /// CR 701.52: The Ring tempts the controller. Increments ring level and prompts
+    /// CR 701.54a: The Ring tempts the controller. Increments ring level and prompts
     /// ring-bearer selection if the controller has creatures on the battlefield.
     RingTemptsYou,
     /// Grant a casting permission to the target object (e.g., "cast from exile for {2}").
@@ -2110,7 +2112,7 @@ pub enum Effect {
     ExileFromTopUntil {
         filter: TargetFilter,
     },
-    /// CR 702.170: Discover N — exile from top until nonland with MV ≤ N,
+    /// CR 701.57a: Discover N — exile from top until nonland with MV ≤ N,
     /// cast free or put to hand, rest to bottom in random order.
     Discover {
         mana_value_limit: u32,
@@ -2736,7 +2738,7 @@ pub struct CostReduction {
 // ---------------------------------------------------------------------------
 
 /// Parsed ability definition with typed effect. Zero remaining_params.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AbilityDefinition {
     pub kind: AbilityKind,
     pub effect: Box<Effect>,
@@ -2758,7 +2760,7 @@ pub struct AbilityDefinition {
     pub sorcery_speed: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub activation_restrictions: Vec<ActivationRestriction>,
-    /// CR 702.133: Zone from which this ability can be activated.
+    /// CR 602.1: Zone from which this ability can be activated.
     /// `None` = battlefield (default). `Some(Zone::Hand)` for Channel, Cycling, etc.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_zone: Option<Zone>,
@@ -2810,6 +2812,72 @@ pub struct AbilityDefinition {
     /// Produced by "each opponent discards", "each player draws", etc.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub player_scope: Option<PlayerFilter>,
+}
+
+// Thread-local recursion depth counter for AbilityDefinition's Debug impl.
+// Prevents stack overflow when formatting deeply nested ability trees (Effect ↔
+// AbilityDefinition recursion). At depth > 2, recursive children are summarized
+// as `AbilityDefinition { effect: <VariantName>, .. }` instead of fully expanded.
+std::thread_local! {
+    static ABILITY_DEBUG_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+const ABILITY_DEBUG_MAX_DEPTH: u32 = 2;
+
+impl fmt::Debug for AbilityDefinition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let depth = ABILITY_DEBUG_DEPTH.with(|d| {
+            let current = d.get();
+            d.set(current + 1);
+            current
+        });
+
+        let result = if depth >= ABILITY_DEBUG_MAX_DEPTH {
+            // Summarize: effect variant name + key flags, no recursive expansion.
+            let variant: &'static str = self.effect.as_ref().into();
+            write!(f, "AbilityDefinition {{ effect: {variant}")?;
+            if self.sub_ability.is_some() {
+                write!(f, ", sub_ability: Some(..)")?;
+            }
+            if self.else_ability.is_some() {
+                write!(f, ", else_ability: Some(..)")?;
+            }
+            if self.condition.is_some() {
+                write!(f, ", condition: Some(..)")?;
+            }
+            write!(f, ", .. }}")
+        } else {
+            // Full debug output — delegate to a debug_struct for all fields
+            f.debug_struct("AbilityDefinition")
+                .field("kind", &self.kind)
+                .field("effect", &self.effect)
+                .field("cost", &self.cost)
+                .field("sub_ability", &self.sub_ability)
+                .field("else_ability", &self.else_ability)
+                .field("duration", &self.duration)
+                .field("description", &self.description)
+                .field("target_prompt", &self.target_prompt)
+                .field("sorcery_speed", &self.sorcery_speed)
+                .field("activation_restrictions", &self.activation_restrictions)
+                .field("activation_zone", &self.activation_zone)
+                .field("condition", &self.condition)
+                .field("optional_targeting", &self.optional_targeting)
+                .field("optional", &self.optional)
+                .field("optional_for", &self.optional_for)
+                .field("multi_target", &self.multi_target)
+                .field("distribute", &self.distribute)
+                .field("modal", &self.modal)
+                .field("mode_abilities", &self.mode_abilities)
+                .field("repeat_for", &self.repeat_for)
+                .field("cost_reduction", &self.cost_reduction)
+                .field("forward_result", &self.forward_result)
+                .field("player_scope", &self.player_scope)
+                .finish()
+        };
+
+        ABILITY_DEBUG_DEPTH.with(|d| d.set(depth));
+        result
+    }
 }
 
 impl AbilityDefinition {
@@ -3032,7 +3100,7 @@ pub enum TriggerCondition {
     ClassLevelGE { level: u8 },
 
     /// "if you cast it" — zoneless cast check (unlike CastFromZone which requires a specific zone).
-    /// CR 702.170: Used by Discover ETB triggers.
+    /// CR 701.57a: Used by Discover ETB triggers.
     WasCast,
 
     /// "if it's attacking" — true when the trigger source object is currently an attacker.
@@ -3181,7 +3249,7 @@ pub struct TriggerDefinition {
     /// CR 603.2c: "One or more" triggers fire once per batch of simultaneous events.
     #[serde(default)]
     pub batched: bool,
-    /// CR 702.170a: Expend threshold — fires when cumulative mana spent on spells crosses N.
+    /// CR 700.14: Expend threshold — fires when cumulative mana spent on spells crosses N.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expend_threshold: Option<u32>,
 }
