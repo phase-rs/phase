@@ -1,20 +1,31 @@
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 
-/// CR 701.20a: Dig — look at top N cards, put some into hand or another zone, rest elsewhere.
+/// CR 701.16a: Dig — look at top N cards, select some to keep, rest go elsewhere.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let dig_num: usize = match &ability.effect {
-        Effect::Dig { count, .. } => *count as usize,
-        _ => 1,
+    let (dig_num, keep_num, is_up_to, filter, kept_dest, rest_dest) = match &ability.effect {
+        Effect::Dig {
+            count,
+            keep_count,
+            up_to,
+            filter,
+            destination,
+            rest_destination,
+        } => (
+            *count as usize,
+            keep_count.unwrap_or(1) as usize,
+            *up_to,
+            filter.clone(),
+            *destination,
+            *rest_destination,
+        ),
+        _ => (1, 1, false, TargetFilter::Any, None, None),
     };
-
-    // Default keep count is 1 (can be extended via sub-ability or additional typed field)
-    let change_num: usize = 1;
 
     let player = state
         .players
@@ -29,12 +40,35 @@ pub fn resolve(
     }
 
     let cards: Vec<_> = player.library[..count].to_vec();
-    let keep_count = change_num.min(cards.len());
+    let keep_count = keep_num.min(cards.len());
+
+    // Pre-compute selectable cards by evaluating the filter against each card.
+    let selectable_cards = if matches!(filter, TargetFilter::Any) {
+        cards.clone()
+    } else {
+        cards
+            .iter()
+            .filter(|&&card_id| {
+                crate::game::filter::matches_target_filter(
+                    state,
+                    card_id,
+                    &filter,
+                    ability.source_id,
+                )
+            })
+            .copied()
+            .collect()
+    };
 
     state.waiting_for = WaitingFor::DigChoice {
         player: ability.controller,
+        selectable_cards,
         cards,
         keep_count,
+        up_to: is_up_to,
+        kept_destination: kept_dest,
+        rest_destination: rest_dest,
+        source_id: Some(ability.source_id),
     };
 
     events.push(GameEvent::EffectResolved {
@@ -58,6 +92,10 @@ mod tests {
             Effect::Dig {
                 count: dig_num,
                 destination: None,
+                keep_count: None,
+                up_to: false,
+                filter: TargetFilter::Any,
+                rest_destination: None,
             },
             vec![],
             ObjectId(100),
@@ -88,6 +126,7 @@ mod tests {
                 player,
                 cards,
                 keep_count,
+                ..
             } => {
                 assert_eq!(*player, PlayerId(0));
                 assert_eq!(cards.len(), 5);

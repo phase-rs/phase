@@ -40,6 +40,28 @@ pub fn filter_state_for_player(state: &GameState, viewer: PlayerId) -> GameState
         )
     };
 
+    // CR 701.16a: During DigChoice, the choosing player can see the looked-at
+    // library cards. Opponents cannot see any library card identities.
+    let (dig_visible, dig_cards): (
+        std::collections::HashSet<ObjectId>,
+        std::collections::HashSet<ObjectId>,
+    ) = if let WaitingFor::DigChoice {
+        player, ref cards, ..
+    } = filtered.waiting_for
+    {
+        let all_cards: std::collections::HashSet<ObjectId> = cards.iter().copied().collect();
+        if player == viewer {
+            (all_cards.clone(), all_cards)
+        } else {
+            (std::collections::HashSet::new(), all_cards)
+        }
+    } else {
+        (
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+        )
+    };
+
     // Hide library contents for ALL players (no one should see card details in libraries)
     let all_library_ids: Vec<ObjectId> = filtered
         .players
@@ -48,10 +70,14 @@ pub fn filter_state_for_player(state: &GameState, viewer: PlayerId) -> GameState
         .collect();
     for obj_id in all_library_ids {
         // CR 701.62a: Don't hide cards visible to the manifesting player
+        // CR 701.16a: Don't hide cards visible to the digging player
         // CR 701.20b: Don't hide cards currently revealed (e.g. Goblin Guide trigger),
-        // but ManifestDread cards use their own visibility path — not generic revealed_cards
+        // but ManifestDread/Dig cards use their own visibility path — not generic revealed_cards
         let visible = manifest_dread_visible.contains(&obj_id)
-            || (state.revealed_cards.contains(&obj_id) && !manifest_dread_cards.contains(&obj_id));
+            || dig_visible.contains(&obj_id)
+            || (state.revealed_cards.contains(&obj_id)
+                && !manifest_dread_cards.contains(&obj_id)
+                && !dig_cards.contains(&obj_id));
         if !visible {
             hide_card(&mut filtered, obj_id);
         }
@@ -64,6 +90,33 @@ pub fn filter_state_for_player(state: &GameState, viewer: PlayerId) -> GameState
             filtered.waiting_for = WaitingFor::ManifestDreadChoice {
                 player,
                 cards: cards.iter().map(|_| ObjectId(0)).collect(),
+            };
+        }
+    }
+
+    // CR 701.16a: For opponents during DigChoice, redact the card list
+    // so they can't see which specific cards were looked at.
+    if let WaitingFor::DigChoice {
+        player,
+        ref cards,
+        keep_count,
+        up_to,
+        ref selectable_cards,
+        kept_destination,
+        rest_destination,
+        source_id,
+    } = state.waiting_for
+    {
+        if player != viewer {
+            filtered.waiting_for = WaitingFor::DigChoice {
+                player,
+                cards: cards.iter().map(|_| ObjectId(0)).collect(),
+                keep_count,
+                up_to,
+                selectable_cards: selectable_cards.iter().map(|_| ObjectId(0)).collect(),
+                kept_destination,
+                rest_destination,
+                source_id,
             };
         }
     }

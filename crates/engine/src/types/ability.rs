@@ -1736,8 +1736,21 @@ pub enum Effect {
     Dig {
         #[serde(default = "default_one")]
         count: u32,
+        /// Kept-card destination override (None = Hand).
         #[serde(default)]
         destination: Option<Zone>,
+        /// How many cards to keep (None = 1).
+        #[serde(default)]
+        keep_count: Option<u32>,
+        /// True = select 0..=keep_count ("up to N"), false = exactly keep_count.
+        #[serde(default)]
+        up_to: bool,
+        /// Filter for keepable cards (Any = no filter).
+        #[serde(default = "default_target_filter_any")]
+        filter: TargetFilter,
+        /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom).
+        #[serde(default)]
+        rest_destination: Option<Zone>,
     },
     GainControl {
         #[serde(default = "default_target_filter_any")]

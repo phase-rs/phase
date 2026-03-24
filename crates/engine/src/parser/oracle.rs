@@ -1600,7 +1600,9 @@ fn parse_harmonize_keyword(line: &str) -> Option<Keyword> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{ModalSelectionConstraint, QuantityExpr, TargetFilter};
+    use crate::types::ability::{
+        ModalSelectionConstraint, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+    };
     use crate::types::mana::ManaCost;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::triggers::TriggerMode;
@@ -4373,5 +4375,78 @@ mod tests {
             !r.abilities.is_empty(),
             "damage line should produce spell ability"
         );
+    }
+
+    #[test]
+    fn collected_company_dig_from_among() {
+        let r = parse(
+            "Look at the top six cards of your library. Put up to two creature cards with mana value 3 or less from among them onto the battlefield. Put the rest on the bottom of your library in any order.",
+            "Collected Company",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1, "should produce one ability");
+        match &*r.abilities[0].effect {
+            Effect::Dig {
+                count,
+                destination,
+                keep_count,
+                up_to,
+                filter,
+                rest_destination,
+            } => {
+                assert_eq!(*count, 6, "dig count should be 6");
+                assert_eq!(*destination, Some(Zone::Battlefield), "kept cards go to battlefield");
+                assert_eq!(*keep_count, Some(2), "keep up to 2");
+                assert!(*up_to, "should be up_to");
+                assert!(
+                    matches!(filter, TargetFilter::Typed(TypedFilter { ref type_filters, .. })
+                        if type_filters.contains(&TypeFilter::Creature)),
+                    "filter should require creatures, got {:?}",
+                    filter,
+                );
+                assert_eq!(*rest_destination, Some(Zone::Library), "rest go to bottom of library");
+            }
+            other => {
+                panic!("Expected Dig effect, got {:?}", std::mem::discriminant(other));
+            }
+        }
+    }
+
+    #[test]
+    fn commune_with_nature_dig_from_among() {
+        let r = parse(
+            "Look at the top five cards of your library. You may reveal a creature card from among them and put it into your hand. Put the rest on the bottom of your library in any order.",
+            "Commune with Nature",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        match &*r.abilities[0].effect {
+            Effect::Dig {
+                count,
+                destination,
+                keep_count,
+                up_to,
+                filter,
+                rest_destination,
+            } => {
+                assert_eq!(*count, 5);
+                assert_eq!(*destination, Some(Zone::Hand));
+                assert_eq!(*keep_count, Some(1));
+                assert!(*up_to, "a creature card = up to 1");
+                assert!(
+                    matches!(filter, TargetFilter::Typed(TypedFilter { ref type_filters, .. })
+                        if type_filters.contains(&TypeFilter::Creature)),
+                    "filter should require creatures",
+                );
+                assert_eq!(*rest_destination, Some(Zone::Library));
+            }
+            other => {
+                panic!("Expected Dig effect, got {:?}", std::mem::discriminant(other));
+            }
+        }
     }
 }

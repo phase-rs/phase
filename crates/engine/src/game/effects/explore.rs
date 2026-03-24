@@ -128,8 +128,13 @@ pub fn resolve(
         //   - rest go to graveyard (but there's only 1 card, so keep=hand, don't keep=graveyard)
         state.waiting_for = WaitingFor::DigChoice {
             player: controller,
+            selectable_cards: vec![top_card_id],
             cards: vec![top_card_id],
             keep_count: 1,
+            up_to: false,
+            kept_destination: None,
+            rest_destination: None,
+            source_id: Some(ability.source_id),
         };
 
         events.push(GameEvent::EffectResolved {
@@ -256,6 +261,7 @@ mod tests {
                 player,
                 cards,
                 keep_count,
+                ..
             } => {
                 assert_eq!(*player, PlayerId(0));
                 assert_eq!(cards.len(), 1);

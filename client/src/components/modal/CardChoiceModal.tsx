@@ -202,6 +202,9 @@ function DigModal({ data }: { data: DigChoice["data"] }) {
   const inspectObject = useUiStore((s) => s.inspectObject);
   const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
 
+  const isUpTo = data.up_to ?? false;
+  const selectableSet = new Set(data.selectable_cards ?? data.cards);
+
   const toggleSelect = useCallback(
     (id: ObjectId) => {
       setSelected((prev) => {
@@ -226,31 +229,49 @@ function DigModal({ data }: { data: DigChoice["data"] }) {
 
   if (!objects) return null;
 
-  const isReady = selected.size === data.keep_count;
+  const isReady = isUpTo
+    ? selected.size <= data.keep_count
+    : selected.size === data.keep_count;
+
+  const destLabel =
+    data.kept_destination === "Battlefield"
+      ? "onto the battlefield"
+      : "into your hand";
+
+  const countLabel = isUpTo
+    ? `up to ${data.keep_count}`
+    : `${data.keep_count}`;
 
   return (
     <ChoiceOverlay
       title="Choose Cards"
-      subtitle={`Select ${data.keep_count} card${data.keep_count > 1 ? "s" : ""} to put into your hand`}
+      subtitle={`Select ${countLabel} card${data.keep_count > 1 ? "s" : ""} to put ${destLabel}`}
     >
       <div className={CHOICE_CARD_ROW_CLASS}>
         {data.cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
           const isSelected = selected.has(id);
+          const isSelectable = selectableSet.has(id);
           return (
             <motion.button
               key={id}
               className={`relative rounded-lg transition ${
                 isSelected
                   ? "z-10 ring-2 ring-emerald-400/80"
-                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+                  : isSelectable
+                    ? "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+                    : "opacity-40 cursor-not-allowed"
               }`}
               initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
+              animate={{
+                opacity: isSelected ? 1 : isSelectable ? 0.7 : 0.3,
+                y: 0,
+                scale: 1,
+              }}
               transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => toggleSelect(id)}
+              whileHover={isSelectable ? { scale: 1.05, y: -6 } : undefined}
+              onClick={() => isSelectable && toggleSelect(id)}
               onMouseEnter={() => inspectObject(id)}
               onMouseLeave={() => inspectObject(null)}
             >

@@ -78,8 +78,13 @@ pub fn resolve(
 
     state.waiting_for = WaitingFor::DigChoice {
         player: ability.controller,
+        selectable_cards: cards.clone(),
         cards,
         keep_count,
+        up_to: false,
+        kept_destination: None,
+        rest_destination: None,
+        source_id: Some(ability.source_id),
     };
 
     events.push(GameEvent::EffectResolved {
@@ -135,6 +140,7 @@ mod tests {
                 player,
                 cards,
                 keep_count,
+                ..
             } => {
                 assert_eq!(*player, PlayerId(0));
                 assert_eq!(cards.len(), 2);

@@ -859,10 +859,29 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("target".into(), fmt_target(target)));
             }
         }
-        Effect::Dig { count, destination } => {
+        Effect::Dig {
+            count,
+            destination,
+            keep_count,
+            up_to,
+            filter,
+            rest_destination,
+        } => {
             d.push(("count".into(), count.to_string()));
             if let Some(dest) = destination {
                 d.push(("to".into(), fmt_zone(dest)));
+            }
+            if let Some(kc) = keep_count {
+                d.push(("keep_count".into(), kc.to_string()));
+            }
+            if *up_to {
+                d.push(("up_to".into(), "true".into()));
+            }
+            if !matches!(filter, TargetFilter::Any) {
+                d.push(("filter".into(), fmt_target(filter)));
+            }
+            if let Some(rest) = rest_destination {
+                d.push(("rest_to".into(), fmt_zone(rest)));
             }
         }
         Effect::Bounce {

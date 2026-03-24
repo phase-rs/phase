@@ -275,7 +275,10 @@ pub fn parse_mana_symbols(text: &str) -> Option<(ManaCost, &str)> {
         pos = end + 1;
         parsed_any = true;
 
-        match symbol {
+        // Case-insensitive matching: the trigger parser may lowercase mana symbols
+        // (e.g., "{g}" instead of "{G}"), so normalize before matching.
+        let symbol_upper = symbol.to_ascii_uppercase();
+        match symbol_upper.as_str() {
             "W" => shards.push(ManaCostShard::White),
             "U" => shards.push(ManaCostShard::Blue),
             "B" => shards.push(ManaCostShard::Black),
@@ -1321,6 +1324,28 @@ mod tests {
             ManaCost::Cost {
                 generic: 0,
                 shards: vec![ManaCostShard::GreenWhite]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_mana_symbols_lowercase() {
+        let (cost, rest) = parse_mana_symbols("{g}").unwrap();
+        assert_eq!(
+            cost,
+            ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Green],
+            }
+        );
+        assert_eq!(rest, "");
+
+        let (cost, _) = parse_mana_symbols("{2}{w/u}").unwrap();
+        assert_eq!(
+            cost,
+            ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::WhiteBlue],
             }
         );
     }

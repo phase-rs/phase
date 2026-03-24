@@ -306,6 +306,21 @@ pub enum WaitingFor {
         player: PlayerId,
         cards: Vec<ObjectId>,
         keep_count: usize,
+        /// True = select 0..=keep_count ("up to N"), false = exactly keep_count.
+        #[serde(default)]
+        up_to: bool,
+        /// Cards that pass the filter — frontend greys out others.
+        #[serde(default)]
+        selectable_cards: Vec<ObjectId>,
+        /// Where kept cards go (None = Hand).
+        #[serde(default)]
+        kept_destination: Option<Zone>,
+        /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom).
+        #[serde(default)]
+        rest_destination: Option<Zone>,
+        /// Source ability's object ID for filter context.
+        #[serde(default)]
+        source_id: Option<ObjectId>,
     },
     SurveilChoice {
         player: PlayerId,
@@ -1553,6 +1568,11 @@ mod tests {
             player: PlayerId(0),
             cards: vec![ObjectId(1)],
             keep_count: 1,
+            up_to: false,
+            selectable_cards: vec![ObjectId(1)],
+            kept_destination: None,
+            rest_destination: None,
+            source_id: None,
         }));
         variants.push(Box::new(WaitingFor::SurveilChoice {
             player: PlayerId(0),

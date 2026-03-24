@@ -1679,37 +1679,81 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             }
             state.waiting_for.clone()
         }
-        // Dig: player selects keep_count cards for hand, rest go to graveyard
+        // CR 701.16a: Dig — player selects cards to keep, rest go elsewhere.
         (
             WaitingFor::DigChoice {
                 player,
                 cards: all_cards,
                 keep_count,
+                up_to,
+                selectable_cards,
+                kept_destination,
+                rest_destination,
+                ..
             },
             GameAction::SelectCards { cards: kept },
         ) => {
             let p = *player;
             let kc = *keep_count;
+            let is_up_to = *up_to;
             let all = all_cards.clone();
-            if kept.len() != kc {
+            let selectable = selectable_cards.clone();
+            let kept_dest = *kept_destination;
+            let rest_dest = *rest_destination;
+            // Validate selection count
+            if is_up_to {
+                if kept.len() > kc {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Must select at most {} cards, got {}",
+                        kc,
+                        kept.len()
+                    )));
+                }
+            } else if kept.len() != kc {
                 return Err(EngineError::InvalidAction(format!(
                     "Must select exactly {} cards, got {}",
                     kc,
                     kept.len()
                 )));
             }
-            let to_graveyard: Vec<_> = all
+            // Validate all kept cards are in selectable set
+            if !selectable.is_empty() {
+                for card_id in &kept {
+                    if !selectable.contains(card_id) {
+                        return Err(EngineError::InvalidAction(
+                            "Selected card does not match filter".to_string(),
+                        ));
+                    }
+                }
+            }
+            let unkept: Vec<_> = all
                 .iter()
                 .filter(|id| !kept.contains(id))
                 .copied()
                 .collect();
-            // Move kept cards to hand
+            // Move kept cards to destination (default: Hand)
+            let kept_zone = kept_dest.unwrap_or(Zone::Hand);
             for &obj_id in &kept {
-                zones::move_to_zone(state, obj_id, Zone::Hand, &mut events);
+                zones::move_to_zone(state, obj_id, kept_zone, &mut events);
             }
-            // Move rest to graveyard
-            for &obj_id in &to_graveyard {
-                zones::move_to_zone(state, obj_id, Zone::Graveyard, &mut events);
+            // Move rest to destination (default: Graveyard)
+            match rest_dest {
+                // CR 701.24g: Bottom of library via move_to_library_position.
+                Some(Zone::Library) => {
+                    for &obj_id in &unkept {
+                        zones::move_to_library_position(state, obj_id, false, &mut events);
+                    }
+                }
+                Some(zone) => {
+                    for &obj_id in &unkept {
+                        zones::move_to_zone(state, obj_id, zone, &mut events);
+                    }
+                }
+                None => {
+                    for &obj_id in &unkept {
+                        zones::move_to_zone(state, obj_id, Zone::Graveyard, &mut events);
+                    }
+                }
             }
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;

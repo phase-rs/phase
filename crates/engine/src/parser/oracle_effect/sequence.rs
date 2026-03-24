@@ -1,3 +1,4 @@
+use super::super::oracle_target::parse_target;
 use super::super::oracle_util::parse_number;
 use super::types::*;
 use crate::types::ability::{
@@ -85,9 +86,13 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                 {
                     let remainder: String = chars.clone().collect();
                     let remainder_trimmed = remainder.trim_start();
-                    if starts_bare_and_clause(remainder_trimmed) {
-                        // Strip trailing " and " from current before pushing
-                        let before_and = &current[..current.len() - " and ".len()];
+                    // Suppress split when "and put" follows "from among" — the
+                    // "put into hand / onto battlefield" is part of the same
+                    // compound action, not a separate clause.
+                    let before_and = &current[..current.len() - " and ".len()];
+                    let before_lower = before_and.to_ascii_lowercase();
+                    let suppress = before_lower.contains("from among");
+                    if !suppress && starts_bare_and_clause(remainder_trimmed) {
                         push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                         current.clear();
                     }
@@ -381,8 +386,43 @@ pub(super) fn apply_clause_continuation(
         }
         ContinuationAst::PutBackInAnyOrder => {
             // CR 401.5: Absorbed into preceding Dig/RevealTop — the engine's DigChoice
-            // handler already puts remaining cards back on top of library.
-            // Player-chosen ordering is handled by the WaitingFor flow.
+            // handler places remaining cards. If the Dig already has rest_destination
+            // set (e.g., by a preceding DigFromAmong), this is a no-op.
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            if let Effect::Dig {
+                rest_destination, ..
+            } = &mut *previous.effect
+            {
+                if rest_destination.is_none() {
+                    // Default: rest goes to bottom of library (not graveyard)
+                    *rest_destination = Some(Zone::Library);
+                }
+            }
+        }
+        ContinuationAst::DigFromAmong {
+            count,
+            up_to: is_up_to,
+            filter: card_filter,
+            destination: kept_dest,
+        } => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            if let Effect::Dig {
+                keep_count,
+                up_to,
+                filter,
+                destination,
+                ..
+            } = &mut *previous.effect
+            {
+                *keep_count = Some(count);
+                *up_to = is_up_to;
+                *filter = card_filter;
+                *destination = Some(kept_dest);
+            }
         }
         ContinuationAst::ChooseFromExile { count, chooser } => {
             defs.push(AbilityDefinition::new(
@@ -447,6 +487,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::PutBackInAnyOrder => true,
         ContinuationAst::ChooseFromExile { .. } => true,
         ContinuationAst::EntersTappedAttacking => true,
+        ContinuationAst::DigFromAmong { .. } => true,
     }
 }
 
@@ -498,6 +539,77 @@ pub(super) fn parse_intrinsic_continuation_ast(
         }
         _ => None,
     }
+}
+
+/// Parse "put up to N [filter] from among them/those cards onto the battlefield / into your hand"
+/// into a DigFromAmong continuation that patches the preceding Dig effect.
+///
+/// Examples:
+/// - "put up to two creature cards with mana value 3 or less from among them onto the battlefield"
+/// - "put a creature card from among them into your hand"
+/// - "you may reveal a creature card from among them and put it into your hand"
+fn parse_dig_from_among(lower: &str, _original: &str) -> Option<ContinuationAst> {
+    // Determine destination
+    let destination = if lower.contains("onto the battlefield") {
+        Zone::Battlefield
+    } else {
+        Zone::Hand
+    };
+
+    // Find "from among" to split the text into count+filter vs destination
+    let from_among_pos = lower.find("from among")?;
+    let before_from = &lower[..from_among_pos].trim();
+
+    // Strip leading "put " or "you may reveal "
+    let after_put = before_from
+        .strip_prefix("you may put ")
+        .or_else(|| before_from.strip_prefix("you may reveal "))
+        .or_else(|| before_from.strip_prefix("put "))
+        .or_else(|| before_from.strip_prefix("reveal "))
+        .unwrap_or(before_from);
+
+    // Parse "up to N" or "a/an" or just a number
+    let (count, up_to, filter_text) = if let Some(rest) = after_put.strip_prefix("up to ") {
+        if let Some((n, remainder)) = parse_number(rest) {
+            (n, true, remainder.trim())
+        } else {
+            (1, true, rest)
+        }
+    } else if let Some(rest) = after_put.strip_prefix("any number of ") {
+        // "any number of creatures" → up_to with a high cap
+        (255, true, rest)
+    } else if after_put.starts_with("a ") || after_put.starts_with("an ") {
+        // "a creature card" / "an artifact card" — up_to 1 (player may choose none)
+        let rest = after_put
+            .strip_prefix("a ")
+            .or_else(|| after_put.strip_prefix("an "))
+            .unwrap_or(after_put);
+        (1, true, rest)
+    } else if let Some((n, remainder)) = parse_number(after_put) {
+        // Explicit numeric count: "two creature cards" → exactly 2
+        (n, false, remainder.trim())
+    } else {
+        (1, true, after_put)
+    };
+
+    // Parse the filter from the remaining text (e.g., "creature cards with mana value 3 or less")
+    let filter = if filter_text.is_empty()
+        || filter_text == "card"
+        || filter_text == "cards"
+        || filter_text == "of them"
+    {
+        TargetFilter::Any
+    } else {
+        let (parsed_filter, _) = parse_target(filter_text);
+        parsed_filter
+    };
+
+    Some(ContinuationAst::DigFromAmong {
+        count,
+        up_to,
+        filter,
+        destination,
+    })
 }
 
 pub(super) fn parse_followup_continuation_ast(
@@ -570,6 +682,16 @@ pub(super) fn parse_followup_continuation_ast(
                 Chooser::Controller
             };
             Some(ContinuationAst::ChooseFromExile { count, chooser })
+        }
+        // "Put up to N [filter] from among them/those cards onto the battlefield/into your hand"
+        // after Dig — patches keep_count, filter, destination on the preceding Dig effect.
+        Effect::Dig { .. }
+            if (lower.contains("from among them") || lower.contains("from among those cards"))
+                && (lower.contains("onto the battlefield")
+                    || lower.contains("into your hand")
+                    || lower.contains("into their hand")) =>
+        {
+            parse_dig_from_among(&lower, text)
         }
         // CR 508.4 / CR 614.1: "It/The token/He/She/Name enters tapped and attacking"
         // after CopyTokenOf, Token, or ChangeZone effects.

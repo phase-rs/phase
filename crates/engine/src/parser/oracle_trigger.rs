@@ -514,10 +514,11 @@ pub(crate) fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerD
 /// For phase triggers ("at the beginning of..."), the subject is unrecognized and
 /// `resolve_it_pronoun` will fall back to `SelfRef`.
 fn extract_trigger_subject_for_context(condition_text: &str) -> TargetFilter {
-    let after_keyword = condition_text
+    let lower = condition_text.to_lowercase();
+    let after_keyword = lower
         .strip_prefix("whenever ")
-        .or_else(|| condition_text.strip_prefix("when "))
-        .unwrap_or(condition_text);
+        .or_else(|| lower.strip_prefix("when "))
+        .unwrap_or(&lower);
     let (subject, _) = parse_trigger_subject(after_keyword);
     subject
 }
@@ -4707,18 +4708,22 @@ mod tests {
 
     #[test]
     fn trigger_subject_predicate_it_gains() {
-        // "it gains haste" — subject-predicate with "it" as subject
+        // "it gains haste" — subject-predicate with "it" as subject.
+        // The subject "it" resolves to TriggeringSource and lands in the
+        // static_abilities[0].affected field (not the top-level `target`).
         let def = parse_trigger_line(
             "Whenever a creature you control enters, it gains haste until end of turn",
             "Test Enchantment",
         );
         let exec = def.execute.as_ref().expect("should have execute");
         match &*exec.effect {
-            Effect::GenericEffect { target, .. } => {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
                 assert_eq!(
-                    *target,
+                    static_abilities[0].affected,
                     Some(TargetFilter::TriggeringSource),
-                    "subject-predicate 'it' should be TriggeringSource"
+                    "subject-predicate 'it' should produce TriggeringSource in affected"
                 );
             }
             other => panic!("Expected GenericEffect, got {:?}", other),

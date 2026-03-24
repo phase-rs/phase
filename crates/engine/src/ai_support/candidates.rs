@@ -170,18 +170,38 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
         WaitingFor::ScryChoice { player, cards } => select_cards_variants(*player, cards, None),
         WaitingFor::DigChoice {
             player,
-            cards,
             keep_count,
-        } => combinations(cards, *keep_count)
-            .into_iter()
-            .map(|combo| {
-                candidate(
-                    GameAction::SelectCards { cards: combo },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
+            up_to,
+            selectable_cards,
+            ..
+        } => {
+            // Use pre-filtered selectable_cards for combination generation
+            let max_keep = (*keep_count).min(selectable_cards.len());
+            if *up_to {
+                // Generate combinations for all valid sizes 0..=max_keep
+                (0..=max_keep)
+                    .flat_map(|size| combinations(selectable_cards, size))
+                    .map(|combo| {
+                        candidate(
+                            GameAction::SelectCards { cards: combo },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            } else {
+                combinations(selectable_cards, max_keep)
+                    .into_iter()
+                    .map(|combo| {
+                        candidate(
+                            GameAction::SelectCards { cards: combo },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            }
+        }
         WaitingFor::SurveilChoice { player, cards } => select_cards_variants(*player, cards, None),
         WaitingFor::RevealChoice { player, cards, .. } => {
             select_cards_variants(*player, cards, Some(1))
