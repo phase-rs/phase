@@ -1,7 +1,10 @@
-use engine::types::ability::{Effect, PtValue, TargetFilter, TargetRef, TypeFilter};
+use engine::types::ability::{
+    ContinuousModification, Effect, PtValue, TargetFilter, TargetRef, TypeFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::identifiers::ObjectId;
+use engine::types::statics::StaticMode;
 
 use crate::eval::{evaluate_creature, threat_level};
 
@@ -30,22 +33,32 @@ impl TacticalPolicy for AntiSelfHarmPolicy {
 
 /// Penalise casting a targeted spell when the only legal creature targets
 /// would hurt the AI.  Two cases:
-/// - Beneficial spell (pump) but AI has no creatures → would buff opponents.
+/// - Beneficial spell (pump/aura buff) but AI has no creatures → would buff opponents.
 /// - Harmful spell (destroy) but opponents have no creatures → would kill own.
 fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
     let effects = ctx.effects();
-    if effects.is_empty() {
-        return 0.0;
-    }
 
-    let has_beneficial_creature_target = effects.iter().any(|effect| {
+    let mut has_beneficial_creature_target = effects.iter().any(|effect| {
         matches!(effect_polarity(effect), EffectPolarity::Beneficial) && targets_creatures(effect)
     });
     // For harmful spells, only penalise when targeting is creature-exclusive.
     // Burn spells with TargetFilter::Any can still go face — don't block those.
-    let has_harmful_creature_only_target = effects.iter().any(|effect| {
+    let mut has_harmful_creature_only_target = effects.iter().any(|effect| {
         matches!(effect_polarity(effect), EffectPolarity::Harmful) && targets_creatures_only(effect)
     });
+
+    // Auras have no active effects — detect polarity via static definitions.
+    if effects.is_empty() {
+        if let Some(source) = ctx.source_object() {
+            if source.card_types.subtypes.iter().any(|s| s == "Aura") {
+                match aura_polarity(source) {
+                    EffectPolarity::Beneficial => has_beneficial_creature_target = true,
+                    EffectPolarity::Harmful => has_harmful_creature_only_target = true,
+                    EffectPolarity::Contextual => {}
+                }
+            }
+        }
+    }
 
     if !has_beneficial_creature_target && !has_harmful_creature_only_target {
         return 0.0;
@@ -182,12 +195,101 @@ fn effect_polarity(effect: &Effect) -> EffectPolarity {
 /// targeted spells in MTG are removal/damage.
 fn is_spell_beneficial(ctx: &PolicyContext<'_>) -> bool {
     let effects = ctx.effects();
-    if effects.is_empty() {
-        return false;
+
+    // Check active effects for a clear polarity signal.
+    let dominant_polarity = effects.first().map(|e| effect_polarity(e));
+    match dominant_polarity {
+        Some(EffectPolarity::Beneficial) => return true,
+        Some(EffectPolarity::Harmful) => return false,
+        _ => {}
     }
-    // Use the first effect's polarity as dominant (primary effect drives targeting).
-    // If Contextual, fall through to false (assume harmful).
-    matches!(effect_polarity(effects[0]), EffectPolarity::Beneficial)
+
+    // No clear polarity from active effects (empty or Contextual).
+    // Auras carry their beneficial/harmful nature in static definitions.
+    if let Some(source) = ctx.source_object() {
+        if source.card_types.subtypes.iter().any(|s| s == "Aura") {
+            return matches!(aura_polarity(source), EffectPolarity::Beneficial);
+        }
+    }
+
+    false
+}
+
+/// Determines whether an Aura is beneficial or harmful to its target by inspecting
+/// both static modes (CantAttack, CantBeBlocked, etc.) and continuous modifications.
+fn aura_polarity(source: &engine::game::game_object::GameObject) -> EffectPolarity {
+    // First check static modes — these carry clear polarity independent of modifications.
+    for sd in &source.static_definitions {
+        match static_mode_polarity(&sd.mode) {
+            EffectPolarity::Contextual => continue,
+            polarity => return polarity,
+        }
+    }
+
+    // Then check continuous modifications (AddPower, AddKeyword, etc.).
+    for sd in &source.static_definitions {
+        for m in &sd.modifications {
+            match modification_polarity(m) {
+                EffectPolarity::Contextual => continue,
+                polarity => return polarity,
+            }
+        }
+    }
+
+    EffectPolarity::Contextual
+}
+
+/// Classify a static mode as beneficial/harmful to the enchanted permanent.
+fn static_mode_polarity(mode: &StaticMode) -> EffectPolarity {
+    match mode {
+        // Harmful: restricts the enchanted permanent
+        StaticMode::CantAttack
+        | StaticMode::CantBlock
+        | StaticMode::CantUntap
+        | StaticMode::MustAttack
+        | StaticMode::MustBlock
+        | StaticMode::CantGainLife
+        | StaticMode::CantBeActivated => EffectPolarity::Harmful,
+        // Beneficial: enhances the enchanted permanent
+        StaticMode::CantBeBlocked
+        | StaticMode::CantBeBlockedExceptBy { .. }
+        | StaticMode::CantBeTargeted
+        | StaticMode::CantBeCountered
+        | StaticMode::Protection
+        | StaticMode::CastWithFlash => EffectPolarity::Beneficial,
+        // Continuous, cost changes, and others depend on modifications/context
+        _ => EffectPolarity::Contextual,
+    }
+}
+
+/// Classify a continuous modification as beneficial/harmful to its target.
+fn modification_polarity(m: &ContinuousModification) -> EffectPolarity {
+    match m {
+        ContinuousModification::AddPower { value }
+        | ContinuousModification::AddToughness { value } => {
+            if *value > 0 {
+                EffectPolarity::Beneficial
+            } else if *value < 0 {
+                EffectPolarity::Harmful
+            } else {
+                EffectPolarity::Contextual
+            }
+        }
+        ContinuousModification::AddDynamicPower { .. }
+        | ContinuousModification::AddDynamicToughness { .. } => EffectPolarity::Beneficial,
+        ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::GrantAbility { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::AddType { .. }
+        | ContinuousModification::AddSubtype { .. } => EffectPolarity::Beneficial,
+        ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::RemoveSubtype { .. } => EffectPolarity::Harmful,
+        // SetPower/SetToughness, SetColor, etc. are contextual — could go either way.
+        _ => EffectPolarity::Contextual,
+    }
 }
 
 fn score_target_ref(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
@@ -237,9 +339,12 @@ mod tests {
     use crate::config::AiConfig;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::{ResolvedAbility, TargetFilter};
+    use engine::types::ability::{
+        FilterProp, ResolvedAbility, StaticDefinition, TargetFilter, TypedFilter,
+    };
     use engine::types::game_state::{GameState, PendingCast, TargetSelectionSlot, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
+    use engine::types::keywords::Keyword;
     use engine::types::mana::ManaCost;
     use engine::types::player::PlayerId;
     use engine::types::zones::Zone;
@@ -775,5 +880,298 @@ mod tests {
             score >= 0.0,
             "Burn with Any target should not be penalised (can go face), got {score}"
         );
+    }
+
+    fn add_aura(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Aura".to_string());
+        obj.keywords
+            .push(Keyword::Enchant(TargetFilter::Typed(TypedFilter::new(
+                TypeFilter::Creature,
+            ))));
+        // Rancor-style: enchanted creature gets +2/+0 and has trample
+        obj.static_definitions.push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Creature)
+                        .properties(vec![FilterProp::EnchantedBy]),
+                ))
+                .modifications(vec![
+                    ContinuousModification::AddPower { value: 2 },
+                    ContinuousModification::AddToughness { value: 0 },
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Trample,
+                    },
+                ]),
+        );
+        id
+    }
+
+    /// Regression: AI should enchant its own creatures with beneficial auras,
+    /// not opponent creatures. Rancor (+2/+0 and trample) is beneficial.
+    #[test]
+    fn beneficial_aura_prefers_own_creature() {
+        let mut state = make_state();
+        let own_id = add_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let opp_id = add_creature(&mut state, PlayerId(1), "Goblin", 2, 2);
+        let aura_id = add_aura(&mut state, PlayerId(0), "Rancor");
+        let config = AiConfig::default();
+
+        let score_own = score_aura_target(&state, &config, aura_id, own_id, opp_id, own_id);
+        let score_opp = score_aura_target(&state, &config, aura_id, own_id, opp_id, opp_id);
+
+        assert!(
+            score_own > score_opp,
+            "Beneficial aura should prefer own creature: own={score_own}, opp={score_opp}"
+        );
+        assert!(score_own > 0.0, "Own creature score should be positive");
+        assert!(
+            score_opp < 0.0,
+            "Opponent creature score should be negative"
+        );
+    }
+
+    fn score_aura_target(
+        state: &GameState,
+        config: &AiConfig,
+        aura_id: ObjectId,
+        own_id: ObjectId,
+        opp_id: ObjectId,
+        target_id: ObjectId,
+    ) -> f64 {
+        let (decision, candidate) = make_aura_target_selection_ctx(
+            state,
+            aura_id,
+            vec![TargetRef::Object(own_id), TargetRef::Object(opp_id)],
+            Some(TargetRef::Object(target_id)),
+        );
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config,
+        };
+        AntiSelfHarmPolicy.score(&ctx)
+    }
+
+    /// Pre-cast check: AI should not cast a beneficial aura when it has no creatures.
+    #[test]
+    fn pre_cast_penalises_beneficial_aura_with_no_friendly_creatures() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(1), "Goblin", 2, 2);
+        let aura_id = add_aura(&mut state, PlayerId(0), "Rancor");
+        let card_id = state.objects[&aura_id].card_id;
+        let config = AiConfig::default();
+
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: aura_id,
+                card_id,
+                targets: Vec::new(),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Spell,
+            },
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+        };
+
+        let score = AntiSelfHarmPolicy.score(&ctx);
+        assert!(
+            score < -5.0,
+            "Casting beneficial aura with no friendly creatures should be penalised, got {score}"
+        );
+    }
+
+    fn add_harmful_aura(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Aura".to_string());
+        obj.keywords
+            .push(Keyword::Enchant(TargetFilter::Typed(TypedFilter::new(
+                TypeFilter::Creature,
+            ))));
+        // Pacifism-style: enchanted creature can't attack or block
+        obj.static_definitions
+            .push(StaticDefinition::new(StaticMode::CantAttack).affected(TargetFilter::SelfRef));
+        id
+    }
+
+    fn add_unblockable_aura(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Aura".to_string());
+        obj.keywords
+            .push(Keyword::Enchant(TargetFilter::Typed(TypedFilter::new(
+                TypeFilter::Creature,
+            ))));
+        // Aqueous Form-style: enchanted creature can't be blocked
+        obj.static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantBeBlocked).affected(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Creature)
+                        .properties(vec![FilterProp::EnchantedBy]),
+                )),
+            );
+        id
+    }
+
+    /// Harmful auras (Pacifism) should target opponent creatures, not own.
+    #[test]
+    fn harmful_aura_prefers_opponent_creature() {
+        let mut state = make_state();
+        let own_id = add_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let opp_id = add_creature(&mut state, PlayerId(1), "Goblin", 2, 2);
+        let aura_id = add_harmful_aura(&mut state, PlayerId(0), "Pacifism");
+        let config = AiConfig::default();
+
+        let score_own = score_aura_target(&state, &config, aura_id, own_id, opp_id, own_id);
+        let score_opp = score_aura_target(&state, &config, aura_id, own_id, opp_id, opp_id);
+
+        assert!(
+            score_opp > score_own,
+            "Harmful aura should prefer opponent creature: own={score_own}, opp={score_opp}"
+        );
+    }
+
+    /// Beneficial non-modification auras (Aqueous Form: "can't be blocked")
+    /// should target own creatures.
+    #[test]
+    fn beneficial_cant_be_blocked_aura_prefers_own_creature() {
+        let mut state = make_state();
+        let own_id = add_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let opp_id = add_creature(&mut state, PlayerId(1), "Goblin", 2, 2);
+        let aura_id = add_unblockable_aura(&mut state, PlayerId(0), "Aqueous Form");
+        let config = AiConfig::default();
+
+        let score_own = score_aura_target(&state, &config, aura_id, own_id, opp_id, own_id);
+        let score_opp = score_aura_target(&state, &config, aura_id, own_id, opp_id, opp_id);
+
+        assert!(
+            score_own > score_opp,
+            "CantBeBlocked aura should prefer own creature: own={score_own}, opp={score_opp}"
+        );
+        assert!(score_own > 0.0, "Own creature score should be positive");
+    }
+
+    /// Pre-cast: harmful aura (Pacifism) with only own creatures should be penalised.
+    #[test]
+    fn pre_cast_penalises_harmful_aura_with_no_opponent_creatures() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let aura_id = add_harmful_aura(&mut state, PlayerId(0), "Pacifism");
+        let card_id = state.objects[&aura_id].card_id;
+        let config = AiConfig::default();
+
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: aura_id,
+                card_id,
+                targets: Vec::new(),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Spell,
+            },
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+        };
+
+        let score = AntiSelfHarmPolicy.score(&ctx);
+        assert!(
+            score < -5.0,
+            "Casting harmful aura with only own creatures should be penalised, got {score}"
+        );
+    }
+
+    /// Helper to create a target selection context for an aura (no active effects).
+    fn make_aura_target_selection_ctx(
+        state: &GameState,
+        aura_id: ObjectId,
+        legal_targets: Vec<TargetRef>,
+        candidate_target: Option<TargetRef>,
+    ) -> (AiDecisionContext, CandidateAction) {
+        // Auras have no active abilities — use a GenericEffect placeholder since
+        // the policy should fall through to static_definitions for polarity.
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: Vec::new(),
+                target: None,
+                duration: None,
+            },
+            Vec::new(),
+            aura_id,
+            PlayerId(0),
+        );
+        let card_id = state.objects[&aura_id].card_id;
+        let pending_cast = PendingCast::new(aura_id, card_id, ability, ManaCost::zero());
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TargetSelection {
+                player: PlayerId(0),
+                pending_cast: Box::new(pending_cast),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets,
+                    optional: false,
+                }],
+                selection: Default::default(),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: candidate_target,
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Target,
+            },
+        };
+        (decision, candidate)
     }
 }

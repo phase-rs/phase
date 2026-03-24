@@ -29,6 +29,18 @@ impl<'a> PolicyContext<'a> {
                 .values()
                 .find(|object| object.card_id == *card_id),
             GameAction::ActivateAbility { source_id, .. } => self.state.objects.get(source_id),
+            // During target selection, the source is in the pending cast.
+            GameAction::ChooseTarget { .. } | GameAction::SelectTargets { .. } => {
+                match &self.decision.waiting_for {
+                    WaitingFor::TargetSelection { pending_cast, .. } => {
+                        self.state.objects.get(&pending_cast.object_id)
+                    }
+                    WaitingFor::MultiTargetSelection {
+                        pending_ability, ..
+                    } => self.state.objects.get(&pending_ability.source_id),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
