@@ -10,7 +10,13 @@ expression: result
       "effect": {
         "type": "Dig",
         "count": 1,
-        "destination": null
+        "destination": null,
+        "keep_count": null,
+        "up_to": false,
+        "filter": {
+          "type": "Any"
+        },
+        "rest_destination": null
       },
       "cost": {
         "type": "Loyalty",
