@@ -43,7 +43,7 @@ jobs:
         run: |
           mkdir -p data/mtgjson
           curl -L -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
-          cargo run --release --bin oracle-gen -- data/ --stats > client/public/card-data.json
+          cargo run --release --bin oracle-gen --features cli -- data/ --stats > client/public/card-data.json
           cargo run --release --bin coverage-report -- data/ --all > client/public/coverage-data.json
 
       - name: Build WASM
