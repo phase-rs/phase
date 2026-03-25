@@ -407,6 +407,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::LifeTotal => "life total".into(),
         QuantityRef::GraveyardSize => "cards in graveyard".into(),
         QuantityRef::LifeAboveStarting => "life above starting".into(),
+        QuantityRef::StartingLifeTotal => "starting life total".into(),
         QuantityRef::ObjectCount { filter } => format!("# of {}", fmt_target(filter)),
         QuantityRef::PlayerCount { filter } => format!("# of {}", fmt_player_filter(filter)),
         QuantityRef::CountersOnSelf { counter_type } => {
@@ -2808,6 +2809,7 @@ fn quantity_ref_variant_name(qref: &QuantityRef) -> &'static str {
         QuantityRef::LifeTotal => "LifeTotal",
         QuantityRef::GraveyardSize => "GraveyardSize",
         QuantityRef::LifeAboveStarting => "LifeAboveStarting",
+        QuantityRef::StartingLifeTotal => "StartingLifeTotal",
         QuantityRef::ObjectCount { .. } => "ObjectCount",
         QuantityRef::PlayerCount { .. } => "PlayerCount",
         QuantityRef::CountersOnSelf { .. } => "CountersOnSelf",

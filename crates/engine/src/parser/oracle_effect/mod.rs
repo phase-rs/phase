@@ -3,13 +3,13 @@ pub(crate) mod counter;
 pub(crate) mod imperative;
 pub(crate) mod mana;
 mod sequence;
-mod subject;
+pub(crate) mod subject;
 mod token;
 mod types;
 
 use std::str::FromStr;
 
-use super::oracle_quantity::parse_for_each_clause;
+use super::oracle_quantity::{parse_cda_quantity, parse_for_each_clause};
 use super::oracle_target::{parse_event_context_ref, parse_mana_value_suffix, parse_target};
 use super::oracle_util::{
     contains_possessive, has_unconsumed_conditional, parse_mana_symbols, parse_number, TextPair,
@@ -1947,13 +1947,29 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         } else {
             (None, text)
         };
+        // CR 608.2c: General suffix condition — "do Y if X" where X is a quantity comparison.
+        // Runs only when no dedicated stripper matched; parse_condition_text is the safety net
+        // (returns None for anything it can't parse).
+        let (suffix_cond, text) = if condition.is_none()
+            && if_you_do.is_none()
+            && counter_cond.is_none()
+            && cast_from_zone.is_none()
+            && card_type_cond.is_none()
+            && property_cond.is_none()
+            && keyword_instead_cond.is_none()
+        {
+            strip_suffix_conditional(&text)
+        } else {
+            (None, text)
+        };
         let condition = condition
             .or(counter_cond)
             .or(if_you_do)
             .or(cast_from_zone)
             .or(card_type_cond)
             .or(property_cond)
-            .or(keyword_instead_cond);
+            .or(keyword_instead_cond)
+            .or(suffix_cond);
         // CR 608.2c + CR 400.7: "unless ~ entered this turn" — strip suffix and
         // replace condition with SourceDidNotEnterThisTurn. The IfYouDo condition
         // is redundant when the parent is optional (optional already gates the sub).
@@ -3046,6 +3062,77 @@ fn strip_counter_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     (None, text.to_string())
 }
 
+/// Find the position of the last top-level ` if ` in `text` — not inside parentheses or quotes.
+/// Uses left-to-right scanning with depth tracking, same approach as `split_leading_conditional`.
+fn find_last_top_level_if(text: &str) -> Option<usize> {
+    let mut last_pos = None;
+    let mut paren_depth = 0u32;
+    let mut in_quotes = false;
+
+    for (i, ch) in text.char_indices() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            '(' if !in_quotes => paren_depth += 1,
+            ')' if !in_quotes => paren_depth = paren_depth.saturating_sub(1),
+            _ if !in_quotes && paren_depth == 0 && text[i..].starts_with(" if ") => {
+                last_pos = Some(i);
+            }
+            _ => {}
+        }
+    }
+    last_pos
+}
+
+/// CR 608.2c: Strip a general suffix condition (" if {condition}") from effect text.
+/// Finds the LAST top-level " if " (not inside parens/quotes), extracts the condition,
+/// and attempts to parse it. Returns (None, original) if no parseable condition found.
+///
+/// The exclusion list is an optimization to skip patterns handled by dedicated strippers.
+/// The real safety net is `parse_condition_text` requiring " is " — any unrecognized suffix
+/// like "if you control a creature" or "if able" will simply return None, preserving the
+/// original text unchanged.
+fn strip_suffix_conditional(text: &str) -> (Option<AbilityCondition>, String) {
+    // Safety: to_lowercase() on ASCII is byte-length preserving, so `if_pos` from
+    // `lower` is valid as a byte offset into `text`. Oracle text is ASCII.
+    let lower = text.to_lowercase();
+    let Some(if_pos) = find_last_top_level_if(&lower) else {
+        return (None, text.to_string());
+    };
+
+    let condition_text = lower[if_pos + " if ".len()..].trim_end_matches('.').trim();
+
+    // Exclusion list: patterns handled by dedicated strippers or not general conditions.
+    let excluded_prefixes = [
+        "able",
+        "you do",
+        "they do",
+        "a player does",
+        "no one does",
+        "no player does",
+        "possible",
+        "it has ",
+        "its power is ",
+        "its toughness is ",
+        "that creature has ",
+        "that permanent has ",
+        "you cast it from",
+        "it's a ",
+    ];
+    for prefix in &excluded_prefixes {
+        if condition_text.starts_with(prefix) {
+            return (None, text.to_string());
+        }
+    }
+
+    // Try to parse the condition text into a typed AbilityCondition.
+    if let Some(condition) = parse_condition_text(condition_text) {
+        let effect_text = text[..if_pos].trim().to_string();
+        return (Some(condition), effect_text);
+    }
+
+    (None, text.to_string())
+}
+
 /// Parse "N or greater", "N or less", "greater than N", "less than N" into (Comparator, i32).
 fn parse_comparison_suffix(text: &str) -> Option<(Comparator, i32)> {
     use super::oracle_util::parse_number;
@@ -3085,6 +3172,60 @@ fn parse_comparison_suffix(text: &str) -> Option<(Comparator, i32)> {
         }
     }
     None
+}
+
+/// CR 608.2c: Parse comparator + RHS quantity from text after " is ".
+/// Generalizes `parse_comparison_suffix` (which returns `i32`) to dynamic `QuantityExpr` RHS.
+/// Handles: "greater than {qty}", "less than {qty}", "equal to {qty}",
+/// "greater than or equal to {qty}", "{N} or greater", "{N} or less".
+fn parse_quantity_comparison(text: &str) -> Option<(Comparator, QuantityExpr)> {
+    // Longer prefixes first to avoid "greater than" matching before "greater than or equal to".
+    if let Some(rhs_text) = text.strip_prefix("greater than or equal to ") {
+        if let Some(rhs) = parse_cda_quantity(rhs_text) {
+            return Some((Comparator::GE, rhs));
+        }
+    }
+    if let Some(rhs_text) = text.strip_prefix("less than or equal to ") {
+        if let Some(rhs) = parse_cda_quantity(rhs_text) {
+            return Some((Comparator::LE, rhs));
+        }
+    }
+    if let Some(rhs_text) = text.strip_prefix("greater than ") {
+        if let Some(rhs) = parse_cda_quantity(rhs_text) {
+            return Some((Comparator::GT, rhs));
+        }
+    }
+    if let Some(rhs_text) = text.strip_prefix("less than ") {
+        if let Some(rhs) = parse_cda_quantity(rhs_text) {
+            return Some((Comparator::LT, rhs));
+        }
+    }
+    if let Some(rhs_text) = text.strip_prefix("equal to ") {
+        if let Some(rhs) = parse_cda_quantity(rhs_text) {
+            return Some((Comparator::EQ, rhs));
+        }
+    }
+    // Fall back to parse_comparison_suffix for "{N} or greater" / "{N} or less" patterns.
+    if let Some((comparator, value)) = parse_comparison_suffix(text) {
+        return Some((comparator, QuantityExpr::Fixed { value }));
+    }
+    None
+}
+
+/// CR 608.2c: Parse a general condition text fragment into an AbilityCondition.
+/// Handles "{quantity} is {comparator} {quantity}" patterns.
+/// Returns None for unrecognized conditions (caller preserves original text).
+fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
+    let text = text.trim().trim_end_matches('.');
+    // Pattern: "{lhs} is {comparator} {rhs}"
+    let (lhs_text, comparator_rhs) = text.split_once(" is ")?;
+    let lhs = parse_cda_quantity(lhs_text)?;
+    let (comparator, rhs) = parse_quantity_comparison(comparator_rhs)?;
+    Some(AbilityCondition::QuantityCheck {
+        lhs,
+        comparator,
+        rhs,
+    })
 }
 
 /// Strip "you may " prefix, returning whether the effect is optional.
@@ -4111,7 +4252,7 @@ fn infer_origin_zone(lower: &str) -> Option<Zone> {
     }
 }
 
-fn normalize_verb_token(token: &str) -> String {
+pub(crate) fn normalize_verb_token(token: &str) -> String {
     let token = token.trim_matches(|c: char| !c.is_alphabetic());
     match token {
         "does" => "do".to_string(),
@@ -6918,5 +7059,142 @@ mod tests {
             subject: Some(TargetFilter::Any),
         };
         assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::SelfRef);
+    }
+
+    // --- Suffix condition extraction tests ---
+
+    #[test]
+    fn parse_quantity_comparison_greater_than_dynamic() {
+        let result = parse_quantity_comparison("greater than your starting life total");
+        let (cmp, rhs) = result.expect("should parse");
+        assert_eq!(cmp, Comparator::GT);
+        assert!(matches!(
+            rhs,
+            QuantityExpr::Ref {
+                qty: QuantityRef::StartingLifeTotal
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_quantity_comparison_less_than_dynamic() {
+        let result = parse_quantity_comparison("less than your life total");
+        let (cmp, rhs) = result.expect("should parse");
+        assert_eq!(cmp, Comparator::LT);
+        assert!(matches!(
+            rhs,
+            QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_quantity_comparison_fixed_fallback() {
+        let result = parse_quantity_comparison("3 or greater");
+        let (cmp, rhs) = result.expect("should parse");
+        assert_eq!(cmp, Comparator::GE);
+        assert!(matches!(rhs, QuantityExpr::Fixed { value: 3 }));
+    }
+
+    #[test]
+    fn parse_condition_text_life_greater_than_starting() {
+        let result =
+            parse_condition_text("your life total is greater than your starting life total");
+        let cond = result.expect("should parse");
+        assert!(matches!(
+            cond,
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal
+                },
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::StartingLifeTotal
+                },
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_condition_text_non_comparison_returns_none() {
+        assert!(parse_condition_text("the creature that is exiled").is_none());
+    }
+
+    #[test]
+    fn strip_suffix_conditional_extracts_quantity_check() {
+        let (cond, text) = strip_suffix_conditional(
+            "draw a card if your life total is greater than your starting life total",
+        );
+        assert_eq!(text, "draw a card");
+        let cond = cond.expect("should extract condition");
+        assert!(matches!(
+            cond,
+            AbilityCondition::QuantityCheck {
+                comparator: Comparator::GT,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn strip_suffix_conditional_excludes_if_able() {
+        let (cond, text) = strip_suffix_conditional("deal 3 damage to that creature if able");
+        assert!(cond.is_none());
+        assert_eq!(text, "deal 3 damage to that creature if able");
+    }
+
+    #[test]
+    fn strip_suffix_conditional_excludes_if_you_do() {
+        let (cond, _) = strip_suffix_conditional("sacrifice it if you do");
+        assert!(cond.is_none());
+    }
+
+    #[test]
+    fn strip_suffix_conditional_unparseable_returns_none() {
+        let (cond, text) =
+            strip_suffix_conditional("sacrifice a creature if you control a creature");
+        assert!(cond.is_none());
+        assert_eq!(text, "sacrifice a creature if you control a creature");
+    }
+
+    #[test]
+    fn suffix_condition_with_otherwise_integration() {
+        // Cosmos Elixir pattern: suffix condition + Otherwise clause.
+        std::thread::Builder::new()
+            .name("suffix-otherwise".into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let def = parse_effect_chain(
+                    "draw a card if your life total is greater than your starting life total. Otherwise, you gain 2 life and scry 1.",
+                    AbilityKind::Spell,
+                );
+                // First def should be Draw with a QuantityCheck condition.
+                assert!(matches!(*def.effect, Effect::Draw { .. }));
+                assert!(
+                    matches!(
+                        def.condition,
+                        Some(AbilityCondition::QuantityCheck {
+                            comparator: Comparator::GT,
+                            ..
+                        })
+                    ),
+                    "draw should have QuantityCheck condition, got {:?}",
+                    def.condition
+                );
+                // Otherwise should be attached as else_ability containing GainLife.
+                let else_ab = def
+                    .else_ability
+                    .as_ref()
+                    .expect("draw should have else_ability from Otherwise");
+                assert!(
+                    matches!(*else_ab.effect, Effect::GainLife { .. }),
+                    "else_ability should be GainLife, got {:?}",
+                    else_ab.effect
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

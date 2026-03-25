@@ -23,6 +23,7 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
     match trimmed {
         "cards in your hand" => Some(QuantityRef::HandSize),
         "your life total" => Some(QuantityRef::LifeTotal),
+        "your starting life total" => Some(QuantityRef::StartingLifeTotal),
         "cards in your graveyard" => Some(QuantityRef::GraveyardSize),
         // CR 208.3: Self-referential P/T lookups.
         "~'s power" | "its power" | "this creature's power" => Some(QuantityRef::SelfPower),
@@ -202,6 +203,14 @@ pub(crate) fn parse_cda_quantity(text: &str) -> Option<QuantityExpr> {
     if text.contains("cards in your hand") {
         return Some(QuantityExpr::Ref {
             qty: QuantityRef::HandSize,
+        });
+    }
+
+    // CR 103.4: "your starting life total" — must precede "your life total" check
+    // because contains("your life total") would also match "your starting life total".
+    if text.contains("your starting life total") {
+        return Some(QuantityExpr::Ref {
+            qty: QuantityRef::StartingLifeTotal,
         });
     }
 

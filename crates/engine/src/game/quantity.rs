@@ -124,6 +124,8 @@ fn resolve_ref(
         QuantityRef::LifeAboveStarting => {
             player.map_or(0, |p| p.life - state.format_config.starting_life)
         }
+        // CR 103.4: The format's starting life total.
+        QuantityRef::StartingLifeTotal => state.format_config.starting_life,
         // CR 118.4: Total life lost this turn by the controller.
         QuantityRef::LifeLostThisTurn => player.map_or(0, |p| p.life_lost_this_turn as i32),
         QuantityRef::ObjectCount { filter } => state

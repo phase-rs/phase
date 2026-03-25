@@ -1044,6 +1044,8 @@ pub enum QuantityRef {
     /// Controller's life total minus the format's starting life total.
     /// Used for "N or more life more than your starting life total" conditions.
     LifeAboveStarting,
+    /// CR 103.4: The format's starting life total (20 for Standard, 40 for Commander, etc.).
+    StartingLifeTotal,
     /// Count of objects on the battlefield matching a filter.
     /// Used for "for each creature you control" and similar patterns.
     ObjectCount { filter: TargetFilter },
