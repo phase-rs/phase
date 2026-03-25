@@ -10,7 +10,7 @@ text = "One card (Karn Liberated) restarts the game. A game that is restarted im
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Restart-the-game effect not implemented."
+notes = "Restart-the-game effect not implemented. No engine support for Karn Liberated's ultimate ability."
 
 [cr_726_1a]
 rule = "726.1a"
@@ -71,7 +71,7 @@ notes = "Subgames not implemented."
 [cr_726_7]
 rule = "726.7"
 text = "If a multiplayer game using the limited range of influence option (see rule 801) is restarted, all players in the game are involved, regardless of the range of influence of the player who controls the ability that restarted the game."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = "Limited range of influence option not implemented."
+notes = "Limited range of influence option (rule 801) not implemented; not-applicable to current engine scope."

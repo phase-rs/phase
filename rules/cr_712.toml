@@ -6,99 +6,99 @@ title = "Double-Faced Cards"
 
 [cr_712_1]
 rule = "712.1"
-text = "A double-faced card has a Magic card face on one side and either a Magic card face or half of an oversized card face on the other. (It does not have a Magic card back.) There are three kinds of double-faced cards: nonmodal double-faced cards (previously called “transforming double-faced cards”), modal double-faced cards, and meld cards."
-status = "missing"
-impl_files = []
+text = "A double-faced card has a Magic card face on one side and either a Magic card face or half of an oversized card face on the other. (It does not have a Magic card back.) There are three kinds of double-faced cards: nonmodal double-faced cards (previously called \"transforming double-faced cards\"), modal double-faced cards, and meld cards."
+status = "implemented"
+impl_files = ["types/card.rs:66", "game/game_object.rs:115", "game/game_object.rs:116"]
 test_files = []
-notes = ""
+notes = "The engine models all three DFC kinds: CardLayout::Transform (nonmodal DFC), CardLayout::Modal (MDFC), and CardLayout::Meld. The game object has both a transformed boolean and a back_face field."
 
 [cr_712_2]
 rule = "712.2"
-text = "Nonmodal double-faced cards have a Magic card face on each side and include abilities on one or both of their faces that allow the card to either “transform” or “convert” (turn over to its other face) and/or allow the card to be cast or enter the battlefield “transformed” or “converted” (with its back face up)."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "Nonmodal double-faced cards have a Magic card face on each side and include abilities on one or both of their faces that allow the card to either \"transform\" or \"convert\" (turn over to its other face) and/or allow the card to be cast or enter the battlefield \"transformed\" or \"converted\" (with its back face up)."
+status = "implemented"
+impl_files = ["game/transform.rs:9", "game/effects/transform_effect.rs:6", "types/card.rs:70"]
+test_files = ["game/transform.rs:135", "game/effects/transform_effect.rs:112"]
+notes = "CardLayout::Transform models nonmodal DFCs. transform_permanent and the Transform effect handler implement the transform mechanic."
 
 [cr_712_2a]
 rule = "712.2a"
-text = "A nonmodal double-faced card’s front face is marked by a front-face symbol in its upper left corner. On cards printed starting with The Brothers’ War™ release, that symbol is a single white triangle pointed upward inside a black circle. Nonmodal double-faced cards printed in older sets have different front-face symbols. On Magic Origins™ and Core Set 2019 double-faced cards, the front-face symbol is a modified Planeswalker icon. On cards in the Innistrad® block, Shadows over Innistrad set, and Innistrad: Midnight Hunt set, as well as on Ulrich of the Krallenhorde in the Eldritch Moon™ set, the front-face symbol is a sun. On other Eldritch Moon double-faced cards, the front-face symbol is a full moon. On Ixalan® and Rivals of Ixalan™ cards, the front-face symbol is a compass rose. On Kamigawa®: Neon Dynasty double-faced cards, the front-face symbol is a closed fan."
-status = "missing"
+text = "A nonmodal double-faced card's front face is marked by a front-face symbol in its upper left corner. On cards printed starting with The Brothers' War\u2122 release, that symbol is a single white triangle pointed upward inside a black circle. Nonmodal double-faced cards printed in older sets have different front-face symbols. On Magic Origins\u2122 and Core Set 2019 double-faced cards, the front-face symbol is a modified Planeswalker icon. On cards in the Innistrad\u00ae block, Shadows over Innistrad set, and Innistrad: Midnight Hunt set, as well as on Ulrich of the Krallenhorde in the Eldritch Moon\u2122 set, the front-face symbol is a sun. On other Eldritch Moon double-faced cards, the front-face symbol is a full moon. On Ixalan\u00ae and Rivals of Ixalan\u2122 cards, the front-face symbol is a compass rose. On Kamigawa\u00ae: Neon Dynasty double-faced cards, the front-face symbol is a closed fan."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Physical card printing guidance for front-face symbols. Not applicable to a digital engine."
 
 [cr_712_2b]
 rule = "712.2b"
-text = "A nonmodal double-faced card’s back face is marked by a back-face symbol in its upper left or upper right corner. On cards printed starting with The Brothers’ War release, that symbol is a single white triangle pointed downward inside a black circle. Nonmodal double-faced cards printed in older sets have different front-face symbols. On Magic Origins and Core Set 2019 double-faced cards, the back-face symbol is a full Planeswalker icon. On cards in the Innistrad block, Shadows over Innistrad set, and Innistrad: Midnight Hunt set, as well as on Ulrich, Uncontested Alpha in the Eldritch Moon set, the back-face symbol is a crescent moon. On other Eldritch Moon double-faced cards, the back-face symbol is a stylized image of Emrakul. On Ixalan and Rivals of Ixalan cards, the back-face symbol is a land icon. On Kamigawa: Neon Dynasty double-faced cards, the back-face symbol is an open fan."
-status = "missing"
+text = "A nonmodal double-faced card's back face is marked by a back-face symbol in its upper left or upper right corner. On cards printed starting with The Brothers' War release, that symbol is a single white triangle pointed downward inside a black circle. Nonmodal double-faced cards printed in older sets have different front-face symbols. On Magic Origins and Core Set 2019 double-faced cards, the back-face symbol is a full Planeswalker icon. On cards in the Innistrad block, Shadows over Innistrad set, and Innistrad: Midnight Hunt set, as well as on Ulrich, Uncontested Alpha in the Eldritch Moon set, the back-face symbol is a crescent moon. On other Eldritch Moon double-faced cards, the back-face symbol is a stylized image of Emrakul. On Ixalan and Rivals of Ixalan cards, the back-face symbol is a land icon. On Kamigawa: Neon Dynasty double-faced cards, the back-face symbol is an open fan."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Physical card printing guidance for back-face symbols. Not applicable to a digital engine."
 
 [cr_712_2c]
 rule = "712.2c"
-text = "The front face of a nonmodal double-faced card whose back face is a creature has the back face’s power and toughness printed in gray above the power and toughness box. This is reminder text and has no effect on game play."
-status = "missing"
+text = "The front face of a nonmodal double-faced card whose back face is a creature has the back face's power and toughness printed in gray above the power and toughness box. This is reminder text and has no effect on game play."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Physical card reminder text. No engine logic needed."
 
 [cr_712_3]
 rule = "712.3"
-text = "Modal double-faced cards have a Magic card face on each side. These faces are usually independent from one another, but they may have an ability that allows them to “transform” or “convert” on either face."
-status = "missing"
-impl_files = []
+text = "Modal double-faced cards have a Magic card face on each side. These faces are usually independent from one another, but they may have an ability that allows them to \"transform\" or \"convert\" on either face."
+status = "implemented"
+impl_files = ["types/card.rs:73", "database/synthesis.rs:92"]
 test_files = []
-notes = ""
+notes = "CardLayout::Modal models MDFC cards in the type system and MTGJSON loading pipeline."
 
 [cr_712_3a]
 rule = "712.3a"
-text = "A modal double-faced card’s front face is marked by a front-face symbol in its upper left corner. The front-face symbol is a single black triangle inside a sideways teardrop."
-status = "missing"
+text = "A modal double-faced card's front face is marked by a front-face symbol in its upper left corner. The front-face symbol is a single black triangle inside a sideways teardrop."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Physical card printing guidance. Not applicable to a digital engine."
 
 [cr_712_3b]
 rule = "712.3b"
-text = "A modal double-faced card’s back face is marked by a back-face symbol in its upper left corner. The back-face symbol is two white triangles inside a sideways teardrop."
-status = "missing"
+text = "A modal double-faced card's back face is marked by a back-face symbol in its upper left corner. The back-face symbol is two white triangles inside a sideways teardrop."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Physical card printing guidance. Not applicable to a digital engine."
 
 [cr_712_3c]
 rule = "712.3c"
 text = "Each face of a modal double-faced card includes a hint bar in the lower left corner with information about the opposite face. This is reminder text and has no effect on game play."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Physical card reminder text. No engine logic needed."
 
 [cr_712_4]
 rule = "712.4"
 text = "Meld cards have a Magic card face on one side and half of an oversized card face on the other."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["types/card.rs:71", "database/synthesis.rs:90"]
 test_files = []
-notes = ""
+notes = "CardLayout::Meld models meld card pairs in the type system. No active gameplay logic implements the meld mechanic."
 
 [cr_712_4a]
 rule = "712.4a"
-text = "One card in each meld pair has an ability that exiles both that object and its counterpart and melds them. To meld the two cards in a meld pair, put them onto the battlefield with their back faces up and combined (see rule 701.42, “Meld”). The resulting permanent is a single object represented by two cards."
+text = "One card in each meld pair has an ability that exiles both that object and its counterpart and melds them. To meld the two cards in a meld pair, put them onto the battlefield with their back faces up and combined (see rule 701.42, \"Meld\"). The resulting permanent is a single object represented by two cards."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meld mechanic not implemented. No meld ability parsing or two-card permanent representation exists."
 
 [cr_712_4b]
 rule = "712.4b"
-text = "The back faces of a meld pair are used only to determine the characteristics of the melded permanent that pair becomes on the battlefield. If a rule or effect references the back face of a meld card when not part of a melded permanent on the battlefield, it fails to determine its characteristics, regardless of which parts of the melded permanent is represented on that card’s back face."
+text = "The back faces of a meld pair are used only to determine the characteristics of the melded permanent that pair becomes on the battlefield. If a rule or effect references the back face of a meld card when not part of a melded permanent on the battlefield, it fails to determine its characteristics, regardless of which parts of the melded permanent is represented on that card's back face."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meld mechanic not implemented."
 
 [cr_712_4c]
 rule = "712.4c"
@@ -106,143 +106,143 @@ text = "Unlike other double-faced cards, meld cards cannot be transformed or con
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meld mechanic not implemented. No guard exists in transform_permanent preventing transformation of meld cards."
 
 [cr_712_5]
 rule = "712.5"
 text = "There are seven specific meld pairs."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Enumeration of specific meld pairs. No engine logic needed beyond supporting the general meld mechanic."
 
 [cr_712_5a]
 rule = "712.5a"
 text = "Midnight Scavengers and Graf Rats meld to form Chittering Host."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Specific meld pair listing. Not applicable to engine logic."
 
 [cr_712_5b]
 rule = "712.5b"
 text = "Hanweir Garrison and Hanweir Battlements meld to form Hanweir, the Writhing Township."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Specific meld pair listing. Not applicable to engine logic."
 
 [cr_712_5c]
 rule = "712.5c"
 text = "Bruna, the Fading Light and Gisela, the Broken Blade meld to form Brisela, Voice of Nightmares."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Specific meld pair listing. Not applicable to engine logic."
 
 [cr_712_5d]
 rule = "712.5d"
 text = "Phyrexian Dragon Engine and Mishra, Claimed by Gix meld to form Mishra, Lost to Phyrexia."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Specific meld pair listing. Not applicable to engine logic."
 
 [cr_712_5e]
 rule = "712.5e"
 text = "The Mightstone and Weakstone and Urza, Lord Protector meld to form Urza, Planeswalker."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Specific meld pair listing. Not applicable to engine logic."
 
 [cr_712_5f]
 rule = "712.5f"
 text = "Argoth, Sanctum of Nature and Titania, Voice of Gaea meld to form Titania, Gaea Incarnate."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Specific meld pair listing. Not applicable to engine logic."
 
 [cr_712_5g]
 rule = "712.5g"
-text = "Fang, Fearless l’Cie and Vanille, Cheerful l’Cie meld to form Ragnarok, Divine Deliverance."
-status = "missing"
+text = "Fang, Fearless l'Cie and Vanille, Cheerful l'Cie meld to form Ragnarok, Divine Deliverance."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Specific meld pair listing. Not applicable to engine logic."
 
 [cr_712_6]
 rule = "712.6"
 text = "Players who are allowed to look at a double-faced card may look at both sides of that card."
-status = "missing"
+status = "partial"
 impl_files = []
 test_files = []
-notes = ""
+notes = "The engine stores both faces of a DFC (front face as active, back face in back_face). The WASM/server layer filters state per-player but does not currently expose a separate \"look at both sides\" path for DFCs in hidden zones."
 
 [cr_712_7]
 rule = "712.7"
 text = "Players must ensure that double-faced cards in hidden zones are indistinguishable from other cards in the same zone. To do this, the owner of a double-faced card may use completely opaque card sleeves and/or a substitute card (see rule 713). Sanctioned tournaments have additional rules for playing with double-faced cards. See rule 100.6."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Physical play guidance about sleeves and substitute cards. Not applicable to a digital engine where hidden zones are enforced by state filtering."
 
 [cr_712_8]
 rule = "712.8"
-text = "Each face of a double-faced card that isn’t a meld card has its own set of characteristics. The front face of each meld card and the combined face formed by a meld pair each has its own set of characteristics."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "Each face of a double-faced card that isn't a meld card has its own set of characteristics. The front face of each meld card and the combined face formed by a meld pair each has its own set of characteristics."
+status = "implemented"
+impl_files = ["game/game_object.rs:115", "game/transform.rs:36"]
+test_files = ["game/transform.rs:135"]
+notes = "Each face's characteristics are stored separately (active face in the main game object fields, back face in the back_face field). transform_permanent swaps between them."
 
 [cr_712_8a]
 rule = "712.8a"
 text = "While a double-faced card is outside the game or in a zone other than the battlefield or stack, it has only the characteristics of its front face."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["game/zones.rs:90", "game/zones.rs:235"]
+test_files = ["game/transform.rs:185"]
+notes = "When a transformed DFC moves to any zone other than the battlefield, move_to_zone resets to front-face characteristics (transformed = false). This correctly implements both the zone-change and out-of-game cases."
 
 [cr_712_8b]
 rule = "712.8b"
 text = "A meld card on the stack has only the characteristics of its front face."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["types/card.rs:71"]
 test_files = []
-notes = ""
+notes = "CardLayout::Meld is recognized. Deck loading uses only the front face of meld cards. Meld gameplay is not implemented, but the front-face-only-on-stack behavior is a consequence of the general loading approach."
 
 [cr_712_8c]
 rule = "712.8c"
-text = "Normally, a nonmodal double-faced spell has its front face up while on the stack and has only the characteristics of its front face. However, if an effect allows a player to cast a nonmodal double-faced card “transformed” or “converted,” the resulting spell will have its back face up and have only the characteristics of its back face. Its mana value is calculated using the mana cost of its front face."
-status = "missing"
-impl_files = []
+text = "Normally, a nonmodal double-faced spell has its front face up while on the stack and has only the characteristics of its front face. However, if an effect allows a player to cast a nonmodal double-faced card \"transformed\" or \"converted,\" the resulting spell will have its back face up and have only the characteristics of its back face. Its mana value is calculated using the mana cost of its front face."
+status = "partial"
+impl_files = ["game/effects/change_zone.rs:52", "game/effects/change_zone.rs:102"]
 test_files = []
-notes = ""
+notes = "enter_transformed is threaded through the zone-change pipeline (change_zone.rs) so a DFC can enter the battlefield transformed. The front-face-default on the stack is implicit (objects have front-face characteristics by default). Mana value from front-face cost when back face is up is not explicitly implemented."
 
 [cr_712_8d]
 rule = "712.8d"
 text = "While a double-faced permanent has its front face up, it has only the characteristics of its front face."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["game/transform.rs:43"]
+test_files = ["game/transform.rs:135"]
+notes = "A DFC with transformed = false uses the front-face characteristics stored in the primary game object fields."
 
 [cr_712_8e]
 rule = "712.8e"
 text = "While a nonmodal double-faced permanent has its back face up, it has only the characteristics of its back face. However, its mana value is calculated using the mana cost of its front face. If a permanent is copying the back face of a nonmodal double-faced permanent (even if the object representing that copy is itself a double-faced permanent), the mana value of that permanent is 0. See rule 202.3b."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "partial"
+impl_files = ["game/transform.rs:36"]
+test_files = ["game/transform.rs:136"]
+notes = "When transformed = true the back-face characteristics are active. However, mana value is computed from the current active mana_cost (the back face's), not the front face's cost as required. The 0-mana-value-for-copies-of-back-face rule is also not implemented."
 
 [cr_712_8f]
 rule = "712.8f"
-text = "While a modal double-faced spell is on the stack or a modal double-faced permanent is on the battlefield, it has only the characteristics of the face that’s up."
-status = "missing"
-impl_files = []
+text = "While a modal double-faced spell is on the stack or a modal double-faced permanent is on the battlefield, it has only the characteristics of the face that's up."
+status = "partial"
+impl_files = ["types/card.rs:73"]
 test_files = []
-notes = ""
+notes = "CardLayout::Modal is recognized. MDFC back-face selection at cast time (choosing which face to cast) is not yet implemented — the engine only loads the front face of an MDFC into the game object."
 
 [cr_712_8g]
 rule = "712.8g"
@@ -250,15 +250,15 @@ text = "While the two cards of a meld pair are on the battlefield as a melded pe
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meld mechanic not implemented."
 
 [cr_712_9]
 rule = "712.9"
-text = "Only permanents represented by double-faced tokens and double-faced cards that are not meld cards can transform or convert. (See rule 701.27, “Transform,” and rule 701.28, “Convert.”) If a spell or ability instructs a player to transform or convert any permanent that isn’t represented by a double-faced token or a double-faced card, nothing happens."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "Only permanents represented by double-faced tokens and double-faced cards that are not meld cards can transform or convert. (See rule 701.27, \"Transform,\" and rule 701.28, \"Convert.\") If a spell or ability instructs a player to transform or convert any permanent that isn't represented by a double-faced token or a double-faced card, nothing happens."
+status = "implemented"
+impl_files = ["game/transform.rs:31"]
+test_files = ["game/transform.rs:206"]
+notes = "transform_permanent returns an error if back_face is None, which is the case for non-DFC permanents. The non_dfc_cannot_transform test verifies this. Meld cards are not explicitly excluded but they also lack a back_face in the current implementation."
 
 [cr_712_10]
 rule = "712.10"
@@ -266,23 +266,23 @@ text = "If a spell or ability instructs a player to transform or convert a perma
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No guard in transform_permanent checks whether the target back face is an instant or sorcery."
 
 [cr_712_11]
 rule = "712.11"
-text = "A double-faced spell is cast with its front face up by default. See rule 601, “Casting Spells.”"
-status = "missing"
-impl_files = []
+text = "A double-faced spell is cast with its front face up by default. See rule 601, \"Casting Spells.\""
+status = "implemented"
+impl_files = ["game/casting.rs:1"]
 test_files = []
-notes = ""
+notes = "All spells are put on the stack with their current object characteristics, which default to the front face. No DFC-specific check is needed since front-face-by-default is the standard loading behavior."
 
 [cr_712_11a]
 rule = "712.11a"
-text = "If a double-faced card or a copy of a double-faced card is cast as a spell “transformed” or “converted,” it’s put on the stack with its back face up."
+text = "If a double-faced card or a copy of a double-faced card is cast as a spell \"transformed\" or \"converted,\" it's put on the stack with its back face up."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Casting a DFC transformed (e.g., some Innistrad cards) not implemented. The enter_transformed pipeline handles battlefield entry, but the stack phase for transformed casting is not covered."
 
 [cr_712_11b]
 rule = "712.11b"
@@ -290,71 +290,71 @@ text = "A player casting a modal double-faced card or a copy of a modal double-f
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "MDFC face selection during casting not implemented. The engine does not currently present a face-choice prompt for MDFC cards."
 
 [cr_712_11c]
 rule = "712.11c"
 text = "Only the face that will be face up on the stack is evaluated to determine if it can be cast. Only that face is considered to be put onto the stack."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["game/casting.rs:1"]
 test_files = []
-notes = ""
+notes = "The engine evaluates the currently-active face of an object for casting legality, which is correct for the front-face-default case. MDFC back-face casting (rule 712.11b) is not implemented."
 
 [cr_712_11d]
 rule = "712.11d"
-text = "If an ability of a double-faced card’s front face allows it to be cast “transformed” or “converted,” that ability is also considered when evaluating that spell to determine if it can be cast. This is an exception to 712.11c."
+text = "If an ability of a double-faced card's front face allows it to be cast \"transformed\" or \"converted,\" that ability is also considered when evaluating that spell to determine if it can be cast. This is an exception to 712.11c."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Cast-transformed abilities on the front face not implemented."
 
 [cr_712_12]
 rule = "712.12"
-text = "A player playing a modal double-faced card or a copy of a modal double-faced card as a land chooses one of its faces that’s a land before putting it onto the battlefield. It enters the battlefield with that face up. See rule 305, “Lands.”"
+text = "A player playing a modal double-faced card or a copy of a modal double-faced card as a land chooses one of its faces that's a land before putting it onto the battlefield. It enters the battlefield with that face up. See rule 305, \"Lands.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "MDFC land-face selection not implemented. Playing the back (land) face of an MDFC is not currently supported."
 
 [cr_712_13]
 rule = "712.13"
 text = "By default, a resolving double-faced spell that becomes a permanent is put onto the battlefield with the same face up that was face up on the stack."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["game/stack.rs:1"]
 test_files = []
-notes = ""
+notes = "When a spell resolves, its characteristics come from the stack entry, which defaults to the front face. The correct same-face behavior falls out of the general resolution path. Explicit transformed-entry (rule 712.13a) is not fully covered."
 
 [cr_712_13a]
 rule = "712.13a"
-text = "Some abilities may cause a double-faced spell with its front face up on the stack to enter the battlefield transformed or converted. If the back face of the card that represents that spell is an instant or sorcery face, or that spell is a copy of a double-faced card created with an instant or sorcery back face, it doesn’t enter the battlefield, and is instead put into its owner’s graveyard."
-status = "missing"
-impl_files = []
+text = "Some abilities may cause a double-faced spell with its front face up on the stack to enter the battlefield transformed or converted. If the back face of the card that represents that spell is an instant or sorcery face, or that spell is a copy of a double-faced card created with an instant or sorcery back face, it doesn't enter the battlefield, and is instead put into its owner's graveyard."
+status = "partial"
+impl_files = ["game/effects/change_zone.rs:102"]
 test_files = []
-notes = ""
+notes = "The change_zone pipeline supports enter_transformed for battlefield entry. However, the instant/sorcery back-face guard (which causes the card to go to graveyard instead) is not implemented."
 
 [cr_712_14]
 rule = "712.14"
 text = "A double-faced card put onto the battlefield from a zone other than the stack enters the battlefield with its front face up by default."
 status = "implemented"
-impl_files = ["game/trigger_matchers.rs:1337", "game/zones.rs:90", "game/zones.rs:235", "parser/oracle_trigger.rs:884"]
-test_files = []
-notes = ""
+impl_files = ["game/zones.rs:90", "game/zones.rs:235", "game/trigger_matchers.rs:1337"]
+test_files = ["game/transform.rs:185"]
+notes = "Zone changes reset the transformed flag to false (front face up) when a DFC leaves the battlefield. Cards entering from non-stack zones therefore always enter with front face up by default."
 
 [cr_712_14a]
 rule = "712.14a"
-text = "If a spell or ability puts a double-faced card onto the battlefield “transformed” or “converted,” it enters the battlefield with its back face up. If a player is instructed to put a card that isn’t a double-faced card onto the battlefield transformed or converted, that card stays in its current zone."
+text = "If a spell or ability puts a double-faced card onto the battlefield \"transformed\" or \"converted,\" it enters the battlefield with its back face up. If a player is instructed to put a card that isn't a double-faced card onto the battlefield transformed or converted, that card stays in its current zone."
 status = "implemented"
 impl_files = ["game/effects/change_zone.rs:52", "game/effects/change_zone.rs:102"]
 test_files = []
-notes = ""
+notes = "enter_transformed is set on the ProposedEvent and applied after zone-change: if should_transform && back_face.is_some() && !transformed, transform_permanent is called. Non-DFC cards without a back_face are not transformed."
 
 [cr_712_14b]
 rule = "712.14b"
-text = "If a player is instructed to put a modal double-faced card onto the battlefield and its front face isn’t a permanent card, the card stays in its current zone."
+text = "If a player is instructed to put a modal double-faced card onto the battlefield and its front face isn't a permanent card, the card stays in its current zone."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "MDFC-specific ETB restriction (front face must be a permanent) not implemented. The general instant/sorcery ETB guard (zones.rs) catches this for single-faced objects but is not MDFC-aware."
 
 [cr_712_14c]
 rule = "712.14c"
@@ -362,47 +362,47 @@ text = "If a meld card is being melded with its counterpart, those cards enter t
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meld mechanic not implemented."
 
 [cr_712_15]
 rule = "712.15"
-text = "If an effect allows a player to cast a double-faced card as a face-down creature spell, or if a double-faced card enters the battlefield face down, it will have the characteristics given to it by the rule or effect that caused it to be face down. That card remains hidden, using a face-down substitute card (see rule 713) and/or opaque sleeves. See rule 708, “Face-Down Spells and Permanents.”"
+text = "If an effect allows a player to cast a double-faced card as a face-down creature spell, or if a double-faced card enters the battlefield face down, it will have the characteristics given to it by the rule or effect that caused it to be face down. That card remains hidden, using a face-down substitute card (see rule 713) and/or opaque sleeves. See rule 708, \"Face-Down Spells and Permanents.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Interaction between DFC and face-down mechanics not implemented. play_face_down and morph do not handle the DFC case."
 
 [cr_712_15a]
 rule = "712.15a"
-text = "While face down, a double-faced permanent can’t transform or convert. If it’s turned face up, it will have its front face up."
+text = "While face down, a double-faced permanent can't transform or convert. If it's turned face up, it will have its front face up."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No guard in transform_permanent prevents transformation of face-down permanents."
 
 [cr_712_16]
 rule = "712.16"
-text = "Melded permanents and other double-faced permanents can’t be turned face down. If a spell or ability tries to turn a double-faced permanent face down, nothing happens."
+text = "Melded permanents and other double-faced permanents can't be turned face down. If a spell or ability tries to turn a double-faced permanent face down, nothing happens."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No guard in play_face_down prevents DFCs from being turned face down."
 
 [cr_712_17]
 rule = "712.17"
-text = "A double-faced card that is exiled face down remains hidden, using a face-down substitute card and/or opaque sleeves. See rule 713, “Substitute Cards.”"
-status = "missing"
+text = "A double-faced card that is exiled face down remains hidden, using a face-down substitute card and/or opaque sleeves. See rule 713, \"Substitute Cards.\""
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Physical play guidance about substitute cards and sleeves. The digital engine tracks hidden state via the face_down field and state filtering."
 
 [cr_712_18]
 rule = "712.18"
-text = "When a double-faced permanent transforms or converts, it doesn’t become a new object. Any effects that applied to that permanent will continue to apply to it."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "When a double-faced permanent transforms or converts, it doesn't become a new object. Any effects that applied to that permanent will continue to apply to it."
+status = "implemented"
+impl_files = ["game/transform.rs:15"]
+test_files = ["game/transform.rs:135"]
+notes = "transform_permanent operates on the existing game object in place (same ObjectId). Counters, tapped state, attachments, and continuous effects tracked by ObjectId are preserved."
 
 [cr_712_19]
 rule = "712.19"
@@ -410,15 +410,15 @@ text = "If an effect instructs a player to choose a card name, the player may ch
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Name-choice effects do not offer both faces of a DFC. The engine only exposes the active face name."
 
 [cr_712_20]
 rule = "712.20"
-text = "If a double-faced card would have an “As [this permanent] transforms . . .” ability after it transforms or converts, that ability is applied while that permanent is transforming or converting, not afterward."
+text = "If a double-faced card would have an \"As [this permanent] transforms . . .\" ability after it transforms or converts, that ability is applied while that permanent is transforming or converting, not afterward."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "As-transforms abilities not implemented. transform_permanent applies the new characteristics but does not check for or trigger as-transforms abilities."
 
 [cr_712_21]
 rule = "712.21"
@@ -426,15 +426,15 @@ text = "If a melded permanent leaves the battlefield, one permanent leaves the b
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meld mechanic not implemented."
 
 [cr_712_21a]
 rule = "712.21a"
-text = "If a melded permanent is put into its owner’s graveyard or library, that player may arrange the two cards in any order. If it’s put into its owner’s library, that player doesn’t reveal the order."
+text = "If a melded permanent is put into its owner's graveyard or library, that player may arrange the two cards in any order. If it's put into its owner's library, that player doesn't reveal the order."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meld mechanic not implemented."
 
 [cr_712_21b]
 rule = "712.21b"
@@ -442,7 +442,7 @@ text = "If a player exiles a melded permanent, that player determines the relati
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meld mechanic not implemented."
 
 [cr_712_21c]
 rule = "712.21c"
@@ -450,15 +450,15 @@ text = "If an effect can find the new object that a melded permanent becomes as 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meld mechanic not implemented."
 
 [cr_712_21d]
 rule = "712.21d"
-text = "If multiple replacement effects could be applied to the event of a melded permanent leaving the battlefield or being put into the new zone, applying one of those replacement effects to one of the two cards affects both cards. If the melded permanent is a commander, it may be exempt from this rule; see rules 903.9b–c."
+text = "If multiple replacement effects could be applied to the event of a melded permanent leaving the battlefield or being put into the new zone, applying one of those replacement effects to one of the two cards affects both cards. If the melded permanent is a commander, it may be exempt from this rule; see rules 903.9b-c."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meld mechanic not implemented."
 
 [cr_712_21e]
 rule = "712.21e"
@@ -466,4 +466,4 @@ text = "If an effect needs to know the number of objects that changed zones, a m
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meld mechanic not implemented."

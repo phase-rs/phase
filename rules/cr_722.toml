@@ -39,18 +39,18 @@ notes = "Limited-duration player control not implemented."
 [cr_722_3]
 rule = "722.3"
 text = "Only control of the player changes. All objects are controlled by their normal controllers. A player who's being controlled during their turn is still the active player."
-status = "implemented"
-impl_files = ["game/triggers.rs:425"]
+status = "missing"
+impl_files = []
 test_files = []
-notes = ""
+notes = "Player-control-for-a-turn not implemented. Note: source annotations 'CR 722.3' and 'CR 722.4' in game/triggers.rs refer to Monarch rules that were renumbered to CR 724.2 in a later CompRules update."
 
 [cr_722_4]
 rule = "722.4"
 text = "If information about an object in the game would be visible to the player being controlled, it's visible to both that player and the controller of the player. If information about cards outside the game would be visible to the player being controlled, it's visible only to that player, not the controller of the player."
-status = "implemented"
-impl_files = ["game/triggers.rs:453"]
+status = "missing"
+impl_files = []
 test_files = []
-notes = ""
+notes = "Player-control visibility rules not implemented. Note: source annotations 'CR 722.4' in game/triggers.rs refer to Monarch rules now numbered CR 724.2."
 
 [cr_722_5]
 rule = "722.5"

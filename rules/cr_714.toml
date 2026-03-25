@@ -15,10 +15,10 @@ notes = ""
 [cr_714_1a]
 rule = "714.1a"
 text = "Saga enchantments that also have the type creature are printed with both a power and toughness box and an additional text box below the type line. Any abilities in that text box are independent of its chapter symbols."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["parser/oracle.rs:1", "game/game_object.rs:392"]
 test_files = []
-notes = "Saga creatures (e.g. The Eldest Reborn variants) with independent non-chapter abilities not explicitly modeled."
+notes = "Non-chapter abilities on Saga-creature hybrids are parsed as normal Oracle abilities via oracle.rs and are active independent of chapter state. The engine does not explicitly model the 'additional text box below the type line' as a distinct concept, but the functional behavior (independent abilities parsed and applied) is correct for cards encountered so far."
 
 [cr_714_2]
 rule = "714.2"

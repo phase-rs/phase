@@ -16,25 +16,30 @@ notes = "Copy effects implemented via become_copy.rs and token_copy.rs handlers.
 rule = "707.2"
 text = "When copying an object, the copy acquires the copiable values of the original object's characteristics and, for an object on the stack, choices made when casting or activating it (mode, targets, the value of X, whether it was kicked, how it will affect multiple targets, and so on). The copiable values are the values derived from the text printed on the object (that text being name, mana cost, color indicator, card type, subtype, supertype, rules text, power, toughness, and/or loyalty), as modified by other copy effects, by its face-down status, and by \"as . . . enters\" and \"as . . . is turned face up\" abilities that set power and toughness (and may also set additional characteristics). Other effects (including type-changing and text-changing effects), status, counters, and stickers are not copied."
 status = "implemented"
-impl_files = ["game/effects/become_copy.rs:5", "game/effects/become_copy.rs:14", "game/effects/become_copy.rs:27", "game/effects/token_copy.rs:10", "game/effects/token_copy.rs:45", "game/effects/token_copy.rs:46", "game/effects/token_copy.rs:76", "game/engine.rs:1444", "game/filter.rs:373", "parser/oracle_effect/subject.rs:439", "parser/oracle_target.rs:911", "types/ability.rs:858", "types/ability.rs:1793", "types/ability.rs:1807"]
-test_files = []
-notes = ""
+impl_files = [
+  "game/effects/become_copy.rs:27",
+  "game/effects/become_copy.rs:35",
+  "game/effects/token_copy.rs:45",
+  "game/effects/token_copy.rs:54",
+]
+test_files = ["game/effects/become_copy.rs:99", "game/effects/token_copy.rs:148"]
+notes = "Both become_copy and token_copy snapshot base_* fields (copiable values) from the target. Counters, tapped status, and non-copy effects are not copied."
 
 [cr_707_2a]
 rule = "707.2a"
 text = "A copy acquires the color of the object it's copying because that value is derived from its mana cost or color indicator. A copy acquires the abilities of the object it's copying because those values are derived from its rules text. A copy doesn't wind up with two values of each ability (that is, it doesn't copy the object's abilities and its rules text, then have that rules text define a new set of abilities)."
 status = "implemented"
-impl_files = ["game/effects/become_copy.rs:14", "game/effects/token_copy.rs:45"]
-test_files = []
-notes = "Copiable characteristic acquisition follows the same logic as the parent rule."
+impl_files = ["game/effects/become_copy.rs:37", "game/effects/token_copy.rs:56"]
+test_files = ["game/effects/become_copy.rs:161", "game/effects/token_copy.rs:197"]
+notes = "Color (base_color) and abilities (base_abilities) are both snapshotted from the target. The copy replaces all characteristic fields rather than appending."
 
 [cr_707_2b]
 rule = "707.2b"
 text = "Once an object has been copied, changing the copiable values of the original object won't cause the copy to change."
 status = "implemented"
-impl_files = ["game/effects/become_copy.rs:27"]
+impl_files = ["game/effects/become_copy.rs:35"]
 test_files = []
-notes = "Copy is a snapshot of characteristics at the time of copying."
+notes = "Copy is a snapshot of base_* characteristics at copy time; changes to the original afterward have no effect on the copy."
 
 [cr_707_2c]
 rule = "707.2c"
@@ -42,15 +47,15 @@ text = "If a static ability generates a continuous effect that's a copy effect, 
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Static copy effects with snapshot semantics not explicitly tracked."
+notes = "Static copy effects with snapshot-at-application semantics not explicitly tracked. The engine applies copy effects eagerly but has no separate path for static copy effects."
 
 [cr_707_3]
 rule = "707.3"
 text = "The copy's copiable values become the copied information, as modified by the copy's status (see rule 110.5). Objects that copy the object will use the new copiable values."
 status = "implemented"
-impl_files = ["game/effects/become_copy.rs:27", "game/effects/token_copy.rs:76"]
+impl_files = ["game/effects/become_copy.rs:54", "game/effects/token_copy.rs:77"]
 test_files = []
-notes = "Copiable values propagate through the copy chain."
+notes = "Copiable values (base_* fields) propagate through the copy chain. A third object copying the copy would use the new base_* values."
 
 [cr_707_4]
 rule = "707.4"
@@ -58,15 +63,15 @@ text = "Some effects cause a permanent that's copying a permanent to copy a diff
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Changing what a permanent copies while it remains on the battlefield not explicitly handled."
+notes = "Changing what a permanent copies while it remains on the battlefield not explicitly handled. No card or ability currently exercises this path in the engine."
 
 [cr_707_5]
 rule = "707.5"
 text = "An object that enters the battlefield \"as a copy\" or \"that's a copy\" of another object becomes a copy as it enters the battlefield. It doesn't enter the battlefield, and then become a copy of that permanent. If the text that's being copied includes any abilities that replace the enters-the-battlefield event (such as \"enters with\" or \"as [this] enters\" abilities), those abilities will take effect. Also, any enters-the-battlefield triggered abilities of the copy will have a chance to trigger."
 status = "implemented"
-impl_files = ["game/effects/token_copy.rs:10", "types/ability.rs:1793"]
-test_files = []
-notes = ""
+impl_files = ["game/effects/token_copy.rs:10"]
+test_files = ["game/effects/token_copy.rs:148"]
+notes = "Token copy enters the battlefield already carrying the copied characteristics (copied before ETB triggers fire). ETB replacement effects from copied abilities can apply."
 
 [cr_707_6]
 rule = "707.6"
@@ -74,7 +79,7 @@ text = "When copying a permanent, any choices that have been made for that perma
 status = "missing"
 impl_files = []
 test_files = []
-notes = "ETB choices for copies not explicitly re-prompted."
+notes = "ETB choices for copies not re-prompted. The engine does not currently expose an \"as [this] enters\" choice flow for token copies."
 
 [cr_707_7]
 rule = "707.7"
@@ -82,15 +87,15 @@ text = "If a pair of linked abilities are copied, those abilities will be simila
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Linked ability preservation through copy effects not implemented."
+notes = "Linked ability preservation through copy effects not implemented. The engine copies ability definitions but does not track or re-link linked ability pairs on the copy."
 
 [cr_707_8]
 rule = "707.8"
 text = "When copying a melded permanent or other double-faced permanent, use the copiable values of the face that's currently up to determine the characteristics of the copy. See rule 712, \"Double-Faced Cards.\""
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["game/effects/become_copy.rs:35", "game/effects/token_copy.rs:54"]
 test_files = []
-notes = "Double-faced permanent copying uses current face characteristics."
+notes = "The engine snapshots the current face's characteristics when copying, which is correct behavior for the currently-active face. However, there is no explicit check for DFC identity, and double-faced token copies (rule 707.8a) are not implemented."
 
 [cr_707_8a]
 rule = "707.8a"
@@ -98,15 +103,15 @@ text = "If an effect creates a token that is a copy of a double-faced permanent 
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Double-faced token copies not implemented."
+notes = "Double-faced token copies not implemented. token_copy.rs creates a single-faced token using only the current face's characteristics; the back face is not propagated to the token."
 
 [cr_707_9]
 rule = "707.9"
 text = "Copy effects may include modifications or exceptions to the copying process."
 status = "implemented"
-impl_files = ["ai_support/candidates.rs:112", "game/engine.rs:1427", "game/engine.rs:3087", "game/engine.rs:3104", "game/engine.rs:3132", "game/engine.rs:7367", "parser/oracle.rs:1268", "parser/oracle_replacement.rs:56", "parser/oracle_replacement.rs:316", "parser/oracle_replacement.rs:1917", "types/game_state.rs:287"]
+impl_files = ["parser/oracle_replacement.rs:56", "parser/oracle_replacement.rs:316"]
 test_files = []
-notes = ""
+notes = "The parser recognizes copy-with-modification patterns via oracle_replacement.rs."
 
 [cr_707_9a]
 rule = "707.9a"
@@ -114,7 +119,7 @@ text = "Some copy effects cause the copy to gain an ability as part of the copyi
 status = "implemented"
 impl_files = ["parser/oracle_replacement.rs:347"]
 test_files = []
-notes = ""
+notes = "Copy-and-gain-ability patterns are parsed and applied as part of the copy effect."
 
 [cr_707_9b]
 rule = "707.9b"
@@ -122,7 +127,7 @@ text = "Some copy effects modify a characteristic as part of the copying process
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Characteristic-modifying copy effects not explicitly tracked in copiable values."
+notes = "Characteristic-modifying copy effects not explicitly tracked in copiable values. No engine path currently applies mid-copy characteristic modifications."
 
 [cr_707_9c]
 rule = "707.9c"
@@ -130,7 +135,7 @@ text = "Some copy effects specifically state that they don't copy certain charac
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Selective characteristic exclusion from copy effects not implemented."
+notes = "Selective characteristic exclusion from copy effects not implemented. The engine always copies the full copiable value set."
 
 [cr_707_9d]
 rule = "707.9d"
@@ -138,7 +143,7 @@ text = "When applying a copy effect that doesn't copy a certain characteristic, 
 status = "missing"
 impl_files = []
 test_files = []
-notes = "CDA exclusion in partial copy effects not implemented."
+notes = "CDA exclusion in partial copy effects not implemented. Follows from 707.9c missing."
 
 [cr_707_9e]
 rule = "707.9e"
@@ -168,9 +173,9 @@ notes = "Linked trigger suppression through copy stacking not implemented."
 rule = "707.10"
 text = "To copy a spell, activated ability, or triggered ability means to put a copy of it onto the stack; a copy of a spell isn't cast and a copy of an activated ability isn't activated. A copy of a spell or ability copies both the characteristics of the spell or ability and all decisions made for it, including modes, targets, the value of X, and additional or alternative costs. (See rule 601, \"Casting Spells.\") Choices that are normally made on resolution are not copied. If an effect of the copy refers to objects used to pay its costs, it uses the objects used to pay the costs of the original spell or ability. A copy of a spell is owned by the player under whose control it was put on the stack. A copy of a spell or ability is controlled by the player under whose control it was put on the stack. A copy of a spell is itself a spell, even though it has no spell card associated with it. A copy of an ability is itself an ability."
 status = "implemented"
-impl_files = ["game/effects/copy_spell.rs:6", "parser/oracle_trigger.rs:1851", "parser/oracle_trigger.rs:4534"]
-test_files = []
-notes = ""
+impl_files = ["game/effects/copy_spell.rs:6", "game/effects/copy_spell.rs:24"]
+test_files = ["game/effects/copy_spell.rs:78"]
+notes = "CopySpell creates a new stack entry copying the kind (spell/activated/triggered) and controller from the effect's controller field. Tests verify duplication behavior."
 
 [cr_707_10a]
 rule = "707.10a"
@@ -178,23 +183,27 @@ text = "If a copy of a spell is in a zone other than the stack, it ceases to exi
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Spell/card copy expiry SBA not explicitly implemented."
+notes = "Spell/card copy expiry as an SBA not explicitly implemented. The engine does not currently track which stack entries are copies of spells, so the corresponding SBA check is absent."
 
 [cr_707_10b]
 rule = "707.10b"
 text = "A copy of an ability has the same source as the original ability. If the ability refers to its source by name, the copy refers to that same object and not to any other object with the same name. The copy is considered to be the same ability by effects that count how many times that ability has resolved during the turn."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["game/effects/copy_spell.rs:26"]
 test_files = []
-notes = "Source tracking for copied abilities not fully verified."
+notes = "copy_spell.rs propagates source_id from the original stack entry to the copy, satisfying the source-tracking requirement. However, the engine has no mechanism for counting how many times a particular ability has resolved during a turn, so that aspect is not implemented."
 
 [cr_707_10c]
 rule = "707.10c"
 text = "Some effects copy a spell or ability and state that its controller may choose new targets for the copy. The player may leave any number of the targets unchanged, even if those targets would be illegal. If the player chooses to change some or all of the targets, the new targets must be legal. Once the player has decided what the copy's targets will be, the copy is put onto the stack with those targets."
 status = "implemented"
-impl_files = ["ai_support/candidates.rs:601", "game/effects/copy_spell.rs:7", "game/effects/copy_spell.rs:35", "game/effects/copy_spell.rs:203", "game/engine.rs:2613", "types/game_state.rs:602", "types/game_state.rs:642"]
-test_files = []
-notes = ""
+impl_files = [
+  "game/effects/copy_spell.rs:35",
+  "game/effects/copy_spell.rs:43",
+  "game/effects/copy_spell.rs:53",
+]
+test_files = ["game/effects/copy_spell.rs:164"]
+notes = "When a copied spell has targets, the engine enters WaitingFor::CopyRetarget so the controller can optionally choose new targets before the copy is placed on the stack."
 
 [cr_707_10d]
 rule = "707.10d"
@@ -202,7 +211,7 @@ text = "Some effects copy a spell or ability for each player or object it \"coul
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Fork-style copy-for-each-target not implemented."
+notes = "Fork-style copy-for-each-legal-target not implemented."
 
 [cr_707_10e]
 rule = "707.10e"
@@ -218,7 +227,7 @@ text = "Some effects copy a permanent spell. As that copy resolves, it ceases be
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Permanent spell copy to token token resolution not explicitly handled."
+notes = "Permanent spell copy to token resolution not explicitly handled. The engine resolves copied spells but does not distinguish the copy-of-permanent-spell case to produce a token."
 
 [cr_707_10g]
 rule = "707.10g"
@@ -234,7 +243,7 @@ text = "If an effect refers to a permanent by name, the effect still tracks that
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Object identity tracking through name changes not explicitly implemented."
+notes = "Object identity tracking through name changes not explicitly implemented. The engine tracks objects by ObjectId, which is stable, but effects that \"refer to a permanent by name\" in Oracle text use name-matching rather than id-tracking."
 
 [cr_707_12]
 rule = "707.12"
@@ -242,7 +251,7 @@ text = "An effect that instructs a player to cast a copy of an object (and not j
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Cast-a-copy-of-an-object (vs copy-a-spell) distinction not implemented."
+notes = "Cast-a-copy-of-an-object (vs copy-a-spell) distinction not implemented. The engine has CopySpell but not the cast-copy path described here."
 
 [cr_707_13]
 rule = "707.13"

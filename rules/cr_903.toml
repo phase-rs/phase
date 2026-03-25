@@ -26,7 +26,7 @@ text = "Each deck has a legendary card designated as its commander. That card mu
 status = "implemented"
 impl_files = ["database/synthesis.rs:362", "game/deck_validation.rs:393"]
 test_files = []
-notes = ""
+notes = "Commander designation tracked as an attribute (is_commander flag) that persists across zone changes."
 
 [cr_903_3a]
 rule = "903.3a"
@@ -34,7 +34,7 @@ text = "Some cards have an ability that states the card can be your commander. T
 status = "missing"
 impl_files = []
 test_files = []
-notes = "\"Can be your commander\" ability (e.g. Planeswalkers as commanders) not specifically parsed from Oracle text."
+notes = "\"Can be your commander\" ability (e.g., Planeswalkers with that text) is not parsed from Oracle text. No special-case handling exists to allow non-creature, non-Vehicle commanders via this rule."
 
 [cr_903_3b]
 rule = "903.3b"
@@ -58,7 +58,7 @@ text = "If an effect refers to controlling a commander, it refers to a permanent
 status = "implemented"
 impl_files = ["game/commander.rs:1"]
 test_files = []
-notes = "Commander designation tracked across zones in game/commander.rs."
+notes = "Commander designation tracked across zones via the is_commander flag on game objects."
 
 [cr_903_3e]
 rule = "903.3e"
@@ -66,15 +66,15 @@ text = "If an effect refers to a characteristic of \"your commander,\" it can fi
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Effects querying commander characteristics across all zones not fully implemented."
+notes = "Effects querying commander characteristics across all zones (including library and hand) not fully implemented. Commander objects in non-battlefield zones may not have continuous effects applied."
 
 [cr_903_4]
 rule = "903.4"
 text = "The Commander variant uses color identity to determine what cards can be in a deck with a certain commander. The color identity of a card is the color or colors of any mana symbols in that card's mana cost or rules text, plus any colors defined by its characteristic-defining abilities (see rule 604.3) or color indicator (see rule 204)."
 status = "implemented"
-impl_files = ["game/commander.rs:48", "game/commander.rs:50", "game/commander.rs:64", "game/commander.rs:88", "game/commander.rs:104", "game/commander.rs:140", "game/commander.rs:153", "game/commander.rs:395", "game/commander.rs:427", "game/commander.rs:530", "game/commander.rs:553", "game/deck_validation.rs:349", "game/deck_validation.rs:532", "game/deck_validation.rs:719"]
+impl_files = ["game/commander.rs:48", "game/commander.rs:64", "game/commander.rs:88", "game/commander.rs:140", "game/commander.rs:153", "game/commander.rs:395", "game/commander.rs:427", "game/commander.rs:530", "game/commander.rs:553", "game/deck_validation.rs:349", "game/deck_validation.rs:532", "game/deck_validation.rs:719"]
 test_files = []
-notes = ""
+notes = "Color identity computed from mana cost symbols and color overrides/indicators. Rules-text mana symbols (e.g., activated ability costs) are not yet parsed into structured color identity data."
 
 [cr_903_4a]
 rule = "903.4a"
@@ -82,7 +82,7 @@ text = "Color identity is established before the game begins. If a rule or effec
 status = "implemented"
 impl_files = ["game/commander.rs:48"]
 test_files = []
-notes = "Color identity computed at deck validation/game start time."
+notes = "Color identity computed at deck validation/game start time before any game actions."
 
 [cr_903_4b]
 rule = "903.4b"
@@ -90,7 +90,7 @@ text = "If a commander has a static ability that causes a player to choose its c
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Pre-game color choice for commanders not implemented."
+notes = "Pre-game color choice for commanders (e.g., Devoid commanders) not implemented."
 
 [cr_903_4c]
 rule = "903.4c"
@@ -106,7 +106,7 @@ text = "The back face of a double-faced card (see rule 712) is included when det
 status = "implemented"
 impl_files = ["game/commander.rs:53"]
 test_files = []
-notes = ""
+notes = "Back face of double-faced cards included in color identity calculation."
 
 [cr_903_4e]
 rule = "903.4e"
@@ -114,7 +114,7 @@ text = "If a card has any alternative characteristics, such as those of adventur
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Adventure alternative characteristics not included in color identity calculation."
+notes = "card_color_identity in deck_validation.rs only uses mana cost and color_override; adventure alternative characteristics (e.g., the adventure face's mana cost) are not included."
 
 [cr_903_4f]
 rule = "903.4f"
@@ -138,7 +138,7 @@ text = "Each deck must contain exactly 100 cards, including its commander. In ot
 status = "implemented"
 impl_files = ["game/commander.rs:98"]
 test_files = []
-notes = ""
+notes = "100-card deck size enforced in validate_commander_deck."
 
 [cr_903_5b]
 rule = "903.5b"
@@ -146,7 +146,7 @@ text = "Other than basic lands, each card in a Commander deck must have a differ
 status = "implemented"
 impl_files = ["game/commander.rs:98"]
 test_files = []
-notes = ""
+notes = "Singleton rule enforced in validate_commander_deck; basic lands exempted."
 
 [cr_903_5c]
 rule = "903.5c"
@@ -194,7 +194,7 @@ text = "A player may cast a commander they own from the command zone. A commande
 status = "implemented"
 impl_files = ["game/casting.rs:547", "game/commander.rs:9", "game/commander.rs:19", "game/derived.rs:19", "game/derived.rs:60", "game/game_object.rs:207", "game/keywords.rs:167"]
 test_files = []
-notes = ""
+notes = "Commander tax ({2} per prior cast from command zone) implemented in commander.rs and applied during casting."
 
 [cr_903_9]
 rule = "903.9"
@@ -210,7 +210,7 @@ text = "If a commander is in a graveyard or in exile and that object was put int
 status = "implemented"
 impl_files = ["game/commander.rs:24", "game/effects/mod.rs:637", "game/zones.rs:37"]
 test_files = []
-notes = ""
+notes = "Commander redirect to command zone from graveyard/exile implemented as SBA in commander.rs and zones.rs."
 
 [cr_903_9b]
 rule = "903.9b"
@@ -218,7 +218,7 @@ text = "If a commander would be put into its owner's hand or library from anywhe
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Replacement effect for commander going to hand/library not implemented (only graveyard/exile handled in 903.9a)."
+notes = "should_redirect_to_command_zone in commander.rs only redirects from Graveyard or Exile; hand and library destinations are not handled. The replacement effect for hand/library is missing."
 
 [cr_903_9c]
 rule = "903.9c"
@@ -226,7 +226,7 @@ text = "If a commander is a melded permanent or a merged permanent and its owner
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Meld/mutate not implemented."
+notes = "Meld and mutate not implemented; this rule cannot apply."
 
 [cr_903_10]
 rule = "903.10"
@@ -374,7 +374,7 @@ notes = "Commander Draft variant not implemented."
 
 [cr_903_13e]
 rule = "903.13e"
-text = "After the draft is complete, the cards a player drafted become that player's card pool. If the draft contained draft boosters from Commander Legends or Commander Masters, each player may add up to two cards named The Prismatic Piper to their card pool, but only if those cards are used as the player's commander(s). If the draft contained draft boosters from Commander Legends: Battle for Baldur's Gate®, each player may add up to two cards named Faceless One to their card pool, but only if those cards are used as the player's commander(s)."
+text = "After the draft is complete, the cards a player drafted become that player's card pool. If the draft contained draft boosters from Commander Legends or Commander Masters, each player may add up to two cards named The Prismatic Piper to their card pool, but only if those cards are used as the player's commander(s). If the draft contained draft boosters from Commander Legends: Battle for Baldur's Gate\u00ae, each player may add up to two cards named Faceless One to their card pool, but only if those cards are used as the player's commander(s)."
 status = "missing"
 impl_files = []
 test_files = []

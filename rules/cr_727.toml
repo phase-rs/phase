@@ -10,7 +10,7 @@ text = "Rad counters are a kind of counter a player can have (see rule 122, \"Co
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Rad counters (Unfinity) not implemented."
+notes = "Rad counters (Unfinity set mechanic) not implemented. No player-level counter infrastructure for rad counters exists."
 
 [cr_727_1a]
 rule = "727.1a"
@@ -18,4 +18,4 @@ text = "A card that refers to life loss \"from radiation\" refers to life lost a
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Rad counters not implemented."
+notes = "Rad counters not implemented; \"from radiation\" life-loss tracking not implemented."

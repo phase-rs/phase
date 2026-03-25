@@ -7,26 +7,26 @@ title = "Flip Cards"
 [cr_710_1]
 rule = "710.1"
 text = "Flip cards have a two-part card frame on a single card. The text that appears right side up on the card defines the card's normal characteristics. Additional alternative characteristics appear upside down on the card. The back of a flip card is the normal Magic card back."
-status = "implemented"
-impl_files = ["types/ability.rs:1117"]
+status = "partial"
+impl_files = ["types/card.rs:69", "database/synthesis.rs:88"]
 test_files = []
-notes = "Flip card characteristics tracked in types."
+notes = "CardLayout::Flip(CardFace, CardFace) represents flip card data in the type system and MTGJSON loading pipeline. The engine tracks the flipped state via the game_object.flipped boolean field, but no game logic currently sets or reads this field for gameplay purposes."
 
 [cr_710_1a]
 rule = "710.1a"
 text = "The top half of a flip card contains the card's normal name, text box, type line, power, and toughness. The text box usually contains an ability that causes the permanent to \"flip\" if certain conditions are met."
-status = "implemented"
-impl_files = ["types/ability.rs:1117"]
+status = "partial"
+impl_files = ["types/card.rs:69"]
 test_files = []
-notes = "Normal characteristics of flip cards tracked."
+notes = "The normal (front) face of a flip card is modeled as the first CardFace in CardLayout::Flip. No engine logic acts on flip triggers."
 
 [cr_710_1b]
 rule = "710.1b"
 text = "The bottom half of a flip card contains an alternative name, text box, type line, power, and toughness. These characteristics are used only if the permanent is on the battlefield and only if the permanent is flipped."
-status = "implemented"
-impl_files = ["types/ability.rs:1258"]
+status = "partial"
+impl_files = ["types/card.rs:69"]
 test_files = []
-notes = "Alternative flip-side characteristics tracked and applied when the permanent is flipped."
+notes = "The alternative face is modeled as the second CardFace in CardLayout::Flip. The engine declares the game_object.flipped field but never sets it during gameplay, so the alternative characteristics are never applied."
 
 [cr_710_1c]
 rule = "710.1c"
@@ -34,23 +34,23 @@ text = "A flip card's color and mana cost don't change if the permanent is flipp
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Color/mana cost invariance through flipping not explicitly verified."
+notes = "Flip gameplay not implemented. Color/mana cost invariance through flipping cannot be tested."
 
 [cr_710_2]
 rule = "710.2"
 text = "In every zone other than the battlefield, and also on the battlefield before the permanent flips, a flip card has only the normal characteristics of the card. Once a permanent is flipped, its normal name, text box, type line, power, and toughness don't apply and the alternative versions of those characteristics apply instead."
-status = "implemented"
-impl_files = ["game/quantity.rs:376", "types/ability.rs:1117", "types/player.rs:65"]
+status = "partial"
+impl_files = ["types/card.rs:69"]
 test_files = []
-notes = ""
+notes = "The engine loads only the front face of a flip card as the game object's active characteristics (correct for unflipped state). The switch to alternative characteristics on flip is not implemented."
 
 [cr_710_3]
 rule = "710.3"
 text = "You must ensure that it's clear at all times whether a permanent you control is flipped or not, both when it's untapped and when it's tapped. Common methods for distinguishing between flipped and unflipped permanents include using coins or dice to mark flipped objects."
-status = "implemented"
-impl_files = ["types/ability.rs:1258"]
+status = "not-applicable"
+impl_files = []
 test_files = []
-notes = ""
+notes = "Physical play guidance. Not applicable to a digital engine where flip state would be tracked as a boolean on the game object."
 
 [cr_710_4]
 rule = "710.4"
@@ -58,7 +58,7 @@ text = "Flipping a permanent is a one-way process. Once a permanent is flipped, 
 status = "missing"
 impl_files = []
 test_files = []
-notes = "One-way flip constraint not explicitly enforced; status reset on zone change follows general rules."
+notes = "Flip gameplay not implemented. The one-way flip constraint and status reset on zone change are not enforced."
 
 [cr_710_5]
 rule = "710.5"
@@ -66,4 +66,4 @@ text = "If an effect instructs a player to choose a card name and the player wan
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Choosing a flip card's alternative name not explicitly implemented."
+notes = "Choosing a flip card's alternative name in name-choice effects not implemented. The engine's card name lookup uses the front face name."

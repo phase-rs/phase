@@ -10,7 +10,7 @@ text = "The initiative is a designation a player can have. There is no initiativ
 status = "missing"
 impl_files = []
 test_files = []
-notes = "The Initiative (Baldur's Gate Commander) not implemented."
+notes = "The Initiative (Baldur's Gate Commander) not implemented. TriggerMode::TakesInitiative exists as a stub enum variant in types/triggers.rs but no game state tracking or rules logic is present."
 
 [cr_725_2]
 rule = "725.2"
@@ -18,7 +18,7 @@ text = "There are three inherent triggered abilities associated with having the 
 status = "missing"
 impl_files = []
 test_files = []
-notes = "The Initiative not implemented."
+notes = "The Initiative not implemented. The three synthetic inherent triggers are absent; venture into Undercity and dungeon mechanics not implemented."
 
 [cr_725_3]
 rule = "725.3"

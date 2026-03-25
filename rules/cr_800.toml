@@ -34,15 +34,15 @@ text = "Unlike two-player games, multiplayer games can continue after one or mor
 status = "implemented"
 impl_files = ["game/elimination.rs:8", "game/elimination.rs:46", "game/engine.rs:2889", "game/priority.rs:22", "game/turns.rs:529"]
 test_files = []
-notes = ""
+notes = "Multiplayer continuation after player elimination implemented in game/elimination.rs. Priority skips eliminated players (game/priority.rs:22). Turn advancement skips eliminated players via players::next_player."
 
 [cr_800_4a]
 rule = "800.4a"
 text = "When a player leaves the game, all objects (see rule 109) owned by that player leave the game and any effects which give that player control of any objects or players end. Then, if that player controlled any objects on the stack not represented by cards, those objects cease to exist. Then, if there are any objects still controlled by that player, those objects are exiled. This is not a state-based action. It happens as soon as the player leaves the game. If the player who left the game had priority at the time they left, priority passes to the next player in turn order who's still in the game."
 status = "implemented"
-impl_files = ["game/effects/choose.rs:148", "game/elimination.rs:56", "game/elimination.rs:59", "parser/oracle_effect/mod.rs:1675", "types/ability.rs:62", "types/ability.rs:237", "types/ability.rs:307"]
-test_files = []
-notes = ""
+impl_files = ["game/elimination.rs:56", "game/elimination.rs:59"]
+test_files = ["game/elimination.rs:244"]
+notes = "elimination.rs:57 removes the player's stack objects; elimination.rs:60-75 exiles their battlefield permanents. Priority passing to the next living player is handled by priority.rs. Full test coverage in elimination.rs tests."
 
 [cr_800_4b]
 rule = "800.4b"
@@ -50,7 +50,7 @@ text = "If an object would change to the control of a player who has left the ga
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Edge cases for left-player targeting not explicitly implemented."
+notes = "Edge cases for targeting or affecting a player who has left are not explicitly guarded against in token creation, zone transitions, or gain-control effects."
 
 [cr_800_4c]
 rule = "800.4c"
@@ -74,7 +74,7 @@ text = "If combat damage would be assigned to a player who has left the game, th
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Combat damage skipping for left players not explicitly implemented."
+notes = "Combat damage skipping for eliminated players not explicitly guarded in combat_damage.rs."
 
 [cr_800_4f]
 rule = "800.4f"
@@ -82,7 +82,7 @@ text = "If an object requires a player who has left the game to pay a cost or ch
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Cost non-payment for left players not implemented."
+notes = "Cost non-payment for eliminated players not implemented."
 
 [cr_800_4g]
 rule = "800.4g"
@@ -106,7 +106,7 @@ text = "If an effect requires information about a specific player, the effect us
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Last known information for left players not implemented."
+notes = "Last known information for eliminated players not tracked separately from current game state."
 
 [cr_800_4j]
 rule = "800.4j"
@@ -114,15 +114,15 @@ text = "If a player leaves the game during their turn, that turn continues to it
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Turn continuation without active player after elimination not implemented."
+notes = "Turn continuation without an active player after mid-turn elimination not implemented. The engine does not have a headless-active-player mode."
 
 [cr_800_4k]
 rule = "800.4k"
 text = "If a player who has left the game would begin a turn, that turn doesn't begin."
-status = "missing"
-impl_files = []
-test_files = []
-notes = "Turn skipping for eliminated players not explicitly implemented."
+status = "implemented"
+impl_files = ["game/turns.rs:81", "game/players.rs:16"]
+test_files = ["game/players.rs:156"]
+notes = "start_next_turn advances active_player via players::next_player, which skips eliminated players. A player who has left can never become the active player. Test: next_player_skips_eliminated."
 
 [cr_800_4m]
 rule = "800.4m"
@@ -130,7 +130,7 @@ text = "When a player leaves the game, any continuous effects with durations tha
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Duration tracking for left-player turns not implemented."
+notes = "Duration tracking for effects tied to an eliminated player's next turn is not implemented."
 
 [cr_800_4n]
 rule = "800.4n"
@@ -143,7 +143,7 @@ notes = "Ante zone not implemented; ante is not a supported game mode."
 [cr_800_4p]
 rule = "800.4p"
 text = "In a Planechase game, if the player designated as the planar controller would leave the game, instead the next player in turn order that wouldn't leave the game becomes the planar controller, then the old planar controller leaves the game. See rule 311.5."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
 notes = "Planechase variant not implemented."

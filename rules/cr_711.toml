@@ -10,7 +10,7 @@ text = "Each leveler card has a striated text box and three power/toughness boxe
 status = "implemented"
 impl_files = ["parser/oracle_level.rs:1"]
 test_files = []
-notes = "Level-up cards parsed via parser/oracle_level.rs."
+notes = "Leveler cards are parsed via parser/oracle_level.rs which handles the striated text box structure with level symbols."
 
 [cr_711_2]
 rule = "711.2"
@@ -18,7 +18,7 @@ text = "A level symbol is a keyword ability that represents a static ability. Th
 status = "implemented"
 impl_files = ["parser/oracle_level.rs:1"]
 test_files = []
-notes = "Level symbol ranges (N1-N2 and N+) parsed in oracle_level.rs."
+notes = "Both N1-N2 range and N3+ open-ended level symbol formats are parsed in oracle_level.rs."
 
 [cr_711_2a]
 rule = "711.2a"
@@ -26,7 +26,7 @@ text = "\"{LEVEL N1-N2} [Abilities] [P/T]\" means \"As long as this creature has
 status = "implemented"
 impl_files = ["parser/oracle_level.rs:1"]
 test_files = []
-notes = "Range level symbols implemented."
+notes = "Range level symbols (N1-N2) are parsed and generate static abilities conditioned on counter count."
 
 [cr_711_2b]
 rule = "711.2b"
@@ -34,7 +34,7 @@ text = "\"{LEVEL N3+} [Abilities] [P/T]\" means \"As long as this creature has N
 status = "implemented"
 impl_files = ["parser/oracle_level.rs:1"]
 test_files = []
-notes = "Open-ended N+ level symbols implemented."
+notes = "Open-ended N+ level symbols are parsed and generate static abilities conditioned on counter count."
 
 [cr_711_3]
 rule = "711.3"
@@ -42,7 +42,7 @@ text = "The text box striations have no game significance other than clearly dem
 status = "not-applicable"
 impl_files = []
 test_files = []
-notes = "Layout guidance; no engine logic needed."
+notes = "Layout guidance for physical cards. Not applicable to a digital engine; parsing already handles the association correctly."
 
 [cr_711_4]
 rule = "711.4"
@@ -50,7 +50,7 @@ text = "Any ability a leveler card has that isn't preceded by a level symbol is 
 status = "implemented"
 impl_files = ["game/effects/set_class_level.rs:114"]
 test_files = []
-notes = "Level up activated ability always available regardless of current counter count."
+notes = "The level up activated ability is always available as a base ability on leveler permanents regardless of current counter count."
 
 [cr_711_5]
 rule = "711.5"
@@ -58,7 +58,7 @@ text = "If the number of level counters on a leveler creature is less than N1 (t
 status = "implemented"
 impl_files = ["parser/oracle_level.rs:1"]
 test_files = []
-notes = "Below-minimum-level default P/T handled in the level parser/static ability logic."
+notes = "The default (below-minimum-level) P/T from the uppermost box is the base P/T on the front face. Level conditions are additive static abilities; when no condition applies the base P/T is used."
 
 [cr_711_6]
 rule = "711.6"
@@ -66,7 +66,7 @@ text = "In every zone other than the battlefield, a leveler card has the power a
 status = "implemented"
 impl_files = ["parser/oracle_level.rs:1"]
 test_files = []
-notes = "Non-battlefield leveler cards use base P/T."
+notes = "Non-battlefield leveler cards use the base P/T from the front face. Level static abilities only fire on the battlefield."
 
 [cr_711_7]
 rule = "711.7"
@@ -74,4 +74,4 @@ text = "Some enchantments have the subtype Class and associated abilities that g
 status = "implemented"
 impl_files = ["game/effects/set_class_level.rs:114", "game/restrictions.rs:347"]
 test_files = []
-notes = "Class levels and level counters are distinct systems; both implemented separately."
+notes = "Class levels are tracked separately via game_object.class_level and the SetClassLevel effect. Level counters (for leveler cards) and class levels are distinct systems that do not interact."

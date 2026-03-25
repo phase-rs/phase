@@ -10,7 +10,7 @@ text = "One keyword causes an object to merge with a permanent. See rule 702.140
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Mutate/merging with permanents not implemented."
+notes = "The Mutate keyword is parsed and stored (types/keywords.rs) but the actual merge-with-permanent game mechanic is not implemented. Casting a mutate spell on a target permanent is not supported."
 
 [cr_729_2]
 rule = "729.2"
@@ -18,7 +18,7 @@ text = "To merge an object with a permanent, place that object on top of or unde
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Mutate/merging not implemented."
+notes = "Merged permanent data structure and merge resolution not implemented."
 
 [cr_729_2a]
 rule = "729.2a"

@@ -8,57 +8,57 @@ title = "Face-Down Spells and Permanents"
 rule = "708.1"
 text = "Some cards allow spells and permanents to be face down."
 status = "implemented"
-impl_files = ["game/morph.rs:1"]
-test_files = []
-notes = "Face-down spells and permanents supported via Morph/Disguise in game/morph.rs."
+impl_files = ["game/morph.rs:36", "game/morph.rs:181"]
+test_files = ["game/morph.rs:312"]
+notes = "Face-down spells and permanents supported via Morph/Disguise (play_face_down) and Manifest (manifest_card) in game/morph.rs."
 
 [cr_708_2]
 rule = "708.2"
 text = "Face-down spells and face-down permanents have no characteristics other than those listed by the ability or rules that allowed the spell or permanent to be face down. Any listed characteristics are the copiable values of that object's characteristics. (See rule 613, \"Interaction of Continuous Effects,\" and rule 707, \"Copying Objects.\")"
 status = "implemented"
-impl_files = ["game/morph.rs:1", "types/ability.rs:1"]
-test_files = []
-notes = "Face-down permanents use the 2/2 creature default characteristics defined by morph rules."
+impl_files = ["game/morph.rs:66", "game/morph.rs:198"]
+test_files = ["game/morph.rs:312"]
+notes = "Face-down permanents are given empty/zero characteristic fields. All base_* fields are cleared, making the 2/2 creature with no abilities the copiable state."
 
 [cr_708_2a]
 rule = "708.2a"
 text = "If a face-up permanent is turned face down by a spell or ability that doesn't list any characteristics for that object, it becomes a 2/2 face-down creature with no text, no name, no subtypes, and no mana cost. A permanent that enters the battlefield face down also has these characteristics unless otherwise specified by the effect that put it onto the battlefield face down or allowed it to be cast face down. These values are the copiable values of that object's characteristics."
 status = "implemented"
-impl_files = ["game/morph.rs:100", "game/morph.rs:137"]
-test_files = []
-notes = "2/2 face-down creature default characteristics enforced in morph.rs."
+impl_files = ["game/morph.rs:67", "game/morph.rs:198"]
+test_files = ["game/morph.rs:312"]
+notes = "play_face_down and manifest_card both apply the 2/2 creature with no name, no subtypes, no color, no abilities override. base_power/toughness set to Some(2)."
 
 [cr_708_2b]
 rule = "708.2b"
 text = "A face-down permanent can't be turned face-down. If a spell or ability attempts to turn a face-down permanent face down, nothing happens and that effect doesn't change any of its characteristics or their copiable values."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["game/morph.rs:120"]
 test_files = []
-notes = "No-op when attempting to face-down an already-face-down permanent not explicitly guarded."
+notes = "turn_face_up returns an error if the permanent is not face_down, preventing double-face-down via that path. However, there is no explicit guard in play_face_down preventing a face-down permanent from being turned face down again by a different effect path."
 
 [cr_708_3]
 rule = "708.3"
 text = "Objects that are put onto the battlefield face down are turned face down before they enter the battlefield, so the permanent's enters-the-battlefield abilities won't trigger (if triggered) or have any effect (if static)."
 status = "implemented"
-impl_files = ["game/morph.rs:100"]
-test_files = []
-notes = "Face-down permanents enter as 2/2 creatures with no ETB abilities triggering."
+impl_files = ["game/morph.rs:62", "game/morph.rs:194"]
+test_files = ["game/morph.rs:312"]
+notes = "play_face_down and manifest_card override all characteristics (including clearing abilities) before calling move_to_zone, so ETB triggers fire against the blank 2/2 creature state."
 
 [cr_708_4]
 rule = "708.4"
 text = "Objects that are cast face down are turned face down before they are put onto the stack, so effects that care about the characteristics of a spell will see only the face-down spell's characteristics. Any effects or prohibitions that would apply to casting an object with these characteristics (and not the face-up object's characteristics) are applied to casting this object. The permanent the spell becomes will be a face-down permanent."
 status = "implemented"
-impl_files = ["game/morph.rs:1", "game/casting.rs:1"]
+impl_files = ["game/morph.rs:36", "game/casting.rs:1"]
 test_files = []
-notes = "Morph spells cast face-down with generic 2/2 characteristics on the stack."
+notes = "Morph/Disguise spells are cast via play_face_down which clears characteristics before putting onto the stack, so effects checking spell characteristics see only the face-down state."
 
 [cr_708_5]
 rule = "708.5"
 text = "At any time, you may look at a face-down spell you control on the stack or a face-down permanent you control (even if it's phased out). You can't look at face-down cards in any other zone or face-down spells or permanents controlled by another player."
-status = "missing"
+status = "partial"
 impl_files = []
 test_files = []
-notes = "Player visibility rules for face-down objects not explicitly tracked."
+notes = "The engine stores the original characteristics in back_face and controls visibility via filter_state_for_player in the WASM/server layers. The controller can see the true identity but opponents cannot. The specific \"at any time you may look\" rule is enforced implicitly by the state filtering rather than as an explicit action."
 
 [cr_708_6]
 rule = "708.6"
@@ -66,23 +66,23 @@ text = "If you control multiple face-down spells or face-down permanents, you mu
 status = "not-applicable"
 impl_files = []
 test_files = []
-notes = "Physical play guidance; digital engine tracks identity automatically."
+notes = "Physical play guidance for distinguishing face-down objects. Not applicable to a digital engine where object identity is tracked automatically via ObjectId."
 
 [cr_708_7]
 rule = "708.7"
 text = "The ability or rules that allow a permanent to be face down may also allow the permanent's controller to turn it face up. Spells normally can't be turned face up."
 status = "implemented"
-impl_files = ["game/morph.rs:100", "game/morph.rs:137"]
-test_files = []
-notes = "Turn-face-up action is a special action available to morph/disguise permanent controllers."
+impl_files = ["game/morph.rs:103"]
+test_files = ["game/morph.rs:335"]
+notes = "turn_face_up validates that the back_face contains a morph/disguise keyword (or is a manifested creature) before allowing the action. Spells on the stack have no turn_face_up path."
 
 [cr_708_8]
 rule = "708.8"
 text = "As a face-down permanent is turned face up, its copiable values revert to its normal copiable values. Any effects that have been applied to the face-down permanent still apply to the face-up permanent. Any abilities relating to the permanent entering the battlefield don't trigger and don't have any effect, because the permanent has already entered the battlefield."
 status = "implemented"
-impl_files = ["game/morph.rs:100"]
-test_files = []
-notes = "Turning face up restores characteristics without triggering ETB abilities."
+impl_files = ["game/morph.rs:160", "game/morph.rs:163"]
+test_files = ["game/morph.rs:335"]
+notes = "turn_face_up calls apply_back_face_to_object to restore all base_* fields and marks layers_dirty. No ETB trigger is emitted. External layer effects continue to apply to the now-face-up permanent."
 
 [cr_708_9]
 rule = "708.9"
@@ -90,7 +90,7 @@ text = "If a face-down permanent or a face-down component of a merged permanent 
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Mandatory reveal of face-down objects when they leave the battlefield not implemented."
+notes = "Mandatory reveal of face-down objects when leaving the battlefield not implemented. The engine does not emit a reveal event nor expose the back_face to opponents during the zone-change."
 
 [cr_708_10]
 rule = "708.10"
@@ -98,7 +98,7 @@ text = "If a face-down permanent becomes a copy of another permanent, its copiab
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Interaction between face-down status and copy effects not handled."
+notes = "Interaction between face-down status and copy effects not handled. become_copy.rs does not check face_down status and would apply the copied characteristics directly."
 
 [cr_708_11]
 rule = "708.11"
@@ -106,7 +106,7 @@ text = "If a face-down permanent would have an \"As [this permanent] is turned f
 status = "missing"
 impl_files = []
 test_files = []
-notes = "As-turned-face-up abilities not implemented."
+notes = "As-turned-face-up abilities not implemented. turn_face_up restores characteristics but does not check for or apply face-up triggered abilities during the turn-face-up action."
 
 [cr_708_12]
 rule = "708.12"
@@ -114,4 +114,4 @@ text = "If a spell or ability that instructs a player to reveal a face-down perm
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Reveal of face-down permanents ignoring continuous effects not implemented."
+notes = "Reveal of face-down permanents ignoring continuous effects not implemented. No reveal action path exists in the engine."

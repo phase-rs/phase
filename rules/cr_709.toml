@@ -7,10 +7,10 @@ title = "Split Cards"
 [cr_709_1]
 rule = "709.1"
 text = "Split cards have two card faces on a single card. The back of a split card is the normal Magic card back."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["types/card.rs:68", "database/synthesis.rs:87"]
 test_files = []
-notes = "Split cards not implemented."
+notes = "CardLayout::Split(CardFace, CardFace) represents split card data in the type system and MTGJSON loading pipeline. However, no active game-engine logic implements split-card gameplay rules (half selection, combined characteristics in zones, etc.)."
 
 [cr_709_2]
 rule = "709.2"
@@ -18,7 +18,7 @@ text = "Although split cards have two castable halves, each split card is only o
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Split cards not implemented."
+notes = "Split card gameplay not implemented. The engine has the CardLayout::Split type but does not implement the one-card rule for draw/discard counting."
 
 [cr_709_3]
 rule = "709.3"
@@ -26,7 +26,7 @@ text = "A player chooses which half of a split card they are casting before putt
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Split cards not implemented."
+notes = "Half selection during casting not implemented. No casting path handles CardLayout::Split."
 
 [cr_709_3a]
 rule = "709.3a"
@@ -34,7 +34,7 @@ text = "Only the chosen half is evaluated to see if it can be cast. Only that ha
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Split cards not implemented."
+notes = "Split card casting not implemented."
 
 [cr_709_3b]
 rule = "709.3b"
@@ -42,7 +42,7 @@ text = "While on the stack, only the characteristics of the half being cast exis
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Split cards not implemented."
+notes = "Split card casting not implemented."
 
 [cr_709_3c]
 rule = "709.3c"
@@ -50,7 +50,7 @@ text = "An effect may create a copy of a split card and allow a player to cast t
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Split cards not implemented."
+notes = "Split card copying and casting not implemented."
 
 [cr_709_4]
 rule = "709.4"
@@ -58,7 +58,7 @@ text = "In every zone except the stack, the characteristics of a split card are 
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Split cards not implemented."
+notes = "Combined characteristics for split cards in non-stack zones not implemented. The engine loads only the first face of a split card as the game object."
 
 [cr_709_4a]
 rule = "709.4a"
@@ -66,7 +66,7 @@ text = "Each split card has two names. If an effect instructs a player to choose
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Split cards not implemented."
+notes = "Split card dual-name semantics not implemented in name-choice effects."
 
 [cr_709_4b]
 rule = "709.4b"
@@ -74,7 +74,7 @@ text = "The mana cost of a split card is the combined mana costs of its two halv
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Split cards not implemented."
+notes = "Combined mana cost for split cards in zones other than the stack not implemented."
 
 [cr_709_4c]
 rule = "709.4c"
@@ -82,7 +82,7 @@ text = "A split card has each card type specified on either of its halves and ea
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Split cards not implemented."
+notes = "Combined card type and ability set for split cards not implemented."
 
 [cr_709_4d]
 rule = "709.4d"
@@ -90,7 +90,7 @@ text = "The characteristics of a fused split spell on the stack are also those o
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Split cards/Fuse not implemented."
+notes = "Fuse keyword and fused split spells not implemented."
 
 [cr_709_5]
 rule = "709.5"
@@ -98,7 +98,7 @@ text = "Some split cards are permanent cards with a single shared type line. A s
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Room cards (shared type line split cards) not implemented."
+notes = "Room cards (split permanents with a shared type line and unlock designations) not implemented."
 
 [cr_709_5a]
 rule = "709.5a"

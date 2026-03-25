@@ -7,10 +7,10 @@ title = "Omen Cards"
 [cr_720_1]
 rule = "720.1"
 text = "Omen cards have a two-part card frame, with a smaller frame inset within their text box."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["types/card.rs:74"]
 test_files = []
-notes = "Omen cards not implemented."
+notes = "CardLayout::Omen variant exists in types/card.rs and is handled in layout_faces/synthesis, but map_layout in database/synthesis.rs does not map the 'omen' layout string — it falls through to Single. No Omen-specific casting logic is implemented."
 
 [cr_720_2]
 rule = "720.2"
@@ -18,7 +18,7 @@ text = "The text that appears in the inset frame on the left defines alternative
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Omen cards not implemented."
+notes = "Omen alternative characteristics during casting not implemented. CardLayout::Omen exists as a type stub only."
 
 [cr_720_2a]
 rule = "720.2a"
@@ -50,7 +50,7 @@ text = "As a player casts an omen card, the player chooses whether they cast the
 status = "missing"
 impl_files = []
 test_files = []
-notes = "Omen cards not implemented."
+notes = "Omen casting choice not implemented."
 
 [cr_720_3a]
 rule = "720.3a"
