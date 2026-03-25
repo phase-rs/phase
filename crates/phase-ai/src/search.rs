@@ -48,7 +48,10 @@ pub fn score_candidates(
     let ctx = build_decision_context(state);
     let policies = PolicyRegistry::default();
     let context = build_ai_context(state, ai_player, config);
-    let mut services = PlannerServices::new(ai_player, config, &policies, context);
+    // Derive seed from game state so successive decisions explore different determinizations.
+    let determinize_seed = state.turn_number as u64 * 97 + state.next_object_id;
+    let mut services =
+        PlannerServices::new(ai_player, config, &policies, context, determinize_seed);
     let candidates = services.validate_candidates(state, ctx.candidates.clone());
     let actions: Vec<GameAction> = candidates
         .iter()
@@ -734,6 +737,7 @@ mod tests {
             candidate: &self_candidate,
             ai_player: PlayerId(0),
             config: &AiConfig::default(),
+            context: &crate::context::AiContext::empty(&AiConfig::default().weights),
         });
         let opp_score = policies.score(&PolicyContext {
             state: &state,
@@ -741,6 +745,7 @@ mod tests {
             candidate: &opp_candidate,
             ai_player: PlayerId(0),
             config: &AiConfig::default(),
+            context: &crate::context::AiContext::empty(&AiConfig::default().weights),
         });
         assert!(self_score < opp_score);
         assert!(self_score < -50.0);

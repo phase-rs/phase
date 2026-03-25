@@ -18,7 +18,11 @@ pub struct PolicyRegistry {
 impl Default for PolicyRegistry {
     fn default() -> Self {
         Self {
-            policies: vec![Box::new(AntiSelfHarmPolicy), Box::new(EffectTimingPolicy)],
+            policies: vec![
+                Box::new(AntiSelfHarmPolicy),
+                Box::new(EffectTimingPolicy),
+                Box::new(super::mana_efficiency::ManaEfficiencyPolicy),
+            ],
         }
     }
 }
@@ -35,6 +39,7 @@ impl PolicyRegistry {
         candidates: &[CandidateAction],
         ai_player: PlayerId,
         config: &AiConfig,
+        context: &crate::context::AiContext,
     ) -> Vec<PolicyPrior> {
         if candidates.is_empty() {
             return Vec::new();
@@ -49,6 +54,7 @@ impl PolicyRegistry {
                     candidate,
                     ai_player,
                     config,
+                    context,
                 })
             })
             .collect();

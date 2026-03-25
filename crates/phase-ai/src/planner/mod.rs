@@ -188,12 +188,16 @@ impl<'a> PlannerServices<'a> {
         config: &'a AiConfig,
         policies: &'a PolicyRegistry,
         context: crate::context::AiContext,
+        determinize_seed: u64,
     ) -> Self {
         let information_set_sampler: Box<dyn InformationSetSampler + 'a> =
             match config.search.hidden_info_mode {
-                HiddenInfoMode::PerfectInfo
-                | HiddenInfoMode::Determinized
-                | HiddenInfoMode::RevealedOnlyBias => Box::new(PerfectInfoSampler),
+                HiddenInfoMode::PerfectInfo | HiddenInfoMode::RevealedOnlyBias => {
+                    Box::new(PerfectInfoSampler)
+                }
+                HiddenInfoMode::Determinized => Box::new(
+                    crate::determinize::RandomizedDeterminizer::new(determinize_seed),
+                ),
             };
         let utility_reducer: Box<dyn UtilityReducer + 'a> = match config.search.opponent_model {
             OpponentModel::DeterministicBestReply if config.player_count <= 2 => {
@@ -226,6 +230,7 @@ impl<'a> PlannerServices<'a> {
             config,
             policies,
             crate::context::AiContext::empty(&config.weights),
+            42,
         )
     }
 
@@ -260,11 +265,36 @@ impl<'a> PlannerServices<'a> {
     }
 
     pub fn evaluate_state(&self, state: &GameState) -> f64 {
-        evaluate_state(state, self.ai_player, &self.context.adjusted_weights)
+        self.evaluate_with_strategy(state)
+    }
+
+    /// Evaluate state with both tactical and strategic dimensions.
+    /// Tactical eval (evaluate_state) is context-free and uses adjusted weights.
+    /// Strategic dimensions (synergy, zone quality, card advantage) use AiContext.
+    fn evaluate_with_strategy(&self, state: &GameState) -> f64 {
+        let tactical = evaluate_state(state, self.ai_player, &self.context.adjusted_weights);
+        let weights = &self.context.adjusted_weights;
+
+        let synergy = self
+            .context
+            .synergy_graph
+            .board_synergy_bonus(state, self.ai_player)
+            * weights.synergy;
+
+        let zones = crate::zone_eval::zone_bonus(
+            state,
+            self.ai_player,
+            self.context.deck_profile.archetype,
+        ) * weights.zone_quality;
+
+        let card_adv =
+            crate::card_advantage::differential(state, self.ai_player) * weights.card_advantage;
+
+        tactical + synergy + zones + card_adv
     }
 
     pub fn evaluate_for_planner(&self, state: &GameState) -> ValueEstimate {
-        evaluate_for_planner(state, self.ai_player, &self.config.weights)
+        evaluate_for_planner(state, self.ai_player, &self.context.adjusted_weights)
     }
 
     pub fn tactical_score(
@@ -282,6 +312,7 @@ impl<'a> PlannerServices<'a> {
             candidate,
             ai_player: scoring_player,
             config: self.config,
+            context: &self.context,
         };
         score += self.policies.score(&policy_ctx);
 
@@ -312,8 +343,14 @@ impl<'a> PlannerServices<'a> {
         candidates: &[CandidateAction],
         scoring_player: PlayerId,
     ) -> Vec<PolicyPrior> {
-        self.policies
-            .priors(state, ctx, candidates, scoring_player, self.config)
+        self.policies.priors(
+            state,
+            ctx,
+            candidates,
+            scoring_player,
+            self.config,
+            &self.context,
+        )
     }
 
     pub fn planner_evaluation(&self, state: &GameState) -> PlannerEvaluation {

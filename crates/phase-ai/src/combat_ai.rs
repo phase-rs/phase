@@ -136,6 +136,35 @@ pub fn choose_attackers_with_targets_with_profile(
         }
     }
 
+    // Alpha-strike: if no individual attack looks good but we outnumber blockers,
+    // attack with everyone — the excess creatures get through unblocked.
+    // Only do this if expected unblocked damage justifies the trade.
+    if attacking_ids.is_empty()
+        && !candidates.is_empty()
+        && candidates.len() > opponent_blockers.len()
+        && matches!(
+            objective,
+            CombatObjective::PreserveAdvantage | CombatObjective::Race
+        )
+    {
+        let mut valued: Vec<(ObjectId, f64)> = candidates
+            .iter()
+            .map(|&id| (id, evaluate_creature(state, id)))
+            .collect();
+        valued.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let blocked_count = opponent_blockers.len();
+        let unblocked_power: i32 = valued[blocked_count..]
+            .iter()
+            .filter_map(|&(id, _)| state.objects.get(&id)?.power)
+            .sum();
+        let worst_loss_value: f64 = valued[..blocked_count].iter().map(|&(_, v)| v).sum();
+
+        if unblocked_power as f64 > worst_loss_value {
+            attacking_ids = candidates.clone();
+        }
+    }
+
     // Single opponent: all attackers go to the same target
     if opponents.len() == 1 {
         let target = AttackTarget::Player(opponents[0]);
@@ -368,11 +397,14 @@ pub fn choose_blockers_with_profile(
             let p_life = state.players[player.0 as usize].life;
             // Chump block: sacrifice the blocker to prevent significant damage
             // when life total is threatened (attacker power >= 3 and life <= 3x that)
-            let should_chump = priority == 0
+            let should_chump_stabilize = priority == 0
                 && attacker_power >= 3
                 && matches!(objective, CombatObjective::Stabilize)
                 && p_life <= attacker_power * 3;
-            if priority > 0 || should_chump {
+            // Race chump: losing the damage race, block anything with power >= 2
+            let should_chump_race =
+                priority == 0 && attacker_power >= 2 && matches!(objective, CombatObjective::Race);
+            if priority > 0 || should_chump_stabilize || should_chump_race {
                 assignments.push((blocker_id, attacker_id));
                 used_blockers.push(blocker_id);
             }
@@ -427,11 +459,26 @@ fn determine_block_objective(
 ) -> CombatObjective {
     let life = state.players[player.0 as usize].life;
     let incoming_power = sum_power(state, attacker_ids);
-    if life as f64 <= incoming_power as f64 * profile.stabilize_bias {
-        CombatObjective::Stabilize
-    } else {
-        CombatObjective::PreserveAdvantage
+    let threshold = incoming_power as f64 * profile.stabilize_bias;
+
+    // Immediate lethal: must block to survive this turn
+    if life as f64 <= threshold {
+        return CombatObjective::Stabilize;
     }
+
+    // Multi-turn lethality: dead in ~2-3 turns at this rate
+    if life as f64 <= threshold * 2.5 {
+        return CombatObjective::Stabilize;
+    }
+
+    // Race detection: losing the damage race (opponent hits harder than we do)
+    // Only enter Race if we'd die in ~3 turns AND opponent outpaces us
+    let my_board_power = battlefield_power(state, player);
+    if life as f64 <= threshold * 3.0 && incoming_power > my_board_power {
+        return CombatObjective::Race;
+    }
+
+    CombatObjective::PreserveAdvantage
 }
 
 fn should_attack_given_objective(

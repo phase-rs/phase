@@ -16,6 +16,12 @@ pub struct EvalWeights {
     pub board_power: f64,
     pub board_toughness: f64,
     pub hand_size: f64,
+    /// Weight for zone-quality strategic dimension (hand quality + graveyard value).
+    pub zone_quality: f64,
+    /// Weight for card-advantage strategic dimension (resource differential).
+    pub card_advantage: f64,
+    /// Weight for synergy strategic dimension (board synergy bonus).
+    pub synergy: f64,
 }
 
 impl Default for EvalWeights {
@@ -27,6 +33,9 @@ impl Default for EvalWeights {
             board_power: 1.5,
             board_toughness: 1.0,
             hand_size: 0.5,
+            zone_quality: 0.3,
+            card_advantage: 0.3,
+            synergy: 0.5,
         }
     }
 }

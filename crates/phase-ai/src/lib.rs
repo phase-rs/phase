@@ -1,13 +1,17 @@
 pub mod auto_play;
+pub mod card_advantage;
 pub mod card_hints;
 pub mod combat_ai;
 pub mod config;
 pub mod context;
 pub mod deck_profile;
+pub mod determinize;
 pub mod eval;
 pub mod planner;
 pub mod policies;
 pub mod search;
+pub mod synergy;
+pub mod zone_eval;
 
 pub use card_hints::should_play_now;
 pub use combat_ai::{choose_attackers, choose_attackers_with_targets, choose_blockers};

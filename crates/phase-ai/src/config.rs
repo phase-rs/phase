@@ -245,7 +245,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                     exploration_fraction: 0.0,
                     dirichlet_alpha: None,
                 }),
-                hidden_info_mode: HiddenInfoMode::PerfectInfo,
+                hidden_info_mode: HiddenInfoMode::Determinized,
                 opponent_model: OpponentModel::ThreatWeightedReply,
                 time_budget_ms: None,
             },

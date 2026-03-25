@@ -38,7 +38,10 @@ fn score_action_shape(ctx: &PolicyContext<'_>) -> f64 {
                 return 0.0;
             };
 
-            if object.card_types.core_types.contains(&CoreType::Creature) {
+            let is_pre_combat_preferred =
+                object.card_types.core_types.contains(&CoreType::Creature)
+                    || object.card_types.subtypes.iter().any(|s| s == "Aura");
+            if is_pre_combat_preferred {
                 if matches!(ctx.state.phase, Phase::PreCombatMain) {
                     0.35
                 } else {
@@ -178,6 +181,7 @@ mod tests {
             candidate: &candidate,
             ai_player: PlayerId(0),
             config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
         };
 
         let score = combat_trick_score(&ctx);

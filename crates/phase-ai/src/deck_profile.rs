@@ -106,13 +106,14 @@ impl DeckProfile {
     /// Apply archetype-based multipliers to base evaluation weights.
     /// Returns new weights tuned for this deck's strategy.
     pub fn adjust_weights(&self, base: &EvalWeights) -> EvalWeights {
-        let (life, aggression, presence, power, toughness, hand) = match self.archetype {
-            DeckArchetype::Aggro => (0.6, 2.0, 1.5, 2.0, 0.5, 0.3),
-            DeckArchetype::Midrange => (1.0, 1.0, 1.5, 1.2, 1.2, 0.8),
-            DeckArchetype::Control => (1.5, 0.3, 0.8, 0.5, 0.8, 2.0),
-            DeckArchetype::Combo => (0.8, 0.5, 0.5, 0.5, 0.5, 2.5),
-            DeckArchetype::Ramp => (1.0, 0.7, 1.0, 1.0, 1.0, 1.0),
-        };
+        let (life, aggression, presence, power, toughness, hand, zone, card_adv, syn) =
+            match self.archetype {
+                DeckArchetype::Aggro => (0.6, 2.0, 1.5, 2.0, 0.5, 0.3, 0.15, 0.1, 0.3),
+                DeckArchetype::Midrange => (1.0, 1.0, 1.5, 1.2, 1.2, 0.8, 0.3, 0.4, 0.5),
+                DeckArchetype::Control => (1.5, 0.3, 0.8, 0.5, 0.8, 2.0, 0.6, 0.8, 0.4),
+                DeckArchetype::Combo => (0.8, 0.5, 0.5, 0.5, 0.5, 2.5, 0.5, 0.6, 0.7),
+                DeckArchetype::Ramp => (1.0, 0.7, 1.0, 1.0, 1.0, 1.0, 0.4, 0.3, 0.4),
+            };
 
         EvalWeights {
             life: base.life * life,
@@ -121,6 +122,9 @@ impl DeckProfile {
             board_power: base.board_power * power,
             board_toughness: base.board_toughness * toughness,
             hand_size: base.hand_size * hand,
+            zone_quality: zone,
+            card_advantage: card_adv,
+            synergy: syn,
         }
     }
 }

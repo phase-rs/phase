@@ -12,4 +12,8 @@ rand = "0.9"
 tracing = "0.1"
 web-time = "1"
 
+[[bin]]
+name = "ai-duel"
+path = "src/bin/ai_duel.rs"
+
 [dev-dependencies]

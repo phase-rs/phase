@@ -14,6 +14,7 @@ pub struct PolicyContext<'a> {
     pub candidate: &'a CandidateAction,
     pub ai_player: PlayerId,
     pub config: &'a AiConfig,
+    pub context: &'a crate::context::AiContext,
 }
 
 impl<'a> PolicyContext<'a> {
@@ -146,6 +147,7 @@ mod tests {
             candidate: &candidate,
             ai_player: PlayerId(0),
             config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
         };
 
         let effects = ctx.effects();
@@ -204,6 +206,7 @@ mod tests {
             candidate: &candidate,
             ai_player: PlayerId(0),
             config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
         };
 
         let effects = ctx.effects();
