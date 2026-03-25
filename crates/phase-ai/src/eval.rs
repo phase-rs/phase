@@ -5,10 +5,12 @@ use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
 
+use serde::{Deserialize, Serialize};
+
 use crate::planner::ValueEstimate;
 
 /// Weights for board evaluation heuristics.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalWeights {
     pub life: f64,
     pub aggression: f64,
@@ -36,6 +38,24 @@ impl Default for EvalWeights {
             zone_quality: 0.3,
             card_advantage: 0.3,
             synergy: 0.5,
+        }
+    }
+}
+
+impl EvalWeights {
+    /// Weights learned from 17Lands Premier Draft replay data via logistic regression.
+    /// Trained fields (life, board_presence, board_power, hand_size) use coefficients
+    /// from 12.9M game-turn samples. Fields that 17Lands cannot measure (board_toughness,
+    /// aggression) retain hand-tuned defaults pending CMA-ES refinement.
+    /// See scripts/train_eval_weights.py and data/learned-weights.json.
+    pub fn learned() -> Self {
+        EvalWeights {
+            life: 0.7769,
+            aggression: 0.5,
+            board_presence: 0.9613,
+            board_power: 0.9585,
+            board_toughness: 1.0,
+            hand_size: 2.5,
         }
     }
 }
