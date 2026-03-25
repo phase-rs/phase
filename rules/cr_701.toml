@@ -6,27 +6,27 @@ title = "Keyword Actions"
 
 [cr_701_1]
 rule = "701.1"
-text = "Most actions described in a card’s rules text use the standard English definitions of the verbs within, but some specialized verbs are used whose meanings may not be clear. These “keywords” are game terms; sometimes reminder text summarizes their meanings."
-status = "missing"
+text = "Most actions described in a card's rules text use the standard English definitions of the verbs within, but some specialized verbs are used whose meanings may not be clear. These \"keywords\" are game terms; sometimes reminder text summarizes their meanings."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Informational rule — no implementation required."
 
 [cr_701_2]
 rule = "701.2"
 text = "Activate"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/engine.rs"]
 test_files = []
-notes = ""
+notes = "Activate is the primary action handled by GameAction::ActivateAbility in the engine apply loop."
 
 [cr_701_2a]
 rule = "701.2a"
-text = "To activate an activated ability is to put it onto the stack and pay its costs, so that it will eventually resolve and have its effect. Only an object’s controller (or its owner, if it doesn’t have a controller) can activate its activated ability unless the object specifically says otherwise. A player may activate an ability if they have priority. See rule 602, “Activating Activated Abilities.”"
-status = "missing"
-impl_files = []
+text = "To activate an activated ability is to put it onto the stack and pay its costs, so that it will eventually resolve and have its effect. Only an object's controller (or its owner, if it doesn't have a controller) can activate its activated ability unless the object specifically says otherwise. A player may activate an ability if they have priority. See rule 602, \"Activating Activated Abilities.\""
+status = "implemented"
+impl_files = ["game/engine.rs:271", "game/engine.rs:928", "game/engine.rs:1147", "game/casting.rs:739"]
 test_files = []
-notes = ""
+notes = "Activation is guarded by priority check (WaitingFor::Priority) and controller check in the ActivateAbility arm of engine.rs."
 
 [cr_701_3]
 rule = "701.3"
@@ -38,7 +38,7 @@ notes = ""
 
 [cr_701_3a]
 rule = "701.3a"
-text = "To attach an Aura, Equipment, or Fortification to an object or player means to take it from where it currently is and put it onto that object or player. If something is attached to a permanent on the battlefield, it’s customary to place it so that it’s physically touching the permanent. An Aura, Equipment, or Fortification can’t be attached to an object or player it couldn’t enchant, equip, or fortify, respectively."
+text = "To attach an Aura, Equipment, or Fortification to an object or player means to take it from where it currently is and put it onto that object or player. If something is attached to a permanent on the battlefield, it's customary to place it so that it's physically touching the permanent. An Aura, Equipment, or Fortification can't be attached to an object or player it couldn't enchant, equip, or fortify, respectively."
 status = "implemented"
 impl_files = ["game/effects/attach.rs:6", "game/effects/attach.rs:38"]
 test_files = []
@@ -46,7 +46,7 @@ notes = ""
 
 [cr_701_3b]
 rule = "701.3b"
-text = "If an effect tries to attach an Aura, Equipment, or Fortification to an object or player it can’t be attached to, the Aura, Equipment, or Fortification doesn’t move. If an effect tries to attach an Aura, Equipment, or Fortification to the object or player it’s already attached to, the effect does nothing. If an effect tries to attach an object that isn’t an Aura, Equipment, or Fortification to another object or player, the effect does nothing and the first object doesn’t move."
+text = "If an effect tries to attach an Aura, Equipment, or Fortification to an object or player it can't be attached to, the Aura, Equipment, or Fortification doesn't move. If an effect tries to attach an Aura, Equipment, or Fortification to the object or player it's already attached to, the effect does nothing. If an effect tries to attach an object that isn't an Aura, Equipment, or Fortification to another object or player, the effect does nothing and the first object doesn't move."
 status = "implemented"
 impl_files = ["game/effects/attach.rs:6"]
 test_files = []
@@ -62,11 +62,11 @@ notes = ""
 
 [cr_701_3d]
 rule = "701.3d"
-text = "To “unattach” an Equipment from a creature means to move it away from that creature so the Equipment is on the battlefield but is not equipping anything. It should no longer be physically touching any creature. If an Aura, Equipment, or Fortification that was attached to an object or player ceases to be attached to it, that counts as “becoming unattached [from that object or player]”; this includes if that Aura, Equipment, or Fortification leaves the battlefield, the object leaves the zone it was in, or that player leaves the game."
-status = "missing"
-impl_files = []
+text = "To \"unattach\" an Equipment from a creature means to move it away from that creature so the Equipment is on the battlefield but is not equipping anything. It should no longer be physically touching any creature. If an Aura, Equipment, or Fortification that was attached to an object or player ceases to be attached to it, that counts as \"becoming unattached [from that object or player]\"; this includes if that Aura, Equipment, or Fortification leaves the battlefield, the object leaves the zone it was in, or that player leaves the game."
+status = "implemented"
+impl_files = ["game/sba.rs:409", "game/sba.rs:427", "game/trigger_matchers.rs:1216", "game/trigger_matchers.rs:1217"]
 test_files = []
-notes = ""
+notes = "SBA unattaches equipment when the equipped permanent is illegal (CR 704.5n). TriggerMode::Unattach fires on becoming-unattached events."
 
 [cr_701_4]
 rule = "701.4"
@@ -74,11 +74,11 @@ text = "Behold"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Behold (Bloomburrow set keyword action) is not implemented. No parser recognition or WaitingFor state."
 
 [cr_701_4a]
 rule = "701.4a"
-text = "“Behold a [quality]” means “Reveal a [quality] card from your hand or choose a [quality] permanent you control on the battlefield.”"
+text = "\"Behold a [quality]\" means \"Reveal a [quality] card from your hand or choose a [quality] permanent you control on the battlefield.\""
 status = "missing"
 impl_files = []
 test_files = []
@@ -86,7 +86,7 @@ notes = ""
 
 [cr_701_4b]
 rule = "701.4b"
-text = "The phrase “if a [quality] was beheld” refers to whether or not the object had that quality at the time the player took that action, regardless of whether or not the revealed card or chosen permanent still has that quality as the spell or ability including that phrase resolves."
+text = "The phrase \"if a [quality] was beheld\" refers to whether or not the object had that quality at the time the player took that action, regardless of whether or not the revealed card or chosen permanent still has that quality as the spell or ability including that phrase resolves."
 status = "missing"
 impl_files = []
 test_files = []
@@ -95,14 +95,14 @@ notes = ""
 [cr_701_5]
 rule = "701.5"
 text = "Cast"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/casting.rs", "game/engine.rs"]
 test_files = []
-notes = ""
+notes = "Casting is the primary flow: WaitingFor::Priority → GameAction::CastSpell → casting.rs prepare_spell_cast."
 
 [cr_701_5a]
 rule = "701.5a"
-text = "To cast a spell is to take it from the zone it’s in (usually the hand), put it on the stack, and pay its costs, so that it will eventually resolve and have its effect. A player may cast a spell if they have priority. See rule 601, “Casting Spells.”"
+text = "To cast a spell is to take it from the zone it's in (usually the hand), put it on the stack, and pay its costs, so that it will eventually resolve and have its effect. A player may cast a spell if they have priority. See rule 601, \"Casting Spells.\""
 status = "implemented"
 impl_files = ["parser/oracle_effect/mod.rs:975", "parser/oracle_effect/mod.rs:979"]
 test_files = []
@@ -111,40 +111,40 @@ notes = ""
 [cr_701_5b]
 rule = "701.5b"
 text = "To cast a card is to cast it as a spell."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/casting.rs"]
 test_files = []
-notes = ""
+notes = "Implicit in the casting pipeline — cards are always cast as spells. No separate code path required."
 
 [cr_701_6]
 rule = "701.6"
 text = "Counter"
 status = "implemented"
-impl_files = ["parser/oracle_effect/imperative.rs:1269"]
+impl_files = ["parser/oracle_effect/imperative.rs:1269", "game/effects/counter.rs"]
 test_files = []
 notes = ""
 
 [cr_701_6a]
 rule = "701.6a"
-text = "To counter a spell or ability means to cancel it, removing it from the stack. It doesn’t resolve and none of its effects occur. A countered spell is put into its owner’s graveyard."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "To counter a spell or ability means to cancel it, removing it from the stack. It doesn't resolve and none of its effects occur. A countered spell is put into its owner's graveyard."
+status = "implemented"
+impl_files = ["game/effects/counter.rs:17", "game/effects/counter.rs:130", "game/effects/counter.rs:132"]
+test_files = ["game/effects/counter.rs:265"]
+notes = "counter.rs removes the spell from the stack and moves it to graveyard (CR 608.2b path). Abilities are removed from the stack without zone move."
 
 [cr_701_6b]
 rule = "701.6b"
-text = "The player who cast a countered spell or activated a countered ability doesn’t get a “refund” of any costs that were paid."
-status = "missing"
-impl_files = []
+text = "The player who cast a countered spell or activated a countered ability doesn't get a \"refund\" of any costs that were paid."
+status = "implemented"
+impl_files = ["game/effects/counter.rs"]
 test_files = []
-notes = ""
+notes = "No cost-refund logic exists in counter resolution — costs already paid via the casting/activation pipeline are not returned."
 
 [cr_701_7]
 rule = "701.7"
 text = "Create"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/token.rs", "types/triggers.rs"]
 test_files = []
 notes = ""
 
@@ -159,18 +159,18 @@ notes = ""
 [cr_701_7b]
 rule = "701.7b"
 text = "If a replacement effect applies to a token being created, that effect applies before considering any continuous effects that will modify the characteristics of that token. If a replacement effect applies to a token entering the battlefield, that effect applies after considering any continuous effects that will modify the characteristics of that token."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/token.rs:375"]
 test_files = []
-notes = ""
+notes = "CR 614.1a: token creation is proposed through the replacement pipeline (ProposedEvent::CreateToken) before the token enters the battlefield."
 
 [cr_701_7c]
 rule = "701.7c"
-text = "Previously, an effect that created tokens instructed a player to “put [those tokens] onto the battlefield.” Cards that were printed with that text have received errata in the Oracle card reference so they now “create” those tokens."
-status = "missing"
+text = "Previously, an effect that created tokens instructed a player to \"put [those tokens] onto the battlefield.\" Cards that were printed with that text have received errata in the Oracle card reference so they now \"create\" those tokens."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Historical errata note — no implementation required. Engine uses MTGJSON oracle text which has the errata applied."
 
 [cr_701_8]
 rule = "701.8"
@@ -182,7 +182,7 @@ notes = ""
 
 [cr_701_8a]
 rule = "701.8a"
-text = "To destroy a permanent, move it from the battlefield to its owner’s graveyard."
+text = "To destroy a permanent, move it from the battlefield to its owner's graveyard."
 status = "implemented"
 impl_files = ["game/effects/destroy.rs:13"]
 test_files = []
@@ -190,7 +190,7 @@ notes = ""
 
 [cr_701_8b]
 rule = "701.8b"
-text = "The only ways a permanent can be destroyed are as a result of an effect that uses the word “destroy” or as a result of the state-based actions that check for lethal damage (see rule 704.5g) or damage from a source with deathtouch (see rule 704.5h). If a permanent is put into its owner’s graveyard for any other reason, it hasn’t been “destroyed.”"
+text = "The only ways a permanent can be destroyed are as a result of an effect that uses the word \"destroy\" or as a result of the state-based actions that check for lethal damage (see rule 704.5g) or damage from a source with deathtouch (see rule 704.5h). If a permanent is put into its owner's graveyard for any other reason, it hasn't been \"destroyed.\""
 status = "implemented"
 impl_files = ["game/effects/destroy.rs:14"]
 test_files = []
@@ -198,11 +198,11 @@ notes = ""
 
 [cr_701_8c]
 rule = "701.8c"
-text = "A regeneration effect replaces a destruction event. See rule 701.19, “Regenerate.”"
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "A regeneration effect replaces a destruction event. See rule 701.19, \"Regenerate.\""
+status = "implemented"
+impl_files = ["game/replacement.rs:257", "game/replacement.rs:263"]
+test_files = ["game/effects/destroy.rs:386"]
+notes = "destroy_applier() in replacement.rs intercepts ProposedEvent::Destroy when a regeneration shield is present, taps the permanent and removes it from combat instead of destroying it."
 
 [cr_701_9]
 rule = "701.9"
@@ -214,7 +214,7 @@ notes = ""
 
 [cr_701_9a]
 rule = "701.9a"
-text = "To discard a card, move it from its owner’s hand to that player’s graveyard."
+text = "To discard a card, move it from its owner's hand to that player's graveyard."
 status = "implemented"
 impl_files = ["game/effects/discard.rs:15"]
 test_files = []
@@ -230,11 +230,11 @@ notes = ""
 
 [cr_701_9c]
 rule = "701.9c"
-text = "If a card is discarded, but an effect causes it to be put into a hidden zone instead of into its owner’s graveyard without being revealed, all values of that card’s characteristics are considered to be undefined. If a card is discarded this way to pay a cost that specifies a characteristic about the discarded card, that cost payment is illegal; the game returns to the moment before the cost was paid (see rule 732, “Handling Illegal Actions”)."
+text = "If a card is discarded, but an effect causes it to be put into a hidden zone instead of into its owner's graveyard without being revealed, all values of that card's characteristics are considered to be undefined. If a card is discarded this way to pay a cost that specifies a characteristic about the discarded card, that cost payment is illegal; the game returns to the moment before the cost was paid (see rule 732, \"Handling Illegal Actions\")."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Hidden-zone discard (e.g., Leyline of the Void interaction) is not implemented. All discards move to the graveyard."
 
 [cr_701_10]
 rule = "701.10"
@@ -246,7 +246,7 @@ notes = ""
 
 [cr_701_10a]
 rule = "701.10a"
-text = "Doubling a creature’s power and/or toughness creates a continuous effect. This effect modifies that creature’s power and/or toughness but doesn’t set those characteristics to a specific value. See rule 613.4c."
+text = "Doubling a creature's power and/or toughness creates a continuous effect. This effect modifies that creature's power and/or toughness but doesn't set those characteristics to a specific value. See rule 613.4c."
 status = "implemented"
 impl_files = ["game/effects/pump.rs:128", "game/effects/pump.rs:181", "types/ability.rs:370", "types/ability.rs:384", "types/ability.rs:1835", "types/ability.rs:1841", "types/ability.rs:2171"]
 test_files = []
@@ -254,7 +254,7 @@ notes = ""
 
 [cr_701_10b]
 rule = "701.10b"
-text = "To double a creature’s power, that creature gets +X/+0, where X is that creature’s power as the spell or ability that doubles its power resolves. Similarly, an effect that doubles a creature’s toughness gives it +0/+X, where X is that creature’s toughness. Doubling a creature’s power and toughness gives it +X/+Y, where X is its power and Y is its toughness."
+text = "To double a creature's power, that creature gets +X/+0, where X is that creature's power as the spell or ability that doubles its power resolves. Similarly, an effect that doubles a creature's toughness gives it +0/+X, where X is that creature's toughness. Doubling a creature's power and toughness gives it +X/+Y, where X is its power and Y is its toughness."
 status = "implemented"
 impl_files = ["game/effects/pump.rs:129", "game/effects/pump.rs:229"]
 test_files = []
@@ -262,7 +262,7 @@ notes = ""
 
 [cr_701_10c]
 rule = "701.10c"
-text = "If a creature’s power is less than 0 when it’s doubled, doubling that creature’s power instead means that the creature gets -X/-0, where X is the difference between 0 and its power. Similarly, if its toughness is less than 0 when doubled, it gets -0/-X. If one characteristic’s value is negative but the other isn’t when both are doubled, it gets -X/+Y or +X/-Y, as appropriate."
+text = "If a creature's power is less than 0 when it's doubled, doubling that creature's power instead means that the creature gets -X/-0, where X is the difference between 0 and its power. Similarly, if its toughness is less than 0 when doubled, it gets -0/-X. If one characteristic's value is negative but the other isn't when both are doubled, it gets -X/+Y or +X/-Y, as appropriate."
 status = "implemented"
 impl_files = ["game/effects/pump.rs:131"]
 test_files = []
@@ -270,7 +270,7 @@ notes = ""
 
 [cr_701_10d]
 rule = "701.10d"
-text = "To double a player’s life total, the player gains or loses an amount of life such that their new life total is twice its current value."
+text = "To double a player's life total, the player gains or loses an amount of life such that their new life total is twice its current value."
 status = "implemented"
 impl_files = ["game/effects/double.rs:12", "game/effects/double.rs:104", "game/effects/double.rs:124", "game/effects/double.rs:133", "game/effects/double.rs:399", "parser/oracle_effect/counter.rs:218", "types/ability.rs:368", "types/ability.rs:377", "types/ability.rs:2169"]
 test_files = []
@@ -286,7 +286,7 @@ notes = ""
 
 [cr_701_10f]
 rule = "701.10f"
-text = "To double the amount of a type of mana in a player’s mana pool, that player adds an amount of mana of that type equal to the amount they already have."
+text = "To double the amount of a type of mana in a player's mana pool, that player adds an amount of mana of that type equal to the amount they already have."
 status = "implemented"
 impl_files = ["game/effects/double.rs:150", "game/effects/double.rs:189", "game/effects/double.rs:429", "parser/oracle_effect/counter.rs:235", "types/ability.rs:379"]
 test_files = []
@@ -298,7 +298,7 @@ text = "To double an amount of damage a source would deal, that source instead d
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Damage-doubling replacement effect is not implemented."
 
 [cr_701_11]
 rule = "701.11"
@@ -306,11 +306,11 @@ text = "Triple"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Triple (power/toughness tripling) is not implemented. No cards with this effect are commonly supported."
 
 [cr_701_11a]
 rule = "701.11a"
-text = "Tripling a creature’s power and/or toughness creates a continuous effect. This effect modifies that creature’s power and/or toughness but doesn’t set those characteristics to a specific value. See rule 613.4c."
+text = "Tripling a creature's power and/or toughness creates a continuous effect. This effect modifies that creature's power and/or toughness but doesn't set those characteristics to a specific value. See rule 613.4c."
 status = "missing"
 impl_files = []
 test_files = []
@@ -318,7 +318,7 @@ notes = ""
 
 [cr_701_11b]
 rule = "701.11b"
-text = "To triple a creature’s power, that creature gets +X/+0, where X is twice that creature’s power as the spell or ability that triples its power resolves. Similarly, an effect that triples a creature’s toughness gives it +0/+X, where X is twice that creature’s toughness. Tripling a creature’s power and toughness gives it +X/+Y, where X is twice its power and Y is twice its toughness."
+text = "To triple a creature's power, that creature gets +X/+0, where X is twice that creature's power as the spell or ability that triples its power resolves. Similarly, an effect that triples a creature's toughness gives it +0/+X, where X is twice that creature's toughness. Tripling a creature's power and toughness gives it +X/+Y, where X is twice its power and Y is twice its toughness."
 status = "missing"
 impl_files = []
 test_files = []
@@ -326,7 +326,7 @@ notes = ""
 
 [cr_701_11c]
 rule = "701.11c"
-text = "If a creature’s power is less than 0 when it’s tripled, tripling that creature’s power instead means that the creature gets -X/-0, where X is twice the difference between 0 and its power. Similarly, if its toughness is less than 0 when tripled, it gets -0/-X. If one characteristic’s value is negative but the other isn’t when both are tripled, it gets -X/+Y or +X/-Y, as appropriate."
+text = "If a creature's power is less than 0 when it's tripled, tripling that creature's power instead means that the creature gets -X/-0, where X is twice the difference between 0 and its power. Similarly, if its toughness is less than 0 when tripled, it gets -0/-X. If one characteristic's value is negative but the other isn't when both are tripled, it gets -X/+Y or +X/-Y, as appropriate."
 status = "missing"
 impl_files = []
 test_files = []
@@ -335,14 +335,14 @@ notes = ""
 [cr_701_12]
 rule = "701.12"
 text = "Exchange"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/exchange_control.rs"]
 test_files = []
 notes = ""
 
 [cr_701_12a]
 rule = "701.12a"
-text = "A spell or ability may instruct players to exchange something (for example, life totals or control of two permanents) as part of its resolution. When such a spell or ability resolves, if the entire exchange can’t be completed, no part of the exchange occurs."
+text = "A spell or ability may instruct players to exchange something (for example, life totals or control of two permanents) as part of its resolution. When such a spell or ability resolves, if the entire exchange can't be completed, no part of the exchange occurs."
 status = "implemented"
 impl_files = ["game/effects/exchange_control.rs:9", "game/effects/exchange_control.rs:34", "game/effects/exchange_control.rs:45", "game/effects/exchange_control.rs:80", "game/effects/exchange_control.rs:211", "parser/oracle_effect/imperative.rs:1392", "parser/oracle_effect/imperative.rs:1631", "parser/oracle_effect/types.rs:181", "types/ability.rs:2143"]
 test_files = []
@@ -358,19 +358,19 @@ notes = ""
 
 [cr_701_12c]
 rule = "701.12c"
-text = "When life totals are exchanged, each player gains or loses the amount of life necessary to equal the other player’s previous life total. Replacement effects may modify these gains and losses, and triggered abilities may trigger on them. A player who can’t gain life can’t be given a higher life total this way, and a player who can’t lose life can’t be given a lower life total this way (see rules 119.7–8)."
+text = "When life totals are exchanged, each player gains or loses the amount of life necessary to equal the other player's previous life total. Replacement effects may modify these gains and losses, and triggered abilities may trigger on them. A player who can't gain life can't be given a higher life total this way, and a player who can't lose life can't be given a lower life total this way (see rules 119.7–8)."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Life total exchange is not implemented. exchange_control.rs handles control exchange only."
 
 [cr_701_12d]
 rule = "701.12d"
-text = "Some spells or abilities may instruct a player to exchange cards in one zone with cards in a different zone (for example, exiled cards and cards in a player’s hand). These spells and abilities work the same as other “exchange” spells and abilities, except they can exchange the cards only if all the cards are owned by the same player, and they can exchange the cards even if one zone is empty."
+text = "Some spells or abilities may instruct a player to exchange cards in one zone with cards in a different zone (for example, exiled cards and cards in a player's hand). These spells and abilities work the same as other \"exchange\" spells and abilities, except they can exchange the cards only if all the cards are owned by the same player, and they can exchange the cards even if one zone is empty."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Zone-to-zone card exchange not implemented."
 
 [cr_701_12e]
 rule = "701.12e"
@@ -390,35 +390,35 @@ notes = ""
 
 [cr_701_12g]
 rule = "701.12g"
-text = "A spell or ability may instruct a player to exchange two numerical values. In such an exchange, each value becomes equal to the previous value of the other. If either of those values is a life total, the affected player gains or loses the amount of life necessary to equal the other value. Replacement effects may modify this gain or loss, and triggered abilities may trigger on it. A player who can’t gain life can’t be given a higher life total this way, and a player who can’t lose life can’t be given a lower life total this way (see rules 119.7–8). If either of those values is a power or toughness, a continuous effect is created setting that power or toughness to the other value (see rule 613.4b). This rule does not apply to spells and abilities that switch a creature’s power and toughness."
+text = "A spell or ability may instruct a player to exchange two numerical values. In such an exchange, each value becomes equal to the previous value of the other. If either of those values is a life total, the affected player gains or loses the amount of life necessary to equal the other value. Replacement effects may modify this gain or loss, and triggered abilities may trigger on it. A player who can't gain life can't be given a higher life total this way, and a player who can't lose life can't be given a lower life total this way (see rules 119.7–8). If either of those values is a power or toughness, a continuous effect is created setting that power or toughness to the other value (see rule 613.4b). This rule does not apply to spells and abilities that switch a creature's power and toughness."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Numerical value exchange (life total swap, power/toughness swap) not implemented."
 
 [cr_701_12h]
 rule = "701.12h"
-text = "One card (Exchange of Words) instructs a player to exchange the text boxes of two creatures. This creates a text-changing effect (see rule 612, “Text-Changing Effects”). In such an exchange, the rules text of each permanent becomes the previous rules text of the other."
+text = "One card (Exchange of Words) instructs a player to exchange the text boxes of two creatures. This creates a text-changing effect (see rule 612, \"Text-Changing Effects\"). In such an exchange, the rules text of each permanent becomes the previous rules text of the other."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Text box exchange (Exchange of Words) not implemented."
 
 [cr_701_13]
 rule = "701.13"
 text = "Exile"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/change_zone.rs"]
 test_files = []
-notes = ""
+notes = "Exile is implemented as a ChangeZone effect targeting Zone::Exile."
 
 [cr_701_13a]
 rule = "701.13a"
-text = "To exile an object, move it to the exile zone from wherever it is. See rule 406, “Exile.”"
+text = "To exile an object, move it to the exile zone from wherever it is. See rule 406, \"Exile.\""
 status = "implemented"
-impl_files = ["game/effects/mill.rs:21"]
-test_files = []
-notes = ""
+impl_files = ["game/effects/change_zone.rs:136", "game/effects/change_zone.rs:429"]
+test_files = ["game/effects/change_zone.rs:417"]
+notes = "Zone moves to Zone::Exile are handled in change_zone.rs. Previous entry (mill.rs:21) was a misattribution — that comment references finding the exile target player, not the exile action itself."
 
 [cr_701_14]
 rule = "701.14"
@@ -439,10 +439,10 @@ notes = ""
 [cr_701_14b]
 rule = "701.14b"
 text = "If one or both creatures instructed to fight are no longer on the battlefield or are no longer creatures, neither of them fights or deals damage. If one or both creatures are illegal targets for a resolving spell or ability that instructs them to fight, neither of them fights or deals damage."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/fight.rs:50", "game/effects/fight.rs:105"]
 test_files = []
-notes = ""
+notes = "fight.rs returns EffectError::ObjectNotFound if either creature is gone from the battlefield before damage is applied. Target legality is enforced by the targeting system prior to resolution."
 
 [cr_701_14c]
 rule = "701.14c"
@@ -450,21 +450,21 @@ text = "If a creature fights itself, it deals damage to itself equal to twice it
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Self-fight edge case not specifically handled. The fight resolver reads separate source and target IDs; if they are the same object damage would be applied once from each direction but the second apply_damage_to_target call after the first could result in the object already being gone."
 
 [cr_701_14d]
 rule = "701.14d"
-text = "The damage dealt when a creature fights isn’t combat damage."
-status = "missing"
-impl_files = []
+text = "The damage dealt when a creature fights isn't combat damage."
+status = "implemented"
+impl_files = ["game/effects/fight.rs:84"]
 test_files = []
-notes = ""
+notes = "fight.rs passes is_combat_damage: false to apply_damage_to_target, consistent with CR 701.14d."
 
 [cr_701_15]
 rule = "701.15"
 text = "Goad"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/goad.rs"]
 test_files = []
 notes = ""
 
@@ -478,7 +478,7 @@ notes = ""
 
 [cr_701_15b]
 rule = "701.15b"
-text = "Goaded is a designation a permanent can have. A goaded creature attacks each combat if able and attacks a player other than the controller of the permanent, spell, or ability that caused it to be goaded if able. Goaded is neither an ability nor part of the permanent’s copiable values."
+text = "Goaded is a designation a permanent can have. A goaded creature attacks each combat if able and attacks a player other than the controller of the permanent, spell, or ability that caused it to be goaded if able. Goaded is neither an ability nor part of the permanent's copiable values."
 status = "implemented"
 impl_files = ["game/combat.rs:566", "game/combat.rs:635", "game/combat.rs:655", "game/combat.rs:2203", "game/effects/goad.rs:8"]
 test_files = []
@@ -494,7 +494,7 @@ notes = ""
 
 [cr_701_15d]
 rule = "701.15d"
-text = "Once a player has goaded a creature, the same player goading it again has no effect. Doing so doesn’t create additional combat requirements."
+text = "Once a player has goaded a creature, the same player goading it again has no effect. Doing so doesn't create additional combat requirements."
 status = "implemented"
 impl_files = ["game/effects/goad.rs:13", "game/effects/goad.rs:32", "game/effects/goad.rs:99"]
 test_files = []
@@ -510,7 +510,7 @@ notes = ""
 
 [cr_701_16a]
 rule = "701.16a"
-text = "“Investigate” means “Create a Clue token.” See rule 111.10f."
+text = "\"Investigate\" means \"Create a Clue token.\" See rule 111.10f."
 status = "implemented"
 impl_files = ["game/effects/investigate.rs:5"]
 test_files = []
@@ -534,7 +534,7 @@ notes = ""
 
 [cr_701_17b]
 rule = "701.17b"
-text = "A player can’t mill a number of cards greater than the number of cards in their library. If given the choice to do so, they can’t choose to take that action. If instructed to do so, they mill as many as possible. Similarly, the player can’t pay a cost that includes milling a number of cards greater than the number of cards in their library."
+text = "A player can't mill a number of cards greater than the number of cards in their library. If given the choice to do so, they can't choose to take that action. If instructed to do so, they mill as many as possible. Similarly, the player can't pay a cost that includes milling a number of cards greater than the number of cards in their library."
 status = "implemented"
 impl_files = ["game/effects/mill.rs:41"]
 test_files = []
@@ -546,63 +546,63 @@ text = "An effect that refers to a milled card can find that card in the zone it
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mill-trigger context (finding a specific milled card by identity) is not tracked across the mill event boundary."
 
 [cr_701_17d]
 rule = "701.17d"
-text = "If an ability checks information about a single milled card but more than one card was milled, that ability refers to each of the milled cards. If that ability asks for any information about the milled card, such as a characteristic or mana value, it gets multiple answers. If these answers are used to determine the value of a variable, the sum of the answers is used. If that ability performs any actions on “the” card, it performs that action on each milled card. If that ability performs any actions on “a” card, the controller of the ability chooses which card is affected."
+text = "If an ability checks information about a single milled card but more than one card was milled, that ability refers to each of the milled cards. If that ability asks for any information about the milled card, such as a characteristic or mana value, it gets multiple answers. If these answers are used to determine the value of a variable, the sum of the answers is used. If that ability performs any actions on \"the\" card, it performs that action on each milled card. If that ability performs any actions on \"a\" card, the controller of the ability chooses which card is affected."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multi-card mill trigger interaction (\"each milled card\") is not specifically handled."
 
 [cr_701_18]
 rule = "701.18"
 text = "Play"
 status = "implemented"
-impl_files = ["parser/oracle_effect/imperative.rs:1263"]
+impl_files = ["parser/oracle_effect/imperative.rs:1263", "game/engine.rs:231"]
 test_files = []
-notes = ""
+notes = "GameAction::PlayLand handles the play-a-land action. Cast effects handle playing as a spell."
 
 [cr_701_18a]
 rule = "701.18a"
-text = "To play a land means to put it onto the battlefield from the zone it’s in (usually the hand). A player may play a land if they have priority, it’s the main phase of their turn, the stack is empty, and they haven’t played a land this turn. Playing a land is a special action (see rule 116), so it doesn’t use the stack; it simply happens. Putting a land onto the battlefield as the result of a spell or ability isn’t the same as playing a land. See rule 305, “Lands.”"
+text = "To play a land means to put it onto the battlefield from the zone it's in (usually the hand). A player may play a land if they have priority, it's the main phase of their turn, the stack is empty, and they haven't played a land this turn. Playing a land is a special action (see rule 116), so it doesn't use the stack; it simply happens. Putting a land onto the battlefield as the result of a spell or ability isn't the same as playing a land. See rule 305, \"Lands.\""
 status = "implemented"
 impl_files = ["parser/oracle_effect/sequence.rs:118", "parser/oracle_effect/sequence.rs:521"]
 test_files = []
-notes = ""
+notes = "Play land validation (main phase, empty stack, land play count) is enforced in the GameAction::PlayLand arm of engine.rs."
 
 [cr_701_18b]
 rule = "701.18b"
 text = "To play a card means to play that card as a land or to cast that card as a spell, whichever is appropriate."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/engine.rs:231"]
 test_files = []
-notes = ""
+notes = "Play-a-card effects dispatch to PlayLand or CastSpell based on card type."
 
 [cr_701_18c]
 rule = "701.18c"
-text = "Some effects instruct a player to “play” with a certain aspect of the game changed, such as “Play with the top card of your library revealed.” “Play” in this sense means to play the Magic game."
-status = "missing"
+text = "Some effects instruct a player to \"play\" with a certain aspect of the game changed, such as \"Play with the top card of your library revealed.\" \"Play\" in this sense means to play the Magic game."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Informational clarification — no separate implementation path needed beyond the individual effects that change game aspects."
 
 [cr_701_18d]
 rule = "701.18d"
-text = "Previously, the action of casting a spell, or casting a card as a spell, was referred to on cards as “playing” that spell or that card. Cards that were printed with that text have received errata in the Oracle card reference so they now refer to “casting” that spell or that card."
-status = "missing"
+text = "Previously, the action of casting a spell, or casting a card as a spell, was referred to on cards as \"playing\" that spell or that card. Cards that were printed with that text have received errata in the Oracle card reference so they now refer to \"casting\" that spell or that card."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Historical errata note — no implementation required. MTGJSON oracle text includes the errata."
 
 [cr_701_18e]
 rule = "701.18e"
-text = "Previously, the action of using an activated ability was referred to on cards as “playing” that ability. Cards that were printed with that text have received errata in the Oracle card reference so they now refer to “activating” that ability."
-status = "missing"
+text = "Previously, the action of using an activated ability was referred to on cards as \"playing\" that ability. Cards that were printed with that text have received errata in the Oracle card reference so they now refer to \"activating\" that ability."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Historical errata note — no implementation required."
 
 [cr_701_19]
 rule = "701.19"
@@ -614,7 +614,7 @@ notes = ""
 
 [cr_701_19a]
 rule = "701.19a"
-text = "If the effect of a resolving spell or ability regenerates a permanent, it creates a replacement effect that protects the permanent the next time it would be destroyed this turn. In this case, “Regenerate [permanent]” means “The next time [permanent] would be destroyed this turn, instead remove all damage marked on it and its controller taps it. If it’s an attacking or blocking creature, remove it from combat.”"
+text = "If the effect of a resolving spell or ability regenerates a permanent, it creates a replacement effect that protects the permanent the next time it would be destroyed this turn. In this case, \"Regenerate [permanent]\" means \"The next time [permanent] would be destroyed this turn, instead remove all damage marked on it and its controller taps it. If it's an attacking or blocking creature, remove it from combat.\""
 status = "implemented"
 impl_files = ["game/effects/regenerate.rs:10", "game/effects/regenerate.rs:58", "game/replacement.rs:297", "game/sba.rs:1299", "types/ability.rs:180", "types/ability.rs:1577", "types/ability.rs:1581", "types/ability.rs:1699", "types/ability.rs:3615", "types/events.rs:191"]
 test_files = []
@@ -622,7 +622,7 @@ notes = ""
 
 [cr_701_19b]
 rule = "701.19b"
-text = "If the effect of a static ability regenerates a permanent, it replaces destruction with an alternate effect each time that permanent would be destroyed. In this case, “Regenerate [permanent]” means “Instead remove all damage marked on [permanent] and its controller taps it. If it’s an attacking or blocking creature, remove it from combat.”"
+text = "If the effect of a static ability regenerates a permanent, it replaces destruction with an alternate effect each time that permanent would be destroyed. In this case, \"Regenerate [permanent]\" means \"Instead remove all damage marked on [permanent] and its controller taps it. If it's an attacking or blocking creature, remove it from combat.\""
 status = "implemented"
 impl_files = ["game/replacement.rs:301", "game/sba.rs:95", "game/sba.rs:270", "game/sba.rs:313", "game/turns.rs:235"]
 test_files = []
@@ -630,7 +630,7 @@ notes = ""
 
 [cr_701_19c]
 rule = "701.19c"
-text = "Neither activating an ability that creates a regeneration shield nor casting a spell that creates a regeneration shield is the same as regenerating a permanent. Effects that say that a permanent can’t be regenerated don’t preclude such abilities from being activated or such spells from being cast; rather, they cause regeneration shields to not be applied."
+text = "Neither activating an ability that creates a regeneration shield nor casting a spell that creates a regeneration shield is the same as regenerating a permanent. Effects that say that a permanent can't be regenerated don't preclude such abilities from being activated or such spells from being cast; rather, they cause regeneration shields to not be applied."
 status = "implemented"
 impl_files = ["game/replacement.rs:305", "game/replacement.rs:2634", "parser/oracle_effect/sequence.rs:661", "parser/oracle_effect/types.rs:130", "types/proposed_event.rs:98"]
 test_files = []
@@ -639,14 +639,14 @@ notes = ""
 [cr_701_20]
 rule = "701.20"
 text = "Reveal"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/reveal_hand.rs", "game/effects/reveal_top.rs"]
 test_files = []
 notes = ""
 
 [cr_701_20a]
 rule = "701.20a"
-text = "To reveal a card, show that card to all players for a brief time. If an effect causes a card to be revealed, it remains revealed for as long as necessary to complete the parts of the effect that card is relevant to. If the cost to cast a spell or activate an ability includes revealing a card, or if a card is revealed because an ability is activated from a hidden zone (see rule 602.2a), the card remains revealed from the time the spell or ability is announced until the time it leaves the stack. If revealing a card causes a triggered ability to trigger, the card remains revealed until that triggered ability leaves the stack. If that ability isn’t put onto the stack the next time a player would receive priority, the card ceases to be revealed."
+text = "To reveal a card, show that card to all players for a brief time. If an effect causes a card to be revealed, it remains revealed for as long as necessary to complete the parts of the effect that card is relevant to. If the cost to cast a spell or activate an ability includes revealing a card, or if a card is revealed because an ability is activated from a hidden zone (see rule 602.2a), the card remains revealed from the time the spell or ability is announced until the time it leaves the stack. If revealing a card causes a triggered ability to trigger, the card remains revealed until that triggered ability leaves the stack. If that ability isn't put onto the stack the next time a player would receive priority, the card ceases to be revealed."
 status = "implemented"
 impl_files = ["game/effects/reveal_hand.rs:9", "game/effects/reveal_hand.rs:44", "parser/oracle_effect/imperative.rs:471", "parser/oracle_effect/mod.rs:1390", "parser/oracle_effect/types.rs:321", "types/ability.rs:1947", "types/ability.rs:1951"]
 test_files = []
@@ -654,7 +654,7 @@ notes = ""
 
 [cr_701_20b]
 rule = "701.20b"
-text = "Revealing a card doesn’t cause it to leave the zone it’s in."
+text = "Revealing a card doesn't cause it to leave the zone it's in."
 status = "implemented"
 impl_files = ["game/effects/reveal_hand.rs:61", "game/effects/reveal_top.rs:43"]
 test_files = []
@@ -663,18 +663,18 @@ notes = ""
 [cr_701_20c]
 rule = "701.20c"
 text = "A card that is currently revealed may be revealed again."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/reveal_hand.rs:61"]
 test_files = []
-notes = ""
+notes = "Reveal operations do not check for prior revealed state — revealing again is always permitted by the engine."
 
 [cr_701_20d]
 rule = "701.20d"
-text = "If cards in a player’s library are shuffled or otherwise reordered, any revealed cards that are reordered stop being revealed and become new objects."
+text = "If cards in a player's library are shuffled or otherwise reordered, any revealed cards that are reordered stop being revealed and become new objects."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "The engine does not track object identity across shuffle events for revealed-card tracking. Revealed status is not cleared on shuffle."
 
 [cr_701_20e]
 rule = "701.20e"
@@ -694,7 +694,7 @@ notes = ""
 
 [cr_701_21a]
 rule = "701.21a"
-text = "To sacrifice a permanent, its controller moves it from the battlefield directly to its owner’s graveyard. A player can’t sacrifice something that isn’t a permanent, or something that’s a permanent they don’t control. Sacrificing a permanent doesn’t destroy it, so regeneration or other effects that replace destruction can’t affect this action."
+text = "To sacrifice a permanent, its controller moves it from the battlefield directly to its owner's graveyard. A player can't sacrifice something that isn't a permanent, or something that's a permanent they don't control. Sacrificing a permanent doesn't destroy it, so regeneration or other effects that replace destruction can't affect this action."
 status = "implemented"
 impl_files = ["game/effects/sacrifice.rs:7", "game/effects/sacrifice.rs:25", "game/engine.rs:647"]
 test_files = []
@@ -710,7 +710,7 @@ notes = ""
 
 [cr_701_22a]
 rule = "701.22a"
-text = "To “scry N” means to look at the top N cards of your library, then put any number of them on the bottom of your library in any order and the rest on top of your library in any order."
+text = "To \"scry N\" means to look at the top N cards of your library, then put any number of them on the bottom of your library in any order and the rest on top of your library in any order."
 status = "implemented"
 impl_files = ["game/effects/scry.rs:5"]
 test_files = []
@@ -718,7 +718,7 @@ notes = ""
 
 [cr_701_22b]
 rule = "701.22b"
-text = "If a player is instructed to scry 0, no scry event occurs. Abilities that trigger whenever a player scries won’t trigger."
+text = "If a player is instructed to scry 0, no scry event occurs. Abilities that trigger whenever a player scries won't trigger."
 status = "implemented"
 impl_files = ["game/effects/scry.rs:23"]
 test_files = []
@@ -730,27 +730,27 @@ text = "If multiple players scry at once, each of those players looks at the top
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Simultaneous multi-player scry is not implemented. The engine always scries one player at a time."
 
 [cr_701_22d]
 rule = "701.22d"
 text = "An ability that triggers whenever a player scries triggers after the process described in rule 701.22a is complete, even if some or all of those actions were impossible."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/scry.rs:23", "types/triggers.rs:255"]
 test_files = []
-notes = ""
+notes = "The scry trigger fires via TriggerMode matching on GameEvent::Scried after the scry operation completes."
 
 [cr_701_23]
 rule = "701.23"
 text = "Search"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/search_library.rs"]
 test_files = []
 notes = ""
 
 [cr_701_23a]
 rule = "701.23a"
-text = "To search for a card in a zone, look at all cards in that zone (even if it’s a hidden zone) and find a card that matches the given description."
+text = "To search for a card in a zone, look at all cards in that zone (even if it's a hidden zone) and find a card that matches the given description."
 status = "implemented"
 impl_files = ["game/effects/search_library.rs:6", "parser/oracle_effect/sequence.rs:516", "parser/oracle_effect/types.rs:113"]
 test_files = []
@@ -758,35 +758,35 @@ notes = ""
 
 [cr_701_23b]
 rule = "701.23b"
-text = "If a player is searching a hidden zone for cards with a stated quality, such as a card with a certain card type or color, that player isn’t required to find some or all of those cards even if they’re present in that zone."
+text = "If a player is searching a hidden zone for cards with a stated quality, such as a card with a certain card type or color, that player isn't required to find some or all of those cards even if they're present in that zone."
 status = "implemented"
 impl_files = ["game/effects/search_library.rs:44"]
 test_files = []
-notes = ""
+notes = "search_library.rs presents all matching candidates but allows the player to choose none (optional search)."
 
 [cr_701_23c]
 rule = "701.23c"
-text = "If a player is instructed to search a hidden zone for cards that match an undefined quality, that player may still search that zone but can’t find any cards."
+text = "If a player is instructed to search a hidden zone for cards that match an undefined quality, that player may still search that zone but can't find any cards."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Undefined-quality search edge case not explicitly handled."
 
 [cr_701_23d]
 rule = "701.23d"
-text = "If a player is searching a hidden zone simply for a quantity of cards, such as “a card” or “three cards,” that player must find that many cards (or as many as possible, if the zone doesn’t contain enough cards)."
+text = "If a player is searching a hidden zone simply for a quantity of cards, such as \"a card\" or \"three cards,\" that player must find that many cards (or as many as possible, if the zone doesn't contain enough cards)."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mandatory quantity search (e.g., search for any card without a quality constraint) not explicitly enforced."
 
 [cr_701_23e]
 rule = "701.23e"
-text = "If the effect that contains the search instruction doesn’t also contain instructions to reveal the found card(s), then they’re not revealed."
-status = "missing"
-impl_files = []
+text = "If the effect that contains the search instruction doesn't also contain instructions to reveal the found card(s), then they're not revealed."
+status = "implemented"
+impl_files = ["game/effects/search_library.rs"]
 test_files = []
-notes = ""
+notes = "search_library.rs does not reveal the found card unless the ability definition explicitly includes a reveal step."
 
 [cr_701_23f]
 rule = "701.23f"
@@ -794,7 +794,7 @@ text = "If searching a zone is replaced with searching a portion of that zone, a
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Partial-zone search replacement not implemented."
 
 [cr_701_23g]
 rule = "701.23g"
@@ -818,7 +818,7 @@ text = "If multiple players search at once, each of those players looks at the a
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Simultaneous multi-player search not implemented."
 
 [cr_701_23j]
 rule = "701.23j"
@@ -826,7 +826,7 @@ text = "If an effect instructs a player to search outside the game for a card, t
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Outside-the-game search (Wishes, Lessons) is not implemented."
 
 [cr_701_24]
 rule = "701.24"
@@ -846,7 +846,7 @@ notes = ""
 
 [cr_701_24b]
 rule = "701.24b"
-text = "Some effects cause a player to search a library for a card or cards, shuffle that library, then put some or all of the found cards into a different zone or in a certain position in that library. In such cases, the found cards aren’t included in the shuffle, even though they remain in the library at that time. Rather, all the cards in that library except those are shuffled. Abilities that trigger when a library is shuffled will still trigger. See also rule 401, “Library.”"
+text = "Some effects cause a player to search a library for a card or cards, shuffle that library, then put some or all of the found cards into a different zone or in a certain position in that library. In such cases, the found cards aren't included in the shuffle, even though they remain in the library at that time. Rather, all the cards in that library except those are shuffled. Abilities that trigger when a library is shuffled will still trigger. See also rule 401, \"Library.\""
 status = "implemented"
 impl_files = ["parser/oracle.rs:3315", "parser/oracle_effect/sequence.rs:502"]
 test_files = []
@@ -854,7 +854,7 @@ notes = ""
 
 [cr_701_24c]
 rule = "701.24c"
-text = "If an effect would cause a player to shuffle one or more specific objects into a library, that library is shuffled even if none of those objects are in the zone they’re expected to be in or an effect causes all of those objects to be moved to another zone or remain in their current zone."
+text = "If an effect would cause a player to shuffle one or more specific objects into a library, that library is shuffled even if none of those objects are in the zone they're expected to be in or an effect causes all of those objects to be moved to another zone or remain in their current zone."
 status = "missing"
 impl_files = []
 test_files = []
@@ -871,10 +871,10 @@ notes = ""
 [cr_701_24e]
 rule = "701.24e"
 text = "If an effect causes a player to shuffle a library containing zero or one cards, abilities that trigger when a library is shuffled will still trigger."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/shuffle.rs:7"]
 test_files = []
-notes = ""
+notes = "shuffle_library() does not check library size — it shuffles regardless, so the trigger fires even for 0 or 1 card libraries."
 
 [cr_701_24f]
 rule = "701.24f"
@@ -882,11 +882,11 @@ text = "If two or more effects cause a library to be shuffled multiple times sim
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Simultaneous multiple shuffle interactions are not specifically handled."
 
 [cr_701_24g]
 rule = "701.24g"
-text = "If an effect would cause a player to shuffle a library at the same time that an object would be put into a certain position in that library, the result is a shuffled library that’s randomized except that the object is in the specified position."
+text = "If an effect would cause a player to shuffle a library at the same time that an object would be put into a certain position in that library, the result is a shuffled library that's randomized except that the object is in the specified position."
 status = "implemented"
 impl_files = ["game/effects/put_on_top.rs:8", "game/effects/put_on_top.rs:36", "game/engine.rs:1742", "game/zones.rs:187", "parser/oracle_effect/imperative.rs:738", "parser/oracle_effect/imperative.rs:749", "parser/oracle_effect/imperative.rs:755", "parser/oracle_effect/imperative.rs:766", "parser/oracle_effect/imperative.rs:772", "parser/oracle_effect/imperative.rs:846", "types/ability.rs:1525", "types/ability.rs:2120"]
 test_files = []
@@ -902,7 +902,7 @@ notes = ""
 
 [cr_701_25a]
 rule = "701.25a"
-text = "To “surveil N” means to look at the top N cards of your library, then put any number of them into your graveyard and the rest on top of your library in any order."
+text = "To \"surveil N\" means to look at the top N cards of your library, then put any number of them into your graveyard and the rest on top of your library in any order."
 status = "implemented"
 impl_files = ["game/effects/surveil.rs:5", "game/transform.rs:9"]
 test_files = []
@@ -914,11 +914,11 @@ text = "If an effect allows you to look at additional cards while you surveil, t
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Extended surveil (looking at additional cards beyond N) is not implemented."
 
 [cr_701_25c]
 rule = "701.25c"
-text = "If a player is instructed to surveil 0, no surveil event occurs. Abilities that trigger whenever a player surveils won’t trigger."
+text = "If a player is instructed to surveil 0, no surveil event occurs. Abilities that trigger whenever a player surveils won't trigger."
 status = "implemented"
 impl_files = ["game/effects/surveil.rs:23"]
 test_files = []
@@ -927,10 +927,10 @@ notes = ""
 [cr_701_25d]
 rule = "701.25d"
 text = "An ability that triggers whenever a player surveils triggers after the process described in rule 701.25a is complete, even if some or all of those actions were impossible."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/surveil.rs:23", "types/triggers.rs:253"]
 test_files = []
-notes = ""
+notes = "Surveil triggers fire via TriggerMode matching on GameEvent after the surveil operation completes."
 
 [cr_701_26]
 rule = "701.26"
@@ -966,7 +966,7 @@ notes = ""
 
 [cr_701_27a]
 rule = "701.27a"
-text = "To transform a permanent, turn it over so that its other face is up. Only permanents represented by double-faced tokens and double-faced cards can transform. (See rule 712, “Double-Faced Cards.”)"
+text = "To transform a permanent, turn it over so that its other face is up. Only permanents represented by double-faced tokens and double-faced cards can transform. (See rule 712, \"Double-Faced Cards.\")"
 status = "implemented"
 impl_files = ["game/effects/transform_effect.rs:6"]
 test_files = []
@@ -974,15 +974,15 @@ notes = ""
 
 [cr_701_27b]
 rule = "701.27b"
-text = "Although transforming a permanent uses the same physical action as turning a permanent face up or face down, they are different game actions. Abilities that trigger when a permanent is turned face down won’t trigger when that permanent transforms, and so on."
-status = "missing"
-impl_files = []
+text = "Although transforming a permanent uses the same physical action as turning a permanent face up or face down, they are different game actions. Abilities that trigger when a permanent is turned face down won't trigger when that permanent transforms, and so on."
+status = "implemented"
+impl_files = ["game/effects/transform_effect.rs:6", "game/morph.rs:103"]
 test_files = []
-notes = ""
+notes = "Transform and turn-face-up are distinct code paths: transform_effect.rs vs morph.rs turn_face_up. They emit different events so triggers are segregated."
 
 [cr_701_27c]
 rule = "701.27c"
-text = "If a spell or ability instructs a player to transform a permanent that isn’t represented by a double-faced token or a double-faced card, nothing happens."
+text = "If a spell or ability instructs a player to transform a permanent that isn't represented by a double-faced token or a double-faced card, nothing happens."
 status = "implemented"
 impl_files = ["game/effects/transform_effect.rs:21"]
 test_files = []
@@ -994,31 +994,31 @@ text = "If a spell or ability instructs a player to transform a permanent, and t
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Instant/sorcery back face guard not specifically implemented in transform_effect.rs."
 
 [cr_701_27e]
 rule = "701.27e"
-text = "Some triggered abilities trigger when an object “transforms into” an object with a specified characteristic. Such an ability triggers if the object either transforms or converts (see rule 701.28) and has the specified characteristic immediately after it does so."
+text = "Some triggered abilities trigger when an object \"transforms into\" an object with a specified characteristic. Such an ability triggers if the object either transforms or converts (see rule 701.28) and has the specified characteristic immediately after it does so."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "\"Transforms into [quality]\" trigger condition not implemented. Convert action (701.28) also not implemented."
 
 [cr_701_27f]
 rule = "701.27f"
-text = "If an activated or triggered ability of a permanent that isn’t a delayed triggered ability of that permanent tries to transform it, the permanent does so only if it hasn’t transformed or converted since the ability was put onto the stack. If a delayed triggered ability of a permanent tries to transform that permanent, the permanent does so only if it hasn’t transformed or converted since that delayed triggered ability was created. In both cases, if the permanent has already transformed or converted, an instruction to do either is ignored."
+text = "If an activated or triggered ability of a permanent that isn't a delayed triggered ability of that permanent tries to transform it, the permanent does so only if it hasn't transformed or converted since the ability was put onto the stack. If a delayed triggered ability of a permanent tries to transform that permanent, the permanent does so only if it hasn't transformed or converted since that delayed triggered ability was created. In both cases, if the permanent has already transformed or converted, an instruction to do either is ignored."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Transform-once-per-stack-window guard not implemented."
 
 [cr_701_27g]
 rule = "701.27g"
-text = "Some spells and abilities refer to a “transformed permanent.” This phrase refers to a double-faced permanent on the battlefield with its back face up. A permanent with its front face up is never considered a transformed permanent, even if it had its back face up previously. Similarly, an object represented by more than one card, such as a melded or merged permanent, is never considered a transformed permanent, even if it has components that are back face up. See rules 701.42, “Meld,” and 729, “Merging with Permanents.”"
+text = "Some spells and abilities refer to a \"transformed permanent.\" This phrase refers to a double-faced permanent on the battlefield with its back face up. A permanent with its front face up is never considered a transformed permanent, even if it had its back face up previously. Similarly, an object represented by more than one card, such as a melded or merged permanent, is never considered a transformed permanent, even if it has components that are back face up. See rules 701.42, \"Meld,\" and 729, \"Merging with Permanents.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "\"Transformed permanent\" as a query condition is not implemented."
 
 [cr_701_28]
 rule = "701.28"
@@ -1026,7 +1026,7 @@ text = "Convert"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Convert (used for Incubator tokens and similar) is not implemented as a distinct action from Transform."
 
 [cr_701_28a]
 rule = "701.28a"
@@ -1038,7 +1038,7 @@ notes = ""
 
 [cr_701_28b]
 rule = "701.28b"
-text = "Although converting a permanent uses the same physical action as turning a permanent face up or face down, they are different game actions. Abilities that trigger when a permanent is turned face down won’t trigger when that permanent converts, and so on."
+text = "Although converting a permanent uses the same physical action as turning a permanent face up or face down, they are different game actions. Abilities that trigger when a permanent is turned face down won't trigger when that permanent converts, and so on."
 status = "missing"
 impl_files = []
 test_files = []
@@ -1046,7 +1046,7 @@ notes = ""
 
 [cr_701_28c]
 rule = "701.28c"
-text = "If a spell or ability instructs a player to convert a permanent that isn’t represented by a double-faced token or a double-faced card, nothing happens."
+text = "If a spell or ability instructs a player to convert a permanent that isn't represented by a double-faced token or a double-faced card, nothing happens."
 status = "missing"
 impl_files = []
 test_files = []
@@ -1062,7 +1062,7 @@ notes = ""
 
 [cr_701_28e]
 rule = "701.28e"
-text = "If an activated or triggered ability of a permanent that isn’t a delayed triggered ability of that permanent tries to convert it, the permanent does so only if it hasn’t converted or transformed since the ability was put onto the stack. If a delayed triggered ability of a permanent tries to convert that permanent, the permanent does so only if it hasn’t converted or transformed since that delayed triggered ability was created. In both cases, if the permanent has already transformed or converted, an instruction to do either is ignored."
+text = "If an activated or triggered ability of a permanent that isn't a delayed triggered ability of that permanent tries to convert it, the permanent does so only if it hasn't converted or transformed since the ability was put onto the stack. If a delayed triggered ability of a permanent tries to convert that permanent, the permanent does so only if it hasn't converted or transformed since that delayed triggered ability was created. In both cases, if the permanent has already transformed or converted, an instruction to do either is ignored."
 status = "missing"
 impl_files = []
 test_files = []
@@ -1070,7 +1070,7 @@ notes = ""
 
 [cr_701_28f]
 rule = "701.28f"
-text = "If a spell or ability states that a permanent can’t transform, that permanent also can’t convert."
+text = "If a spell or ability states that a permanent can't transform, that permanent also can't convert."
 status = "missing"
 impl_files = []
 test_files = []
@@ -1082,11 +1082,11 @@ text = "Fateseal"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Fateseal (Future Sight block) is not implemented. No cards using fateseal are currently supported."
 
 [cr_701_29a]
 rule = "701.29a"
-text = "To “fateseal N” means to look at the top N cards of an opponent’s library, then put any number of them on the bottom of that library in any order and the rest on top of that library in any order."
+text = "To \"fateseal N\" means to look at the top N cards of an opponent's library, then put any number of them on the bottom of that library in any order and the rest on top of that library in any order."
 status = "missing"
 impl_files = []
 test_files = []
@@ -1098,7 +1098,7 @@ text = "Clash"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Clash (Lorwyn block) is not implemented."
 
 [cr_701_30a]
 rule = "701.30a"
@@ -1110,7 +1110,7 @@ notes = ""
 
 [cr_701_30b]
 rule = "701.30b"
-text = "“Clash with an opponent” means “Choose an opponent. You and that opponent each clash.”"
+text = "\"Clash with an opponent\" means \"Choose an opponent. You and that opponent each clash.\""
 status = "missing"
 impl_files = []
 test_files = []
@@ -1135,39 +1135,39 @@ notes = ""
 [cr_701_31]
 rule = "701.31"
 text = "Planeswalk"
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Planechase variant not supported by this engine."
 
 [cr_701_31a]
 rule = "701.31a"
-text = "A player may planeswalk only during a Planechase game. Only the planar controller may planeswalk. See rule 901, “Planechase.”"
-status = "missing"
+text = "A player may planeswalk only during a Planechase game. Only the planar controller may planeswalk. See rule 901, \"Planechase.\""
+status = "not-applicable"
 impl_files = []
 test_files = []
 notes = ""
 
 [cr_701_31b]
 rule = "701.31b"
-text = "To planeswalk is to put each face-up plane card and phenomenon card on the bottom of its owner’s planar deck face down, then move the top card of your planar deck off that planar deck and turn it face up."
-status = "missing"
+text = "To planeswalk is to put each face-up plane card and phenomenon card on the bottom of its owner's planar deck face down, then move the top card of your planar deck off that planar deck and turn it face up."
+status = "not-applicable"
 impl_files = []
 test_files = []
 notes = ""
 
 [cr_701_31c]
 rule = "701.31c"
-text = "A player may planeswalk as the result of the “planeswalking ability” (see rule 901.8), because the owner of a face-up plane card or phenomenon card leaves the game (see rule 901.10), or because a phenomenon’s triggered ability leaves the stack (see rule 704.6f). Abilities may also instruct a player to planeswalk."
-status = "missing"
+text = "A player may planeswalk as the result of the \"planeswalking ability\" (see rule 901.8), because the owner of a face-up plane card or phenomenon card leaves the game (see rule 901.10), or because a phenomenon's triggered ability leaves the stack (see rule 704.6f). Abilities may also instruct a player to planeswalk."
+status = "not-applicable"
 impl_files = []
 test_files = []
 notes = ""
 
 [cr_701_31d]
 rule = "701.31d"
-text = "The plane card that’s turned face up is the plane the player planeswalks to. The plane card that’s turned face down or that leaves the game is the plane the player planeswalks away from. The same is true with respect to phenomena."
-status = "missing"
+text = "The plane card that's turned face up is the plane the player planeswalks to. The plane card that's turned face down or that leaves the game is the plane the player planeswalks away from. The same is true with respect to phenomena."
+status = "not-applicable"
 impl_files = []
 test_files = []
 notes = ""
@@ -1175,23 +1175,23 @@ notes = ""
 [cr_701_32]
 rule = "701.32"
 text = "Set in Motion"
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Archenemy variant not supported by this engine."
 
 [cr_701_32a]
 rule = "701.32a"
-text = "Only a scheme card may be set in motion, and only during an Archenemy game. Only the archenemy may set a scheme card in motion. See rule 314, “Schemes,” and rule 904, “Archenemy.”"
-status = "missing"
+text = "Only a scheme card may be set in motion, and only during an Archenemy game. Only the archenemy may set a scheme card in motion. See rule 314, \"Schemes,\" and rule 904, \"Archenemy.\""
+status = "not-applicable"
 impl_files = []
 test_files = []
 notes = ""
 
 [cr_701_32b]
 rule = "701.32b"
-text = "To set a scheme in motion, move it off the top of your scheme deck if it’s on top of your scheme deck and turn it face up if it isn’t face up. That scheme is considered to have been set in motion even if neither of these actions was performed on it."
-status = "missing"
+text = "To set a scheme in motion, move it off the top of your scheme deck if it's on top of your scheme deck and turn it face up if it isn't face up. That scheme is considered to have been set in motion even if neither of these actions was performed on it."
+status = "not-applicable"
 impl_files = []
 test_files = []
 notes = ""
@@ -1199,7 +1199,7 @@ notes = ""
 [cr_701_32c]
 rule = "701.32c"
 text = "Schemes may only be set in motion one at a time. If a player is instructed to set multiple schemes in motion, that player sets a scheme in motion that many times."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
 notes = ""
@@ -1207,23 +1207,23 @@ notes = ""
 [cr_701_33]
 rule = "701.33"
 text = "Abandon"
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Archenemy variant not supported by this engine."
 
 [cr_701_33a]
 rule = "701.33a"
-text = "Only a face-up ongoing scheme card may be abandoned, and only during an Archenemy game. See rule 314, “Schemes,” and rule 904, “Archenemy.”"
-status = "missing"
+text = "Only a face-up ongoing scheme card may be abandoned, and only during an Archenemy game. See rule 314, \"Schemes,\" and rule 904, \"Archenemy.\""
+status = "not-applicable"
 impl_files = []
 test_files = []
 notes = ""
 
 [cr_701_33b]
 rule = "701.33b"
-text = "To abandon a scheme, turn it face down and put it on the bottom of its owner’s scheme deck."
-status = "missing"
+text = "To abandon a scheme, turn it face down and put it on the bottom of its owner's scheme deck."
+status = "not-applicable"
 impl_files = []
 test_files = []
 notes = ""
@@ -1246,11 +1246,11 @@ notes = ""
 
 [cr_701_34b]
 rule = "701.34b"
-text = "In a Two-Headed Giant game, poison counters are shared by the team. If more than one player on a team is chosen this way, only one of those players can be given an additional poison counter. The player who proliferates chooses which player that is. See rule 810, “Two-Headed Giant Variant.”"
-status = "missing"
+text = "In a Two-Headed Giant game, poison counters are shared by the team. If more than one player on a team is chosen this way, only one of those players can be given an additional poison counter. The player who proliferates chooses which player that is. See rule 810, \"Two-Headed Giant Variant.\""
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Two-Headed Giant variant not supported by this engine."
 
 [cr_701_35]
 rule = "701.35"
@@ -1258,11 +1258,11 @@ text = "Detain"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Detain (Return to Ravnica block) is not implemented. No Effect::Detain variant exists."
 
 [cr_701_35a]
 rule = "701.35a"
-text = "Certain spells and abilities can detain a permanent. Until the next turn of the controller of that spell or ability, that permanent can’t attack or block and its activated abilities can’t be activated."
+text = "Certain spells and abilities can detain a permanent. Until the next turn of the controller of that spell or ability, that permanent can't attack or block and its activated abilities can't be activated."
 status = "missing"
 impl_files = []
 test_files = []
@@ -1274,11 +1274,11 @@ text = "Populate"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Populate (Return to Ravnica block) is not implemented as a keyword action. token_copy.rs implements CopyTokenOf but does not implement the populate keyword action (choose a creature token you control and create a copy of it)."
 
 [cr_701_36a]
 rule = "701.36a"
-text = "To populate means to choose a creature token you control and create a token that’s a copy of that creature token."
+text = "To populate means to choose a creature token you control and create a token that's a copy of that creature token."
 status = "missing"
 impl_files = []
 test_files = []
@@ -1286,7 +1286,7 @@ notes = ""
 
 [cr_701_36b]
 rule = "701.36b"
-text = "If you control no creature tokens when instructed to populate, you won’t create a token."
+text = "If you control no creature tokens when instructed to populate, you won't create a token."
 status = "missing"
 impl_files = []
 test_files = []
@@ -1295,14 +1295,14 @@ notes = ""
 [cr_701_37]
 rule = "701.37"
 text = "Monstrosity"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/monstrosity.rs"]
 test_files = []
 notes = ""
 
 [cr_701_37a]
 rule = "701.37a"
-text = "“Monstrosity N” means “If this permanent isn’t monstrous, put N +1/+1 counters on it and it becomes monstrous.”"
+text = "\"Monstrosity N\" means \"If this permanent isn't monstrous, put N +1/+1 counters on it and it becomes monstrous.\""
 status = "implemented"
 impl_files = ["game/effects/monstrosity.rs:8", "game/effects/monstrosity.rs:27", "game/effects/monstrosity.rs:38", "game/effects/monstrosity.rs:43", "game/effects/monstrosity.rs:48", "game/trigger_matchers.rs:148", "game/trigger_matchers.rs:1413", "parser/oracle_effect/imperative.rs:1348", "parser/oracle_effect/imperative.rs:1845", "types/ability.rs:2193"]
 test_files = []
@@ -1310,7 +1310,7 @@ notes = ""
 
 [cr_701_37b]
 rule = "701.37b"
-text = "Monstrous is a designation that has no rules meaning other than to act as a marker that the monstrosity action and other spells and abilities can identify. Only permanents can be or become monstrous. Once a permanent becomes monstrous, it stays monstrous until it leaves the battlefield. Monstrous is neither an ability nor part of the permanent’s copiable values."
+text = "Monstrous is a designation that has no rules meaning other than to act as a marker that the monstrosity action and other spells and abilities can identify. Only permanents can be or become monstrous. Once a permanent becomes monstrous, it stays monstrous until it leaves the battlefield. Monstrous is neither an ability nor part of the permanent's copiable values."
 status = "implemented"
 impl_files = ["game/effects/monstrosity.rs:13", "game/effects/monstrosity.rs:43", "game/game_object.rs:261", "game/zones.rs:126"]
 test_files = []
@@ -1318,11 +1318,11 @@ notes = ""
 
 [cr_701_37c]
 rule = "701.37c"
-text = "If a permanent’s ability instructs a player to “monstrosity X,” other abilities of that permanent may also refer to X. The value of X in those abilities is equal to the value of X as that permanent became monstrous."
+text = "If a permanent's ability instructs a player to \"monstrosity X,\" other abilities of that permanent may also refer to X. The value of X in those abilities is equal to the value of X as that permanent became monstrous."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "X-value binding for monstrosity references in triggered abilities is not implemented."
 
 [cr_701_38]
 rule = "701.38"
@@ -1330,7 +1330,7 @@ text = "Vote"
 status = "implemented"
 impl_files = ["parser/oracle_cost.rs:291"]
 test_files = []
-notes = ""
+notes = "Vote is recognized in cost parsing. Note: oracle_cost.rs:291 has an incorrect CR annotation (says CR 701.38 but Vote is CR 701.38 — this is actually correct). Full vote resolution with multiple player choices and APNAP order is not implemented."
 
 [cr_701_38a]
 rule = "701.38a"
@@ -1338,7 +1338,7 @@ text = "Some spells and abilities instruct players to vote for one choice from a
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Full vote resolution with per-player choice prompts in APNAP order is not implemented."
 
 [cr_701_38b]
 rule = "701.38b"
@@ -1350,7 +1350,7 @@ notes = ""
 
 [cr_701_38c]
 rule = "701.38c"
-text = "If the text of a spell or ability refers to “voting,” it refers only to an actual vote, not to any spell or ability that involves the players making choices or decisions without using the word “vote.”"
+text = "If the text of a spell or ability refers to \"voting,\" it refers only to an actual vote, not to any spell or ability that involves the players making choices or decisions without using the word \"vote.\""
 status = "missing"
 impl_files = []
 test_files = []
@@ -1370,11 +1370,11 @@ text = "Bolster"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Bolster (Khans of Tarkir block) is not implemented."
 
 [cr_701_39a]
 rule = "701.39a"
-text = "“Bolster N” means “Choose a creature you control with the least toughness or tied for least toughness among creatures you control. Put N +1/+1 counters on that creature.”"
+text = "\"Bolster N\" means \"Choose a creature you control with the least toughness or tied for least toughness among creatures you control. Put N +1/+1 counters on that creature.\""
 status = "missing"
 impl_files = []
 test_files = []
@@ -1383,14 +1383,14 @@ notes = ""
 [cr_701_40]
 rule = "701.40"
 text = "Manifest"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/morph.rs:173", "game/morph.rs:229"]
 test_files = []
-notes = ""
+notes = "Manifest is implemented via morph.rs manifest_card() and manifest()."
 
 [cr_701_40a]
 rule = "701.40a"
-text = "To manifest a card, turn it face down. It becomes a 2/2 face-down creature card with no text, no name, no subtypes, and no mana cost. Put that card onto the battlefield face down. That permanent is a manifested permanent for as long as it remains face down. The effect defining its characteristics works while the card is face down and ends when it’s turned face up."
+text = "To manifest a card, turn it face down. It becomes a 2/2 face-down creature card with no text, no name, no subtypes, and no mana cost. Put that card onto the battlefield face down. That permanent is a manifested permanent for as long as it remains face down. The effect defining its characteristics works while the card is face down and ends when it's turned face up."
 status = "implemented"
 impl_files = ["game/morph.rs:173", "game/morph.rs:198", "game/morph.rs:229"]
 test_files = []
@@ -1398,19 +1398,19 @@ notes = ""
 
 [cr_701_40b]
 rule = "701.40b"
-text = "Any time you have priority, you may turn a manifested permanent you control face up. This is a special action that doesn’t use the stack (see rule 116.2b). To do this, show all players that the card representing that permanent is a creature card and what that card’s mana cost is, pay that cost, then turn the permanent face up. The effect defining its characteristics while it was face down ends, and it regains its normal characteristics. (If the card representing that permanent isn’t a creature card or it doesn’t have a mana cost, it can’t be turned face up this way.)"
-status = "missing"
-impl_files = []
+text = "Any time you have priority, you may turn a manifested permanent you control face up. This is a special action that doesn't use the stack (see rule 116.2b). To do this, show all players that the card representing that permanent is a creature card and what that card's mana cost is, pay that cost, then turn the permanent face up. The effect defining its characteristics while it was face down ends, and it regains its normal characteristics. (If the card representing that permanent isn't a creature card or it doesn't have a mana cost, it can't be turned face up this way.)"
+status = "implemented"
+impl_files = ["game/morph.rs:103", "game/morph.rs:145", "game/morph.rs:154"]
 test_files = []
-notes = ""
+notes = "turn_face_up() in morph.rs validates that the card is a creature with a mana cost before allowing face-up."
 
 [cr_701_40c]
 rule = "701.40c"
 text = "If a card with morph is manifested, its controller may turn that card face up using either the procedure described in rule 702.37e to turn a face-down permanent with morph face up or the procedure described above to turn a manifested permanent face up."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/morph.rs:148"]
 test_files = []
-notes = ""
+notes = "turn_face_up() checks for morph cost (has_morph_cost) before falling back to manifest creature check, allowing both paths."
 
 [cr_701_40d]
 rule = "701.40d"
@@ -1418,39 +1418,39 @@ text = "If a card with disguise is manifested, its controller may turn that card
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Disguise interaction with manifest face-up not specifically handled."
 
 [cr_701_40e]
 rule = "701.40e"
 text = "If an effect instructs a player to manifest multiple cards from their library, those cards are manifested one at a time."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/morph.rs:229"]
 test_files = []
-notes = ""
+notes = "manifest() processes one card at a time from the library."
 
 [cr_701_40f]
 rule = "701.40f"
-text = "If an effect instructs a player to manifest a card and a rule or effect prohibits the face-down object from entering the battlefield, that card isn’t manifested. Its characteristics remain unmodified and it remains in its previous zone. If it was face up, it remains face up."
+text = "If an effect instructs a player to manifest a card and a rule or effect prohibits the face-down object from entering the battlefield, that card isn't manifested. Its characteristics remain unmodified and it remains in its previous zone. If it was face up, it remains face up."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Enter-the-battlefield prohibition for face-down objects during manifest not specifically handled."
 
 [cr_701_40g]
 rule = "701.40g"
-text = "If a manifested permanent that’s represented by an instant or sorcery card would turn face up, its controller reveals it and leaves it face down. Abilities that trigger whenever a permanent is turned face up won’t trigger."
+text = "If a manifested permanent that's represented by an instant or sorcery card would turn face up, its controller reveals it and leaves it face down. Abilities that trigger whenever a permanent is turned face up won't trigger."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Instant/sorcery manifest face-up guard not implemented. turn_face_up() only checks for creature card with mana cost."
 
 [cr_701_40h]
 rule = "701.40h"
-text = "See rule 708, “Face-Down Spells and Permanents,” for more information."
-status = "missing"
+text = "See rule 708, \"Face-Down Spells and Permanents,\" for more information."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Cross-reference only."
 
 [cr_701_41]
 rule = "701.41"
@@ -1458,11 +1458,11 @@ text = "Support"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Support (Battle for Zendikar block) is not implemented."
 
 [cr_701_41a]
 rule = "701.41a"
-text = "“Support N” on a permanent means “Put a +1/+1 counter on each of up to N other target creatures.” “Support N” on an instant or sorcery spell means “Put a +1/+1 counter on each of up to N target creatures.”"
+text = "\"Support N\" on a permanent means \"Put a +1/+1 counter on each of up to N other target creatures.\" \"Support N\" on an instant or sorcery spell means \"Put a +1/+1 counter on each of up to N target creatures.\""
 status = "missing"
 impl_files = []
 test_files = []
@@ -1474,11 +1474,11 @@ text = "Meld"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meld is not implemented."
 
 [cr_701_42a]
 rule = "701.42a"
-text = "Meld is a keyword action that appears in an ability on one card in a meld pair. To meld the two cards in a meld pair, put them onto the battlefield with their back faces up and combined. The resulting permanent is a single object represented by two cards. See rule 712, “Double-Faced Cards.”"
+text = "Meld is a keyword action that appears in an ability on one card in a meld pair. To meld the two cards in a meld pair, put them onto the battlefield with their back faces up and combined. The resulting permanent is a single object represented by two cards. See rule 712, \"Double-Faced Cards.\""
 status = "missing"
 impl_files = []
 test_files = []
@@ -1486,7 +1486,7 @@ notes = ""
 
 [cr_701_42b]
 rule = "701.42b"
-text = "Only two cards belonging to the same meld pair can be melded. Tokens, cards that aren’t meld cards, or meld cards that don’t form a meld pair can’t be melded."
+text = "Only two cards belonging to the same meld pair can be melded. Tokens, cards that aren't meld cards, or meld cards that don't form a meld pair can't be melded."
 status = "missing"
 impl_files = []
 test_files = []
@@ -1494,7 +1494,7 @@ notes = ""
 
 [cr_701_42c]
 rule = "701.42c"
-text = "If an effect instructs a player to meld objects that can’t be melded, they stay in their current zone."
+text = "If an effect instructs a player to meld objects that can't be melded, they stay in their current zone."
 status = "missing"
 impl_files = []
 test_files = []
@@ -1503,10 +1503,10 @@ notes = ""
 [cr_701_43]
 rule = "701.43"
 text = "Exert"
-status = "implemented"
-impl_files = ["types/triggers.rs:171"]
+status = "partial"
+impl_files = ["types/triggers.rs:171", "parser/oracle_cost.rs:296", "game/casting.rs:1449"]
 test_files = []
-notes = ""
+notes = "Exert is recognized as AbilityCost::Exert and the Exerted TriggerMode exists, but the core mechanic (permanent does not untap during controller's next untap step) is not implemented. AbilityCost::Exert is a no-op in pay_ability_cost. Source annotation at oracle_cost.rs:291 incorrectly cites CR 701.38 (Vote) instead of CR 701.43."
 
 [cr_701_43a]
 rule = "701.43a"
@@ -1514,11 +1514,11 @@ text = "To exert a permanent, you choose to have it not untap during your next u
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "The skip-next-untap mechanic is not implemented. No is_exerted flag or untap-step check exists in the engine."
 
 [cr_701_43b]
 rule = "701.43b"
-text = "A permanent can be exerted even if it’s not tapped or has already been exerted in a turn. If you exert a permanent more than once before your next untap step, each effect causing it not to untap expires during the same untap step."
+text = "A permanent can be exerted even if it's not tapped or has already been exerted in a turn. If you exert a permanent more than once before your next untap step, each effect causing it not to untap expires during the same untap step."
 status = "missing"
 impl_files = []
 test_files = []
@@ -1526,7 +1526,7 @@ notes = ""
 
 [cr_701_43c]
 rule = "701.43c"
-text = "An object that isn’t on the battlefield can’t be exerted."
+text = "An object that isn't on the battlefield can't be exerted."
 status = "missing"
 impl_files = []
 test_files = []
@@ -1534,7 +1534,7 @@ notes = ""
 
 [cr_701_43d]
 rule = "701.43d"
-text = "“You may exert [this creature] as it attacks” is an optional cost to attack (see rule 508.1g). Some objects with this static ability have a triggered ability that triggers “when you do” printed in the same paragraph. These abilities are linked. (See rule 607.2h.)"
+text = "\"You may exert [this creature] as it attacks\" is an optional cost to attack (see rule 508.1g). Some objects with this static ability have a triggered ability that triggers \"when you do\" printed in the same paragraph. These abilities are linked. (See rule 607.2h.)"
 status = "missing"
 impl_files = []
 test_files = []
@@ -1550,7 +1550,7 @@ notes = ""
 
 [cr_701_44a]
 rule = "701.44a"
-text = "Certain spells and abilities instruct a permanent to explore. To do so, that permanent’s controller reveals the top card of their library. If a land card is revealed this way, that player puts that card into their hand. Otherwise, that player puts a +1/+1 counter on the exploring permanent and may put the revealed card into their graveyard."
+text = "Certain spells and abilities instruct a permanent to explore. To do so, that permanent's controller reveals the top card of their library. If a land card is revealed this way, that player puts that card into their hand. Otherwise, that player puts a +1/+1 counter on the exploring permanent and may put the revealed card into their graveyard."
 status = "implemented"
 impl_files = ["game/effects/explore.rs:41", "game/effects/explore.rs:77", "game/effects/explore.rs:108", "game/effects/explore.rs:122", "game/effects/explore.rs:203", "game/effects/explore.rs:252"]
 test_files = []
@@ -1558,11 +1558,11 @@ notes = ""
 
 [cr_701_44b]
 rule = "701.44b"
-text = "A permanent “explores” after the process described in rule 701.44a is complete, even if some or all of those actions were impossible."
-status = "missing"
-impl_files = []
+text = "A permanent \"explores\" after the process described in rule 701.44a is complete, even if some or all of those actions were impossible."
+status = "implemented"
+impl_files = ["game/effects/explore.rs:252"]
 test_files = []
-notes = ""
+notes = "GameEvent::Explored is emitted after the explore process completes."
 
 [cr_701_44c]
 rule = "701.44c"
@@ -1570,7 +1570,7 @@ text = "If a permanent changes zones before an effect causes it to explore, its 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Last-known-information for zone-change before explore is not specifically handled."
 
 [cr_701_44d]
 rule = "701.44d"
@@ -1578,20 +1578,20 @@ text = "If multiple permanents are instructed to explore at the same time, the f
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Simultaneous multi-permanent explore ordering is not implemented."
 
 [cr_701_45]
 rule = "701.45"
 text = "Assemble"
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Assemble (Unstable silver-border) is not implemented and out of scope for this engine."
 
 [cr_701_45a]
 rule = "701.45a"
-text = "Assemble is a keyword action in the Unstable set that puts Contraptions onto the battlefield. Outside of silver-bordered cards, only one card (Steamflogger Boss) refers to assembling a Contraption. Cards and mechanics from the Unstable set aren’t included in these rules. See the Unstable FAQ for more information."
-status = "missing"
+text = "Assemble is a keyword action in the Unstable set that puts Contraptions onto the battlefield. Outside of silver-bordered cards, only one card (Steamflogger Boss) refers to assembling a Contraption. Cards and mechanics from the Unstable set aren't included in these rules. See the Unstable FAQ for more information."
+status = "not-applicable"
 impl_files = []
 test_files = []
 notes = ""
@@ -1599,30 +1599,30 @@ notes = ""
 [cr_701_46]
 rule = "701.46"
 text = "Adapt"
-status = "implemented"
-impl_files = ["types/triggers.rs:204"]
+status = "partial"
+impl_files = ["types/triggers.rs:203", "types/triggers.rs:205", "parser/oracle_keyword.rs:525"]
 test_files = []
-notes = ""
+notes = "Adapt is recognized as a keyword cost line (skipped by the parser for further parsing) and TriggerMode::Adapt exists. However, the adapt action itself (check for no +1/+1 counters, then add counters) is not implemented as an Effect handler."
 
 [cr_701_46a]
 rule = "701.46a"
-text = "“Adapt N” means “If this permanent has no +1/+1 counters on it, put N +1/+1 counters on it.”"
+text = "\"Adapt N\" means \"If this permanent has no +1/+1 counters on it, put N +1/+1 counters on it.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Adapt N resolution is not implemented. No Effect::Adapt variant or handler exists."
 
 [cr_701_47]
 rule = "701.47"
 text = "Amass"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/amass.rs"]
 test_files = []
 notes = ""
 
 [cr_701_47a]
 rule = "701.47a"
-text = "To amass [subtype] N means “If you don’t control an Army creature, create a 0/0 black [subtype] Army creature token. Choose an Army creature you control. Put N +1/+1 counters on that creature. If it isn’t a [subtype], it becomes a [subtype] in addition to its other types.”"
+text = "To amass [subtype] N means \"If you don't control an Army creature, create a 0/0 black [subtype] Army creature token. Choose an Army creature you control. Put N +1/+1 counters on that creature. If it isn't a [subtype], it becomes a [subtype] in addition to its other types.\""
 status = "implemented"
 impl_files = ["game/effects/amass.rs:13", "game/effects/amass.rs:32", "game/effects/amass.rs:38", "game/effects/amass.rs:42", "game/effects/amass.rs:47", "game/effects/amass.rs:69", "parser/oracle_effect/imperative.rs:1346", "parser/oracle_effect/imperative.rs:1813", "types/ability.rs:2183"]
 test_files = []
@@ -1630,27 +1630,27 @@ notes = ""
 
 [cr_701_47b]
 rule = "701.47b"
-text = "A player “amassed” after the process described in rule 701.47a is complete, even if some or all of those actions were impossible."
+text = "A player \"amassed\" after the process described in rule 701.47a is complete, even if some or all of those actions were impossible."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No specific \"amassed\" completion event is emitted after the process."
 
 [cr_701_47c]
 rule = "701.47c"
-text = "The phrases “the Army you amassed” and “the amassed Army” refer to the creature you chose, whether or not it received counters."
+text = "The phrases \"the Army you amassed\" and \"the amassed Army\" refer to the creature you chose, whether or not it received counters."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Amass result tracking (which Army was chosen) is not stored for downstream reference."
 
 [cr_701_47d]
 rule = "701.47d"
-text = "Some older cards were printed with amass N without including a subtype. Those cards have received errata in the Oracle card reference so that they read “amass Zombies N.”"
-status = "missing"
+text = "Some older cards were printed with amass N without including a subtype. Those cards have received errata in the Oracle card reference so that they read \"amass Zombies N.\""
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Historical errata note — MTGJSON oracle text includes the errata."
 
 [cr_701_48]
 rule = "701.48"
@@ -1658,11 +1658,11 @@ text = "Learn"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Learn (Strixhaven) is not implemented. Searching outside the game for Lesson cards is not supported."
 
 [cr_701_48a]
 rule = "701.48a"
-text = "“Learn” means “You may discard a card. If you do, draw a card. If you didn’t discard a card, you may reveal a Lesson card you own from outside the game and put it into your hand.”"
+text = "\"Learn\" means \"You may discard a card. If you do, draw a card. If you didn't discard a card, you may reveal a Lesson card you own from outside the game and put it into your hand.\""
 status = "missing"
 impl_files = []
 test_files = []
@@ -1674,11 +1674,11 @@ text = "Venture into the Dungeon"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Venture into the Dungeon (Dungeons & Dragons: Adventures in the Forgotten Realms) is not implemented. No dungeon card zone or venture marker state exists."
 
 [cr_701_49a]
 rule = "701.49a"
-text = "If a player is instructed to venture into the dungeon while they don’t own a dungeon card in the command zone, they choose a dungeon card they own from outside the game and put it into the command zone. They put their venture marker on the topmost room. See rule 309, “Dungeons.”"
+text = "If a player is instructed to venture into the dungeon while they don't own a dungeon card in the command zone, they choose a dungeon card they own from outside the game and put it into the command zone. They put their venture marker on the topmost room. See rule 309, \"Dungeons.\""
 status = "missing"
 impl_files = []
 test_files = []
@@ -1686,7 +1686,7 @@ notes = ""
 
 [cr_701_49b]
 rule = "701.49b"
-text = "If a player is instructed to venture into the dungeon while their venture marker is in any room except a dungeon card’s bottommost room, they choose an adjacent room, following the direction of an arrow pointing away from their current room. If there are multiple arrows pointing away from the room the player’s venture marker is in, they choose one of them to follow. They move their venture marker to that adjacent room."
+text = "If a player is instructed to venture into the dungeon while their venture marker is in any room except a dungeon card's bottommost room, they choose an adjacent room, following the direction of an arrow pointing away from their current room. If there are multiple arrows pointing away from the room the player's venture marker is in, they choose one of them to follow. They move their venture marker to that adjacent room."
 status = "missing"
 impl_files = []
 test_files = []
@@ -1702,7 +1702,7 @@ notes = ""
 
 [cr_701_49d]
 rule = "701.49d"
-text = "Venture into [quality] is a variant of venture into the dungeon. If a player is instructed to “venture into [quality]” while they don’t own a dungeon card in the command zone, they choose a dungeon card they own from outside the game with the indicated quality and put it into the command zone. They put their venture marker on the topmost room of that dungeon. If they already own a dungeon card in the command zone, they follow the normal procedure for venturing into the dungeon outlined in 701.49b–c."
+text = "Venture into [quality] is a variant of venture into the dungeon. If a player is instructed to \"venture into [quality]\" while they don't own a dungeon card in the command zone, they choose a dungeon card they own from outside the game with the indicated quality and put it into the command zone. They put their venture marker on the topmost room of that dungeon. If they already own a dungeon card in the command zone, they follow the normal procedure for venturing into the dungeon outlined in 701.49b–c."
 status = "missing"
 impl_files = []
 test_files = []
@@ -1711,14 +1711,14 @@ notes = ""
 [cr_701_50]
 rule = "701.50"
 text = "Connive"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/connive.rs"]
 test_files = []
 notes = ""
 
 [cr_701_50a]
 rule = "701.50a"
-text = "Certain spells and abilities instruct a permanent to connive. To do so, that permanent’s controller draws a card, then discards a card. If a nonland card is discarded this way, that player puts a +1/+1 counter on the conniving permanent."
+text = "Certain spells and abilities instruct a permanent to connive. To do so, that permanent's controller draws a card, then discards a card. If a nonland card is discarded this way, that player puts a +1/+1 counter on the conniving permanent."
 status = "implemented"
 impl_files = ["game/effects/connive.rs:13", "game/engine.rs:1990", "game/engine.rs:2051", "types/ability.rs:1981", "types/game_state.rs:353"]
 test_files = []
@@ -1726,11 +1726,11 @@ notes = ""
 
 [cr_701_50b]
 rule = "701.50b"
-text = "A permanent “connives” after the process described in rule 701.50a is complete, even if some or all of those actions were impossible."
+text = "A permanent \"connives\" after the process described in rule 701.50a is complete, even if some or all of those actions were impossible."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No explicit \"connived\" completion event is emitted after the connive process."
 
 [cr_701_50c]
 rule = "701.50c"
@@ -1746,11 +1746,11 @@ text = "If multiple permanents are instructed to connive at the same time, the f
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Simultaneous multi-permanent connive APNAP ordering is not implemented."
 
 [cr_701_50e]
 rule = "701.50e"
-text = "Connive N is a variant of connive. The permanent’s controller draws N cards, discards N cards, then puts a number of +1/+1 counters on the permanent equal to the number of nonland cards discarded this way."
+text = "Connive N is a variant of connive. The permanent's controller draws N cards, discards N cards, then puts a number of +1/+1 counters on the permanent equal to the number of nonland cards discarded this way."
 status = "implemented"
 impl_files = ["types/ability.rs:1983"]
 test_files = []
@@ -1762,11 +1762,11 @@ text = "Open an Attraction"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Attraction deck mechanic (Unfinity) is not implemented."
 
 [cr_701_51a]
 rule = "701.51a"
-text = "A player may open an Attraction only during a game in which that player is playing with an Attraction deck (see rule 717, “Attraction Cards”)."
+text = "A player may open an Attraction only during a game in which that player is playing with an Attraction deck (see rule 717, \"Attraction Cards\")."
 status = "missing"
 impl_files = []
 test_files = []
@@ -1782,7 +1782,7 @@ notes = ""
 
 [cr_701_51c]
 rule = "701.51c"
-text = "An ability which triggers whenever a player opens an Attraction triggers when that player puts an Attraction card onto the battlefield while performing the instruction in the above rule. If an effect prevents that Attraction from entering the battlefield or replaces entering the battlefield with another event, that ability doesn’t trigger."
+text = "An ability which triggers whenever a player opens an Attraction triggers when that player puts an Attraction card onto the battlefield while performing the instruction in the above rule. If an effect prevents that Attraction from entering the battlefield or replaces entering the battlefield with another event, that ability doesn't trigger."
 status = "missing"
 impl_files = []
 test_files = []
@@ -1794,15 +1794,15 @@ text = "Roll to Visit Your Attractions"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Roll to Visit Your Attractions (Unfinity) is not implemented. TriggerMode::VisitAttraction exists in types/triggers.rs but no Attraction deck or roll mechanism is present."
 
 [cr_701_52a]
 rule = "701.52a"
-text = "To roll to visit your Attractions, roll a six-sided die. Then if you control one or more Attractions with a number lit up that is equal to that result, each of those Attractions has been “visited” and its visit ability triggers. See rule 717, “Attraction Cards,” and rule 702.159, “Visit.”"
-status = "implemented"
-impl_files = ["game/effects/ring.rs:33"]
+text = "To roll to visit your Attractions, roll a six-sided die. Then if you control one or more Attractions with a number lit up that is equal to that result, each of those Attractions has been \"visited\" and its visit ability triggers. See rule 717, \"Attraction Cards,\" and rule 702.159, \"Visit.\""
+status = "missing"
+impl_files = []
 test_files = []
-notes = ""
+notes = "The previous entry listing game/effects/ring.rs:33 was incorrect. ring.rs implements CR 701.54 (The Ring Tempts You); lines 21 and 33 in ring.rs contain mislabeled inline comments citing CR 701.52a/b, which are source annotation errors. No actual Attraction roll-to-visit implementation exists."
 
 [cr_701_53]
 rule = "701.53"
@@ -1810,7 +1810,7 @@ text = "Incubate"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Incubate (Phyrexia: All Will Be One) is not implemented. No Incubator token type or convert action exists."
 
 [cr_701_53a]
 rule = "701.53a"
@@ -1822,7 +1822,7 @@ notes = ""
 
 [cr_701_53b]
 rule = "701.53b"
-text = "An Incubator token is a double-faced token. Its front face is a colorless Incubator artifact with “{2}: Transform this token.” Its back face is a 0/0 colorless Phyrexian artifact creature named “Phyrexian Token.”"
+text = "An Incubator token is a double-faced token. Its front face is a colorless Incubator artifact with \"{2}: Transform this token.\" Its back face is a 0/0 colorless Phyrexian artifact creature named \"Phyrexian Token.\""
 status = "missing"
 impl_files = []
 test_files = []
@@ -1838,7 +1838,7 @@ notes = ""
 
 [cr_701_54a]
 rule = "701.54a"
-text = "Certain spells and abilities have the text “the Ring tempts you.” Each time the Ring tempts you, choose a creature you control. That creature becomes your Ring-bearer until another creature becomes your Ring-bearer or another player gains control of it."
+text = "Certain spells and abilities have the text \"the Ring tempts you.\" Each time the Ring tempts you, choose a creature you control. That creature becomes your Ring-bearer until another creature becomes your Ring-bearer or another player gains control of it."
 status = "implemented"
 impl_files = ["ai_support/candidates.rs:535", "game/effects/ring.rs:9", "game/engine.rs:2128", "game/layers.rs:175", "types/ability.rs:1279", "types/ability.rs:2075", "types/actions.rs:108"]
 test_files = []
@@ -1847,14 +1847,14 @@ notes = ""
 [cr_701_54b]
 rule = "701.54b"
 text = "Ring-bearer is a designation a permanent can have. Being a Ring-bearer is not a copiable value."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/ring.rs:12", "types/game_state.rs:523"]
 test_files = []
-notes = ""
+notes = "ring_bearer field on GameState tracks the Ring-bearer per player. It is not part of the permanent's copiable values."
 
 [cr_701_54c]
 rule = "701.54c"
-text = "If a player doesn’t have an emblem named The Ring at the time the Ring tempts them, they get an emblem named The Ring before choosing a creature to be their Ring-bearer. The Ring has “Your Ring-bearer is legendary and can’t be blocked by creatures with greater power.” As long as the Ring has tempted that player two or more times, it has “Whenever your Ring-bearer attacks, draw a card, then discard a card.” As long as the Ring has tempted that player three or more times, it has “Whenever your Ring-bearer becomes blocked by a creature, the blocking creature’s controller sacrifices it at end of combat.” As long as the Ring has tempted that player four or more times, it has “Whenever your Ring-bearer deals combat damage to a player, each opponent loses 3 life.”"
+text = "If a player doesn't have an emblem named The Ring at the time the Ring tempts them, they get an emblem named The Ring before choosing a creature to be their Ring-bearer. The Ring has \"Your Ring-bearer is legendary and can't be blocked by creatures with greater power.\" As long as the Ring has tempted that player two or more times, it has \"Whenever your Ring-bearer attacks, draw a card, then discard a card.\" As long as the Ring has tempted that player three or more times, it has \"Whenever your Ring-bearer becomes blocked by a creature, the blocking creature's controller sacrifices it at end of combat.\" As long as the Ring has tempted that player four or more times, it has \"Whenever your Ring-bearer deals combat damage to a player, each opponent loses 3 life.\""
 status = "implemented"
 impl_files = ["game/effects/ring.rs:12", "game/layers.rs:180", "types/ability.rs:1281"]
 test_files = []
@@ -1862,7 +1862,7 @@ notes = ""
 
 [cr_701_54d]
 rule = "701.54d"
-text = "Some abilities trigger “Whenever the Ring tempts you.” The Ring tempts a player whenever they complete the actions in 701.54a, even if some or all of those actions were impossible."
+text = "Some abilities trigger \"Whenever the Ring tempts you.\" The Ring tempts a player whenever they complete the actions in 701.54a, even if some or all of those actions were impossible."
 status = "implemented"
 impl_files = ["game/trigger_matchers.rs:1615"]
 test_files = []
@@ -1870,11 +1870,11 @@ notes = ""
 
 [cr_701_54e]
 rule = "701.54e"
-text = "Some abilities check to see if a creature “is your Ring-bearer.” For the purposes of those abilities, that condition is true if that creature is on the battlefield under your control and has the Ring-bearer designation."
-status = "missing"
-impl_files = []
+text = "Some abilities check to see if a creature \"is your Ring-bearer.\" For the purposes of those abilities, that condition is true if that creature is on the battlefield under your control and has the Ring-bearer designation."
+status = "implemented"
+impl_files = ["game/layers.rs:175", "types/game_state.rs:523"]
 test_files = []
-notes = ""
+notes = "Ring-bearer queries are resolved against the ring_bearer map in GameState and enforced in layers.rs."
 
 [cr_701_55]
 rule = "701.55"
@@ -1882,11 +1882,11 @@ text = "Face a Villainous Choice"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Face a Villainous Choice (Outlaws of Thunder Junction) is not implemented."
 
 [cr_701_55a]
 rule = "701.55a"
-text = "“[A player] faces a villainous choice — [option A], or [option B]” means “[A player] chooses [option A] or [option B]. Then all actions in the chosen option are performed.”"
+text = "\"[A player] faces a villainous choice — [option A], or [option B]\" means \"[A player] chooses [option A] or [option B]. Then all actions in the chosen option are performed.\""
 status = "missing"
 impl_files = []
 test_files = []
@@ -1922,11 +1922,11 @@ text = "Time Travel"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Time Travel (Doctor Who Commander) is not implemented. Suspend (CR 702.62) is not yet fully implemented either."
 
 [cr_701_56a]
 rule = "701.56a"
-text = "To time travel means to choose any number of permanents you control with one or more time counters on them and/or suspended cards you own in exile with one or more time counters on them and, for each of those objects, put a time counter on it or remove a time counter from it. See rule 702.62, “Suspend.”"
+text = "To time travel means to choose any number of permanents you control with one or more time counters on them and/or suspended cards you own in exile with one or more time counters on them and, for each of those objects, put a time counter on it or remove a time counter from it. See rule 702.62, \"Suspend.\""
 status = "missing"
 impl_files = []
 test_files = []
@@ -1935,14 +1935,14 @@ notes = ""
 [cr_701_57]
 rule = "701.57"
 text = "Discover"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/discover.rs"]
 test_files = []
 notes = ""
 
 [cr_701_57a]
 rule = "701.57a"
-text = "“Discover N” means “Exile cards from the top of your library until you exile a nonland card with mana value N or less. You may cast that card without paying its mana cost if the resulting spell’s mana value is less than or equal to N. If you don’t cast it, put that card into your hand. Put the remaining exiled cards on the bottom of your library in a random order.”"
+text = "\"Discover N\" means \"Exile cards from the top of your library until you exile a nonland card with mana value N or less. You may cast that card without paying its mana cost if the resulting spell's mana value is less than or equal to N. If you don't cast it, put that card into your hand. Put the remaining exiled cards on the bottom of your library in a random order.\""
 status = "implemented"
 impl_files = ["game/effects/cast_from_zone.rs:13", "game/effects/discover.rs:9", "game/effects/discover.rs:34", "game/effects/discover.rs:69", "game/engine.rs:1622", "game/engine.rs:1636", "game/engine.rs:1651", "parser/oracle_effect/mod.rs:446", "parser/oracle_keyword.rs:248", "parser/oracle_trigger.rs:287", "types/ability.rs:2115", "types/ability.rs:3103", "types/actions.rs:130", "types/game_state.rs:569", "types/keywords.rs:305"]
 test_files = []
@@ -1950,19 +1950,19 @@ notes = ""
 
 [cr_701_57b]
 rule = "701.57b"
-text = "A player has “discovered” after the process described in 701.57a is complete, even if some or all of those actions were impossible."
+text = "A player has \"discovered\" after the process described in 701.57a is complete, even if some or all of those actions were impossible."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No explicit \"discovered\" completion event is emitted."
 
 [cr_701_57c]
 rule = "701.57c"
-text = "If the final card exiled during the process described in rule 701.57a has mana value N or less, it is the “discovered card,” regardless of whether it was cast or put into a player’s hand."
-status = "missing"
-impl_files = []
+text = "If the final card exiled during the process described in rule 701.57a has mana value N or less, it is the \"discovered card,\" regardless of whether it was cast or put into a player's hand."
+status = "implemented"
+impl_files = ["game/effects/discover.rs:69", "game/engine.rs:1651"]
 test_files = []
-notes = ""
+notes = "discover.rs and engine.rs correctly track the discovered card regardless of whether the player casts it or puts it in hand."
 
 [cr_701_58]
 rule = "701.58"
@@ -1970,11 +1970,11 @@ text = "Cloak"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Cloak (March of the Machine) is not implemented as a distinct action. Morph and disguise face-down mechanics exist (morph.rs) but cloak with its ward {2} characteristic is not handled."
 
 [cr_701_58a]
 rule = "701.58a"
-text = "To cloak a card, turn it face down. It becomes a 2/2 face-down creature card with ward {2}, no name, no subtypes, and no mana cost. Put that card onto the battlefield face down. That permanent is a cloaked permanent for as long as it remains face down. The effect defining its characteristics works while the card is face down and ends when it’s turned face up."
+text = "To cloak a card, turn it face down. It becomes a 2/2 face-down creature card with ward {2}, no name, no subtypes, and no mana cost. Put that card onto the battlefield face down. That permanent is a cloaked permanent for as long as it remains face down. The effect defining its characteristics works while the card is face down and ends when it's turned face up."
 status = "missing"
 impl_files = []
 test_files = []
@@ -1982,7 +1982,7 @@ notes = ""
 
 [cr_701_58b]
 rule = "701.58b"
-text = "Any time you have priority, you may turn a cloaked permanent you control face up. This is a special action that doesn’t use the stack (see rule 116.2b). To do this, show all players that the card representing that permanent is a creature card and what that card’s mana cost is, pay that cost, then turn the permanent face up. The effect defining its characteristics while it was face down ends, and it regains its normal characteristics. (If the card representing that permanent isn’t a creature card or it doesn’t have a mana cost, it can’t be turned face up this way.)"
+text = "Any time you have priority, you may turn a cloaked permanent you control face up. This is a special action that doesn't use the stack (see rule 116.2b). To do this, show all players that the card representing that permanent is a creature card and what that card's mana cost is, pay that cost, then turn the permanent face up. The effect defining its characteristics while it was face down ends, and it regains its normal characteristics. (If the card representing that permanent isn't a creature card or it doesn't have a mana cost, it can't be turned face up this way.)"
 status = "missing"
 impl_files = []
 test_files = []
@@ -2014,7 +2014,7 @@ notes = ""
 
 [cr_701_58f]
 rule = "701.58f"
-text = "If an effect instructs a player to cloak a card and a rule or effect prohibits the face-down object from entering the battlefield, that card isn’t cloaked. Its characteristics remain unmodified and it remains in its previous zone. If it was face up, it remains face up."
+text = "If an effect instructs a player to cloak a card and a rule or effect prohibits the face-down object from entering the battlefield, that card isn't cloaked. Its characteristics remain unmodified and it remains in its previous zone. If it was face up, it remains face up."
 status = "missing"
 impl_files = []
 test_files = []
@@ -2022,7 +2022,7 @@ notes = ""
 
 [cr_701_58g]
 rule = "701.58g"
-text = "If a cloaked permanent that’s represented by an instant or sorcery card would turn face up, its controller reveals it and leaves it face down. Abilities that trigger whenever a permanent is turned face up won’t trigger."
+text = "If a cloaked permanent that's represented by an instant or sorcery card would turn face up, its controller reveals it and leaves it face down. Abilities that trigger whenever a permanent is turned face up won't trigger."
 status = "missing"
 impl_files = []
 test_files = []
@@ -2030,31 +2030,31 @@ notes = ""
 
 [cr_701_58h]
 rule = "701.58h"
-text = "See rule 708, “Face-Down Spells and Permanents,” for more information."
-status = "missing"
+text = "See rule 708, \"Face-Down Spells and Permanents,\" for more information."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Cross-reference only."
 
 [cr_701_59]
 rule = "701.59"
 text = "Collect Evidence"
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["types/ability.rs:2201", "game/effects/mod.rs:240", "game/trigger_matchers.rs:206"]
 test_files = []
-notes = ""
+notes = "Collect Evidence is parsed into Effect::CollectEvidence and TriggerMode::CollectEvidence exists. However, the resolver in effects/mod.rs is a stub (no-op). The actual exile-cards-from-graveyard action is not implemented."
 
 [cr_701_59a]
 rule = "701.59a"
-text = "To “collect evidence N” means to exile any number of cards from your graveyard with total mana value N or greater."
+text = "To \"collect evidence N\" means to exile any number of cards from your graveyard with total mana value N or greater."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "The actual exile-from-graveyard with mana value threshold is not implemented."
 
 [cr_701_59b]
 rule = "701.59b"
-text = "If a player is given the choice to collect evidence but is unable to exile cards with total mana value N or greater from their graveyard (usually because there aren’t enough cards to do so) they can’t choose to collect evidence."
+text = "If a player is given the choice to collect evidence but is unable to exile cards with total mana value N or greater from their graveyard (usually because there aren't enough cards to do so) they can't choose to collect evidence."
 status = "missing"
 impl_files = []
 test_files = []
@@ -2062,7 +2062,7 @@ notes = ""
 
 [cr_701_59c]
 rule = "701.59c"
-text = "A spell that has an ability that allows a player to collect evidence as an additional cost to cast it may have another ability that refers to whether evidence was collected. These abilities are linked. See rule 607, “Linked Abilities.”"
+text = "A spell that has an ability that allows a player to collect evidence as an additional cost to cast it may have another ability that refers to whether evidence was collected. These abilities are linked. See rule 607, \"Linked Abilities.\""
 status = "missing"
 impl_files = []
 test_files = []
@@ -2071,8 +2071,8 @@ notes = ""
 [cr_701_60]
 rule = "701.60"
 text = "Suspect"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/suspect.rs"]
 test_files = []
 notes = ""
 
@@ -2080,45 +2080,45 @@ notes = ""
 rule = "701.60a"
 text = "Certain spells and abilities instruct a player to suspect a creature. That creature becomes suspected until it leaves the battlefield or until a spell or ability causes it to no longer be suspected."
 status = "implemented"
-impl_files = ["game/game_object.rs:255", "types/events.rs:195"]
-test_files = []
+impl_files = ["game/game_object.rs:255", "types/events.rs:195", "game/effects/suspect.rs:37"]
+test_files = ["game/effects/suspect.rs:102"]
 notes = ""
 
 [cr_701_60b]
 rule = "701.60b"
-text = "Suspected is a designation a permanent can have. Only permanents can have the suspected designation. Suspected is neither an ability nor part of the permanent’s copiable values."
-status = "missing"
-impl_files = []
+text = "Suspected is a designation a permanent can have. Only permanents can have the suspected designation. Suspected is neither an ability nor part of the permanent's copiable values."
+status = "implemented"
+impl_files = ["game/effects/suspect.rs:12", "game/game_object.rs:255"]
 test_files = []
-notes = ""
+notes = "is_suspected is a field on GameObject, explicitly tracked as a designation separate from abilities and copiable values."
 
 [cr_701_60c]
 rule = "701.60c"
-text = "A suspected permanent has menace and “This creature can’t block” for as long as it’s suspected."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "A suspected permanent has menace and \"This creature can't block\" for as long as it's suspected."
+status = "implemented"
+impl_files = ["game/effects/suspect.rs:39", "game/effects/suspect.rs:48"]
+test_files = ["game/effects/suspect.rs:130"]
+notes = "suspect.rs adds menace to base_keywords and CantBlock to base_static_definitions. These survive layer recalc via base_* fields."
 
 [cr_701_60d]
 rule = "701.60d"
-text = "A suspected permanent can’t become suspected again."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "A suspected permanent can't become suspected again."
+status = "implemented"
+impl_files = ["game/effects/suspect.rs:33"]
+test_files = ["game/effects/suspect.rs:197"]
+notes = "suspect.rs checks is_suspected before setting the designation; already-suspected permanents are skipped."
 
 [cr_701_61]
 rule = "701.61"
 text = "Forage"
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["types/ability.rs:2199", "game/effects/mod.rs:240", "game/trigger_matchers.rs:210"]
 test_files = []
-notes = ""
+notes = "Forage is parsed into Effect::Forage and TriggerMode::Forage exists. However, the resolver in effects/mod.rs is a stub (no-op). The actual exile-three-cards-or-sacrifice-Food action is not implemented."
 
 [cr_701_61a]
 rule = "701.61a"
-text = "To forage means “Exile three cards from your graveyard or sacrifice a Food.”"
+text = "To forage means \"Exile three cards from your graveyard or sacrifice a Food.\""
 status = "missing"
 impl_files = []
 test_files = []
@@ -2127,14 +2127,14 @@ notes = ""
 [cr_701_62]
 rule = "701.62"
 text = "Manifest Dread"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/manifest_dread.rs"]
 test_files = []
 notes = ""
 
 [cr_701_62a]
 rule = "701.62a"
-text = "“Manifest dread” means “Look at the top two cards of your library. Manifest one of them, then put the cards you looked at that were not manifested this way into your graveyard.” See rule 701.40, “Manifest.”"
+text = "\"Manifest dread\" means \"Look at the top two cards of your library. Manifest one of them, then put the cards you looked at that were not manifested this way into your graveyard.\" See rule 701.40, \"Manifest.\""
 status = "implemented"
 impl_files = ["ai_support/candidates.rs:685", "game/effects/manifest_dread.rs:5", "game/effects/manifest_dread.rs:25", "game/effects/manifest_dread.rs:33", "game/effects/manifest_dread.rs:42", "game/engine.rs:1576", "game/engine.rs:1600", "game/engine.rs:1604", "parser/oracle_effect/imperative.rs:1292", "parser/oracle_effect/types.rs:186", "types/ability.rs:2159", "types/game_state.rs:362"]
 test_files = []
@@ -2146,19 +2146,19 @@ text = "An ability that triggers whenever a player manifests dread triggers afte
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No explicit manifest-dread completion event is emitted to fire triggers after the full process."
 
 [cr_701_63]
 rule = "701.63"
 text = "Endure"
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["types/ability.rs", "game/effects/mod.rs:242"]
 test_files = []
-notes = ""
+notes = "Endure is parsed into Effect::Endure and recognized by the coverage system, but the resolver in effects/mod.rs is a stub (no-op). The actual create-Spirit-token-or-put-counters action is not implemented."
 
 [cr_701_63a]
 rule = "701.63a"
-text = "Certain abilities instruct a permanent to endure N. To do so, that permanent’s controller creates an N/N white Spirit creature token unless they put N +1/+1 counters on that permanent."
+text = "Certain abilities instruct a permanent to endure N. To do so, that permanent's controller creates an N/N white Spirit creature token unless they put N +1/+1 counters on that permanent."
 status = "missing"
 impl_files = []
 test_files = []
@@ -2178,11 +2178,11 @@ text = "Harness"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Harness (Avatar: The Last Airbender) is not implemented."
 
 [cr_701_64a]
 rule = "701.64a"
-text = "“Harness [this permanent]” means “If this permanent isn’t harnessed, it becomes harnessed.”"
+text = "\"Harness [this permanent]\" means \"If this permanent isn't harnessed, it becomes harnessed.\""
 status = "missing"
 impl_files = []
 test_files = []
@@ -2190,7 +2190,7 @@ notes = ""
 
 [cr_701_64b]
 rule = "701.64b"
-text = "Harnessed is a designation that has no rules meaning other than to act as a marker that other spells and abilities can identify. Only permanents can be or become harnessed. Once a permanent becomes harnessed, it stays harnessed until it leaves the battlefield. Harnessed is neither an ability nor part of the permanent’s copiable values."
+text = "Harnessed is a designation that has no rules meaning other than to act as a marker that other spells and abilities can identify. Only permanents can be or become harnessed. Once a permanent becomes harnessed, it stays harnessed until it leaves the battlefield. Harnessed is neither an ability nor part of the permanent's copiable values."
 status = "missing"
 impl_files = []
 test_files = []
@@ -2202,7 +2202,7 @@ text = "Airbend"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Airbend (Avatar: The Last Airbender) is not implemented."
 
 [cr_701_65a]
 rule = "701.65a"
@@ -2226,11 +2226,11 @@ text = "Earthbend"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Earthbend (Avatar: The Last Airbender) is not implemented."
 
 [cr_701_66a]
 rule = "701.66a"
-text = "“Earthbend N” means “Target land you control becomes a 0/0 land creature with haste in addition to its other types. Put N +1/+1 counters on it. When that land dies or is put into exile, return it to the battlefield tapped under your control.”"
+text = "\"Earthbend N\" means \"Target land you control becomes a 0/0 land creature with haste in addition to its other types. Put N +1/+1 counters on it. When that land dies or is put into exile, return it to the battlefield tapped under your control.\""
 status = "missing"
 impl_files = []
 test_files = []
@@ -2254,11 +2254,11 @@ notes = ""
 
 [cr_701_67a]
 rule = "701.67a"
-text = "“Waterbend [cost]” means “Pay [cost]. For each generic mana in that cost, you may tap an untapped artifact or creature you control rather than pay that mana.”"
-status = "missing"
-impl_files = []
+text = "\"Waterbend [cost]\" means \"Pay [cost]. For each generic mana in that cost, you may tap an untapped artifact or creature you control rather than pay that mana.\""
+status = "implemented"
+impl_files = ["game/casting_costs.rs:609", "game/casting_costs.rs:739", "game/engine.rs:1276", "game/engine.rs:1251"]
 test_files = []
-notes = ""
+notes = "Waterbend tapping mechanic is handled in the ManaPayment flow: ConvokeMode::Waterbend allows tapping artifacts or creatures to produce colorless mana. GameEvent::Waterbend is emitted for each tap."
 
 [cr_701_67b]
 rule = "701.67b"
@@ -2266,27 +2266,27 @@ text = "If a waterbend cost is part of the total cost to cast a spell or activat
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Generic-mana scoping for waterbend vs overall spell cost is not explicitly enforced."
 
 [cr_701_67c]
 rule = "701.67c"
 text = "An ability that triggers whenever a player waterbends triggers whenever that player pays a waterbend cost, regardless of how they paid that cost."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/engine.rs:1276", "game/trigger_matchers.rs:1705", "game/trigger_matchers.rs:1712", "types/triggers.rs:303"]
 test_files = []
-notes = ""
+notes = "GameEvent::Waterbend is emitted and matched by TriggerMode::Waterbend in trigger_matchers.rs."
 
 [cr_701_68]
 rule = "701.68"
 text = "Blight"
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["types/ability.rs", "game/effects/mod.rs:243"]
 test_files = []
-notes = ""
+notes = "Blight is parsed into Effect::BlightEffect and AbilityCost::Blight. The effect resolver in effects/mod.rs is a stub (no-op). The actual put-N-minus-one-minus-one-counters action is not implemented."
 
 [cr_701_68a]
 rule = "701.68a"
-text = "To “blight N” means to put N -1/-1 counters on a creature you control."
+text = "To \"blight N\" means to put N -1/-1 counters on a creature you control."
 status = "missing"
 impl_files = []
 test_files = []
@@ -2294,7 +2294,7 @@ notes = ""
 
 [cr_701_68b]
 rule = "701.68b"
-text = "If a player is given the choice to blight but is unable to put N -1/-1 counters on a creature they control (usually because they control no creatures), they can’t choose to blight."
+text = "If a player is given the choice to blight but is unable to put N -1/-1 counters on a creature they control (usually because they control no creatures), they can't choose to blight."
 status = "missing"
 impl_files = []
 test_files = []
@@ -2302,7 +2302,7 @@ notes = ""
 
 [cr_701_68c]
 rule = "701.68c"
-text = "Some spells and abilities that instruct a player to blight refer to the “blighted creature.” This phrase refers to the object that the player who was instructed to blight chose to put -1/-1 counters on when blighting."
+text = "Some spells and abilities that instruct a player to blight refer to the \"blighted creature.\" This phrase refers to the object that the player who was instructed to blight chose to put -1/-1 counters on when blighting."
 status = "missing"
 impl_files = []
 test_files = []

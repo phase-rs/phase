@@ -1,16 +1,16 @@
-# Comprehensive Rules Section 729: Daybound and Nightbound
+# Comprehensive Rules Section 729: Merging with Permanents (Mutate)
 
 [_meta]
 section = 729
-title = "Daybound and Nightbound"
+title = "Merging with Permanents (Mutate)"
 
 [cr_729_1]
 rule = "729.1"
-text = "One keyword causes an object to merge with a permanent. See rule 702.140, “Mutate.”"
+text = "One keyword causes an object to merge with a permanent. See rule 702.140, \"Mutate.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutate/merging with permanents not implemented."
 
 [cr_729_2]
 rule = "729.2"
@@ -18,7 +18,7 @@ text = "To merge an object with a permanent, place that object on top of or unde
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutate/merging not implemented."
 
 [cr_729_2a]
 rule = "729.2a"
@@ -26,23 +26,23 @@ text = "A merged permanent has only the characteristics of its topmost component
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutate/merging not implemented."
 
 [cr_729_2b]
 rule = "729.2b"
-text = "As an object merges with a permanent, that object leaves its previous zone and becomes part of an object on the battlefield, but the resulting permanent isn’t considered to have just entered the battlefield."
+text = "As an object merges with a permanent, that object leaves its previous zone and becomes part of an object on the battlefield, but the resulting permanent isn't considered to have just entered the battlefield."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutate/merging not implemented."
 
 [cr_729_2c]
 rule = "729.2c"
-text = "Because a merged permanent is the same object that it was before, it hasn’t just come under a player’s control, any continuous effects that affected it continue to do so, and so on."
+text = "Because a merged permanent is the same object that it was before, it hasn't just come under a player's control, any continuous effects that affected it continue to do so, and so on."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutate/merging not implemented."
 
 [cr_729_2d]
 rule = "729.2d"
@@ -50,15 +50,15 @@ text = "If a merged permanent contains a token, the resulting permanent is a tok
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutate/merging not implemented."
 
 [cr_729_2e]
 rule = "729.2e"
-text = "If a merged permanent contains face-up and face-down components, the permanent’s status is determined by its topmost component. If a face-down permanent becomes a face-up permanent as a result of an object merging with it, other effects don’t count it as being turned face up."
+text = "If a merged permanent contains face-up and face-down components, the permanent's status is determined by its topmost component. If a face-down permanent becomes a face-up permanent as a result of an object merging with it, other effects don't count it as being turned face up."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutate/merging not implemented."
 
 [cr_729_2f]
 rule = "729.2f"
@@ -66,23 +66,23 @@ text = "If a merged permanent is turned face down, each face-up component that r
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutate/merging not implemented."
 
 [cr_729_2g]
 rule = "729.2g"
-text = "A face-down merged permanent that contains an instant or sorcery card can’t be turned face up. If such a permanent would turn face up, its controller reveals it and leaves it face down. Abilities that trigger when a permanent is turned face up won’t trigger."
+text = "A face-down merged permanent that contains an instant or sorcery card can't be turned face up. If such a permanent would turn face up, its controller reveals it and leaves it face down. Abilities that trigger when a permanent is turned face up won't trigger."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutate/merging not implemented."
 
 [cr_729_2h]
 rule = "729.2h"
-text = "If a merged permanent contains a flip card (see rule 710), that component’s alternative characteristics are used instead of its normal characteristics if the merged permanent is flipped."
+text = "If a merged permanent contains a flip card (see rule 710), that component's alternative characteristics are used instead of its normal characteristics if the merged permanent is flipped."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutate/merging not implemented."
 
 [cr_729_2i]
 rule = "729.2i"
@@ -90,15 +90,15 @@ text = "A merged permanent is not a double-faced permanent even if it contains o
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutate/merging not implemented."
 
 [cr_729_2j]
 rule = "729.2j"
-text = "A face-up merged permanent that contains a double-faced component can’t be turned face down."
+text = "A face-up merged permanent that contains a double-faced component can't be turned face down."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutate/merging not implemented."
 
 [cr_729_3]
 rule = "729.3"
@@ -106,15 +106,15 @@ text = "If a merged permanent leaves the battlefield, one permanent leaves the b
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutate/merging not implemented."
 
 [cr_729_3a]
 rule = "729.3a"
-text = "If a merged permanent is put into its owner’s graveyard or library, that player may arrange the new objects in any order. If it’s put into its owner’s library, that player doesn’t reveal the order."
+text = "If a merged permanent is put into its owner's graveyard or library, that player may arrange the new objects in any order. If it's put into its owner's library, that player doesn't reveal the order."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutate/merging not implemented."
 
 [cr_729_3b]
 rule = "729.3b"
@@ -122,7 +122,7 @@ text = "If a player exiles a merged permanent, that player determines the relati
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutate/merging not implemented."
 
 [cr_729_3c]
 rule = "729.3c"
@@ -130,7 +130,7 @@ text = "If an effect can find the new object that a merged permanent becomes as 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutate/merging not implemented."
 
 [cr_729_3d]
 rule = "729.3d"
@@ -138,12 +138,12 @@ text = "If multiple replacement effects could be applied to the event of a merge
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutate/merging not implemented."
 
 [cr_729_3e]
 rule = "729.3e"
-text = "If a replacement effect applies to a “card” being put into a zone without also including tokens, that effect applies to all components of the merged permanent if it’s not a token, including components that are tokens. If the merged permanent is a token but some of its components are cards, the merged permanent and its token components are put into the appropriate zone, and the components that are cards are moved by the replacement effect."
+text = "If a replacement effect applies to a \"card\" being put into a zone without also including tokens, that effect applies to all components of the merged permanent if it's not a token, including components that are tokens. If the merged permanent is a token but some of its components are cards, the merged permanent and its token components are put into the appropriate zone, and the components that are cards are moved by the replacement effect."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutate/merging not implemented."

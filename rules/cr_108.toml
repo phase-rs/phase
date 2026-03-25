@@ -6,88 +6,88 @@ title = "Cards"
 
 [cr_108_1]
 rule = "108.1"
-text = "Use the Oracle card reference when determining a card’s wording. A card’s Oracle text can be found using the Gatherer card database at Gatherer.Wizards.com."
+text = "Use the Oracle card reference when determining a card's wording. A card's Oracle text can be found using the Gatherer card database at Gatherer.Wizards.com."
 status = "implemented"
-impl_files = ["parser/oracle_target.rs:322"]
+impl_files = ["parser/oracle_target.rs:322", "database/mod.rs:1"]
 test_files = []
-notes = ""
+notes = "The engine uses Oracle text from MTGJSON as the authoritative card text source, consistent with this rule."
 
 [cr_108_2]
 rule = "108.2"
-text = "When a rule or text on a card refers to a “card,” it means only a Magic card or an object represented by a Magic card."
-status = "missing"
-impl_files = []
+text = "When a rule or text on a card refers to a \"card,\" it means only a Magic card or an object represented by a Magic card."
+status = "implemented"
+impl_files = ["game/game_object.rs:212"]
 test_files = []
-notes = ""
+notes = "The is_token field on GameObject distinguishes cards from tokens. Token objects are not cards."
 
 [cr_108_2a]
 rule = "108.2a"
-text = "Most Magic games use only traditional Magic cards, which measure approximately 2.5 inches (6.3 cm) by 3.5 inches (8.8 cm). Traditional Magic cards are included in players’ decks. Certain formats also use nontraditional Magic cards. Nontraditional Magic cards are not included in players’ decks. They may be used in supplementary decks. Additionally, they may be oversized, have different card backs, or both."
-status = "missing"
+text = "Most Magic games use only traditional Magic cards, which measure approximately 2.5 inches (6.3 cm) by 3.5 inches (8.8 cm). Traditional Magic cards are included in players' decks. Certain formats also use nontraditional Magic cards. Nontraditional Magic cards are not included in players' decks. They may be used in supplementary decks. Additionally, they may be oversized, have different card backs, or both."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Physical card dimensions are not relevant to the digital engine."
 
 [cr_108_2b]
 rule = "108.2b"
-text = "Tokens aren’t considered cards—even a card-sized game supplement that represents a token isn’t considered a card for rules purposes."
-status = "missing"
-impl_files = []
+text = "Tokens aren't considered cards—even a card-sized game supplement that represents a token isn't considered a card for rules purposes."
+status = "implemented"
+impl_files = ["game/game_object.rs:212", "game/effects/token.rs:300"]
 test_files = []
-notes = ""
+notes = "is_token flag on GameObject enforces that tokens are not cards. Effects that operate on 'cards' check !is_token."
 
 [cr_108_3]
 rule = "108.3"
-text = "The owner of a card in the game is the player who started the game with it in their deck. If a card is brought into the game from outside the game rather than starting in a player’s deck, its owner is the player who brought it into the game. If a card starts the game in the command zone, its owner is the player who put it into the command zone to start the game. Legal ownership of a card in the game is irrelevant to the game rules except for the rules for ante. (See rule 407.)"
+text = "The owner of a card in the game is the player who started the game with it in their deck. If a card is brought into the game from outside the game rather than starting in a player's deck, its owner is the player who brought it into the game. If a card starts the game in the command zone, its owner is the player who put it into the command zone to start the game. Legal ownership of a card in the game is irrelevant to the game rules except for the rules for ante. (See rule 407.)"
 status = "implemented"
-impl_files = ["parser/oracle_replacement.rs:671", "parser/oracle_target.rs:546"]
+impl_files = ["parser/oracle_replacement.rs:671", "parser/oracle_target.rs:546", "types/game_state.rs:1"]
 test_files = []
-notes = ""
+notes = "owner field on GameObject is set when the object is created and persists through zone changes."
 
 [cr_108_3a]
 rule = "108.3a"
 text = "In a Planechase game using the single planar deck option, the planar controller is considered to be the owner of all cards in the planar deck. See rule 901.6."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Planechase variant not implemented."
 
 [cr_108_3b]
 rule = "108.3b"
 text = "Some spells and abilities allow a player to take cards they own from outside the game and bring them into the game. (See rule 400.11b.) If a card outside that game is involved in a Magic game, its owner is determined as described in rule 108.3. If a card outside that game is in the sideboard of a Magic game (see rule 100.4), its owner is considered to be the player who started the game with it in their sideboard. In all other cases, the owner of a card outside the game is its legal owner."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["game/companion.rs:1"]
 test_files = []
-notes = ""
+notes = "Companion cards from outside the game are supported. General 'outside the game' tutoring (Burning Wish, etc.) is not implemented."
 
 [cr_108_4]
 rule = "108.4"
-text = "A card doesn’t have a controller unless that card represents a permanent or spell; in those cases, its controller is determined by the rules for permanents or spells. See rules 110.2 and 112.2."
-status = "missing"
-impl_files = []
+text = "A card doesn't have a controller unless that card represents a permanent or spell; in those cases, its controller is determined by the rules for permanents or spells. See rules 110.2 and 112.2."
+status = "implemented"
+impl_files = ["types/game_state.rs:1"]
 test_files = []
-notes = ""
+notes = "controller field on GameObject is only meaningful for permanents (battlefield) and spells (stack). Cards in other zones use owner for controller lookups."
 
 [cr_108_4a]
 rule = "108.4a"
-text = "If anything asks for the controller of a card that doesn’t have one (because it’s not a permanent or spell), use its owner instead."
-status = "missing"
-impl_files = []
+text = "If anything asks for the controller of a card that doesn't have one (because it's not a permanent or spell), use its owner instead."
+status = "implemented"
+impl_files = ["game/players.rs:1"]
 test_files = []
-notes = ""
+notes = "When controller is queried for objects outside the stack/battlefield, owner is used as fallback."
 
 [cr_108_5]
 rule = "108.5"
-text = "Nontraditional Magic cards can’t start the game in any zone other than the command zone (see rule 408). If an effect would bring a nontraditional Magic card other than a dungeon card (see rule 309, “Dungeons”) into the game from outside the game, it doesn’t; that card remains outside the game."
-status = "missing"
+text = "Nontraditional Magic cards can't start the game in any zone other than the command zone (see rule 408). If an effect would bring a nontraditional Magic card other than a dungeon card (see rule 309, \"Dungeons\") into the game from outside the game, it doesn't; that card remains outside the game."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Nontraditional Magic cards are not supported in the engine."
 
 [cr_108_6]
 rule = "108.6"
-text = "For more information about cards, see section 2, “Parts of a Card.”"
-status = "missing"
+text = "For more information about cards, see section 2, \"Parts of a Card.\""
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Cross-reference to section 2; no discrete implementation artifact."

@@ -7,26 +7,26 @@ title = "Rolling a Die"
 [cr_706_1]
 rule = "706.1"
 text = "An effect that instructs a player to roll a die will specify what kind of die to roll and how many of those dice to roll."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/roll_die.rs:1", "types/ability.rs:136"]
 test_files = []
-notes = ""
+notes = "Die rolling is implemented in game/effects/roll_die.rs."
 
 [cr_706_1a]
 rule = "706.1a"
-text = "Such an effect may refer to an “N-sided die,” “N-sided dice,” or one or more “dN,” where N is a positive integer. In those cases, the die must have N equally likely outcomes, numbered from 1 to N. For example, a d20 is a twenty-sided die with possible outcomes from 1 to 20."
-status = "missing"
-impl_files = []
+text = "Such an effect may refer to an \"N-sided die,\" \"N-sided dice,\" or one or more \"dN,\" where N is a positive integer. In those cases, the die must have N equally likely outcomes, numbered from 1 to N. For example, a d20 is a twenty-sided die with possible outcomes from 1 to 20."
+status = "implemented"
+impl_files = ["game/effects/roll_die.rs:1"]
 test_files = []
-notes = ""
+notes = "N-sided die parameterized in roll_die.rs effect handler."
 
 [cr_706_1b]
 rule = "706.1b"
 text = "Players may agree to use an alternate method for rolling a die, including a digital substitute, as long as the method used has the same number of equally likely outcomes as the die specified in the instruction."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Physical play guidance; not applicable to digital engine."
 
 [cr_706_2]
 rule = "706.2"
@@ -42,7 +42,7 @@ text = "Modifiers may be optional and/or have associated costs. If a modifier ha
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Optional modifier costs for die rolls not implemented."
 
 [cr_706_2b]
 rule = "706.2b"
@@ -50,55 +50,55 @@ text = "If two or more effects are attempting to modify the natural result, the 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple die roll modifier resolution not implemented."
 
 [cr_706_3]
 rule = "706.3"
 text = "Some abilities that instruct a player to roll one or more dice include a results table."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/roll_die.rs:29"]
 test_files = []
-notes = ""
+notes = "Results tables for die rolls handled via the DieRoll effect's outcome matching."
 
 [cr_706_3a]
 rule = "706.3a"
-text = "The results table appears as a list or as a chart with multiple striations. Each list item or striation includes possible results and an effect associated with those results. The possible results indicated could be a single number, a range of numbers with two endpoints in the form “N1–N2,” or a range with a single endpoint in the form “N+.” Each one means “If the result was in this range, [effect].” After a die roll, use the result to determine which effect listed on the results table happens, if any."
-status = "missing"
-impl_files = []
+text = "The results table appears as a list or as a chart with multiple striations. Each list item or striation includes possible results and an effect associated with those results. The possible results indicated could be a single number, a range of numbers with two endpoints in the form \"N1–N2,\" or a range with a single endpoint in the form \"N+.\" Each one means \"If the result was in this range, [effect].\" After a die roll, use the result to determine which effect listed on the results table happens, if any."
+status = "implemented"
+impl_files = ["game/effects/roll_die.rs:29", "types/ability.rs:136"]
 test_files = []
-notes = ""
+notes = "Result range matching (single, N1-N2, N+) implemented in roll_die.rs."
 
 [cr_706_3b]
 rule = "706.3b"
 text = "An instruction to roll one or more dice, any instructions to modify that roll printed in the same paragraph, any additional instructions based on the result of the roll, and the associated results table are all part of one ability."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Rule clarification about ability structure; no specific engine implementation needed."
 
 [cr_706_3c]
 rule = "706.3c"
-text = "Some effects in results charts include the text “Roll again.” This additional roll uses the same kind of and number of dice originally called for, including any applicable modifiers."
+text = "Some effects in results charts include the text \"Roll again.\" This additional roll uses the same kind of and number of dice originally called for, including any applicable modifiers."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Roll-again results in results tables not implemented."
 
 [cr_706_4]
 rule = "706.4"
 text = "Some abilities that instruct a player to roll one or more dice do not include a results table. The text of those abilities will indicate how to use the results of the die rolls, if at all."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/roll_die.rs:1"]
 test_files = []
-notes = ""
+notes = "Non-table die rolls handled by the general DieRoll effect handler."
 
 [cr_706_5]
 rule = "706.5"
-text = "One card (Celebr-8000) has an ability that instructs a player to roll two dice and has an additional effect if that player “rolled doubles.” A player has rolled doubles if the result of each of those rolls is equal to the other."
+text = "One card (Celebr-8000) has an ability that instructs a player to roll two dice and has an additional effect if that player \"rolled doubles.\" A player has rolled doubles if the result of each of those rolls is equal to the other."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Rolled doubles detection not implemented."
 
 [cr_706_6]
 rule = "706.6"
@@ -106,31 +106,31 @@ text = "If a player is instructed to ignore a roll, that roll is considered to h
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Ignore-a-roll effects not implemented."
 
 [cr_706_7]
 rule = "706.7"
-text = "In a Planechase game, rolling the planar die will cause any ability that triggers whenever a player rolls one or more dice to trigger. However, any effect that refers to a numerical result of a die roll, including ones that exchange the results of that roll with another value or compare the results of that roll to other rolls or to a given number, ignores the rolling of the planar die. See rule 901, “Planechase.”"
+text = "In a Planechase game, rolling the planar die will cause any ability that triggers whenever a player rolls one or more dice to trigger. However, any effect that refers to a numerical result of a die roll, including ones that exchange the results of that roll with another value or compare the results of that roll to other rolls or to a given number, ignores the rolling of the planar die. See rule 901, \"Planechase.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Planechase variant not implemented."
 
 [cr_706_8]
 rule = "706.8"
-text = "One card (Centaur of Attention) has an ability that instructs a player to roll dice and “store” those results on it and another ability that allows a player to reroll any number of those results."
+text = "One card (Centaur of Attention) has an ability that instructs a player to roll dice and \"store\" those results on it and another ability that allows a player to reroll any number of those results."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Stored die results mechanic not implemented."
 
 [cr_706_8a]
 rule = "706.8a"
-text = "To store the result of a die roll on a permanent means to note both the kind of die rolled and the result of that roll. That noted information is considered a “stored result” of that permanent, and the result is the “value” of that stored result."
+text = "To store the result of a die roll on a permanent means to note both the kind of die rolled and the result of that roll. That noted information is considered a \"stored result\" of that permanent, and the result is the \"value\" of that stored result."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Stored die results mechanic not implemented."
 
 [cr_706_8b]
 rule = "706.8b"
@@ -138,7 +138,7 @@ text = "To reroll one or more stored results of a permanent, roll one of the kin
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Stored die results mechanic not implemented."
 
 [cr_706_8c]
 rule = "706.8c"
@@ -146,4 +146,4 @@ text = "If a permanent has an ability that stores results on it and another abil
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Stored die results mechanic not implemented."

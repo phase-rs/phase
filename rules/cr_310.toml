@@ -6,51 +6,51 @@ title = "Battles"
 
 [cr_310_1]
 rule = "310.1"
-text = "A player who has priority may cast a battle card from their hand during a main phase of their turn when the stack is empty. Casting a battle as a spell uses the stack. (See rule 601, “Casting Spells.”)"
-status = "missing"
-impl_files = []
+text = "A player who has priority may cast a battle card from their hand during a main phase of their turn when the stack is empty. Casting a battle as a spell uses the stack. (See rule 601, \"Casting Spells.\")"
+status = "partial"
+impl_files = ["types/card_type.rs:60", "game/casting.rs:526"]
 test_files = []
-notes = ""
+notes = "CoreType::Battle is defined and battles enter via the standard permanent spell path. However, the mandatory protector choice on ETB (CR 310.8a) is not implemented."
 
 [cr_310_2]
 rule = "310.2"
 text = "When a battle spell resolves, its controller puts it onto the battlefield under their control."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["game/stack.rs:259"]
 test_files = []
-notes = ""
+notes = "is_permanent_type() includes CoreType::Battle; battle spells resolve to Zone::Battlefield. However, the protector-selection ETB replacement effect (CR 310.8a) is not implemented."
 
 [cr_310_3]
 rule = "310.3"
-text = "Battle subtypes are always a single word and are listed after a long dash: “Battle — Siege.” Battle subtypes are also called battle types. See rule 205.3q for the complete list of battle types."
-status = "missing"
-impl_files = []
+text = "Battle subtypes are always a single word and are listed after a long dash: \"Battle — Siege.\" Battle subtypes are also called battle types. See rule 205.3q for the complete list of battle types."
+status = "implemented"
+impl_files = ["types/card_type.rs:60"]
 test_files = []
-notes = ""
+notes = "Battle card type defined. Siege subtype stored in CardType.subtypes as a string."
 
 [cr_310_4]
 rule = "310.4"
 text = "Defense is a characteristic that battles have."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["types/card.rs:25"]
 test_files = []
-notes = ""
+notes = "CardFace.defense stores the printed defense value as Option<String>. However, defense counters on battlefield objects and defense-as-characteristic are not fully modeled in GameObject."
 
 [cr_310_4a]
 rule = "310.4a"
 text = "The defense of a battle card not on the battlefield is equal to the number printed in its lower right corner."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["types/card.rs:25"]
 test_files = []
-notes = ""
+notes = "CardFace.defense stores the printed value but it is not used for game logic."
 
 [cr_310_4b]
 rule = "310.4b"
-text = "A battle has the intrinsic ability “This permanent enters with a number of defense counters on it equal to its printed defense number.” This ability creates a replacement effect (see rule 614.1c)."
+text = "A battle has the intrinsic ability \"This permanent enters with a number of defense counters on it equal to its printed defense number.\" This ability creates a replacement effect (see rule 614.1c)."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Battles do not enter with defense counters. The intrinsic ETB replacement effect is not implemented."
 
 [cr_310_4c]
 rule = "310.4c"
@@ -58,15 +58,15 @@ text = "The defense of a battle on the battlefield is equal to the number of def
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Defense counter tracking on battlefield battle objects is not implemented."
 
 [cr_310_5]
 rule = "310.5"
-text = "Battles can be attacked. (See rule 508, “Declare Attackers Step.”)"
+text = "Battles can be attacked. (See rule 508, \"Declare Attackers Step.\")"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Battles cannot be declared as attack targets in combat.rs. Only players and planeswalkers are implemented as valid attack targets."
 
 [cr_310_6]
 rule = "310.6"
@@ -74,15 +74,15 @@ text = "Damage dealt to a battle results in that many defense counters being rem
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "deal_damage.rs has a TODO for CR 120.3h (battle damage removes defense counters). Not implemented."
 
 [cr_310_7]
 rule = "310.7"
-text = "If a battle’s defense is 0 and it isn’t the source of an ability which has triggered but not yet left the stack, it’s put into its owner’s graveyard. (This is a state-based action. See rule 704.)"
+text = "If a battle's defense is 0 and it isn't the source of an ability which has triggered but not yet left the stack, it's put into its owner's graveyard. (This is a state-based action. See rule 704.)"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No SBA for zero-defense battles in sba.rs."
 
 [cr_310_8]
 rule = "310.8"
@@ -90,7 +90,7 @@ text = "Each battle has a player designated as its protector."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Protector concept not implemented. Battles have no protector tracking."
 
 [cr_310_8a]
 rule = "310.8a"
@@ -98,92 +98,92 @@ text = "As a battle enters the battlefield, its controller chooses a player to b
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "ETB protector selection is not implemented."
 
 [cr_310_8b]
 rule = "310.8b"
-text = "A battle’s protector can never attack it. A battle can be attacked by any attacking player for whom its protector is a defending player. Notably, a Siege battle can be attacked by its own controller."
+text = "A battle's protector can never attack it. A battle can be attacked by any attacking player for whom its protector is a defending player. Notably, a Siege battle can be attacked by its own controller."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Protector-based attack targeting not implemented."
 
 [cr_310_8c]
 rule = "310.8c"
-text = "A battle’s protector may block creatures attacking that battle with creatures they control. Creatures controlled by other players can’t block those attackers."
+text = "A battle's protector may block creatures attacking that battle with creatures they control. Creatures controlled by other players can't block those attackers."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Protector-based blocking restrictions not implemented."
 
 [cr_310_8d]
 rule = "310.8d"
-text = "If a battle’s protector is a different player than its controller, all rules and effects that refer to the “defending player” relative to a battle that is being attacked refer to that battle’s protector rather than its controller. See rule 508.5."
+text = "If a battle's protector is a different player than its controller, all rules and effects that refer to the \"defending player\" relative to a battle that is being attacked refer to that battle's protector rather than its controller. See rule 508.5."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Defending player resolution for battles not implemented."
 
 [cr_310_8e]
 rule = "310.8e"
-text = "If a rule or effect refers to the player who protects a battle, it means the player who is that battle’s protector."
+text = "If a rule or effect refers to the player who protects a battle, it means the player who is that battle's protector."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Protector reference resolution not implemented."
 
 [cr_310_8f]
 rule = "310.8f"
-text = "A battle can have only one protector at a time. A battle’s protector stops being its protector if another player becomes its protector."
+text = "A battle can have only one protector at a time. A battle's protector stops being its protector if another player becomes its protector."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Protector tracking not implemented."
 
 [cr_310_8g]
 rule = "310.8g"
-text = "A battle’s protector doesn’t change if it stops being a battle or it becomes a copy of another battle."
+text = "A battle's protector doesn't change if it stops being a battle or it becomes a copy of another battle."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Protector persistence rules not implemented."
 
 [cr_310_9]
 rule = "310.9"
-text = "A battle can’t be attached to players or permanents, even if it is also an Aura, Equipment, or Fortification. If a battle is somehow attached to a permanent, it becomes unattached. This is a state-based action (see rule 704)."
+text = "A battle can't be attached to players or permanents, even if it is also an Aura, Equipment, or Fortification. If a battle is somehow attached to a permanent, it becomes unattached. This is a state-based action (see rule 704)."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No SBA for battle becoming unattached in sba.rs."
 
 [cr_310_10]
 rule = "310.10"
-text = "If a battle that isn’t being attacked has no player designated as its protector, or its protector is a player who can’t be its protector based on its battle type, its controller chooses an appropriate player to be its protector. If no player can be chosen this way, the battle is put into its owner’s graveyard. This is a state-based action (see rule 704)."
+text = "If a battle that isn't being attacked has no player designated as its protector, or its protector is a player who can't be its protector based on its battle type, its controller chooses an appropriate player to be its protector. If no player can be chosen this way, the battle is put into its owner's graveyard. This is a state-based action (see rule 704)."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Protector validity SBA not implemented."
 
 [cr_310_11]
 rule = "310.11"
 text = "All currently existing battles have the subtype Siege. Sieges are subject to special rules."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["types/card_type.rs:60"]
 test_files = []
-notes = ""
+notes = "Battle type defined and Siege subtype is parsed from MTGJSON. Special Siege rules (protector choice, attack rules) are not implemented."
 
 [cr_310_11a]
 rule = "310.11a"
-text = "As a Siege enters the battlefield, its controller must choose its protector from among their opponents. Only an opponent of a Siege’s controller can be its protector."
+text = "As a Siege enters the battlefield, its controller must choose its protector from among their opponents. Only an opponent of a Siege's controller can be its protector."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Siege ETB opponent-protector selection not implemented."
 
 [cr_310_11b]
 rule = "310.11b"
-text = "Sieges have the intrinsic ability “When the last defense counter is removed from this permanent, exile it, then you may cast it transformed without paying its mana cost.”"
+text = "Sieges have the intrinsic ability \"When the last defense counter is removed from this permanent, exile it, then you may cast it transformed without paying its mana cost.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Siege intrinsic transform ability not implemented."

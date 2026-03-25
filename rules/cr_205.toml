@@ -6,15 +6,15 @@ title = "Type Line"
 
 [cr_205_1]
 rule = "205.1"
-text = "The type line is printed directly below the illustration. It contains the card’s card type(s). It also contains the card’s subtype(s) and supertype(s), if applicable."
-status = "missing"
-impl_files = []
+text = "The type line is printed directly below the illustration. It contains the card's card type(s). It also contains the card's subtype(s) and supertype(s), if applicable."
+status = "implemented"
+impl_files = ["types/card_type.rs:106", "types/card.rs:21"]
 test_files = []
-notes = ""
+notes = "CardType struct contains supertypes, core_types, and subtypes. CardFace.card_type stores the parsed type line."
 
 [cr_205_1a]
 rule = "205.1a"
-text = "Some effects set an object’s card type. In most such cases, the new card type(s) replaces any existing card types. However, an object with either the instant or sorcery card type retains that type. Counters, stickers, effects, and damage marked on the object remain with it, even if they are meaningless to the new card type. Similarly, when an effect sets one or more of an object’s subtypes, the new subtype(s) replaces any existing subtypes from the appropriate set (creature types, land types, artifact types, enchantment types, planeswalker types, or spell types). If an object’s card type is removed, the subtypes correlated with that card type will remain if they are also the subtypes of a card type the object currently has; otherwise, they are also removed for the entire time the object’s card type is removed. Removing an object’s subtype doesn’t affect its card types at all."
+text = "Some effects set an object's card type. In most such cases, the new card type(s) replaces any existing card types. However, an object with either the instant or sorcery card type retains that type. Counters, stickers, effects, and damage marked on the object remain with it, even if they are meaningless to the new card type. Similarly, when an effect sets one or more of an object's subtypes, the new subtype(s) replaces any existing subtypes from the appropriate set (creature types, land types, artifact types, enchantment types, planeswalker types, or spell types). If an object's card type is removed, the subtypes correlated with that card type will remain if they are also the subtypes of a card type the object currently has; otherwise, they are also removed for the entire time the object's card type is removed. Removing an object's subtype doesn't affect its card types at all."
 status = "implemented"
 impl_files = ["game/effects/animate.rs:75", "parser/oracle_effect/mod.rs:387", "parser/oracle_effect/mod.rs:540", "parser/oracle_effect/mod.rs:2010", "parser/oracle_effect/mod.rs:2824", "parser/oracle_static.rs:2343", "parser/oracle_static.rs:2403", "types/ability.rs:1866"]
 test_files = []
@@ -22,23 +22,23 @@ notes = ""
 
 [cr_205_1b]
 rule = "205.1b"
-text = "Some effects change an object’s card type, supertype, or subtype but specify that the object retains a prior card type, supertype, or subtype. In such cases, all the object’s prior card types, supertypes, and subtypes are retained. This rule applies to effects that use phrases such as “in addition to its other types” or that state that something is “still a [type, supertype, or subtype].” Some effects state that an object becomes an “artifact creature”; these effects also allow the object to retain all of its prior card types and subtypes. Some effects state that an object becomes a “[creature type or types] artifact creature”; these effects also allow the object to retain all of its prior card types and subtypes other than creature types, but replace any existing creature types."
-status = "missing"
-impl_files = []
+text = "Some effects change an object's card type, supertype, or subtype but specify that the object retains a prior card type, supertype, or subtype. In such cases, all the object's prior card types, supertypes, and subtypes are retained. This rule applies to effects that use phrases such as \"in addition to its other types\" or that state that something is \"still a [type, supertype, or subtype].\" Some effects state that an object becomes an \"artifact creature\"; these effects also allow the object to retain all of its prior card types and subtypes. Some effects state that an object becomes a \"[creature type or types] artifact creature\"; these effects also allow the object to retain all of its prior card types and subtypes other than creature types, but replace any existing creature types."
+status = "implemented"
+impl_files = ["parser/oracle_effect/mod.rs:387", "parser/oracle_static.rs:2343", "types/ability.rs:1866"]
 test_files = []
-notes = ""
+notes = "ContinuousModification::AddType adds to existing types (additive). ContinuousModification::SetCoreTypes replaces. Parser detects 'in addition to its other types' phrases."
 
 [cr_205_2]
 rule = "205.2"
 text = "Card Types"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/card_type.rs:44"]
 test_files = []
-notes = ""
+notes = "CoreType enum defines all card types. CardType struct holds Vec<CoreType>."
 
 [cr_205_2a]
 rule = "205.2a"
-text = "The card types are artifact, battle, conspiracy, creature, dungeon, enchantment, instant, kindred, land, phenomenon, plane, planeswalker, scheme, sorcery, and vanguard. See section 3, “Card Types.”"
+text = "The card types are artifact, battle, conspiracy, creature, dungeon, enchantment, instant, kindred, land, phenomenon, plane, planeswalker, scheme, sorcery, and vanguard. See section 3, \"Card Types.\""
 status = "implemented"
 impl_files = ["game/effects/choose.rs:137", "game/filter.rs:149", "types/card_type.rs:44"]
 test_files = []
@@ -47,18 +47,18 @@ notes = ""
 [cr_205_2b]
 rule = "205.2b"
 text = "Some objects have more than one card type (for example, an artifact creature). Such objects satisfy the criteria for any effect that applies to any of their card types."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/card_type.rs:109", "game/filter.rs:149"]
 test_files = []
-notes = ""
+notes = "CardType.core_types is a Vec<CoreType>, allowing multiple card types. filter.rs checks obj.card_types.core_types.contains() which satisfies any-type matching."
 
 [cr_205_2c]
 rule = "205.2c"
-text = "Tokens have card types even though they aren’t cards. The same is true of copies of spells and copies of cards."
-status = "missing"
-impl_files = []
+text = "Tokens have card types even though they aren't cards. The same is true of copies of spells and copies of cards."
+status = "implemented"
+impl_files = ["game/effects/token.rs:1", "game/effects/become_copy.rs:1"]
 test_files = []
-notes = ""
+notes = "Tokens are created as GameObjects with fully populated card_types. Copies via become_copy copy the card_types characteristic."
 
 [cr_205_3]
 rule = "205.3"
@@ -79,62 +79,62 @@ notes = ""
 [cr_205_3b]
 rule = "205.3b"
 text = "Subtypes of each card type except creature and plane are always single words and are listed after a long dash. Each word after the dash is a separate subtype. Subtypes of creature cards are one or two words and are listed after a long dash. Each word or two-word phrase, as listed in rule 205.3m, is a separate subtype. Objects other than planes may have multiple subtypes. Subtypes of planes are also listed after a long dash, but may be multiple words; all words after the dash are, collectively, a single subtype."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/card_type.rs:110", "database/synthesis.rs:1"]
 test_files = []
-notes = ""
+notes = "CardType.subtypes is a Vec<String> parsed from MTGJSON type_line data. Each subtype is a separate string entry."
 
 [cr_205_3c]
 rule = "205.3c"
 text = "If a card with multiple card types has one or more subtypes, each subtype is correlated to its appropriate card type."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["game/layers.rs:768"]
 test_files = []
-notes = ""
+notes = "layers.rs has is_land_subtype() to selectively remove land subtypes during SetBasicLandType without affecting creature subtypes. Full per-type subtype correlation is not broadly enforced."
 
 [cr_205_3d]
 rule = "205.3d"
-text = "An object can’t gain a subtype that doesn’t correspond to one of that object’s types."
+text = "An object can't gain a subtype that doesn't correspond to one of that object's types."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No enforcement that added subtypes match the object's card types. Parser-level effects add subtypes without type validation."
 
 [cr_205_3e]
 rule = "205.3e"
-text = "If an effect instructs a player to choose a subtype, that player must choose one, and only one, existing subtype, and the subtype must be for the appropriate card type. For example, the player can’t choose a land type if an instruction requires choosing a creature type."
-status = "missing"
-impl_files = []
+text = "If an effect instructs a player to choose a subtype, that player must choose one, and only one, existing subtype, and the subtype must be for the appropriate card type. For example, the player can't choose a land type if an instruction requires choosing a creature type."
+status = "implemented"
+impl_files = ["game/effects/choose.rs:91", "game/effects/choose.rs:115", "game/effects/choose.rs:136"]
 test_files = []
-notes = ""
+notes = "ChoiceType::CreatureType, BasicLandType, LandType present typed subtype lists. Each restricts choices to the appropriate subtype category."
 
 [cr_205_3f]
 rule = "205.3f"
-text = "Many cards were printed with subtypes that are now obsolete. Many cards have retroactively received subtypes. Use the Oracle card reference to determine what a card’s subtypes are. (See rule 108.1.)"
-status = "missing"
-impl_files = []
+text = "Many cards were printed with subtypes that are now obsolete. Many cards have retroactively received subtypes. Use the Oracle card reference to determine what a card's subtypes are. (See rule 108.1.)"
+status = "implemented"
+impl_files = ["database/synthesis.rs:1"]
 test_files = []
-notes = ""
+notes = "Card data is sourced from MTGJSON which uses current Oracle data including retroactive errata. No obsolete subtypes are used."
 
 [cr_205_3g]
 rule = "205.3g"
 text = "Artifacts have their own unique set of subtypes; these subtypes are called artifact types. The artifact types are Attraction (see rule 717), Blood, Bobblehead, Clue, Contraption, Equipment (see rule 301.5), Food, Fortification (see rule 301.6), Gold, Incubator, Infinity, Junk, Lander, Map, Mutagen, Powerstone, Spacecraft, Stone, Treasure, and Vehicle (see rule 301.7)."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/card_type.rs:1"]
 test_files = []
-notes = ""
+notes = "Artifact subtypes are stored as strings in CardType.subtypes. Equipment, Vehicle, Food, Treasure, Clue, Blood etc. are checked by string comparison."
 
 [cr_205_3h]
 rule = "205.3h"
 text = "Enchantments have their own unique set of subtypes; these subtypes are called enchantment types. The enchantment types are Aura (see rule 303.4), Background, Cartouche, Case (see rule 719), Class (see rule 716), Curse, Role (see rule 303.7), Room, Rune, Saga (see rule 714), Shard, and Shrine."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/card_type.rs:1", "game/printed_cards.rs:68", "game/printed_cards.rs:73"]
 test_files = []
-notes = ""
+notes = "Enchantment subtypes stored as strings. Class, Saga, Case, and Aura/Role subtypes are all checked by string comparison in engine logic."
 
 [cr_205_3i]
 rule = "205.3i"
-text = "Lands have their own unique set of subtypes; these subtypes are called land types. The land types are Cave, Desert, Forest, Gate, Island, Lair, Locus, Mine, Mountain, Plains, Planet, Power-Plant, Sphere, Swamp, Tower, Town, and Urza’s. Of that list, Forest, Island, Mountain, Plains, and Swamp are the basic land types. See rule 305.6."
+text = "Lands have their own unique set of subtypes; these subtypes are called land types. The land types are Cave, Desert, Forest, Gate, Island, Lair, Locus, Mine, Mountain, Plains, Planet, Power-Plant, Sphere, Swamp, Tower, Town, and Urza's. Of that list, Forest, Island, Mountain, Plains, and Swamp are the basic land types. See rule 305.6."
 status = "implemented"
 impl_files = ["game/effects/choose.rs:91", "game/effects/choose.rs:146", "game/layers.rs:769", "types/card_type.rs:113"]
 test_files = []
@@ -143,22 +143,22 @@ notes = ""
 [cr_205_3j]
 rule = "205.3j"
 text = "Planeswalkers have their own unique set of subtypes; these subtypes are called planeswalker types. The planeswalker types are Ajani, Aminatou, Angrath, Arlinn, Ashiok, Bahamut, Basri, Bolas, Calix, Chandra, Comet, Dack, Dakkon, Daretti, Davriel, Dihada, Domri, Dovin, Ellywick, Elminster, Elspeth, Estrid, Freyalise, Garruk, Gideon, Grist, Guff, Huatli, Jace, Jared, Jaya, Jeska, Kaito, Karn, Kasmina, Kaya, Kiora, Koth, Liliana, Lolth, Lukka, Minsc, Mordenkainen, Nahiri, Narset, Niko, Nissa, Nixilis, Oko, Quintorius, Ral, Rowan, Saheeli, Samut, Sarkhan, Serra, Sivitri, Sorin, Szat, Tamiyo, Tasha, Teferi, Teyo, Tezzeret, Tibalt, Tyvar, Ugin, Urza, Venser, Vivien, Vraska, Vronos, Will, Windgrace, Wrenn, Xenagos, Yanggu, Yanling, and Zariel."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/card_type.rs:1"]
 test_files = []
-notes = ""
+notes = "Planeswalker subtypes stored as strings in CardType.subtypes. Used in legend rule and uniqueness checks."
 
 [cr_205_3k]
 rule = "205.3k"
 text = "Instants and sorceries share their lists of subtypes; these subtypes are called spell types. The spell types are Adventure, Arcane, Lesson, Omen, and Trap."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/card_type.rs:1"]
 test_files = []
-notes = ""
+notes = "Spell subtypes stored as strings in CardType.subtypes. Adventure subtype is checked in casting.rs for Adventure casting variant."
 
 [cr_205_3m]
 rule = "205.3m"
-text = "Creatures and kindreds share their lists of subtypes; these subtypes are called creature types. One creature type is two words long: Time Lord. All other creature types are one word long: Advisor, Aetherborn, Alien, Ally, Angel, Antelope, Ape, Archer, Archon, Armadillo, Army, Artificer, Assassin, Assembly-Worker, Astartes, Atog, Aurochs, Avatar, Azra, Badger, Balloon, Barbarian, Bard, Basilisk, Bat, Bear, Beast, Beaver, Beeble, Beholder, Berserker, Bird, Bison, Blinkmoth, Boar, Bringer, Brushwagg, Camarid, Camel, Capybara, Caribou, Carrier, Cat, Centaur, Child, Chimera, Citizen, Cleric, Clown, Cockatrice, Construct, Coward, Coyote, Crab, Crocodile, C’tan, Custodes, Cyberman, Cyclops, Dalek, Dauthi, Demigod, Demon, Deserter, Detective, Devil, Dinosaur, Djinn, Doctor, Dog, Dragon, Drake, Dreadnought, Drix, Drone, Druid, Dryad, Dwarf, Echidna, Efreet, Egg, Elder, Eldrazi, Elemental, Elephant, Elf, Elk, Employee, Eye, Faerie, Ferret, Fish, Flagbearer, Fox, Fractal, Frog, Fungus, Gamer, Gargoyle, Germ, Giant, Gith, Glimmer, Gnoll, Gnome, Goat, Goblin, God, Golem, Gorgon, Graveborn, Gremlin, Griffin, Guest, Hag, Halfling, Hamster, Harpy, Hedgehog, Hellion, Hero, Hippo, Hippogriff, Homarid, Homunculus, Horror, Horse, Human, Hydra, Hyena, Illusion, Imp, Incarnation, Inkling, Inquisitor, Insect, Jackal, Jellyfish, Juggernaut, Kangaroo, Kavu, Kirin, Kithkin, Knight, Kobold, Kor, Kraken, Llama, Lamia, Lammasu, Leech, Lemur, Leviathan, Lhurgoyf, Licid, Lizard, Lobster, Manticore, Masticore, Mercenary, Merfolk, Metathran, Minion, Minotaur, Mite, Mole, Monger, Mongoose, Monk, Monkey, Moogle, Moonfolk, Mount, Mouse, Mutant, Myr, Mystic, Nautilus, Necron, Nephilim, Nightmare, Nightstalker, Ninja, Noble, Noggle, Nomad, Nymph, Octopus, Ogre, Ooze, Orb, Orc, Orgg, Otter, Ouphe, Ox, Oyster, Pangolin, Peasant, Pegasus, Pentavite, Performer, Pest, Phelddagrif, Phoenix, Phyrexian, Pilot, Pincher, Pirate, Plant, Platypus, Porcupine, Possum, Praetor, Primarch, Prism, Processor, Qu, Rabbit, Raccoon, Ranger, Rat, Rebel, Reflection, Rhino, Rigger, Robot, Rogue, Sable, Salamander, Samurai, Sand, Saproling, Satyr, Scarecrow, Scientist, Scion, Scorpion, Scout, Sculpture, Seal, Serf, Serpent, Servo, Shade, Shaman, Shapeshifter, Shark, Sheep, Siren, Skeleton, Skunk, Slith, Sliver, Sloth, Slug, Snail, Snake, Soldier, Soltari, Sorcerer, Spawn, Specter, Spellshaper, Sphinx, Spider, Spike, Spirit, Splinter, Sponge, Squid, Squirrel, Starfish, Surrakar, Survivor, Symbiote, Synth, Tentacle, Tetravite, Thalakos, Thopter, Thrull, Tiefling, Toy, Treefolk, Trilobite, Triskelavite, Troll, Turtle, Tyranid, Unicorn, Utrom, Vampire, Varmint, Vedalken, Villain, Volver, Wall, Walrus, Warlock, Warrior, Weasel, Weird, Werewolf, Whale, Wizard, Wolf, Wolverine, Wombat, Worm, Wraith, Wurm, Yeti, Zombie, and Zubera."
+text = "Creatures and kindreds share their lists of subtypes; these subtypes are called creature types. One creature type is two words long: Time Lord. All other creature types are one word long: Advisor, Aetherborn, Alien, Ally, Angel, Antelope, Ape, Archer, Archon, Armadillo, Army, Artificer, Assassin, Assembly-Worker, Astartes, Atog, Aurochs, Avatar, Azra, Badger, Balloon, Barbarian, Bard, Basilisk, Bat, Bear, Beast, Beaver, Beeble, Beholder, Berserker, Bird, Bison, Blinkmoth, Boar, Bringer, Brushwagg, Camarid, Camel, Capybara, Caribou, Carrier, Cat, Centaur, Child, Chimera, Citizen, Cleric, Clown, Cockatrice, Construct, Coward, Coyote, Crab, Crocodile, C'tan, Custodes, Cyberman, Cyclops, Dalek, Dauthi, Demigod, Demon, Deserter, Detective, Devil, Dinosaur, Djinn, Doctor, Dog, Dragon, Drake, Dreadnought, Drix, Drone, Druid, Dryad, Dwarf, Echidna, Efreet, Egg, Elder, Eldrazi, Elemental, Elephant, Elf, Elk, Employee, Eye, Faerie, Ferret, Fish, Flagbearer, Fox, Fractal, Frog, Fungus, Gamer, Gargoyle, Germ, Giant, Gith, Glimmer, Gnoll, Gnome, Goat, Goblin, God, Golem, Gorgon, Graveborn, Gremlin, Griffin, Guest, Hag, Halfling, Hamster, Harpy, Hedgehog, Hellion, Hero, Hippo, Hippogriff, Homarid, Homunculus, Horror, Horse, Human, Hydra, Hyena, Illusion, Imp, Incarnation, Inkling, Inquisitor, Insect, Jackal, Jellyfish, Juggernaut, Kangaroo, Kavu, Kirin, Kithkin, Knight, Kobold, Kor, Kraken, Llama, Lamia, Lammasu, Leech, Lemur, Leviathan, Lhurgoyf, Licid, Lizard, Lobster, Manticore, Masticore, Mercenary, Merfolk, Metathran, Minion, Minotaur, Mite, Mole, Monger, Mongoose, Monk, Monkey, Moogle, Moonfolk, Mount, Mouse, Mutant, Myr, Mystic, Nautilus, Necron, Nephilim, Nightmare, Nightstalker, Ninja, Noble, Noggle, Nomad, Nymph, Octopus, Ogre, Ooze, Orb, Orc, Orgg, Otter, Ouphe, Ox, Oyster, Pangolin, Peasant, Pegasus, Pentavite, Performer, Pest, Phelddagrif, Phoenix, Phyrexian, Pilot, Pincher, Pirate, Plant, Platypus, Porcupine, Possum, Praetor, Primarch, Prism, Processor, Qu, Rabbit, Raccoon, Ranger, Rat, Rebel, Reflection, Rhino, Rigger, Robot, Rogue, Sable, Salamander, Samurai, Sand, Saproling, Satyr, Scarecrow, Scientist, Scion, Scorpion, Scout, Sculpture, Seal, Serf, Serpent, Servo, Shade, Shaman, Shapeshifter, Shark, Sheep, Siren, Skeleton, Skunk, Slith, Sliver, Sloth, Slug, Snail, Snake, Soldier, Soltari, Sorcerer, Spawn, Specter, Spellshaper, Sphinx, Spider, Spike, Spirit, Splinter, Sponge, Squid, Squirrel, Starfish, Surrakar, Survivor, Symbiote, Synth, Tentacle, Tetravite, Thalakos, Thopter, Thrull, Tiefling, Toy, Treefolk, Trilobite, Triskelavite, Troll, Turtle, Tyranid, Unicorn, Utrom, Vampire, Varmint, Vedalken, Villain, Volver, Wall, Walrus, Warlock, Warrior, Weasel, Weird, Werewolf, Whale, Wizard, Wolf, Wolverine, Wombat, Worm, Wraith, Wurm, Yeti, Zombie, and Zubera."
 status = "implemented"
 impl_files = ["game/effects/choose.rs:121", "parser/oracle.rs:1363", "parser/oracle_static.rs:738", "parser/oracle_static.rs:803", "parser/oracle_static.rs:882", "parser/oracle_static.rs:907", "parser/oracle_static.rs:920", "parser/oracle_static.rs:1700", "parser/oracle_static.rs:4623", "parser/oracle_static.rs:4640", "parser/oracle_trigger.rs:1235", "parser/oracle_trigger.rs:1252", "parser/oracle_trigger.rs:1303", "parser/oracle_trigger.rs:3981", "types/ability.rs:723"]
 test_files = []
@@ -166,11 +166,11 @@ notes = ""
 
 [cr_205_3n]
 rule = "205.3n"
-text = "Planes have their own unique set of subtypes; these subtypes are called planar types. The planar types are The Abyss, Alara, Alfava Metraxis, Amonkhet, Androzani Minor, Antausia, Apalapucia, Arcavios, Arkhos, Avishkar, Azgol, Belenon, Bolas’s Meditation Realm, Capenna, Cridhe, The Dalek Asylum, Darillium, Dominaria, Earth, Echoir, Eldraine, Equilor, Ergamon, Fabacin, Fiora, Gallifrey, Gargantikar, Gobakhan, Horsehead Nebula, Ikoria, Innistrad, Iquatana, Ir, Ixalan, Kaldheim, Kamigawa, Kandoka, Karsus, Kephalai, Kinshala, Kolbahan, Kylem, Kyneth, The Library, Lorwyn, Luvion, Mars, Mercadia, Mirrodin, Moag, Mongseng, Moon, Muraganda, Necros, New Earth, New Phyrexia, Outside Mutter’s Spiral, Phyrexia, Pyrulea, Rabiah, Rath, Ravnica, Regatha, Segovia, Serra’s Realm, Shadowmoor, Shandalar, Shenmeng, Skaro, Spacecraft, Tarkir, Theros, Time, Trenzalore, Ulgrotha, Unknown Planet, Valla, Vryn, Wildfire, Xerex, Zendikar, and Zhalfir."
+text = "Planes have their own unique set of subtypes; these subtypes are called planar types. The planar types are The Abyss, Alara, Alfava Metraxis, Amonkhet, Androzani Minor, Antausia, Apalapucia, Arcavios, Arkhos, Avishkar, Azgol, Belenon, Bolas's Meditation Realm, Capenna, Cridhe, The Dalek Asylum, Darillium, Dominaria, Earth, Echoir, Eldraine, Equilor, Ergamon, Fabacin, Fiora, Gallifrey, Gargantikar, Gobakhan, Horsehead Nebula, Ikoria, Innistrad, Iquatana, Ir, Ixalan, Kaldheim, Kamigawa, Kandoka, Karsus, Kephalai, Kinshala, Kolbahan, Kylem, Kyneth, The Library, Lorwyn, Luvion, Mars, Mercadia, Mirrodin, Moag, Mongseng, Moon, Muraganda, Necros, New Earth, New Phyrexia, Outside Mutter's Spiral, Phyrexia, Pyrulea, Rabiah, Rath, Ravnica, Regatha, Segovia, Serra's Realm, Shadowmoor, Shandalar, Shenmeng, Skaro, Spacecraft, Tarkir, Theros, Time, Trenzalore, Ulgrotha, Unknown Planet, Valla, Vryn, Wildfire, Xerex, Zendikar, and Zhalfir."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Planechase plane cards are not implemented in the engine."
 
 [cr_205_3p]
 rule = "205.3p"
@@ -178,15 +178,15 @@ text = "One dungeon card (Undercity) has a subtype; this subtype is called a dun
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Dungeon cards (Undercity) are not implemented in the engine."
 
 [cr_205_3q]
 rule = "205.3q"
 text = "Battles have a unique subtype, called a battle type. That battle type is Siege."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/card_type.rs:60", "types/card_type.rs:80"]
 test_files = []
-notes = ""
+notes = "Battle card type is defined in CoreType::Battle. The Siege subtype is stored in CardType.subtypes as a string."
 
 [cr_205_3r]
 rule = "205.3r"
@@ -194,7 +194,7 @@ text = "Phenomenon cards, scheme cards, vanguard cards, and conspiracy cards hav
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "These non-traditional card types are not implemented in the engine."
 
 [cr_205_4]
 rule = "205.4"
@@ -206,7 +206,7 @@ notes = ""
 
 [cr_205_4a]
 rule = "205.4a"
-text = "An object can have one or more supertypes. A card’s supertypes are printed directly before its card types. The supertypes are basic, legendary, ongoing, snow, and world."
+text = "An object can have one or more supertypes. A card's supertypes are printed directly before its card types. The supertypes are basic, legendary, ongoing, snow, and world."
 status = "implemented"
 impl_files = ["game/filter.rs:311", "parser/oracle_target.rs:230", "parser/oracle_target.rs:670", "parser/oracle_target.rs:2417", "parser/oracle_target.rs:2434", "types/ability.rs:817"]
 test_files = []
@@ -214,7 +214,7 @@ notes = ""
 
 [cr_205_4b]
 rule = "205.4b"
-text = "An object’s supertype is independent of its card type and subtype, even though some supertypes are closely identified with specific card types. Changing an object’s card types or subtypes won’t change its supertypes. Changing an object’s supertypes won’t change its card types or subtypes. When an object gains or loses a supertype, it retains any other supertypes it had."
+text = "An object's supertype is independent of its card type and subtype, even though some supertypes are closely identified with specific card types. Changing an object's card types or subtypes won't change its supertypes. Changing an object's supertypes won't change its card types or subtypes. When an object gains or loses a supertype, it retains any other supertypes it had."
 status = "implemented"
 impl_files = ["game/filter.rs:296", "parser/oracle_replacement.rs:812", "parser/oracle_target.rs:254", "parser/oracle_target.rs:650", "parser/oracle_target.rs:680", "parser/oracle_target.rs:708", "parser/oracle_target.rs:2254", "types/ability.rs:719", "types/ability.rs:812"]
 test_files = []
@@ -222,48 +222,48 @@ notes = ""
 
 [cr_205_4c]
 rule = "205.4c"
-text = "Any land with the supertype “basic” is a basic land. Any land that doesn’t have this supertype is a nonbasic land, even if it has a basic land type."
-status = "missing"
-impl_files = []
+text = "Any land with the supertype \"basic\" is a basic land. Any land that doesn't have this supertype is a nonbasic land, even if it has a basic land type."
+status = "implemented"
+impl_files = ["types/card_type.rs:8", "game/filter.rs:809", "game/effects/search_library.rs:134"]
 test_files = []
-notes = ""
+notes = "Supertype::Basic is checked to determine basic land status. search_library.rs pushes Supertype::Basic when searching for basic lands."
 
 [cr_205_4d]
 rule = "205.4d"
-text = "Any permanent with the supertype “legendary” is subject to the state-based action for legendary permanents, also called the “legend rule” (see rule 704.5j)."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "Any permanent with the supertype \"legendary\" is subject to the state-based action for legendary permanents, also called the \"legend rule\" (see rule 704.5j)."
+status = "implemented"
+impl_files = ["game/sba.rs:327", "game/sba.rs:100"]
+test_files = ["game/sba.rs:720", "game/sba.rs:1355"]
+notes = "check_legend_rule() in sba.rs groups battlefield permanents with Supertype::Legendary by name and triggers the legend rule SBA."
 
 [cr_205_4e]
 rule = "205.4e"
-text = "Any instant or sorcery spell with the supertype “legendary” is subject to a casting restriction. A player can’t cast a legendary instant or sorcery spell unless that player controls a legendary creature or a legendary planeswalker."
+text = "Any instant or sorcery spell with the supertype \"legendary\" is subject to a casting restriction. A player can't cast a legendary instant or sorcery spell unless that player controls a legendary creature or a legendary planeswalker."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Legendary instant/sorcery casting restriction not implemented in the engine."
 
 [cr_205_4f]
 rule = "205.4f"
-text = "Any permanent with the supertype “world” is subject to the state-based action for world permanents, also called the “world rule” (see rule 704.5k)."
+text = "Any permanent with the supertype \"world\" is subject to the state-based action for world permanents, also called the \"world rule\" (see rule 704.5k)."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "World rule SBA (CR 704.5k) is not implemented in sba.rs."
 
 [cr_205_4g]
 rule = "205.4g"
-text = "Any permanent with the supertype “snow” is a snow permanent. Any permanent that doesn’t have this supertype is a nonsnow permanent, regardless of its name."
-status = "missing"
-impl_files = []
+text = "Any permanent with the supertype \"snow\" is a snow permanent. Any permanent that doesn't have this supertype is a nonsnow permanent, regardless of its name."
+status = "implemented"
+impl_files = ["types/card_type.rs:12", "game/restrictions.rs:764", "game/filter.rs:289"]
 test_files = []
-notes = ""
+notes = "Supertype::Snow is defined. restrictions.rs checks for snow permanents via obj.card_types.supertypes.contains(&Supertype::Snow). HasSupertype filter uses string 'Snow'."
 
 [cr_205_4h]
 rule = "205.4h"
-text = "Any scheme card with the supertype “ongoing” is exempt from the state-based action for schemes (see rule 704.6e)."
+text = "Any scheme card with the supertype \"ongoing\" is exempt from the state-based action for schemes (see rule 704.6e)."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Scheme cards and the Ongoing supertype are not implemented in the engine."

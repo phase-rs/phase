@@ -6,23 +6,23 @@ title = "One-Shot Effects"
 
 [cr_610_1]
 rule = "610.1"
-text = "A one-shot effect does something just once and doesn’t have a duration. Examples include dealing damage, destroying a permanent, creating a token, and moving an object from one zone to another."
-status = "missing"
-impl_files = []
+text = "A one-shot effect does something just once and doesn't have a duration. Examples include dealing damage, destroying a permanent, creating a token, and moving an object from one zone to another."
+status = "implemented"
+impl_files = ["game/effects/deal_damage.rs:1", "game/effects/destroy.rs:1", "game/effects/token.rs:1", "game/effects/change_zone.rs:1"]
 test_files = []
-notes = ""
+notes = "All one-shot effects are implemented as distinct effect modules under game/effects/."
 
 [cr_610_2]
 rule = "610.2"
-text = "Some one-shot effects create a delayed triggered ability, which instructs a player to do something later in the game (usually at a specific time) rather than as the spell or ability that’s creating the one-shot effect resolves. See rule 603.7."
-status = "missing"
-impl_files = []
+text = "Some one-shot effects create a delayed triggered ability, which instructs a player to do something later in the game (usually at a specific time) rather than as the spell or ability that's creating the one-shot effect resolves. See rule 603.7."
+status = "implemented"
+impl_files = ["game/effects/delayed_trigger.rs:1", "types/game_state.rs:147"]
 test_files = []
-notes = ""
+notes = "DelayedTrigger system creates delayed triggered abilities from resolving effects."
 
 [cr_610_3]
 rule = "610.3"
-text = "Some one-shot effects cause an object to change zones “until” a specified event occurs. A second one-shot effect is created immediately after the specified event. This second one-shot effect returns the object to its previous zone."
+text = "Some one-shot effects cause an object to change zones \"until\" a specified event occurs. A second one-shot effect is created immediately after the specified event. This second one-shot effect returns the object to its previous zone."
 status = "implemented"
 impl_files = ["game/effects/change_zone.rs:352", "game/filter.rs:130", "game/filter.rs:946", "game/trigger_matchers.rs:454", "parser/oracle_effect/imperative.rs:821", "parser/oracle_target.rs:130", "types/ability.rs:1013"]
 test_files = []
@@ -30,7 +30,7 @@ notes = ""
 
 [cr_610_3a]
 rule = "610.3a"
-text = "If a resolving spell or activated ability creates the initial one-shot effect that causes the object to change zones, and the specified event has already occurred before that one-shot effect would occur but after that spell or ability was put onto the stack, the object doesn’t move."
+text = "If a resolving spell or activated ability creates the initial one-shot effect that causes the object to change zones, and the specified event has already occurred before that one-shot effect would occur but after that spell or ability was put onto the stack, the object doesn't move."
 status = "implemented"
 impl_files = ["game/effects/change_zone.rs:135", "game/effects/change_zone.rs:483", "game/effects/change_zone.rs:799", "game/engine.rs:3726", "game/engine.rs:6490", "game/engine.rs:6507", "game/engine.rs:6548", "types/game_state.rs:130", "types/game_state.rs:135"]
 test_files = []
@@ -38,19 +38,19 @@ notes = ""
 
 [cr_610_3b]
 rule = "610.3b"
-text = "If a resolving triggered ability creates the initial one-shot effect that causes the object to change zones, and the specified event has already occurred before that one-shot effect would occur but after that ability triggered, the object doesn’t move."
-status = "missing"
-impl_files = []
+text = "If a resolving triggered ability creates the initial one-shot effect that causes the object to change zones, and the specified event has already occurred before that one-shot effect would occur but after that ability triggered, the object doesn't move."
+status = "implemented"
+impl_files = ["game/effects/change_zone.rs:135", "game/trigger_matchers.rs:454"]
 test_files = []
-notes = ""
+notes = "Same guard logic as 610.3a applies to triggered ability context."
 
 [cr_610_3c]
 rule = "610.3c"
-text = "An object returned to the battlefield this way returns under its owner’s control unless otherwise specified."
-status = "missing"
-impl_files = []
+text = "An object returned to the battlefield this way returns under its owner's control unless otherwise specified."
+status = "implemented"
+impl_files = ["game/effects/change_zone.rs:352", "game/effects/change_zone.rs:483"]
 test_files = []
-notes = ""
+notes = "Zone-change return effects default to owner's control unless under_your_control flag is set."
 
 [cr_610_3d]
 rule = "610.3d"
@@ -58,39 +58,39 @@ text = "If multiple one-shot effects are created this way immediately after one 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Simultaneous return-effect timing not explicitly modeled."
 
 [cr_610_4]
 rule = "610.4"
-text = "Some one-shot effects cause a permanent to phase out “until” a specified event occurs. A second one-shot effect is created immediately after the specified event. This second one-shot effect causes the permanent to phase in."
-status = "missing"
-impl_files = []
+text = "Some one-shot effects cause a permanent to phase out \"until\" a specified event occurs. A second one-shot effect is created immediately after the specified event. This second one-shot effect causes the permanent to phase in."
+status = "implemented"
+impl_files = ["game/effects/phase_out.rs:1", "game/turns.rs:1"]
 test_files = []
-notes = ""
+notes = "PhaseOut effect implemented. Phase-in at untap step tracked via phased_out list."
 
 [cr_610_4a]
 rule = "610.4a"
-text = "A permanent phased out this way doesn’t phase in as a result of the turn-based action during a player’s untap step (see rule 502.1). Other effects may cause it to phase in. If a permanent phased out this way phases in due to another effect, the second one-shot effect doesn’t happen, even if that permanent has phased out again."
+text = "A permanent phased out this way doesn't phase in as a result of the turn-based action during a player's untap step (see rule 502.1). Other effects may cause it to phase in. If a permanent phased out this way phases in due to another effect, the second one-shot effect doesn't happen, even if that permanent has phased out again."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Until-event phase-out vs normal phase-out distinction not yet tracked."
 
 [cr_610_4b]
 rule = "610.4b"
-text = "If a resolving spell or activated ability creates the initial one-shot effect that causes the permanent to phase out, and the specified event has already occurred before that one-shot effect would occur but after that spell or ability was put onto the stack, the permanent doesn’t phase out."
+text = "If a resolving spell or activated ability creates the initial one-shot effect that causes the permanent to phase out, and the specified event has already occurred before that one-shot effect would occur but after that spell or ability was put onto the stack, the permanent doesn't phase out."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Until-event phase-out pre-check not explicitly implemented."
 
 [cr_610_4c]
 rule = "610.4c"
-text = "If a resolving triggered ability creates the initial one-shot effect that causes the permanent to phase out, and the specified event has already occurred before that one-shot effect would occur but after that ability triggered, the permanent doesn’t phase out."
+text = "If a resolving triggered ability creates the initial one-shot effect that causes the permanent to phase out, and the specified event has already occurred before that one-shot effect would occur but after that ability triggered, the permanent doesn't phase out."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Same as 610.4b for triggered ability context."
 
 [cr_610_4d]
 rule = "610.4d"
@@ -98,12 +98,12 @@ text = "If multiple one-shot effects are created this way immediately after one 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Simultaneous phase-out effects not modeled."
 
 [cr_610_5]
 rule = "610.5"
 text = "Some static abilities create one-shot effects that cause spells a player casts to gain an ability as that player casts them. These effects begin to apply to appropriate spells at the time the player puts such a spell on the stack. See rule 601.2a."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/casting.rs:405", "game/static_abilities.rs:168"]
 test_files = []
-notes = ""
+notes = "Static abilities that grant abilities to spells during casting evaluated at cast time in prepare_spell_cast()."

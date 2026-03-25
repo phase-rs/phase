@@ -1,32 +1,32 @@
-# Comprehensive Rules Section 723: The Monarch
+# Comprehensive Rules Section 723: End the Turn
 
 [_meta]
 section = 723
-title = "The Monarch"
+title = "End the Turn"
 
 [cr_723_1]
 rule = "723.1"
-text = "Some cards end the turn. When an effect ends the turn, follow these steps in order, as they differ from the normal process for resolving spells and abilities (see rule 608, “Resolving Spells and Abilities”)."
+text = "Some cards end the turn. When an effect ends the turn, follow these steps in order, as they differ from the normal process for resolving spells and abilities (see rule 608, \"Resolving Spells and Abilities\")."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "End-the-turn effect (e.g. Sundial of the Infinite) not implemented as distinct from normal turn flow."
 
 [cr_723_1a]
 rule = "723.1a"
-text = "If there are any triggered abilities that triggered before this process began but haven’t been put onto the stack yet, those abilities cease to exist. They won’t be put onto the stack. This rule does not apply to abilities that trigger during this process (see rule 723.1f)."
+text = "If there are any triggered abilities that triggered before this process began but haven't been put onto the stack yet, those abilities cease to exist. They won't be put onto the stack. This rule does not apply to abilities that trigger during this process (see rule 723.1f)."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "End-the-turn effect not implemented."
 
 [cr_723_1b]
 rule = "723.1b"
-text = "Exile every object on the stack, including the object that’s resolving. All objects not on the battlefield or in the command zone that aren’t represented by cards will cease to exist the next time state-based actions are checked (see rule 704, “State-Based Actions”)."
+text = "Exile every object on the stack, including the object that's resolving. All objects not on the battlefield or in the command zone that aren't represented by cards will cease to exist the next time state-based actions are checked (see rule 704, \"State-Based Actions\")."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "End-the-turn effect not implemented."
 
 [cr_723_1c]
 rule = "723.1c"
@@ -34,7 +34,7 @@ text = "Check state-based actions. No player gets priority, and no triggered abi
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "End-the-turn effect not implemented."
 
 [cr_723_1d]
 rule = "723.1d"
@@ -42,47 +42,47 @@ text = "The current phase and/or step ends. If this happens during combat, remov
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "End-the-turn effect not implemented."
 
 [cr_723_1e]
 rule = "723.1e"
-text = "Even though the turn ends, “at the beginning of the end step” triggered abilities don’t trigger because the end step is skipped."
+text = "Even though the turn ends, \"at the beginning of the end step\" triggered abilities don't trigger because the end step is skipped."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "End-the-turn effect not implemented."
 
 [cr_723_1f]
 rule = "723.1f"
-text = "No player gets priority during this process, so triggered abilities are not put onto the stack. If any triggered abilities have triggered since this process began, those abilities are put onto the stack during the cleanup step, then the active player gets priority and players can cast spells and activate abilities. Then there will be another cleanup step before the turn finally ends. If no triggered abilities have triggered during this process, no player gets priority during the cleanup step. See rule 514, “Cleanup Step.”"
+text = "No player gets priority during this process, so triggered abilities are not put onto the stack. If any triggered abilities have triggered since this process began, those abilities are put onto the stack during the cleanup step, then the active player gets priority and players can cast spells and activate abilities. Then there will be another cleanup step before the turn finally ends. If no triggered abilities have triggered during this process, no player gets priority during the cleanup step. See rule 514, \"Cleanup Step.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "End-the-turn effect not implemented."
 
 [cr_723_2]
 rule = "723.2"
-text = "One card (Mandate of Peace) ends the combat phase. When an effect ends the combat phase, follow these steps in order, as they differ from the normal process for resolving spells and abilities (see rule 608, “Resolving Spells and Abilities”)."
+text = "One card (Mandate of Peace) ends the combat phase. When an effect ends the combat phase, follow these steps in order, as they differ from the normal process for resolving spells and abilities (see rule 608, \"Resolving Spells and Abilities\")."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "End-the-combat-phase effect not implemented."
 
 [cr_723_2a]
 rule = "723.2a"
-text = "If there are any triggered abilities that triggered before this process began but haven’t been put onto the stack yet, those abilities cease to exist. They won’t be put onto the stack. This rule does not apply to abilities that trigger during this process (see rule 723.2f)."
+text = "If there are any triggered abilities that triggered before this process began but haven't been put onto the stack yet, those abilities cease to exist. They won't be put onto the stack. This rule does not apply to abilities that trigger during this process (see rule 723.2f)."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "End-the-combat-phase effect not implemented."
 
 [cr_723_2b]
 rule = "723.2b"
-text = "Exile every object on the stack, including the object that’s resolving. All objects not on the battlefield or in the command zone that aren’t represented by cards will cease to exist the next time state-based actions are checked (see rule 704, “State-Based Actions”)."
+text = "Exile every object on the stack, including the object that's resolving. All objects not on the battlefield or in the command zone that aren't represented by cards will cease to exist the next time state-based actions are checked (see rule 704, \"State-Based Actions\")."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "End-the-combat-phase effect not implemented."
 
 [cr_723_2c]
 rule = "723.2c"
@@ -90,23 +90,23 @@ text = "Check state-based actions. No player gets priority, and no triggered abi
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "End-the-combat-phase effect not implemented."
 
 [cr_723_2d]
 rule = "723.2d"
-text = "The current combat phase ends. Remove all creatures and planeswalkers from combat. Effects that last “until end of combat” expire. The game skips straight to the next phase, usually the postcombat main phase; skip any steps between this step and that phase."
+text = "The current combat phase ends. Remove all creatures and planeswalkers from combat. Effects that last \"until end of combat\" expire. The game skips straight to the next phase, usually the postcombat main phase; skip any steps between this step and that phase."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "End-the-combat-phase effect not implemented."
 
 [cr_723_2e]
 rule = "723.2e"
-text = "Even though the combat phase ends, “at end of combat” triggered abilities don’t trigger because the end of combat step is skipped."
+text = "Even though the combat phase ends, \"at end of combat\" triggered abilities don't trigger because the end of combat step is skipped."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "End-the-combat-phase effect not implemented."
 
 [cr_723_2f]
 rule = "723.2f"
@@ -114,12 +114,12 @@ text = "No player gets priority during this process, so triggered abilities are 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "End-the-combat-phase effect not implemented."
 
 [cr_723_2g]
 rule = "723.2g"
-text = "If an effect attempts to end the combat phase at any time that’s not a combat phase, nothing happens."
+text = "If an effect attempts to end the combat phase at any time that's not a combat phase, nothing happens."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "End-the-combat-phase effect not implemented."

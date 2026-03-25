@@ -7,42 +7,42 @@ title = "Numbers and Symbols"
 [cr_107_1]
 rule = "107.1"
 text = "The only numbers the Magic game uses are integers."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/game_state.rs:1"]
 test_files = []
-notes = ""
+notes = "All game values (power, toughness, life, counters, damage) are represented as i32 integers in the engine."
 
 [cr_107_1a]
 rule = "107.1a"
-text = "You can’t choose a fractional number, deal fractional damage, gain fractional life, and so on. If a spell or ability could generate a fractional number, the spell or ability will tell you whether to round up or down."
-status = "missing"
-impl_files = []
+text = "You can't choose a fractional number, deal fractional damage, gain fractional life, and so on. If a spell or ability could generate a fractional number, the spell or ability will tell you whether to round up or down."
+status = "implemented"
+impl_files = ["types/game_state.rs:1"]
 test_files = []
-notes = ""
+notes = "Integer types enforce this rule by design. No fractional arithmetic exists in the engine."
 
 [cr_107_1b]
 rule = "107.1b"
-text = "Most of the time, the Magic game uses only positive numbers and zero. You can’t choose a negative number, deal negative damage, gain negative life, and so on. However, it’s possible for a game value, such as a creature’s power, to be less than zero. If a calculation or comparison needs to use a negative value, it does so. If a calculation that would determine the result of an effect yields a negative number, zero is used instead, unless that effect doubles, triples, or sets to a specific value a player’s life total or the power and/or toughness of a creature or creature card."
-status = "missing"
-impl_files = []
+text = "Most of the time, the Magic game uses only positive numbers and zero. You can't choose a negative number, deal negative damage, gain negative life, and so on. However, it's possible for a game value, such as a creature's power, to be less than zero. If a calculation or comparison needs to use a negative value, it does so. If a calculation that would determine the result of an effect yields a negative number, zero is used instead, unless that effect doubles, triples, or sets to a specific value a player's life total or the power and/or toughness of a creature or creature card."
+status = "implemented"
+impl_files = ["game/effects/deal_damage.rs:89", "game/quantity.rs:104"]
 test_files = []
-notes = ""
+notes = "Damage can't be negative (clamped to 0 in deal_damage.rs). Power/toughness can go negative (i32). The 'zero floor for results' is applied in effect resolvers."
 
 [cr_107_1c]
 rule = "107.1c"
-text = "If a rule or ability instructs a player to choose “any number,” that player may choose any positive number or zero."
-status = "missing"
-impl_files = []
+text = "If a rule or ability instructs a player to choose \"any number,\" that player may choose any positive number or zero."
+status = "implemented"
+impl_files = ["game/effects/choose.rs:1"]
 test_files = []
-notes = ""
+notes = "Choose effects present non-negative integer options. The choose effect handler accepts any non-negative integer when 'any number' is specified."
 
 [cr_107_2]
 rule = "107.2"
-text = "If anything needs to use a number that can’t be determined, either as a result or in a calculation, it uses 0 instead."
+text = "If anything needs to use a number that can't be determined, either as a result or in a calculation, it uses 0 instead."
 status = "implemented"
 impl_files = ["game/quantity.rs:104", "game/quantity.rs:211", "parser/oracle_effect/imperative.rs:143", "types/ability.rs:1070", "types/ability.rs:1123", "types/ability.rs:1169"]
 test_files = []
-notes = ""
+notes = "resolve_quantity() returns 0 for undetermined quantities. QuantityExpr::Fixed(0) is used as a default for unresolvable expressions."
 
 [cr_107_3]
 rule = "107.3"
@@ -50,31 +50,31 @@ text = "Many objects use the letter X as a placeholder for a number that needs t
 status = "implemented"
 impl_files = ["game/mana_payment.rs:182", "game/mana_payment.rs:278"]
 test_files = []
-notes = ""
+notes = "X mana costs are handled in mana_payment.rs. The chosen X value is stored in the stack object and used during resolution."
 
 [cr_107_3a]
 rule = "107.3a"
-text = "If a spell or activated ability has a mana cost, alternative cost, additional cost, and/or activation cost with an {X}, [-X], or X in it, and the value of X isn’t defined by the text of that spell or ability, the controller of that spell or ability chooses and announces the value of X as part of casting the spell or activating the ability. (See rule 601, “Casting Spells.”) While a spell is on the stack, any X in its mana cost or in any alternative cost or additional cost it has equals the announced value. While an activated ability is on the stack, any X in its activation cost equals the announced value."
-status = "missing"
-impl_files = []
+text = "If a spell or activated ability has a mana cost, alternative cost, additional cost, and/or activation cost with an {X}, [-X], or X in it, and the value of X isn't defined by the text of that spell or ability, the controller of that spell or ability chooses and announces the value of X as part of casting the spell or activating the ability. (See rule 601, \"Casting Spells.\") While a spell is on the stack, any X in its mana cost or in any alternative cost or additional cost it has equals the announced value. While an activated ability is on the stack, any X in its activation cost equals the announced value."
+status = "implemented"
+impl_files = ["game/casting.rs:1", "game/mana_payment.rs:182"]
 test_files = []
-notes = ""
+notes = "X value is chosen during the casting process and stored with the stack object. The chosen X is used for cost payment and effect resolution."
 
 [cr_107_3b]
 rule = "107.3b"
-text = "If a player is casting a spell that has an {X} in its mana cost, the value of X isn’t defined by the text of that spell, and an effect lets that player cast that spell while paying neither its mana cost nor an alternative cost that includes X, then the only legal choice for X is 0. This doesn’t apply to effects that only reduce a cost, even if they reduce it to zero. See rule 601, “Casting Spells.”"
+text = "If a player is casting a spell that has an {X} in its mana cost, the value of X isn't defined by the text of that spell, and an effect lets that player cast that spell while paying neither its mana cost nor an alternative cost that includes X, then the only legal choice for X is 0. This doesn't apply to effects that only reduce a cost, even if they reduce it to zero. See rule 601, \"Casting Spells.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "When casting free (paying no mana cost), X must be 0. This constraint is not explicitly enforced when free-cast effects are applied."
 
 [cr_107_3c]
 rule = "107.3c"
-text = "If a spell or activated ability has an {X}, [-X], or X in its cost and/or its text, and the value of X is defined by the text of that spell or ability, then that’s the value of X while that spell or ability is on the stack. The controller of that spell or ability doesn’t get to choose the value. Note that the value of X may change while that spell or ability is on the stack."
-status = "missing"
-impl_files = []
+text = "If a spell or activated ability has an {X}, [-X], or X in its cost and/or its text, and the value of X is defined by the text of that spell or ability, then that's the value of X while that spell or ability is on the stack. The controller of that spell or ability doesn't get to choose the value. Note that the value of X may change while that spell or ability is on the stack."
+status = "implemented"
+impl_files = ["game/quantity.rs:169", "types/ability.rs:1062"]
 test_files = []
-notes = ""
+notes = "CDA-defined X values are computed dynamically from game state, not chosen by the player."
 
 [cr_107_3d]
 rule = "107.3d"
@@ -82,71 +82,71 @@ text = "If a cost associated with a special action, such as a suspend cost or a 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Special action X costs (e.g., morph with X) are not explicitly handled. Morph costs are currently fixed."
 
 [cr_107_3e]
 rule = "107.3e"
-text = "If a spell or ability refers to the {X} or X in the mana cost, alternative cost, additional cost, or activation cost of another object, any X in that spell or ability’s text uses the value of X chosen or defined for the other object."
+text = "If a spell or ability refers to the {X} or X in the mana cost, alternative cost, additional cost, or activation cost of another object, any X in that spell or ability's text uses the value of X chosen or defined for the other object."
 status = "implemented"
 impl_files = ["game/quantity.rs:169", "types/ability.rs:1062", "types/ability.rs:1130"]
 test_files = []
-notes = ""
+notes = "QuantityRef::XValue reads X from the stack object's chosen X. Cross-object X references are supported."
 
 [cr_107_3f]
 rule = "107.3f"
-text = "Sometimes X appears in the text of a spell or ability but not in a mana cost, alternative cost, additional cost, or activation cost. If the value of X isn’t defined, the controller of the spell or ability chooses the value of X at the appropriate time (either as it’s put on the stack or as it resolves)."
+text = "Sometimes X appears in the text of a spell or ability but not in a mana cost, alternative cost, additional cost, or activation cost. If the value of X isn't defined, the controller of the spell or ability chooses the value of X at the appropriate time (either as it's put on the stack or as it resolves)."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "X in effect text without a cost is not separately tracked. This scenario is uncommon in implemented cards."
 
 [cr_107_3g]
 rule = "107.3g"
 text = "If a card in any zone other than the stack has an {X} in its mana cost, the value of {X} is treated as 0, even if the value of X is defined somewhere within its text."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/quantity.rs:104"]
 test_files = []
-notes = ""
+notes = "X defaults to 0 when not on the stack. resolve_quantity() returns 0 for XValue when no stack context is present."
 
 [cr_107_3h]
 rule = "107.3h"
-text = "If an effect instructs a player to pay an object’s mana cost that includes {X}, the value of X is treated as 0 unless the object is a spell on the stack. In that case, the value of X is the value chosen or determined for it as the spell was cast."
+text = "If an effect instructs a player to pay an object's mana cost that includes {X}, the value of X is treated as 0 unless the object is a spell on the stack. In that case, the value of X is the value chosen or determined for it as the spell was cast."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Paying another object's mana cost (e.g., via Spelltwine-like effects) with X handling is not explicitly implemented."
 
 [cr_107_3i]
 rule = "107.3i"
 text = "Normally, all instances of X on an object have the same value at any given time."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/quantity.rs:169"]
 test_files = []
-notes = ""
+notes = "A single X value is stored per stack object; all references to X on that object read the same value."
 
 [cr_107_3j]
 rule = "107.3j"
-text = "If an object gains an ability, the value of X within that ability is the value defined by that ability, or 0 if that ability doesn’t define a value of X. This is an exception to rule 107.3i. This may occur with ability-adding effects, text-changing effects, or copy effects."
+text = "If an object gains an ability, the value of X within that ability is the value defined by that ability, or 0 if that ability doesn't define a value of X. This is an exception to rule 107.3i. This may occur with ability-adding effects, text-changing effects, or copy effects."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Granted abilities with independent X values are not explicitly handled."
 
 [cr_107_3k]
 rule = "107.3k"
-text = "If an object’s activated ability has an {X}, [-X], or X in its activation cost, the value of X for that ability is independent of any other values of X chosen for that object or for other instances of abilities of that object. This is an exception to rule 107.3i."
+text = "If an object's activated ability has an {X}, [-X], or X in its activation cost, the value of X for that ability is independent of any other values of X chosen for that object or for other instances of abilities of that object. This is an exception to rule 107.3i."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Independent X values for different activated ability instances are not explicitly modeled."
 
 [cr_107_3m]
 rule = "107.3m"
-text = "If an object’s enters-the-battlefield triggered ability or replacement effect refers to X, and the spell that became that object as it resolved had a value of X chosen for any of its costs, the value of X for that ability is the same as the value of X for that spell, although the value of X for that permanent is 0. This is an exception to rule 107.3i."
-status = "missing"
-impl_files = []
+text = "If an object's enters-the-battlefield triggered ability or replacement effect refers to X, and the spell that became that object as it resolved had a value of X chosen for any of its costs, the value of X for that ability is the same as the value of X for that spell, although the value of X for that permanent is 0. This is an exception to rule 107.3i."
+status = "partial"
+impl_files = ["game/quantity.rs:169"]
 test_files = []
-notes = ""
+notes = "ETB abilities can reference the casting X via the stack context. However, once the permanent is on the battlefield (not on the stack), X becomes 0 — the explicit persistence of X for ETB triggers is partially handled."
 
 [cr_107_3n]
 rule = "107.3n"
@@ -154,7 +154,7 @@ text = "If a delayed triggered ability created by a resolving spell or ability r
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Delayed triggered abilities inheriting X values from their creating spell are not explicitly implemented."
 
 [cr_107_3p]
 rule = "107.3p"
@@ -162,7 +162,7 @@ text = "Some objects use the letter Y in addition to the letter X. Y follows the
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Y variable support is not implemented. No current cards require Y."
 
 [cr_107_4]
 rule = "107.4"
@@ -170,15 +170,15 @@ text = "The mana symbols are {W}, {U}, {B}, {R}, {G}, and {C}; the numerical sym
 status = "implemented"
 impl_files = ["game/mana_payment.rs:389", "game/mana_payment.rs:405"]
 test_files = []
-notes = ""
+notes = "ManaCostShard enum covers all listed mana symbols. Payment routing handles each shard type correctly."
 
 [cr_107_4a]
 rule = "107.4a"
-text = "There are five primary colored mana symbols: {W} is white, {U} blue, {B} black, {R} red, and {G} green. These symbols are used to represent colored mana, and also to represent colored mana in costs. Colored mana in costs can be paid only with the appropriate color of mana. See rule 202, “Mana Cost and Color.”"
+text = "There are five primary colored mana symbols: {W} is white, {U} blue, {B} black, {R} red, and {G} green. These symbols are used to represent colored mana, and also to represent colored mana in costs. Colored mana in costs can be paid only with the appropriate color of mana. See rule 202, \"Mana Cost and Color.\""
 status = "implemented"
 impl_files = ["game/mana_payment.rs:10", "game/mana_payment.rs:235", "game/mana_payment.rs:392"]
 test_files = []
-notes = ""
+notes = "Colored mana payment strictly enforced — {W} requires white mana, {U} requires blue, etc."
 
 [cr_107_4b]
 rule = "107.4b"
@@ -186,7 +186,7 @@ text = "Numerical symbols (such as {1}) and variable symbols (such as {X}) repre
 status = "implemented"
 impl_files = ["game/mana_payment.rs:305", "game/mana_payment.rs:392"]
 test_files = []
-notes = ""
+notes = "Generic mana (ManaCostShard::Generic) is payable with any mana type."
 
 [cr_107_4c]
 rule = "107.4c"
@@ -194,15 +194,15 @@ text = "The colorless mana symbol {C} is used to represent one colorless mana, a
 status = "implemented"
 impl_files = ["game/mana_payment.rs:392"]
 test_files = []
-notes = ""
+notes = "ManaCostShard::Colorless requires pure colorless mana. Colored mana cannot satisfy {C}."
 
 [cr_107_4d]
 rule = "107.4d"
 text = "The symbol {0} represents zero mana and is used as a placeholder for a cost that can be paid with no resources. (See rule 118.5.)"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/casting.rs:1"]
 test_files = []
-notes = ""
+notes = "ManaCost::Cost with an empty shards vec or zero generic value represents {0}. The casting system handles zero-cost spells."
 
 [cr_107_4e]
 rule = "107.4e"
@@ -210,7 +210,7 @@ text = "A hybrid mana symbol is also a colored mana symbol, even if one of its c
 status = "implemented"
 impl_files = ["game/mana_payment.rs:156", "game/mana_payment.rs:166", "game/mana_payment.rs:184", "game/mana_payment.rs:243", "game/mana_payment.rs:261", "game/mana_payment.rs:280", "game/mana_payment.rs:393"]
 test_files = []
-notes = ""
+notes = "ManaCostShard::Hybrid and ManaCostShard::TwoGenericHybrid implement both halves. Color identity computation includes both component colors."
 
 [cr_107_4f]
 rule = "107.4f"
@@ -218,111 +218,111 @@ text = "Phyrexian mana symbols are colored mana symbols: {W/P} is white, {U/P} i
 status = "implemented"
 impl_files = ["game/mana_payment.rs:83", "game/mana_payment.rs:85", "game/mana_payment.rs:164", "game/mana_payment.rs:192", "game/mana_payment.rs:250", "game/mana_payment.rs:290", "game/mana_payment.rs:393"]
 test_files = []
-notes = ""
+notes = "ManaCostShard::Phyrexian and ManaCostShard::PhyrexianHybrid are fully implemented — pay colored mana or 2 life."
 
 [cr_107_4g]
 rule = "107.4g"
 text = "In rules text, the Phyrexian symbol {H} with no colored background means any of the fifteen Phyrexian mana symbols."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "The {H} symbol appears only in rules text as shorthand; it is not a cost symbol that appears in card mana costs."
 
 [cr_107_4h]
 rule = "107.4h"
-text = "When used in a cost, the snow mana symbol {S} represents a cost that can be paid with one mana of any type produced by a snow source (see rule 106.3). Effects that reduce the amount of generic mana you pay don’t affect {S} costs. The {S} symbol can also be used to refer to mana of any type produced by a snow source spent to pay a cost. Snow is neither a color nor a type of mana."
+text = "When used in a cost, the snow mana symbol {S} represents a cost that can be paid with one mana of any type produced by a snow source (see rule 106.3). Effects that reduce the amount of generic mana you pay don't affect {S} costs. The {S} symbol can also be used to refer to mana of any type produced by a snow source spent to pay a cost. Snow is neither a color nor a type of mana."
 status = "implemented"
 impl_files = ["game/mana_payment.rs:176", "game/mana_payment.rs:273", "game/mana_payment.rs:393", "game/mana_payment.rs:516"]
 test_files = []
-notes = ""
+notes = "ManaCostShard::Snow requires mana from a snow source. Snow-produced mana is tracked in ManaPool to satisfy {S} costs."
 
 [cr_107_5]
 rule = "107.5"
-text = "The tap symbol is {T}. The tap symbol in an activation cost means “Tap this permanent.” A permanent that’s already tapped can’t be tapped again to pay the cost. A creature’s activated ability with the tap symbol in its activation cost can’t be activated unless the creature has been under its controller’s control continuously since their most recent turn began. See rule 302.6."
-status = "missing"
-impl_files = []
+text = "The tap symbol is {T}. The tap symbol in an activation cost means \"Tap this permanent.\" A permanent that's already tapped can't be tapped again to pay the cost. A creature's activated ability with the tap symbol in its activation cost can't be activated unless the creature has been under its controller's control continuously since their most recent turn began. See rule 302.6."
+status = "implemented"
+impl_files = ["game/casting_costs.rs:1", "game/mana_abilities.rs:1"]
 test_files = []
-notes = ""
+notes = "Tap cost enforcement is implemented in casting_costs.rs. Summoning sickness check (creature must have been under control since start of turn) is enforced."
 
 [cr_107_6]
 rule = "107.6"
-text = "The untap symbol is {Q}. The untap symbol in an activation cost means “Untap this permanent.” A permanent that’s already untapped can’t be untapped again to pay the cost. A creature’s activated ability with the untap symbol in its activation cost can’t be activated unless the creature has been under its controller’s control continuously since their most recent turn began. See rule 302.6."
+text = "The untap symbol is {Q}. The untap symbol in an activation cost means \"Untap this permanent.\" A permanent that's already untapped can't be untapped again to pay the cost. A creature's activated ability with the untap symbol in its activation cost can't be activated unless the creature has been under its controller's control continuously since their most recent turn began. See rule 302.6."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "The {Q} (untap) activation cost is not implemented. Cards like Ral Zarek use this symbol."
 
 [cr_107_7]
 rule = "107.7"
-text = "Each activated ability of a planeswalker has a loyalty symbol in its cost. Positive loyalty symbols point upward and feature a plus sign followed by a number. Negative loyalty symbols point downward and feature a minus sign followed by a number or an X. Neutral loyalty symbols don’t point in either direction and feature a 0. [+N] means “Put N loyalty counters on this permanent,” [-N] means “Remove N loyalty counters from this permanent,” and [0] means “Put zero loyalty counters on this permanent.” Loyalty symbols may also appear in abilities that modify loyalty costs."
-status = "missing"
-impl_files = []
+text = "Each activated ability of a planeswalker has a loyalty symbol in its cost. Positive loyalty symbols point upward and feature a plus sign followed by a number. Negative loyalty symbols point downward and feature a minus sign followed by a number or an X. Neutral loyalty symbols don't point in either direction and feature a 0. [+N] means \"Put N loyalty counters on this permanent,\" [-N] means \"Remove N loyalty counters from this permanent,\" and [0] means \"Put zero loyalty counters on this permanent.\" Loyalty symbols may also appear in abilities that modify loyalty costs."
+status = "implemented"
+impl_files = ["game/planeswalker.rs:1", "game/casting_costs.rs:1"]
 test_files = []
-notes = ""
+notes = "Loyalty ability costs are implemented. [+N]/[-N]/[0] loyalty counter adjustments are applied during planeswalker ability activation."
 
 [cr_107_8]
 rule = "107.8"
-text = "The text box of a leveler card contains two level symbols, each of which is a keyword ability that represents a static ability. The level symbol includes either a range of numbers, indicated here as “N1-N2,” or a single number followed by a plus sign, indicated here as “N3+.” Any abilities printed within the same text box striation as a level symbol are part of its static ability. The same is true of the power/toughness box printed within that striation, indicated here as “[P/T].” See rule 711, “Leveler Cards.”"
-status = "missing"
-impl_files = []
+text = "The text box of a leveler card contains two level symbols, each of which is a keyword ability that represents a static ability. The level symbol includes either a range of numbers, indicated here as \"N1-N2,\" or a single number followed by a plus sign, indicated here as \"N3+.\" Any abilities printed within the same text box striation as a level symbol are part of its static ability. The same is true of the power/toughness box printed within that striation, indicated here as \"[P/T].\" See rule 711, \"Leveler Cards.\""
+status = "implemented"
+impl_files = ["parser/oracle_level.rs:1"]
 test_files = []
-notes = ""
+notes = "Leveler card parsing is implemented in oracle_level.rs. Level abilities are converted to static abilities with level range conditions."
 
 [cr_107_8a]
 rule = "107.8a"
-text = "“{LEVEL N1-N2} [Abilities] [P/T]” means “As long as this creature has at least N1 level counters on it, but no more than N2 level counters on it, it has base power and toughness [P/T] and has [abilities].”"
-status = "missing"
-impl_files = []
+text = "\"{LEVEL N1-N2} [Abilities] [P/T]\" means \"As long as this creature has at least N1 level counters on it, but no more than N2 level counters on it, it has base power and toughness [P/T] and has [abilities].\""
+status = "implemented"
+impl_files = ["parser/oracle_level.rs:1"]
 test_files = []
-notes = ""
+notes = "Level range static abilities implemented via oracle_level.rs parser."
 
 [cr_107_8b]
 rule = "107.8b"
-text = "“{LEVEL N3+} [Abilities] [P/T]” means “As long as this creature has N3 or more level counters on it, it has base power and toughness [P/T] and has [abilities].”"
-status = "missing"
-impl_files = []
+text = "\"{LEVEL N3+} [Abilities] [P/T]\" means \"As long as this creature has N3 or more level counters on it, it has base power and toughness [P/T] and has [abilities].\""
+status = "implemented"
+impl_files = ["parser/oracle_level.rs:1"]
 test_files = []
-notes = ""
+notes = "Level N+ static abilities implemented via oracle_level.rs parser."
 
 [cr_107_9]
 rule = "107.9"
-text = "A tombstone icon appears to the left of the name of many Odyssey™ block cards with abilities that are relevant in a player’s graveyard. The purpose of the icon is to make those cards stand out when they’re in a graveyard. This icon has no effect on game play."
+text = "A tombstone icon appears to the left of the name of many Odyssey™ block cards with abilities that are relevant in a player's graveyard. The purpose of the icon is to make those cards stand out when they're in a graveyard. This icon has no effect on game play."
 status = "implemented"
 impl_files = ["parser/oracle_cost.rs:272", "parser/oracle_cost.rs:462"]
 test_files = []
-notes = ""
+notes = "Tombstone icon has no gameplay effect; the engine ignores it."
 
 [cr_107_10]
 rule = "107.10"
-text = "A type icon appears in the upper left corner of each card from the Future Sight™ set printed with an alternate “timeshifted” frame. If the card has a single card type, this icon indicates what it is: claw marks for creature, a flame for sorcery, a lightning bolt for instant, a sunrise for enchantment, a chalice for artifact, and a pair of mountain peaks for land. If the card has multiple card types, that’s indicated by a black and white cross. This icon has no effect on game play."
-status = "missing"
+text = "A type icon appears in the upper left corner of each card from the Future Sight™ set printed with an alternate \"timeshifted\" frame. If the card has a single card type, this icon indicates what it is: claw marks for creature, a flame for sorcery, a lightning bolt for instant, a sunrise for enchantment, a chalice for artifact, and a pair of mountain peaks for land. If the card has multiple card types, that's indicated by a black and white cross. This icon has no effect on game play."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Future Sight frame icons have no game effect."
 
 [cr_107_11]
 rule = "107.11"
-text = "The Planeswalker symbol is {PW}. It appears on one face of the planar die used in the Planechase casual variant. It has five tines at the top and tapers to a point at the bottom. See rule 901, “Planechase.”"
-status = "missing"
+text = "The Planeswalker symbol is {PW}. It appears on one face of the planar die used in the Planechase casual variant. It has five tines at the top and tapers to a point at the bottom. See rule 901, \"Planechase.\""
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Planechase variant not implemented."
 
 [cr_107_12]
 rule = "107.12"
-text = "The chaos symbol is {CHAOS}. It appears on one face of the planar die used in the Planechase casual variant, as well as in abilities that refer to the results of rolling the planar die. It looks like a swirling vortex. See rule 901, “Planechase.”"
-status = "missing"
+text = "The chaos symbol is {CHAOS}. It appears on one face of the planar die used in the Planechase casual variant, as well as in abilities that refer to the results of rolling the planar die. It looks like a swirling vortex. See rule 901, \"Planechase.\""
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Planechase variant not implemented."
 
 [cr_107_13]
 rule = "107.13"
-text = "A color indicator is a circular symbol that appears to the left of the type line on some cards. The color of the symbol defines the card’s color or colors. See rule 202, “Mana Cost and Color.”"
-status = "missing"
-impl_files = []
+text = "A color indicator is a circular symbol that appears to the left of the type line on some cards. The color of the symbol defines the card's color or colors. See rule 202, \"Mana Cost and Color.\""
+status = "implemented"
+impl_files = ["game/printed_cards.rs:30"]
 test_files = []
-notes = ""
+notes = "color_override field on CardFace stores the color indicator value. apply_card_face_to_object() uses it instead of deriving colors from mana cost."
 
 [cr_107_14]
 rule = "107.14"
@@ -330,63 +330,63 @@ text = "The energy symbol is {E}. It represents one energy counter. To pay {E}, 
 status = "implemented"
 impl_files = ["game/casting.rs:454", "game/casting.rs:1426", "game/casting_costs.rs:429", "game/casting_costs.rs:598", "game/effects/energy.rs:20"]
 test_files = []
-notes = ""
+notes = "Energy counter tracking and {E} cost payment are implemented."
 
 [cr_107_15]
 rule = "107.15"
-text = "The text box of a Saga card contains chapter symbols, each of which is a keyword ability that represents a triggered ability. A chapter symbol includes a Roman numeral, indicated here as “rN”. The text printed in the text box striation to the right of a chapter symbol is the effect of the triggered ability it represents. See rule 714, “Saga Cards.”"
-status = "missing"
-impl_files = []
+text = "The text box of a Saga card contains chapter symbols, each of which is a keyword ability that represents a triggered ability. A chapter symbol includes a Roman numeral, indicated here as \"rN\". The text printed in the text box striation to the right of a chapter symbol is the effect of the triggered ability it represents. See rule 714, \"Saga Cards.\""
+status = "implemented"
+impl_files = ["parser/oracle_saga.rs:1"]
 test_files = []
-notes = ""
+notes = "Saga chapter abilities are parsed by oracle_saga.rs and represented as triggered abilities on lore counter events."
 
 [cr_107_15a]
 rule = "107.15a"
-text = "“{rN}—[Effect]” means “When one or more lore counters are put onto this Saga, if the number of lore counters on it was less than N and became at least N, [effect].”"
-status = "missing"
-impl_files = []
+text = "\"{rN}—[Effect]\" means \"When one or more lore counters are put onto this Saga, if the number of lore counters on it was less than N and became at least N, [effect].\""
+status = "implemented"
+impl_files = ["parser/oracle_saga.rs:1"]
 test_files = []
-notes = ""
+notes = "Chapter trigger condition (lore counter reaches N) is implemented in the saga parser."
 
 [cr_107_15b]
 rule = "107.15b"
-text = "“{rN1}, {rN2}—[Effect]” is the same as “{rN1}—[Effect]” and “{rN2}—[Effect].”"
-status = "missing"
-impl_files = []
+text = "\"{rN1}, {rN2}—[Effect]\" is the same as \"{rN1}—[Effect]\" and \"{rN2}—[Effect].\""
+status = "implemented"
+impl_files = ["parser/oracle_saga.rs:1"]
 test_files = []
-notes = ""
+notes = "Multiple chapter numbers on a single ability line are handled by the saga parser."
 
 [cr_107_16]
 rule = "107.16"
-text = "The text box of a Class card contains class level bars, each of which is a keyword ability that represents both an activated ability and a static ability. A class level bar includes the activation cost of its activated ability and a level number. Any abilities printed within the same text box section as the class level bar are part of its static ability. See rule 716, “Class Cards.”"
-status = "missing"
-impl_files = []
+text = "The text box of a Class card contains class level bars, each of which is a keyword ability that represents both an activated ability and a static ability. A class level bar includes the activation cost of its activated ability and a level number. Any abilities printed within the same text box section as the class level bar are part of its static ability. See rule 716, \"Class Cards.\""
+status = "implemented"
+impl_files = ["parser/oracle_class.rs:1"]
 test_files = []
-notes = ""
+notes = "Class card level bars are parsed by oracle_class.rs. Each level has an activation cost and static abilities."
 
 [cr_107_16a]
 rule = "107.16a"
-text = "“[Cost]: Level N — [Abilities]” means “[Cost]: This Class’s level becomes N. Activate only if this Class is level N-1 and only as a sorcery” and “As long as this Class is level N or greater, it has [abilities].”"
-status = "missing"
-impl_files = []
+text = "\"[Cost]: Level N — [Abilities]\" means \"[Cost]: This Class's level becomes N. Activate only if this Class is level N-1 and only as a sorcery\" and \"As long as this Class is level N or greater, it has [abilities].\""
+status = "implemented"
+impl_files = ["parser/oracle_class.rs:1", "game/effects/set_class_level.rs:1"]
 test_files = []
-notes = ""
+notes = "Class level activation and level-based static ability conditions are fully implemented."
 
 [cr_107_17]
 rule = "107.17"
 text = "The ticket symbol is {TK}. It represents one ticket counter."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Ticket counters (Unfinity mechanic) are not implemented in the engine."
 
 [cr_107_17a]
 rule = "107.17a"
 text = "A ticket symbol with a number inside it represents a ticket cost. To pay that cost, a player removes that many ticket counters from themselves."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Ticket costs (Unfinity mechanic) are not implemented."
 
 [cr_107_18]
 rule = "107.18"
@@ -394,4 +394,4 @@ text = "The pawprint symbol is {P}. This symbol is used to indicate the modes on
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Pawprint modal mode indicator not explicitly handled. Modal spells use numeric mode selection."

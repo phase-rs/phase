@@ -1,8 +1,8 @@
-# Comprehensive Rules Section 720: Taking Shortcuts
+# Comprehensive Rules Section 720: Omen Cards
 
 [_meta]
 section = 720
-title = "Taking Shortcuts"
+title = "Omen Cards"
 
 [cr_720_1]
 rule = "720.1"
@@ -10,31 +10,31 @@ text = "Omen cards have a two-part card frame, with a smaller frame inset within
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Omen cards not implemented."
 
 [cr_720_2]
 rule = "720.2"
-text = "The text that appears in the inset frame on the left defines alternative characteristics that the object may have while it’s a spell. The card’s normal characteristics appear as usual, although with a smaller text box on the right."
+text = "The text that appears in the inset frame on the left defines alternative characteristics that the object may have while it's a spell. The card's normal characteristics appear as usual, although with a smaller text box on the right."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Omen cards not implemented."
 
 [cr_720_2a]
 rule = "720.2a"
-text = "If an effect refers to a card, spell, or permanent that “has an Omen,” it refers to an object that has the alternative characteristics of an Omen spell, even if the object currently doesn’t use them."
+text = "If an effect refers to a card, spell, or permanent that \"has an Omen,\" it refers to an object that has the alternative characteristics of an Omen spell, even if the object currently doesn't use them."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Omen cards not implemented."
 
 [cr_720_2b]
 rule = "720.2b"
-text = "The existence and values of these alternative characteristics are part of the object’s copiable values."
+text = "The existence and values of these alternative characteristics are part of the object's copiable values."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Omen cards not implemented."
 
 [cr_720_2c]
 rule = "720.2c"
@@ -42,7 +42,7 @@ text = "Although omen cards are printed with multiple sets of characteristics, e
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Omen cards not implemented."
 
 [cr_720_3]
 rule = "720.3"
@@ -50,7 +50,7 @@ text = "As a player casts an omen card, the player chooses whether they cast the
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Omen cards not implemented."
 
 [cr_720_3a]
 rule = "720.3a"
@@ -58,7 +58,7 @@ text = "When casting an omen card as an Omen, only the alternative characteristi
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Omen cards not implemented."
 
 [cr_720_3b]
 rule = "720.3b"
@@ -66,7 +66,7 @@ text = "While on the stack as an Omen, the spell has only its alternative charac
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Omen cards not implemented."
 
 [cr_720_3c]
 rule = "720.3c"
@@ -74,15 +74,15 @@ text = "If an Omen spell is copied, the copy is also an Omen. It has the alterna
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Omen cards not implemented."
 
 [cr_720_3d]
 rule = "720.3d"
-text = "As an Omen spell resolves, its controller shuffles it into its owner’s library instead of putting it into its owner’s graveyard as it resolves."
+text = "As an Omen spell resolves, its controller shuffles it into its owner's library instead of putting it into its owner's graveyard as it resolves."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Omen resolution shuffle-into-library not implemented."
 
 [cr_720_4]
 rule = "720.4"
@@ -90,12 +90,12 @@ text = "In every zone except the stack, and while on the stack not as an Omen, a
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Omen cards not implemented."
 
 [cr_720_5]
 rule = "720.5"
-text = "If an effect instructs a player to choose a card name and the player wants to choose an omen card’s alternative name, the player may do so."
+text = "If an effect instructs a player to choose a card name and the player wants to choose an omen card's alternative name, the player may do so."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Omen cards not implemented."

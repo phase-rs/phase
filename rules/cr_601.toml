@@ -6,23 +6,23 @@ title = "Casting Spells"
 
 [cr_601_1]
 rule = "601.1"
-text = "Previously, the action of casting a spell, or casting a card as a spell, was referred to on cards as “playing” that spell or that card. Cards that were printed with that text have received errata in the Oracle card reference so they now refer to “casting” that spell or that card."
-status = "missing"
+text = "Previously, the action of casting a spell, or casting a card as a spell, was referred to on cards as \"playing\" that spell or that card. Cards that were printed with that text have received errata in the Oracle card reference so they now refer to \"casting\" that spell or that card."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Errata/terminology rule only — no engine logic required. The engine uses 'cast' throughout."
 
 [cr_601_1a]
 rule = "601.1a"
-text = "Some effects still refer to “playing” a card. “Playing a card” means playing that card as a land or casting that card as a spell, whichever is appropriate."
-status = "missing"
-impl_files = []
+text = "Some effects still refer to \"playing\" a card. \"Playing a card\" means playing that card as a land or casting that card as a spell, whichever is appropriate."
+status = "implemented"
+impl_files = ["types/ability.rs:196", "types/ability.rs:199"]
 test_files = []
-notes = ""
+notes = "CardPlayMode enum distinguishes Cast vs Play. game/casting.rs:347 handles land play vs spell cast."
 
 [cr_601_2]
 rule = "601.2"
-text = "To cast a spell is to take it from where it is (usually the hand), put it on the stack, and pay its costs, so that it will eventually resolve and have its effect. Casting a spell includes proposal of the spell (rules 601.2a–d) and determination and payment of costs (rules 601.2f–h). To cast a spell, a player follows the steps listed below, in order. A player must be legally allowed to cast the spell to begin this process (see rule 601.3). If a player is unable to comply with the requirements of a step listed below while performing that step, the casting of the spell is illegal; the game returns to the moment before the casting of that spell was proposed (see rule 732, “Handling Illegal Actions”)."
+text = "To cast a spell is to take it from where it is (usually the hand), put it on the stack, and pay its costs, so that it will eventually resolve and have its effect. Casting a spell includes proposal of the spell (rules 601.2a–d) and determination and payment of costs (rules 601.2f–h). To cast a spell, a player follows the steps listed below, in order. A player must be legally allowed to cast the spell to begin this process (see rule 601.3). If a player is unable to comply with the requirements of a step listed below while performing that step, the casting of the spell is illegal; the game returns to the moment before the casting of that spell was proposed (see rule 732, \"Handling Illegal Actions\")."
 status = "implemented"
 impl_files = ["game/triggers.rs:953", "parser/oracle_trigger.rs:1785", "parser/oracle_trigger.rs:1940", "parser/oracle_trigger.rs:1948", "parser/oracle_trigger.rs:1957", "parser/oracle_trigger.rs:4519", "types/ability.rs:196", "types/ability.rs:199", "types/ability.rs:2039", "types/ability.rs:3114"]
 test_files = []
@@ -30,7 +30,7 @@ notes = ""
 
 [cr_601_2a]
 rule = "601.2a"
-text = "To propose the casting of a spell, a player first moves that card (or that copy of a card) from where it is to the stack. It becomes the topmost object on the stack. It has all the characteristics of the card (or the copy of a card) associated with it, and that player becomes its controller. Any continuous effects that modify the characteristics of the spell as you start casting it begin as it is put on the stack (see rule 611.2f). Any one-shot effects that cause the spell to gain abilities as you cast it apply as it is put on the stack (see rule 610.5). The spell remains on the stack until it resolves, it’s countered, or a rule or effect moves it elsewhere."
+text = "To propose the casting of a spell, a player first moves that card (or that copy of a card) from where it is to the stack. It becomes the topmost object on the stack. It has all the characteristics of the card (or the copy of a card) associated with it, and that player becomes its controller. Any continuous effects that modify the characteristics of the spell as you start casting it begin as it is put on the stack (see rule 611.2f). Any one-shot effects that cause the spell to gain abilities as you cast it apply as it is put on the stack (see rule 610.5). The spell remains on the stack until it resolves, it's countered, or a rule or effect moves it elsewhere."
 status = "implemented"
 impl_files = ["game/casting.rs:117", "game/casting.rs:137", "game/casting.rs:215", "game/casting.rs:228", "game/casting.rs:277", "game/casting.rs:378", "game/casting.rs:386", "game/casting_costs.rs:869", "game/effects/cast_from_zone.rs:10", "game/effects/cast_from_zone.rs:57", "parser/oracle.rs:1194", "parser/oracle_effect/mod.rs:1494", "parser/oracle_effect/mod.rs:1546", "parser/oracle_static.rs:44", "parser/oracle_static.rs:2728", "types/ability.rs:2032", "types/game_state.rs:812", "types/game_state.rs:993"]
 test_files = []
@@ -38,7 +38,7 @@ notes = ""
 
 [cr_601_2b]
 rule = "601.2b"
-text = "If the spell is modal, the player announces the mode choice (see rule 700.2). If the player wishes to splice any cards onto the spell (see rule 702.47), they reveal those cards in their hand. If the spell has alternative or additional costs that will be paid as it’s being cast such as buyback or kicker costs (see rules 118.8 and 118.9), the player announces their intentions to pay any or all of those costs (see rule 601.2f). A player can’t apply two alternative methods of casting or two alternative costs to a single spell. If the spell has a variable cost that will be paid as it’s being cast (such as an {X} in its mana cost; see rule 107.3), the player announces the value of that variable. If the value of that variable is defined in the text of the spell by a choice that player would make later in the announcement or resolution of the spell, that player makes that choice at this time instead of that later time. If a cost that will be paid as the spell is being cast includes hybrid mana symbols, the player announces the nonhybrid equivalent cost they intend to pay. If a cost that will be paid as the spell is being cast includes Phyrexian mana symbols, the player announces whether they intend to pay 2 life or a corresponding colored mana cost for each of those symbols. Previously made choices (such as choosing to cast a spell with flashback from a graveyard or choosing to cast a creature with morph face down) may restrict the player’s options when making these choices."
+text = "If the spell is modal, the player announces the mode choice (see rule 700.2). If the player wishes to splice any cards onto the spell (see rule 702.47), they reveal those cards in their hand. If the spell has alternative or additional costs that will be paid as it's being cast such as buyback or kicker costs (see rules 118.8 and 118.9), the player announces their intentions to pay any or all of those costs (see rule 601.2f). A player can't apply two alternative methods of casting or two alternative costs to a single spell. If the spell has a variable cost that will be paid as it's being cast (such as an {X} in its mana cost; see rule 107.3), the player announces the value of that variable. If the value of that variable is defined in the text of the spell by a choice that player would make later in the announcement or resolution of the spell, that player makes that choice at this time instead of that later time. If a cost that will be paid as the spell is being cast includes hybrid mana symbols, the player announces the nonhybrid equivalent cost they intend to pay. If a cost that will be paid as the spell is being cast includes Phyrexian mana symbols, the player announces whether they intend to pay 2 life or a corresponding colored mana cost for each of those symbols. Previously made choices (such as choosing to cast a spell with flashback from a graveyard or choosing to cast a creature with morph face down) may restrict the player's options when making these choices."
 status = "implemented"
 impl_files = ["game/casting_costs.rs:132", "game/casting_costs.rs:493", "game/casting_costs.rs:542", "game/casting_costs.rs:681", "game/engine.rs:416", "game/engine.rs:504", "types/game_state.rs:528", "types/game_state.rs:539", "types/game_state.rs:560"]
 test_files = []
@@ -46,7 +46,7 @@ notes = ""
 
 [cr_601_2c]
 rule = "601.2c"
-text = "The player announces their choice of an appropriate object or player for each target the spell requires. A spell may require some targets only if an alternative or additional cost (such as a kicker cost) or a particular mode was chosen for it; otherwise, the spell is cast as though it did not require those targets. Similarly, a spell may require alternative targets only if an alternative or additional cost was chosen for it. If the spell has a variable number of targets, the player announces how many targets they will choose before they announce those targets. In some cases, the number of targets will be defined by the spell’s text. Once the number of targets the spell has is determined, that number doesn’t change, even if the information used to determine the number of targets does. The same target can’t be chosen multiple times for any one instance of the word “target” on the spell. However, if the spell uses the word “target” in multiple places, the same object or player can be chosen once for each instance of the word “target” (as long as it fits the targeting criteria). If any effects say that an object or player must be chosen as a target, the player chooses targets so that they obey the maximum possible number of such effects without violating any rules or effects that say that an object or player can’t be chosen as a target. The chosen objects and/or players each become a target of that spell. (Any abilities that trigger when those objects and/or players become the target of a spell trigger at this point; they’ll wait to be put on the stack until the spell has finished being cast.)"
+text = "The player announces their choice of an appropriate object or player for each target the spell requires. A spell may require some targets only if an alternative or additional cost (such as a kicker cost) or a particular mode was chosen for it; otherwise, the spell is cast as though it did not require those targets. Similarly, a spell may require alternative targets only if an alternative or additional cost was chosen for it. If the spell has a variable number of targets, the player announces how many targets they will choose before they announce those targets. In some cases, the number of targets will be defined by the spell's text. Once the number of targets the spell has is determined, that number doesn't change, even if the information used to determine the number of targets does. The same target can't be chosen multiple times for any one instance of the word \"target\" on the spell. However, if the spell uses the word \"target\" in multiple places, the same object or player can be chosen once for each instance of the word \"target\" (as long as it fits the targeting criteria). If any effects say that an object or player must be chosen as a target, the player chooses targets so that they obey the maximum possible number of such effects without violating any rules or effects that say that an object or player can't be chosen as a target. The chosen objects and/or players each become a target of that spell. (Any abilities that trigger when those objects and/or players become the target of a spell trigger at this point; they'll wait to be put on the stack until the spell has finished being cast.)"
 status = "implemented"
 impl_files = ["game/ability_utils.rs:83", "game/ability_utils.rs:176", "game/ability_utils.rs:305", "game/casting_costs.rs:383", "game/effects/cast_from_zone.rs:19", "game/effects/mod.rs:88", "game/engine.rs:2515", "game/engine.rs:2532", "game/engine.rs:2542", "game/filter.rs:352", "types/ability.rs:693", "types/ability.rs:2782", "types/game_state.rs:440"]
 test_files = []
@@ -62,15 +62,15 @@ notes = ""
 
 [cr_601_2e]
 rule = "601.2e"
-text = "The game checks to see if the proposed spell can legally be cast. If the proposed spell is illegal, the game returns to the moment before the casting of that spell was proposed (see rule 732, “Handling Illegal Actions”)."
-status = "missing"
-impl_files = []
+text = "The game checks to see if the proposed spell can legally be cast. If the proposed spell is illegal, the game returns to the moment before the casting of that spell was proposed (see rule 732, \"Handling Illegal Actions\")."
+status = "implemented"
+impl_files = ["game/casting.rs:364", "game/casting.rs:399", "game/casting.rs:405", "game/casting.rs:416", "game/restrictions.rs:19", "game/restrictions.rs:241"]
 test_files = []
-notes = ""
+notes = "prepare_spell_cast() and can_cast_object_now() enforce all casting legality checks before committing to cast. EngineError returns to pre-cast state on failure."
 
 [cr_601_2f]
 rule = "601.2f"
-text = "The player determines the total cost of the spell. Usually this is just the mana cost. Some spells have additional or alternative costs. Some effects may increase or reduce the cost to pay, or may provide other alternative costs. Costs may include paying mana, tapping permanents, sacrificing permanents, discarding cards, and so on. The total cost is the mana cost or alternative cost (as determined in rule 601.2b), plus all additional costs and cost increases, and minus all cost reductions. If multiple cost reductions apply, the player may apply them in any order. If the mana component of the total cost is reduced to nothing by cost reduction effects, it is considered to be {0}. It can’t be reduced to less than {0}. Once the total cost is determined, any effects that directly affect the total cost are applied. Then the resulting total cost becomes “locked in.” If effects would change the total cost after this time, they have no effect."
+text = "The player determines the total cost of the spell. Usually this is just the mana cost. Some spells have additional or alternative costs. Some effects may increase or reduce the cost to pay, or may provide other alternative costs. Costs may include paying mana, tapping permanents, sacrificing permanents, discarding cards, and so on. The total cost is the mana cost or alternative cost (as determined in rule 601.2b), plus all additional costs and cost increases, and minus all cost reductions. If multiple cost reductions apply, the player may apply them in any order. If the mana component of the total cost is reduced to nothing by cost reduction effects, it is considered to be {0}. It can't be reduced to less than {0}. Once the total cost is determined, any effects that directly affect the total cost are applied. Then the resulting total cost becomes \"locked in.\" If effects would change the total cost after this time, they have no effect."
 status = "implemented"
 impl_files = ["game/casting.rs:569", "game/casting.rs:583", "game/casting.rs:622", "game/casting.rs:631", "game/casting.rs:638", "game/casting.rs:675", "game/casting.rs:701", "game/casting.rs:1564", "game/casting.rs:1641", "game/casting.rs:1824", "game/casting.rs:1842", "game/casting_costs.rs:382", "game/casting_costs.rs:383", "game/casting_costs.rs:1280", "game/casting_costs.rs:1314", "game/casting_costs.rs:1339", "game/game_object.rs:228", "game/keywords.rs:273", "game/keywords.rs:274", "game/keywords.rs:352", "game/mana_payment.rs:218", "game/mana_payment.rs:220", "game/static_abilities.rs:50", "parser/oracle.rs:58", "parser/oracle.rs:132", "parser/oracle.rs:336", "parser/oracle.rs:745", "parser/oracle.rs:4061", "parser/oracle_cost.rs:366", "parser/oracle_static.rs:603", "parser/oracle_static.rs:634", "parser/oracle_static.rs:2782", "parser/oracle_static.rs:4793", "types/ability.rs:2726", "types/ability.rs:2801", "types/card.rs:54", "types/statics.rs:82", "types/statics.rs:89", "types/statics.rs:97"]
 test_files = []
@@ -78,15 +78,15 @@ notes = ""
 
 [cr_601_2g]
 rule = "601.2g"
-text = "If the total cost includes a mana payment, the player then has a chance to activate mana abilities (see rule 605, “Mana Abilities”). Mana abilities must be activated before costs are paid."
-status = "missing"
-impl_files = []
+text = "If the total cost includes a mana payment, the player then has a chance to activate mana abilities (see rule 605, \"Mana Abilities\"). Mana abilities must be activated before costs are paid."
+status = "implemented"
+impl_files = ["game/casting.rs:1303", "game/casting.rs:1324", "game/casting_costs.rs:954", "game/engine.rs:1143", "types/game_state.rs:953"]
 test_files = []
-notes = ""
+notes = "WaitingFor::ManaPayment state allows the player to tap lands/activate mana abilities before paying. auto_tap_mana_sources pre-fills the pool."
 
 [cr_601_2h]
 rule = "601.2h"
-text = "The player pays the total cost. First, they pay all costs that don’t involve random elements or moving objects from the library to a public zone, in any order. Then they pay all remaining costs in any order. Partial payments are not allowed. Unpayable costs can’t be paid."
+text = "The player pays the total cost. First, they pay all costs that don't involve random elements or moving objects from the library to a public zone, in any order. Then they pay all remaining costs in any order. Partial payments are not allowed. Unpayable costs can't be paid."
 status = "implemented"
 impl_files = ["game/casting_costs.rs:113", "game/mana_payment.rs:207", "game/mana_payment.rs:209", "game/mana_payment.rs:218"]
 test_files = []
@@ -94,7 +94,7 @@ notes = ""
 
 [cr_601_2i]
 rule = "601.2i"
-text = "Once the steps described in 601.2a–h are completed, effects that modify the characteristics of the spell as it’s cast are applied, then the spell becomes cast. Any abilities that trigger when a spell is cast or put onto the stack trigger at this time. If the spell’s controller had priority before casting it, they get priority."
+text = "Once the steps described in 601.2a–h are completed, effects that modify the characteristics of the spell as it's cast are applied, then the spell becomes cast. Any abilities that trigger when a spell is cast or put onto the stack trigger at this time. If the spell's controller had priority before casting it, they get priority."
 status = "implemented"
 impl_files = ["game/restrictions.rs:110", "types/triggers.rs:41", "types/triggers.rs:42"]
 test_files = []
@@ -110,15 +110,15 @@ notes = ""
 
 [cr_601_3a]
 rule = "601.3a"
-text = "If an effect prohibits a player from casting a spell with certain qualities, that player may consider any choices to be made during that spell’s proposal that may cause those qualities to change. If any such choices could cause that effect to no longer prohibit that player from casting that spell, the player may begin to cast the spell, ignoring the effect."
+text = "If an effect prohibits a player from casting a spell with certain qualities, that player may consider any choices to be made during that spell's proposal that may cause those qualities to change. If any such choices could cause that effect to no longer prohibit that player from casting that spell, the player may begin to cast the spell, ignoring the effect."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Nuanced lookahead rule. The engine enforces prohibitions but does not model the lookahead exception."
 
 [cr_601_3b]
 rule = "601.3b"
-text = "If an effect allows a player to cast a spell with certain qualities as though it had flash, that player may consider any choices to be made during that spell’s proposal that may cause that spell’s qualities to change. If any such choices could cause that effect to apply, that player may begin to cast that spell as though it had flash."
+text = "If an effect allows a player to cast a spell with certain qualities as though it had flash, that player may consider any choices to be made during that spell's proposal that may cause that spell's qualities to change. If any such choices could cause that effect to apply, that player may begin to cast that spell as though it had flash."
 status = "implemented"
 impl_files = ["game/restrictions.rs:28"]
 test_files = []
@@ -135,18 +135,18 @@ notes = ""
 [cr_601_3d]
 rule = "601.3d"
 text = "If a spell would have flash only if certain conditions are met, its controller may begin to cast that spell as though it had flash if those conditions are met."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/restrictions.rs:28", "game/restrictions.rs:60"]
 test_files = []
-notes = ""
+notes = "Flash timing checks in restrictions.rs evaluate conditions at cast time. Covered by conditional flash permissions."
 
 [cr_601_3e]
 rule = "601.3e"
-text = "Some rules and effects state that an alternative set of characteristics or a subset of characteristics are considered to determine if a card or copy of a card is legal to cast. These alternative characteristics replace the object’s characteristics for this determination. Continuous effects that would apply to that object once it has those characteristics are also considered."
+text = "Some rules and effects state that an alternative set of characteristics or a subset of characteristics are considered to determine if a card or copy of a card is legal to cast. These alternative characteristics replace the object's characteristics for this determination. Continuous effects that would apply to that object once it has those characteristics are also considered."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Edge case for morph/manifest face-down casting characteristic substitution during legality check."
 
 [cr_601_3f]
 rule = "601.3f"
@@ -154,23 +154,23 @@ text = "Some effects allow a player to cast a spell with certain qualities from 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Face-down exile casting not yet implemented."
 
 [cr_601_4]
 rule = "601.4"
-text = "While announcing the choices of any modes, alternative costs, and/or additional costs as described in rule 601.2b, some options may be available to a player only if other choices are made that would normally be made later in that rule’s instructions. In that case, the spell’s controller may consider any other choices to be made in that step. If any such choices could allow them to choose a particular mode, alternative cost, or additional cost, they may do so."
+text = "While announcing the choices of any modes, alternative costs, and/or additional costs as described in rule 601.2b, some options may be available to a player only if other choices are made that would normally be made later in that rule's instructions. In that case, the spell's controller may consider any other choices to be made in that step. If any such choices could allow them to choose a particular mode, alternative cost, or additional cost, they may do so."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Lookahead rule for interdependent announcement choices. Not explicitly modeled."
 
 [cr_601_5]
 rule = "601.5"
-text = "If a player is no longer allowed to cast a spell after completing its proposal (see rules 601.2a–d), the casting of the spell is illegal and the game returns to the moment before the casting of that spell was proposed (see rule 732, “Handling Illegal Actions”). It doesn’t matter if a rule or effect would make the casting of the spell illegal while determining and paying that spell’s costs (see rules 601.2f–h) or any time after the spell has been cast."
-status = "missing"
-impl_files = []
+text = "If a player is no longer allowed to cast a spell after completing its proposal (see rules 601.2a–d), the casting of the spell is illegal and the game returns to the moment before the casting of that spell was proposed (see rule 732, \"Handling Illegal Actions\"). It doesn't matter if a rule or effect would make the casting of the spell illegal while determining and paying that spell's costs (see rules 601.2f–h) or any time after the spell has been cast."
+status = "implemented"
+impl_files = ["game/casting.rs:1810", "game/engine.rs:268"]
 test_files = []
-notes = ""
+notes = "handle_cancel_cast() rolls back to pre-cast state. EngineError::ActionNotAllowed propagates illegal cast."
 
 [cr_601_5a]
 rule = "601.5a"
@@ -178,36 +178,36 @@ text = "Once a player has begun casting a spell that had flash because certain c
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Flash conditions are re-checked only at cast initiation; mid-cast condition changes not modeled explicitly."
 
 [cr_601_6]
 rule = "601.6"
-text = "Some spells specify that one of their controller’s opponents does something the controller would normally do while it’s being cast, such as choose a mode or choose targets. In these cases, the opponent does so when the spell’s controller normally would do so."
+text = "Some spells specify that one of their controller's opponents does something the controller would normally do while it's being cast, such as choose a mode or choose targets. In these cases, the opponent does so when the spell's controller normally would do so."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Opponent-makes-choices-during-cast not yet implemented."
 
 [cr_601_6a]
 rule = "601.6a"
-text = "If there is more than one opponent who could make such a choice, the spell’s controller decides which of those opponents will make the choice."
+text = "If there is more than one opponent who could make such a choice, the spell's controller decides which of those opponents will make the choice."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Depends on CR 601.6 implementation."
 
 [cr_601_6b]
 rule = "601.6b"
-text = "If the spell instructs its controller and another player to do something at the same time as the spell is being cast, the spell’s controller goes first, then the other player. This is an exception to rule 101.4."
+text = "If the spell instructs its controller and another player to do something at the same time as the spell is being cast, the spell's controller goes first, then the other player. This is an exception to rule 101.4."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Simultaneous-cast-announcement ordering not modeled."
 
 [cr_601_7]
 rule = "601.7"
-text = "Casting a spell that alters costs won’t affect spells and abilities that are already on the stack."
-status = "missing"
-impl_files = []
+text = "Casting a spell that alters costs won't affect spells and abilities that are already on the stack."
+status = "implemented"
+impl_files = ["game/casting.rs:593", "game/casting_costs.rs:1280"]
 test_files = []
-notes = ""
+notes = "Cost modifiers are computed and locked-in per-cast via apply_battlefield_cost_modifiers(); existing stack entries are not retroactively affected."

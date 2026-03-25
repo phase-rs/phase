@@ -6,71 +6,71 @@ title = "Enchantments"
 
 [cr_303_1]
 rule = "303.1"
-text = "A player who has priority may cast an enchantment card from their hand during a main phase of their turn when the stack is empty. Casting an enchantment as a spell uses the stack. (See rule 601, “Casting Spells.”)"
-status = "missing"
-impl_files = []
+text = "A player who has priority may cast an enchantment card from their hand during a main phase of their turn when the stack is empty. Casting an enchantment as a spell uses the stack. (See rule 601, \"Casting Spells.\")"
+status = "implemented"
+impl_files = ["game/restrictions.rs:35", "game/casting.rs:526"]
 test_files = []
-notes = ""
+notes = "Sorcery-speed restriction enforced by is_sorcery_speed_window(). Enchantment cards use the stack via CastSpell. Aura spells targeting is handled in casting_targets.rs."
 
 [cr_303_2]
 rule = "303.2"
 text = "When an enchantment spell resolves, its controller puts it onto the battlefield under their control."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/stack.rs:106", "game/stack.rs:259"]
 test_files = []
-notes = ""
+notes = "is_permanent_type() includes CoreType::Enchantment; enchantment spells resolve to Zone::Battlefield."
 
 [cr_303_3]
 rule = "303.3"
-text = "Enchantment subtypes are always a single word and are listed after a long dash: “Enchantment — Shrine.” Each word after the dash is a separate subtype. Enchantment subtypes are also called enchantment types. Enchantments may have multiple subtypes. See rule 205.3h for the complete list of enchantment types."
-status = "missing"
-impl_files = []
+text = "Enchantment subtypes are always a single word and are listed after a long dash: \"Enchantment — Shrine.\" Each word after the dash is a separate subtype. Enchantment subtypes are also called enchantment types. Enchantments may have multiple subtypes. See rule 205.3h for the complete list of enchantment types."
+status = "implemented"
+impl_files = ["types/card_type.rs:110"]
 test_files = []
-notes = ""
+notes = "Enchantment subtypes stored as strings in CardType.subtypes. Parsed from MTGJSON type line."
 
 [cr_303_4]
 rule = "303.4"
-text = "Some enchantments have the subtype “Aura.” An Aura enters the battlefield attached to an object or player. What an Aura can be attached to is defined by its enchant keyword ability (see rule 702.5, “Enchant”). Other effects can limit what a permanent can be enchanted by."
-status = "missing"
-impl_files = []
+text = "Some enchantments have the subtype \"Aura.\" An Aura enters the battlefield attached to an object or player. What an Aura can be attached to is defined by its enchant keyword ability (see rule 702.5, \"Enchant\"). Other effects can limit what a permanent can be enchanted by."
+status = "implemented"
+impl_files = ["game/stack.rs:138", "game/effects/attach.rs:1"]
 test_files = []
-notes = ""
+notes = "Aura spells require a target (enchant) and attach to that target on resolution (stack.rs:138). The enchant keyword defines the attachment target filter."
 
 [cr_303_4a]
 rule = "303.4a"
 text = "An Aura spell requires a target, which is defined by its enchant ability."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/casting.rs:1", "game/casting_targets.rs:1"]
 test_files = []
-notes = ""
+notes = "Aura spells set WaitingFor::Target during casting using the enchant ability's TargetFilter. Target selection is required before casting resolves."
 
 [cr_303_4b]
 rule = "303.4b"
-text = "The object or player an Aura is attached to is called enchanted. The Aura is attached to, or “enchants,” that object or player."
-status = "missing"
-impl_files = []
+text = "The object or player an Aura is attached to is called enchanted. The Aura is attached to, or \"enchants,\" that object or player."
+status = "implemented"
+impl_files = ["game/game_object.rs:1", "game/effects/attach.rs:1"]
 test_files = []
-notes = ""
+notes = "GameObject.attached_to stores the ObjectId of the enchanted object. Static abilities reference 'enchanted [object]' via this field."
 
 [cr_303_4c]
 rule = "303.4c"
-text = "If an Aura is enchanting an illegal object or player as defined by its enchant ability and other applicable effects, the object it was attached to no longer exists, or the player it was attached to has left the game, the Aura is put into its owner’s graveyard. (This is a state-based action. See rule 704.)"
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "If an Aura is enchanting an illegal object or player as defined by its enchant ability and other applicable effects, the object it was attached to no longer exists, or the player it was attached to has left the game, the Aura is put into its owner's graveyard. (This is a state-based action. See rule 704.)"
+status = "implemented"
+impl_files = ["game/sba.rs:379", "game/sba.rs:104"]
+test_files = ["game/sba.rs:774"]
+notes = "check_unattached_auras() in sba.rs detects Auras with attached_to pointing to missing or illegal targets and moves them to graveyard."
 
 [cr_303_4d]
 rule = "303.4d"
-text = "An Aura can’t enchant itself. If this occurs somehow, the Aura is put into its owner’s graveyard. An Aura that’s also a creature can’t enchant anything. If this occurs somehow, the Aura becomes unattached, then is put into its owner’s graveyard. (These are state-based actions. See rule 704.) An Aura can’t enchant more than one object or player. If a spell or ability would cause an Aura to become attached to more than one object or player, the Aura’s controller chooses which object or player it becomes attached to."
-status = "missing"
-impl_files = []
+text = "An Aura can't enchant itself. If this occurs somehow, the Aura is put into its owner's graveyard. An Aura that's also a creature can't enchant anything. If this occurs somehow, the Aura becomes unattached, then is put into its owner's graveyard. (These are state-based actions. See rule 704.) An Aura can't enchant more than one object or player. If a spell or ability would cause an Aura to become attached to more than one object or player, the Aura's controller chooses which object or player it becomes attached to."
+status = "partial"
+impl_files = ["game/sba.rs:379"]
 test_files = []
-notes = ""
+notes = "SBA check_unattached_auras handles illegal attachment. Self-enchant and creature-Aura edge cases depend on is_valid_attachment_target() which may not cover all CR 303.4d scenarios."
 
 [cr_303_4e]
 rule = "303.4e"
-text = "An Aura’s controller is separate from the enchanted object’s controller or the enchanted player; the two need not be the same. If an Aura enchants an object, changing control of the object doesn’t change control of the Aura, and vice versa. Only the Aura’s controller can activate its abilities. However, if the Aura grants an ability to the enchanted object (with “gains” or “has”), the enchanted object’s controller is the only one who can activate that ability."
+text = "An Aura's controller is separate from the enchanted object's controller or the enchanted player; the two need not be the same. If an Aura enchants an object, changing control of the object doesn't change control of the Aura, and vice versa. Only the Aura's controller can activate its abilities. However, if the Aura grants an ability to the enchanted object (with \"gains\" or \"has\"), the enchanted object's controller is the only one who can activate that ability."
 status = "implemented"
 impl_files = ["parser/oracle_static.rs:76"]
 test_files = []
@@ -78,7 +78,7 @@ notes = ""
 
 [cr_303_4f]
 rule = "303.4f"
-text = "If an Aura is entering the battlefield under a player’s control by any means other than by resolving as an Aura spell, and the effect putting it onto the battlefield doesn’t specify the object or player the Aura will enchant, that player chooses what it will enchant as the Aura enters the battlefield. The player must choose a legal object or player according to the Aura’s enchant ability and any other applicable effects."
+text = "If an Aura is entering the battlefield under a player's control by any means other than by resolving as an Aura spell, and the effect putting it onto the battlefield doesn't specify the object or player the Aura will enchant, that player chooses what it will enchant as the Aura enters the battlefield. The player must choose a legal object or player according to the Aura's enchant ability and any other applicable effects."
 status = "implemented"
 impl_files = ["game/stack.rs:138", "parser/oracle_effect/sequence.rs:319"]
 test_files = []
@@ -86,71 +86,71 @@ notes = ""
 
 [cr_303_4g]
 rule = "303.4g"
-text = "If an Aura is entering the battlefield and there is no legal object or player for it to enchant, the Aura remains in its current zone, unless that zone is the stack. In that case, the Aura is put into its owner’s graveyard instead of entering the battlefield. If the Aura is a token, it isn’t created."
-status = "missing"
-impl_files = []
+text = "If an Aura is entering the battlefield and there is no legal object or player for it to enchant, the Aura remains in its current zone, unless that zone is the stack. In that case, the Aura is put into its owner's graveyard instead of entering the battlefield. If the Aura is a token, it isn't created."
+status = "partial"
+impl_files = ["game/stack.rs:138"]
 test_files = []
-notes = ""
+notes = "Aura targeting on the stack requires a legal target (fizzle if target is gone). ETB Aura with no legal target falls back to unattached enter in some paths but full CR 303.4g semantics are not uniformly enforced."
 
 [cr_303_4h]
 rule = "303.4h"
-text = "If an effect attempts to put a permanent that isn’t an Aura, Equipment, or Fortification onto the battlefield attached to an object or player, it enters the battlefield unattached."
-status = "missing"
-impl_files = []
+text = "If an effect attempts to put a permanent that isn't an Aura, Equipment, or Fortification onto the battlefield attached to an object or player, it enters the battlefield unattached."
+status = "implemented"
+impl_files = ["game/effects/attach.rs:1"]
 test_files = []
-notes = ""
+notes = "attach.rs validates attachment type before applying. Non-Aura/Equipment objects entering with attachment directives enter unattached."
 
 [cr_303_4i]
 rule = "303.4i"
-text = "If an effect attempts to put an Aura onto the battlefield attached to either an object or player it can’t legally enchant or an object or player that is undefined, the Aura remains in its current zone, unless that zone is the stack. In that case, the Aura is put into its owner’s graveyard instead of entering the battlefield. If the Aura is a token, it isn’t created."
-status = "missing"
-impl_files = []
+text = "If an effect attempts to put an Aura onto the battlefield attached to either an object or player it can't legally enchant or an object or player that is undefined, the Aura remains in its current zone, unless that zone is the stack. In that case, the Aura is put into its owner's graveyard instead of entering the battlefield. If the Aura is a token, it isn't created."
+status = "partial"
+impl_files = ["game/effects/attach.rs:1"]
 test_files = []
-notes = ""
+notes = "Attach validation checks legality but the full zone-specific behavior (stay in hand if entering from non-stack) is not exhaustively implemented."
 
 [cr_303_4j]
 rule = "303.4j"
-text = "If an effect attempts to attach an Aura on the battlefield to an object or player it can’t legally enchant, the Aura doesn’t move."
-status = "missing"
-impl_files = []
+text = "If an effect attempts to attach an Aura on the battlefield to an object or player it can't legally enchant, the Aura doesn't move."
+status = "implemented"
+impl_files = ["game/effects/attach.rs:1"]
 test_files = []
-notes = ""
+notes = "attach.rs validates targets for legality before applying the attach effect. Illegal targets result in no movement."
 
 [cr_303_4k]
 rule = "303.4k"
-text = "If an effect allows an Aura that’s being turned face up to become attached to an object or player, the Aura’s controller considers the characteristics of that Aura as it would exist if it were face up to determine what it may be attached to, and they must choose a legal object or player according to the Aura’s enchant ability and any other applicable effects."
+text = "If an effect allows an Aura that's being turned face up to become attached to an object or player, the Aura's controller considers the characteristics of that Aura as it would exist if it were face up to determine what it may be attached to, and they must choose a legal object or player according to the Aura's enchant ability and any other applicable effects."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Face-up Aura reattachment during morph/manifest is not implemented."
 
 [cr_303_4m]
 rule = "303.4m"
-text = "An ability of a permanent that refers to the “enchanted [object or player]” refers to whatever object or player that permanent is attached to, even if the permanent with the ability isn’t an Aura."
-status = "missing"
-impl_files = []
+text = "An ability of a permanent that refers to the \"enchanted [object or player]\" refers to whatever object or player that permanent is attached to, even if the permanent with the ability isn't an Aura."
+status = "implemented"
+impl_files = ["game/game_object.rs:1", "game/static_abilities.rs:1"]
 test_files = []
-notes = ""
+notes = "Static ability evaluation resolves 'enchanted X' via obj.attached_to regardless of whether the permanent is an Aura subtype."
 
 [cr_303_5]
 rule = "303.5"
-text = "Some enchantments have the subtype “Saga.” See rule 714 for more information about Saga cards."
-status = "missing"
-impl_files = []
+text = "Some enchantments have the subtype \"Saga.\" See rule 714 for more information about Saga cards."
+status = "implemented"
+impl_files = ["game/printed_cards.rs:73", "game/effects/set_class_level.rs:1"]
 test_files = []
-notes = ""
+notes = "Saga subtype is detected and handled. Saga lore counter logic and chapter ability triggering are implemented via the set_class_level mechanism and trigger system."
 
 [cr_303_6]
 rule = "303.6"
-text = "Some enchantments have the subtype “Class.” See rule 716 for more information about Class cards."
-status = "missing"
-impl_files = []
+text = "Some enchantments have the subtype \"Class.\" See rule 716 for more information about Class cards."
+status = "implemented"
+impl_files = ["game/printed_cards.rs:68", "game/effects/set_class_level.rs:1"]
 test_files = []
-notes = ""
+notes = "Class subtype is detected. Class level progression is implemented via class_level field and set_class_level effect handler."
 
 [cr_303_7]
 rule = "303.7"
-text = "Some Aura enchantments also have the subtype “Role.”"
+text = "Some Aura enchantments also have the subtype \"Role.\""
 status = "implemented"
 impl_files = ["parser/oracle_effect/token.rs:66", "parser/oracle_effect/token.rs:461", "parser/oracle_effect/token.rs:487", "types/ability.rs:1615"]
 test_files = []
@@ -158,8 +158,8 @@ notes = ""
 
 [cr_303_7a]
 rule = "303.7a"
-text = "If a permanent has more than one Role controlled by the same player attached to it, each of those Roles except the one with the most recent timestamp is put into its owner’s graveyard. This is a state-based action. See rule 704."
+text = "If a permanent has more than one Role controlled by the same player attached to it, each of those Roles except the one with the most recent timestamp is put into its owner's graveyard. This is a state-based action. See rule 704."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Role uniqueness SBA (one Role per player per permanent) is not implemented in sba.rs."

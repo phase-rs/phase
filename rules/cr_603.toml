@@ -6,7 +6,7 @@ title = "Handling Triggered Abilities"
 
 [cr_603_1]
 rule = "603.1"
-text = "Triggered abilities have a trigger condition and an effect. They are written as “[When/Whenever/At] [trigger condition or event], [effect]. [Instructions (if any).]”"
+text = "Triggered abilities have a trigger condition and an effect. They are written as \"[When/Whenever/At] [trigger condition or event], [effect]. [Instructions (if any).]\""
 status = "implemented"
 impl_files = ["types/triggers.rs:11", "types/triggers.rs:290"]
 test_files = []
@@ -14,23 +14,23 @@ notes = ""
 
 [cr_603_1a]
 rule = "603.1a"
-text = "A triggered ability may include instructions after its effects that limit what the ability may target or state that it can’t be countered. This text is not part of the ability’s effect. It functions while the ability is on the stack."
+text = "A triggered ability may include instructions after its effects that limit what the ability may target or state that it can't be countered. This text is not part of the ability's effect. It functions while the ability is on the stack."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Instructions embedded after effect text (e.g. 'can't be countered') not explicitly separated in the ability model."
 
 [cr_603_1b]
 rule = "603.1b"
-text = "A triggered ability may have more than one trigger condition, and an instruction that refers to whether “all” of those conditions have happened during a particular period. This refers to whether or not all of those conditions have occurred during that period, regardless of whether that ability has triggered based on those conditions."
+text = "A triggered ability may have more than one trigger condition, and an instruction that refers to whether \"all\" of those conditions have happened during a particular period. This refers to whether or not all of those conditions have occurred during that period, regardless of whether that ability has triggered based on those conditions."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multi-condition 'all of the above happened' triggers not yet modeled."
 
 [cr_603_2]
 rule = "603.2"
-text = "Whenever a game event or game state matches a triggered ability’s trigger event, that ability automatically triggers. The ability doesn’t do anything at this point."
+text = "Whenever a game event or game state matches a triggered ability's trigger event, that ability automatically triggers. The ability doesn't do anything at this point."
 status = "implemented"
 impl_files = ["game/combat_damage.rs:26", "game/combat_damage.rs:39", "game/trigger_matchers.rs:645", "game/triggers.rs:822", "parser/oracle_trigger.rs:1995", "types/triggers.rs:12"]
 test_files = []
@@ -38,15 +38,15 @@ notes = ""
 
 [cr_603_2a]
 rule = "603.2a"
-text = "Because they aren’t cast or activated, triggered abilities can trigger even when it isn’t legal to cast spells and activate abilities. Effects that preclude abilities from being activated don’t affect them."
-status = "missing"
-impl_files = []
+text = "Because they aren't cast or activated, triggered abilities can trigger even when it isn't legal to cast spells and activate abilities. Effects that preclude abilities from being activated don't affect them."
+status = "implemented"
+impl_files = ["game/triggers.rs:822"]
 test_files = []
-notes = ""
+notes = "check_and_collect_triggers() runs independently of priority and casting restrictions."
 
 [cr_603_2b]
 rule = "603.2b"
-text = "When a phase or step begins, all abilities that trigger “at the beginning of” that phase or step trigger."
+text = "When a phase or step begins, all abilities that trigger \"at the beginning of\" that phase or step trigger."
 status = "implemented"
 impl_files = ["types/triggers.rs:146", "types/triggers.rs:147", "types/triggers.rs:154"]
 test_files = []
@@ -62,7 +62,7 @@ notes = ""
 
 [cr_603_2d]
 rule = "603.2d"
-text = "An ability may state that a triggered ability triggers additional times. In this case, rather than simply determining that such an ability has triggered, determine how many times it should trigger, then that ability triggers that many times. An effect that states that an ability triggers additional times doesn’t invoke itself repeatedly and doesn’t apply to other effects that affect how many times an ability triggers. An effect that states a triggered ability of an object triggers additional times refers only to triggered abilities that object has, not to any delayed or reflexive triggered abilities (see rule 603.7 and rule 603.12) that may be created by abilities the object has."
+text = "An ability may state that a triggered ability triggers additional times. In this case, rather than simply determining that such an ability has triggered, determine how many times it should trigger, then that ability triggers that many times. An effect that states that an ability triggers additional times doesn't invoke itself repeatedly and doesn't apply to other effects that affect how many times an ability triggers. An effect that states a triggered ability of an object triggers additional times refers only to triggered abilities that object has, not to any delayed or reflexive triggered abilities (see rule 603.7 and rule 603.12) that may be created by abilities the object has."
 status = "implemented"
 impl_files = ["game/triggers.rs:494", "game/triggers.rs:592", "game/triggers.rs:635"]
 test_files = []
@@ -70,7 +70,7 @@ notes = ""
 
 [cr_603_2e]
 rule = "603.2e"
-text = "Some trigger events use the word “becomes” (for example, “becomes attached” or “becomes blocked”). These trigger only at the time the named event happens—they don’t trigger if that state already exists or retrigger if it persists. An ability that triggers when a permanent “becomes tapped” or “becomes untapped” doesn’t trigger if the permanent enters the battlefield in that state."
+text = "Some trigger events use the word \"becomes\" (for example, \"becomes attached\" or \"becomes blocked\"). These trigger only at the time the named event happens—they don't trigger if that state already exists or retrigger if it persists. An ability that triggers when a permanent \"becomes tapped\" or \"becomes untapped\" doesn't trigger if the permanent enters the battlefield in that state."
 status = "implemented"
 impl_files = ["types/triggers.rs:23", "types/triggers.rs:75", "types/triggers.rs:104"]
 test_files = []
@@ -78,15 +78,15 @@ notes = ""
 
 [cr_603_2f]
 rule = "603.2f"
-text = "If a triggered ability’s trigger condition is met, but the object with that triggered ability is at no time visible to all players, the ability does not trigger."
+text = "If a triggered ability's trigger condition is met, but the object with that triggered ability is at no time visible to all players, the ability does not trigger."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Hidden-zone visibility suppression of triggers not explicitly modeled."
 
 [cr_603_2g]
 rule = "603.2g"
-text = "An ability triggers only if its trigger event actually occurs. An event that’s prevented or replaced won’t trigger anything."
+text = "An ability triggers only if its trigger event actually occurs. An event that's prevented or replaced won't trigger anything."
 status = "implemented"
 impl_files = ["types/triggers.rs:51"]
 test_files = []
@@ -94,15 +94,15 @@ notes = ""
 
 [cr_603_2h]
 rule = "603.2h"
-text = "A triggered ability may have an instruction followed by “Do this only once each turn.” This ability triggers only if its source’s controller has not yet taken the indicated action that turn."
+text = "A triggered ability may have an instruction followed by \"Do this only once each turn.\" This ability triggers only if its source's controller has not yet taken the indicated action that turn."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Per-turn single-fire trigger tracking not yet implemented."
 
 [cr_603_3]
 rule = "603.3"
-text = "Once an ability has triggered, its controller puts it on the stack as an object that’s not a card the next time a player would receive priority. See rule 117, “Timing and Priority.” The ability becomes the topmost object on the stack. It has the text of the ability that created it, and no other characteristics. It remains on the stack until it’s countered, it resolves, a rule causes it to be removed from the stack, or an effect moves it elsewhere."
+text = "Once an ability has triggered, its controller puts it on the stack as an object that's not a card the next time a player would receive priority. See rule 117, \"Timing and Priority.\" The ability becomes the topmost object on the stack. It has the text of the ability that created it, and no other characteristics. It remains on the stack until it's countered, it resolves, a rule causes it to be removed from the stack, or an effect moves it elsewhere."
 status = "implemented"
 impl_files = ["game/triggers.rs:569", "types/triggers.rs:13"]
 test_files = []
@@ -110,15 +110,15 @@ notes = ""
 
 [cr_603_3a]
 rule = "603.3a"
-text = "A triggered ability is controlled by the player who controlled its source at the time it triggered, unless it’s a delayed triggered ability. To determine the controller of a delayed triggered ability, see rules 603.7d–f."
-status = "missing"
-impl_files = []
+text = "A triggered ability is controlled by the player who controlled its source at the time it triggered, unless it's a delayed triggered ability. To determine the controller of a delayed triggered ability, see rules 603.7d–f."
+status = "implemented"
+impl_files = ["game/triggers.rs:569", "types/game_state.rs:155"]
 test_files = []
-notes = ""
+notes = "Trigger controller is captured at trigger time in check_and_collect_triggers(); delayed trigger controller stored in DelayedTrigger.controller."
 
 [cr_603_3b]
 rule = "603.3b"
-text = "If multiple abilities have triggered since the last time a player received priority, the abilities are placed on the stack in a two-part process. First, each player, in APNAP order, puts each triggered ability they control with a trigger condition that isn’t another ability triggering on the stack in any order they choose. (See rule 101.4.) Second, each player, in APNAP order, puts all remaining triggered abilities they control on the stack in any order they choose. Then the game once again checks for and performs state-based actions until none are performed, then abilities that triggered during this process go on the stack. This process repeats until no new state-based actions are performed and no abilities trigger. Then the appropriate player gets priority."
+text = "If multiple abilities have triggered since the last time a player received priority, the abilities are placed on the stack in a two-part process. First, each player, in APNAP order, puts each triggered ability they control with a trigger condition that isn't another ability triggering on the stack in any order they choose. (See rule 101.4.) Second, each player, in APNAP order, puts all remaining triggered abilities they control on the stack in any order they choose. Then the game once again checks for and performs state-based actions until none are performed, then abilities that triggered during this process go on the stack. This process repeats until no new state-based actions are performed and no abilities trigger. Then the appropriate player gets priority."
 status = "implemented"
 impl_files = ["game/triggers.rs:145", "game/triggers.rs:503", "game/triggers.rs:515", "game/triggers.rs:682"]
 test_files = []
@@ -126,23 +126,23 @@ notes = ""
 
 [cr_603_3c]
 rule = "603.3c"
-text = "If a triggered ability is modal, its controller announces the mode choice when putting the ability on the stack. If one of the modes would be illegal (due to an inability to choose legal targets, for example), that mode can’t be chosen. If no mode is chosen, the ability is removed from the stack. (See rule 700.2.)"
+text = "If a triggered ability is modal, its controller announces the mode choice when putting the ability on the stack. If one of the modes would be illegal (due to an inability to choose legal targets, for example), that mode can't be chosen. If no mode is chosen, the ability is removed from the stack. (See rule 700.2.)"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Modal triggered abilities don't yet prompt for mode choice when placed on stack."
 
 [cr_603_3d]
 rule = "603.3d"
 text = "The remainder of the process for putting a triggered ability on the stack is identical to the process for casting a spell listed in rules 601.2c–d. If a choice is required when the triggered ability goes on the stack but no legal choices can be made for it, or if a rule or a continuous effect otherwise makes the ability illegal, the ability is simply removed from the stack."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/triggers.rs:569", "game/ability_utils.rs:83"]
 test_files = []
-notes = ""
+notes = "push_trigger_to_stack() follows the same target-selection pipeline as casting."
 
 [cr_603_4]
 rule = "603.4"
-text = "A triggered ability may read “When/Whenever/At [trigger event], if [condition], [effect].” When the trigger event occurs, the ability checks whether the stated condition is true. The ability triggers only if it is; otherwise it does nothing. If the ability triggers, it checks the stated condition again as it resolves. If the condition isn’t true at that time, the ability is removed from the stack and does nothing. Note that this mirrors the check for legal targets. This rule is referred to as the “intervening ‘if’ clause” rule. (The word “if” has only its normal English meaning anywhere else in the text of a card; this rule only applies to an “if” that immediately follows a trigger condition.)"
+text = "A triggered ability may read \"When/Whenever/At [trigger event], if [condition], [effect].\" When the trigger event occurs, the ability checks whether the stated condition is true. The ability triggers only if it is; otherwise it does nothing. If the ability triggers, it checks the stated condition again as it resolves. If the condition isn't true at that time, the ability is removed from the stack and does nothing. Note that this mirrors the check for legal targets. This rule is referred to as the \"intervening 'if' clause\" rule. (The word \"if\" has only its normal English meaning anywhere else in the text of a card; this rule only applies to an \"if\" that immediately follows a trigger condition.)"
 status = "implemented"
 impl_files = ["game/casting_costs.rs:822", "game/effects/mod.rs:882", "game/effects/mod.rs:908", "game/stack.rs:27", "game/stack.rs:115", "game/trigger_matchers.rs:1008", "game/triggers.rs:948", "parser/oracle_effect/mod.rs:1908", "parser/oracle_effect/mod.rs:2769", "parser/oracle_effect/mod.rs:2938", "parser/oracle_effect/mod.rs:3007", "parser/oracle_trigger.rs:308", "parser/oracle_trigger.rs:318", "parser/oracle_trigger.rs:343", "types/ability.rs:3011", "types/ability.rs:3021", "types/ability.rs:3061", "types/ability.rs:3110"]
 test_files = []
@@ -150,15 +150,15 @@ notes = ""
 
 [cr_603_5]
 rule = "603.5"
-text = "Some triggered abilities’ effects are optional (they contain “may,” as in “At the beginning of your upkeep, you may draw a card”). These abilities go on the stack when they trigger, regardless of whether their controller intends to exercise the ability’s option or not. The choice is made when the ability resolves. Likewise, triggered abilities that have an effect “unless” something is true or a player chooses to do something will go on the stack normally; the “unless” part of the ability is dealt with when the ability resolves."
-status = "missing"
-impl_files = []
+text = "Some triggered abilities' effects are optional (they contain \"may,\" as in \"At the beginning of your upkeep, you may draw a card\"). These abilities go on the stack when they trigger, regardless of whether their controller intends to exercise the ability's option or not. The choice is made when the ability resolves. Likewise, triggered abilities that have an effect \"unless\" something is true or a player chooses to do something will go on the stack normally; the \"unless\" part of the ability is dealt with when the ability resolves."
+status = "implemented"
+impl_files = ["game/effects/mod.rs:362", "game/triggers.rs:569", "types/ability.rs:34"]
 test_files = []
-notes = ""
+notes = "Optional effects (MayChoose) are pushed to stack unconditionally; choice is made at resolution via WaitingFor::OptionalEffect."
 
 [cr_603_6]
 rule = "603.6"
-text = "Trigger events that involve objects changing zones are called “zone-change triggers.” Many abilities with zone-change triggers attempt to do something to that object after it changes zones. During resolution, these abilities look for the object in the zone that it moved to. If the object is unable to be found in the zone it went to, the part of the ability attempting to do something to the object will fail to do anything. The ability could be unable to find the object because the object never entered the specified zone, because it left the zone before the ability resolved, or because it is in a zone that is hidden from a player, such as a library or an opponent’s hand. (This rule applies even if the object leaves the zone and returns again before the ability resolves.) The most common zone-change triggers are enters-the-battlefield triggers and leaves-the-battlefield triggers."
+text = "Trigger events that involve objects changing zones are called \"zone-change triggers.\" Many abilities with zone-change triggers attempt to do something to that object after it changes zones. During resolution, these abilities look for the object in the zone that it moved to. If the object is unable to be found in the zone it went to, the part of the ability attempting to do something to the object will fail to do anything. The ability could be unable to find the object because the object never entered the specified zone, because it left the zone before the ability resolved, or because it is in a zone that is hidden from a player, such as a library or an opponent's hand. (This rule applies even if the object leaves the zone and returns again before the ability resolves.) The most common zone-change triggers are enters-the-battlefield triggers and leaves-the-battlefield triggers."
 status = "implemented"
 impl_files = ["game/trigger_matchers.rs:473", "types/triggers.rs:18", "types/triggers.rs:21"]
 test_files = []
@@ -166,7 +166,7 @@ notes = ""
 
 [cr_603_6a]
 rule = "603.6a"
-text = "Enters-the-battlefield abilities trigger when a permanent enters the battlefield. These are written, “When [this object] enters, . . . “ or “Whenever a [type] enters, . . .” Each time an event puts one or more permanents onto the battlefield, all permanents on the battlefield (including the newcomers) are checked for any enters-the-battlefield triggers that match the event."
+text = "Enters-the-battlefield abilities trigger when a permanent enters the battlefield. These are written, \"When [this object] enters, . . . \" or \"Whenever a [type] enters, . . .\" Each time an event puts one or more permanents onto the battlefield, all permanents on the battlefield (including the newcomers) are checked for any enters-the-battlefield triggers that match the event."
 status = "implemented"
 impl_files = ["game/trigger_matchers.rs:610", "types/triggers.rs:19", "types/triggers.rs:294"]
 test_files = []
@@ -174,15 +174,15 @@ notes = ""
 
 [cr_603_6b]
 rule = "603.6b"
-text = "Continuous effects that modify characteristics of a permanent do so the moment the permanent is on the battlefield (and not before then). The permanent is never on the battlefield with its unmodified characteristics. Continuous effects don’t apply before the permanent is on the battlefield, however (see rule 603.6d)."
-status = "missing"
-impl_files = []
+text = "Continuous effects that modify characteristics of a permanent do so the moment the permanent is on the battlefield (and not before then). The permanent is never on the battlefield with its unmodified characteristics. Continuous effects don't apply before the permanent is on the battlefield, however (see rule 603.6d)."
+status = "implemented"
+impl_files = ["game/layers.rs:211", "game/zones.rs:46"]
 test_files = []
-notes = ""
+notes = "evaluate_layers() runs after each zone change; ETB triggers fire after layers are applied."
 
 [cr_603_6c]
 rule = "603.6c"
-text = "Leaves-the-battlefield abilities trigger when a permanent moves from the battlefield to another zone, or when a phased-in permanent leaves the game because its owner leaves the game. These are written as, but aren’t limited to, “When [this object] leaves the battlefield, . . .” or “Whenever [something] is put into a graveyard from the battlefield, . . . .” (See also rule 603.10.) An ability that attempts to do something to the card that left the battlefield checks for it only in the first zone that it went to. An ability that triggers when a card is put into a certain zone “from anywhere” is never treated as a leaves-the-battlefield ability, even if an object is put into that zone from the battlefield."
+text = "Leaves-the-battlefield abilities trigger when a permanent moves from the battlefield to another zone, or when a phased-in permanent leaves the game because its owner leaves the game. These are written as, but aren't limited to, \"When [this object] leaves the battlefield, . . .\" or \"Whenever [something] is put into a graveyard from the battlefield, . . . .\" (See also rule 603.10.) An ability that attempts to do something to the card that left the battlefield checks for it only in the first zone that it went to. An ability that triggers when a card is put into a certain zone \"from anywhere\" is never treated as a leaves-the-battlefield ability, even if an object is put into that zone from the battlefield."
 status = "implemented"
 impl_files = ["types/triggers.rs:25"]
 test_files = []
@@ -190,7 +190,7 @@ notes = ""
 
 [cr_603_6d]
 rule = "603.6d"
-text = "Some permanents have text that reads “[This permanent] enters with . . . ,” “As [this permanent] enters . . . ,” “[This permanent] enters as . . . ,” or “[This permanent] enters tapped.” Such text is a static ability—not a triggered ability—whose effect occurs as part of the event that puts the permanent onto the battlefield."
+text = "Some permanents have text that reads \"[This permanent] enters with . . . ,\" \"As [this permanent] enters . . . ,\" \"[This permanent] enters as . . . ,\" or \"[This permanent] enters tapped.\" Such text is a static ability—not a triggered ability—whose effect occurs as part of the event that puts the permanent onto the battlefield."
 status = "implemented"
 impl_files = ["game/trigger_matchers.rs:518"]
 test_files = []
@@ -198,15 +198,15 @@ notes = ""
 
 [cr_603_6e]
 rule = "603.6e"
-text = "Some Auras have triggered abilities that trigger on the enchanted permanent leaving the battlefield. These triggered abilities can find the new object that permanent card became in the zone it moved to; they can also find the new object the Aura card became in its owner’s graveyard after state-based actions have been checked. See rule 400.7."
+text = "Some Auras have triggered abilities that trigger on the enchanted permanent leaving the battlefield. These triggered abilities can find the new object that permanent card became in the zone it moved to; they can also find the new object the Aura card became in its owner's graveyard after state-based actions have been checked. See rule 400.7."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Aura LTB trigger cross-referencing the new object not explicitly implemented."
 
 [cr_603_7]
 rule = "603.7"
-text = "An effect may create a delayed triggered ability that can do something at a later time. A delayed triggered ability will contain “when,” “whenever,” or “at,” although that word won’t usually begin the ability."
+text = "An effect may create a delayed triggered ability that can do something at a later time. A delayed triggered ability will contain \"when,\" \"whenever,\" or \"at,\" although that word won't usually begin the ability."
 status = "implemented"
 impl_files = ["game/effects/delayed_trigger.rs:7", "game/effects/delayed_trigger.rs:33", "game/effects/mod.rs:263", "game/effects/mod.rs:554", "game/effects/mod.rs:633", "game/effects/token.rs:477", "game/engine.rs:2939", "game/filter.rs:124", "game/trigger_matchers.rs:449", "game/triggers.rs:648", "game/triggers.rs:713", "parser/oracle_effect/mod.rs:1799", "parser/oracle_effect/mod.rs:1810", "parser/oracle_effect/mod.rs:2089", "parser/oracle_effect/mod.rs:2113", "parser/oracle_target.rs:100", "types/ability.rs:656", "types/ability.rs:661", "types/ability.rs:1009", "types/ability.rs:2007", "types/game_state.rs:147", "types/game_state.rs:918", "types/game_state.rs:922", "types/identifiers.rs:13"]
 test_files = []
@@ -214,7 +214,7 @@ notes = ""
 
 [cr_603_7a]
 rule = "603.7a"
-text = "Delayed triggered abilities are created during the resolution of spells or abilities, as the result of a replacement effect being applied, or as a result of a static ability that allows a player to take an action. A delayed triggered ability won’t trigger until it has actually been created, even if its trigger event occurred just beforehand. Other events that happen earlier may make the trigger event impossible."
+text = "Delayed triggered abilities are created during the resolution of spells or abilities, as the result of a replacement effect being applied, or as a result of a static ability that allows a player to take an action. A delayed triggered ability won't trigger until it has actually been created, even if its trigger event occurred just beforehand. Other events that happen earlier may make the trigger event impossible."
 status = "implemented"
 impl_files = ["parser/oracle_effect/mod.rs:1977", "parser/oracle_effect/mod.rs:3332", "parser/oracle_effect/mod.rs:3364", "parser/oracle_effect/sequence.rs:156"]
 test_files = []
@@ -222,15 +222,15 @@ notes = ""
 
 [cr_603_7b]
 rule = "603.7b"
-text = "A delayed triggered ability will trigger only once—the next time its trigger event occurs—unless it has a stated duration, such as “this turn.” If its trigger event occurs more than once simultaneously and the ability doesn’t have a stated duration, the controller of the delayed triggered ability chooses which event causes the ability to trigger."
-status = "missing"
-impl_files = []
+text = "A delayed triggered ability will trigger only once—the next time its trigger event occurs—unless it has a stated duration, such as \"this turn.\" If its trigger event occurs more than once simultaneously and the ability doesn't have a stated duration, the controller of the delayed triggered ability chooses which event causes the ability to trigger."
+status = "implemented"
+impl_files = ["types/ability.rs:1009", "game/triggers.rs:648", "game/triggers.rs:713"]
 test_files = []
-notes = ""
+notes = "DelayedTrigger.one_shot controls single-fire behavior. Duration-based triggers via Duration type."
 
 [cr_603_7c]
 rule = "603.7c"
-text = "A delayed triggered ability that refers to a particular object still affects it even if the object changes characteristics. However, if that object is no longer in the zone it’s expected to be in at the time the delayed triggered ability resolves, the ability won’t affect it. (Note that if that object left that zone and then returned, it’s a new object and thus won’t be affected. See rule 400.7.)"
+text = "A delayed triggered ability that refers to a particular object still affects it even if the object changes characteristics. However, if that object is no longer in the zone it's expected to be in at the time the delayed triggered ability resolves, the ability won't affect it. (Note that if that object left that zone and then returned, it's a new object and thus won't be affected. See rule 400.7.)"
 status = "implemented"
 impl_files = ["game/effects/delayed_trigger.rs:54", "game/effects/mod.rs:283", "game/effects/mod.rs:562", "game/filter.rs:135", "game/quantity.rs:286", "game/quantity.rs:292", "game/quantity.rs:306", "game/quantity.rs:319", "game/stack.rs:47", "game/stack.rs:215", "game/stack.rs:230", "game/targeting.rs:148", "game/targeting.rs:238", "game/targeting.rs:247", "game/targeting.rs:1140", "game/trigger_matchers.rs:458", "game/triggers.rs:46", "game/triggers.rs:650", "game/triggers.rs:738", "game/triggers.rs:749", "game/triggers.rs:759", "game/triggers.rs:782", "game/turns.rs:256", "parser/oracle_effect/imperative.rs:453", "parser/oracle_effect/mod.rs:79", "parser/oracle_effect/mod.rs:118", "parser/oracle_effect/mod.rs:183", "parser/oracle_effect/mod.rs:338", "parser/oracle_effect/mod.rs:343", "parser/oracle_effect/mod.rs:3843", "parser/oracle_quantity.rs:327", "parser/oracle_quantity.rs:347", "types/ability.rs:670", "types/ability.rs:674", "types/ability.rs:677", "types/ability.rs:685", "types/ability.rs:1016", "types/ability.rs:1018", "types/ability.rs:1020", "types/ability.rs:1022", "types/ability.rs:1096", "types/ability.rs:1099", "types/ability.rs:1102", "types/ability.rs:1105", "types/game_state.rs:160", "types/game_state.rs:842"]
 test_files = []
@@ -247,10 +247,10 @@ notes = ""
 [cr_603_7e]
 rule = "603.7e"
 text = "If an activated or triggered ability creates a delayed triggered ability, the source of that delayed triggered ability is the same as the source of that other ability. The controller of that delayed triggered ability is the player who controlled that other ability as it resolved."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/game_state.rs:155", "game/effects/delayed_trigger.rs:33"]
 test_files = []
-notes = ""
+notes = "DelayedTrigger struct stores source_id and controller from the resolving ability."
 
 [cr_603_7f]
 rule = "603.7f"
@@ -258,7 +258,7 @@ text = "If a static ability generates a replacement effect which causes a delaye
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Static-ability-generated replacement effects creating delayed triggers not explicitly tracked."
 
 [cr_603_7g]
 rule = "603.7g"
@@ -266,7 +266,7 @@ text = "If a static ability allows a player to take an action and creates a dela
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Static-permission-triggered delayed abilities not explicitly tracked."
 
 [cr_603_7h]
 rule = "603.7h"
@@ -274,15 +274,15 @@ text = "An activated or triggered ability may create a delayed triggered ability
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Counted-resolution delayed triggers not yet modeled."
 
 [cr_603_8]
 rule = "603.8"
-text = "Some triggered abilities trigger when a game state (such as a player controlling no permanents of a particular card type) is true, rather than triggering when an event occurs. These abilities trigger as soon as the game state matches the condition. They’ll go onto the stack at the next available opportunity. These are called state triggers. (Note that state triggers aren’t the same as state-based actions.) A state-triggered ability doesn’t trigger again until the ability has resolved, has been countered, or has otherwise left the stack. Then, if the object with the ability is still in the same zone and the game state still matches its trigger condition, the ability will trigger again."
+text = "Some triggered abilities trigger when a game state (such as a player controlling no permanents of a particular card type) is true, rather than triggering when an event occurs. These abilities trigger as soon as the game state matches the condition. They'll go onto the stack at the next available opportunity. These are called state triggers. (Note that state triggers aren't the same as state-based actions.) A state-triggered ability doesn't trigger again until the ability has resolved, has been countered, or has otherwise left the stack. Then, if the object with the ability is still in the same zone and the game state still matches its trigger condition, the ability will trigger again."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "State triggers (triggers on continuous game state rather than events) not yet implemented."
 
 [cr_603_9]
 rule = "603.9"
@@ -294,7 +294,7 @@ notes = ""
 
 [cr_603_10]
 rule = "603.10"
-text = "Normally, objects that exist immediately after an event are checked to see if the event matched any trigger conditions, and continuous effects that exist at that time are used to determine what the trigger conditions are and what the objects involved in the event look like. However, some triggered abilities are exceptions to this rule; the game “looks back in time” to determine if those abilities trigger, using the existence of those abilities and the appearance of objects immediately prior to the event. The list of exceptions is as follows:"
+text = "Normally, objects that exist immediately after an event are checked to see if the event matched any trigger conditions, and continuous effects that exist at that time are used to determine what the trigger conditions are and what the objects involved in the event look like. However, some triggered abilities are exceptions to this rule; the game \"looks back in time\" to determine if those abilities trigger, using the existence of those abilities and the appearance of objects immediately prior to the event. The list of exceptions is as follows:"
 status = "implemented"
 impl_files = ["game/triggers.rs:962", "parser/oracle_trigger.rs:366", "types/ability.rs:3122"]
 test_files = []
@@ -303,10 +303,10 @@ notes = ""
 [cr_603_10a]
 rule = "603.10a"
 text = "Some zone-change triggers look back in time. These are leaves-the-battlefield abilities, abilities that trigger when a card leaves a graveyard, and abilities that trigger when an object that all players can see is put into a hand or library."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/triggers.rs:962", "types/ability.rs:3122"]
 test_files = []
-notes = ""
+notes = "look_back_in_time flag on trigger definitions. LTB triggers check pre-move state."
 
 [cr_603_10b]
 rule = "603.10b"
@@ -314,7 +314,7 @@ text = "Abilities that trigger when a permanent phases out look back in time."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Phase-out triggers not yet implemented."
 
 [cr_603_10c]
 rule = "603.10c"
@@ -326,11 +326,11 @@ notes = ""
 
 [cr_603_10d]
 rule = "603.10d"
-text = "Abilities that trigger when a player loses control of an object or when a player’s opponent gains control of an object from that player look back in time."
+text = "Abilities that trigger when a player loses control of an object or when a player's opponent gains control of an object from that player look back in time."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Control-change look-back triggers not explicitly modeled."
 
 [cr_603_10e]
 rule = "603.10e"
@@ -338,7 +338,7 @@ text = "Abilities that trigger when a spell is countered look back in time."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Counter-triggered look-back not explicitly modeled."
 
 [cr_603_10f]
 rule = "603.10f"
@@ -346,27 +346,27 @@ text = "Abilities that trigger when a player loses the game look back in time."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Player-loss look-back triggers not explicitly modeled."
 
 [cr_603_10g]
 rule = "603.10g"
 text = "Abilities that trigger when a player planeswalks away from a plane look back in time."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Planechase not implemented."
 
 [cr_603_11]
 rule = "603.11"
-text = "Some objects have a static ability that’s linked to one or more triggered abilities. (See rule 607, “Linked Abilities.”) These objects combine the abilities into one paragraph, with the static ability first, followed by each triggered ability that’s linked to it. A very few objects have triggered abilities which are written with the trigger condition in the middle of the ability, rather than at the beginning."
+text = "Some objects have a static ability that's linked to one or more triggered abilities. (See rule 607, \"Linked Abilities.\") These objects combine the abilities into one paragraph, with the static ability first, followed by each triggered ability that's linked to it. A very few objects have triggered abilities which are written with the trigger condition in the middle of the ability, rather than at the beginning."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Linked static+triggered ability paragraph structure not explicitly tracked."
 
 [cr_603_12]
 rule = "603.12"
-text = "A resolving spell or ability may allow or instruct a player to take an action and create a triggered ability that triggers “when [a player] [does or doesn’t]” take that action or “when [something happens] this way.” These reflexive triggered abilities follow the rules for delayed triggered abilities (see rule 603.7), except that they’re checked immediately after being created and trigger based on whether the trigger event or events occurred earlier during the resolution of the spell or ability that created them."
+text = "A resolving spell or ability may allow or instruct a player to take an action and create a triggered ability that triggers \"when [a player] [does or doesn't]\" take that action or \"when [something happens] this way.\" These reflexive triggered abilities follow the rules for delayed triggered abilities (see rule 603.7), except that they're checked immediately after being created and trigger based on whether the trigger event or events occurred earlier during the resolution of the spell or ability that created them."
 status = "implemented"
 impl_files = ["game/ability_utils.rs:405", "game/ability_utils.rs:417", "game/effects/mod.rs:728", "game/effects/mod.rs:880", "parser/oracle.rs:2887", "parser/oracle_effect/mod.rs:1911", "parser/oracle_effect/mod.rs:2717", "parser/oracle_effect/mod.rs:2719", "parser/oracle_effect/mod.rs:2723", "parser/oracle_trigger.rs:97", "types/ability.rs:3007"]
 test_files = []
@@ -374,8 +374,8 @@ notes = ""
 
 [cr_603_12a]
 rule = "603.12a"
-text = "Normally, if the trigger event or events occur multiple times during the resolution of the spell or ability that created it, the reflexive triggered ability will trigger once for each of those times. However, if a resolving spell or ability includes a choice to pay a cost “any number of times” and creates a triggered ability that triggers “when [a player] pays [that cost] one or more times,” paying that cost one or more times causes the reflexive triggered ability to trigger only once."
+text = "Normally, if the trigger event or events occur multiple times during the resolution of the spell or ability that created it, the reflexive triggered ability will trigger once for each of those times. However, if a resolving spell or ability includes a choice to pay a cost \"any number of times\" and creates a triggered ability that triggers \"when [a player] pays [that cost] one or more times,\" paying that cost one or more times causes the reflexive triggered ability to trigger only once."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple-fire vs single-fire reflexive trigger distinction not explicitly modeled."

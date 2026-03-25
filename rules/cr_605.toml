@@ -6,15 +6,15 @@ title = "Mana Abilities"
 
 [cr_605_1]
 rule = "605.1"
-text = "Some activated abilities and some triggered abilities are mana abilities, which are subject to special rules. Only abilities that meet either of the following two sets of criteria are mana abilities, regardless of what other effects they may generate or what timing restrictions (such as “Activate only as an instant”) they may have."
-status = "missing"
-impl_files = []
+text = "Some activated abilities and some triggered abilities are mana abilities, which are subject to special rules. Only abilities that meet either of the following two sets of criteria are mana abilities, regardless of what other effects they may generate or what timing restrictions (such as \"Activate only as an instant\") they may have."
+status = "implemented"
+impl_files = ["game/mana_abilities.rs:15", "game/mana_abilities.rs:16", "game/mana_abilities.rs:25"]
 test_files = []
-notes = ""
+notes = "is_mana_ability() enforces criteria. Only abilities meeting both criteria (no target + produces mana + not loyalty) are mana abilities."
 
 [cr_605_1a]
 rule = "605.1a"
-text = "An activated ability is a mana ability if it meets all of the following criteria: it doesn’t require a target (see rule 115.6), it could add mana to a player’s mana pool when it resolves, and it’s not a loyalty ability. (See rule 606, “Loyalty Abilities.”)"
+text = "An activated ability is a mana ability if it meets all of the following criteria: it doesn't require a target (see rule 115.6), it could add mana to a player's mana pool when it resolves, and it's not a loyalty ability. (See rule 606, \"Loyalty Abilities.\")"
 status = "implemented"
 impl_files = ["game/mana_abilities.rs:16", "game/mana_abilities.rs:25", "game/mana_abilities.rs:184", "types/events.rs:59"]
 test_files = []
@@ -22,7 +22,7 @@ notes = ""
 
 [cr_605_1b]
 rule = "605.1b"
-text = "A triggered ability is a mana ability if it meets all of the following criteria: it doesn’t require a target (see rule 115.6), it triggers from the activation or resolution of an activated mana ability (see rule 605.1a) or from mana being added to a player’s mana pool, and it could add mana to a player’s mana pool when it resolves."
+text = "A triggered ability is a mana ability if it meets all of the following criteria: it doesn't require a target (see rule 115.6), it triggers from the activation or resolution of an activated mana ability (see rule 605.1a) or from mana being added to a player's mana pool, and it could add mana to a player's mana pool when it resolves."
 status = "implemented"
 impl_files = ["ai_support/candidates.rs:1180", "game/casting_costs.rs:954", "game/mana_sources.rs:87", "types/events.rs:59"]
 test_files = []
@@ -30,11 +30,11 @@ notes = ""
 
 [cr_605_2]
 rule = "605.2"
-text = "A mana ability remains a mana ability even if the game state doesn’t allow it to produce mana."
-status = "missing"
-impl_files = []
+text = "A mana ability remains a mana ability even if the game state doesn't allow it to produce mana."
+status = "implemented"
+impl_files = ["game/mana_abilities.rs:15"]
 test_files = []
-notes = ""
+notes = "is_mana_ability() checks ability definition structure, not current game state production potential."
 
 [cr_605_3]
 rule = "605.3"
@@ -46,7 +46,7 @@ notes = ""
 
 [cr_605_3a]
 rule = "605.3a"
-text = "A player may activate an activated mana ability whenever they have priority, whenever they are casting a spell or activating an ability that requires a mana payment, or whenever a rule or effect asks for a mana payment, even if it’s in the middle of casting or resolving a spell or activating or resolving an ability."
+text = "A player may activate an activated mana ability whenever they have priority, whenever they are casting a spell or activating an ability that requires a mana payment, or whenever a rule or effect asks for a mana payment, even if it's in the middle of casting or resolving a spell or activating or resolving an ability."
 status = "implemented"
 impl_files = ["ai_support/candidates.rs:1159", "ai_support/mod.rs:23", "types/actions.rs:38", "types/actions.rs:166"]
 test_files = []
@@ -54,7 +54,7 @@ notes = ""
 
 [cr_605_3b]
 rule = "605.3b"
-text = "An activated mana ability doesn’t go on the stack, so it can’t be targeted, countered, or otherwise responded to. Rather, it resolves immediately after it is activated. (See rule 405.6c.)"
+text = "An activated mana ability doesn't go on the stack, so it can't be targeted, countered, or otherwise responded to. Rather, it resolves immediately after it is activated. (See rule 405.6c.)"
 status = "implemented"
 impl_files = ["game/engine.rs:287", "game/engine.rs:3448", "game/mana_abilities.rs:30", "game/mana_abilities.rs:89", "game/mana_abilities.rs:310", "game/mana_sources.rs:192"]
 test_files = []
@@ -62,48 +62,48 @@ notes = ""
 
 [cr_605_3c]
 rule = "605.3c"
-text = "Once a player begins to activate a mana ability, that ability can’t be activated again until it has resolved."
-status = "missing"
-impl_files = []
+text = "Once a player begins to activate a mana ability, that ability can't be activated again until it has resolved."
+status = "implemented"
+impl_files = ["game/mana_sources.rs:103", "game/mana_sources.rs:128"]
 test_files = []
-notes = ""
+notes = "Summoning-sickness and tap checks in mana_sources.rs prevent re-activation before resolution."
 
 [cr_605_4]
 rule = "605.4"
-text = "Triggered mana abilities follow all the rules for other triggered abilities (see rule 603, “Handling Triggered Abilities”), with the following exception:"
-status = "missing"
-impl_files = []
+text = "Triggered mana abilities follow all the rules for other triggered abilities (see rule 603, \"Handling Triggered Abilities\"), with the following exception:"
+status = "implemented"
+impl_files = ["game/casting_costs.rs:954", "game/mana_sources.rs:87"]
 test_files = []
-notes = ""
+notes = "Triggered mana abilities (e.g. Mana Flare) follow trigger rules except for the stack exception."
 
 [cr_605_4a]
 rule = "605.4a"
-text = "A triggered mana ability doesn’t go on the stack, so it can’t be targeted, countered, or otherwise responded to. Rather, it resolves immediately after the mana ability that triggered it, without waiting for priority."
-status = "missing"
-impl_files = []
+text = "A triggered mana ability doesn't go on the stack, so it can't be targeted, countered, or otherwise responded to. Rather, it resolves immediately after the mana ability that triggered it, without waiting for priority."
+status = "implemented"
+impl_files = ["game/casting_costs.rs:954", "game/mana_sources.rs:87"]
 test_files = []
-notes = ""
+notes = "Triggered mana abilities resolve immediately inline with the triggering mana ability resolution."
 
 [cr_605_5]
 rule = "605.5"
-text = "Abilities that don’t meet the criteria specified in rules 605.1a–b and spells aren’t mana abilities."
-status = "missing"
-impl_files = []
+text = "Abilities that don't meet the criteria specified in rules 605.1a–b and spells aren't mana abilities."
+status = "implemented"
+impl_files = ["game/mana_abilities.rs:15", "game/mana_abilities.rs:184"]
 test_files = []
-notes = ""
+notes = "is_mana_ability() returns false for targeted abilities and loyalty abilities."
 
 [cr_605_5a]
 rule = "605.5a"
-text = "An ability with a target is not a mana ability, even if it could put mana into a player’s mana pool when it resolves. The same is true for a triggered ability that could produce mana but triggers from an event other than activating a mana ability, or a triggered ability that triggers from activating a mana ability but couldn’t produce mana. These follow the normal rules for activated or triggered abilities, as appropriate."
-status = "missing"
-impl_files = []
+text = "An ability with a target is not a mana ability, even if it could put mana into a player's mana pool when it resolves. The same is true for a triggered ability that could produce mana but triggers from an event other than activating a mana ability, or a triggered ability that triggers from activating a mana ability but couldn't produce mana. These follow the normal rules for activated or triggered abilities, as appropriate."
+status = "implemented"
+impl_files = ["game/mana_abilities.rs:16", "game/mana_abilities.rs:25"]
 test_files = []
-notes = ""
+notes = "is_mana_ability() checks both no-target and produces-mana criteria. Targeted mana-producing abilities go on the stack normally."
 
 [cr_605_5b]
 rule = "605.5b"
-text = "A spell can never be a mana ability, even if it could put mana into a player’s mana pool when it resolves. It’s cast and resolves just like any other spell. Some older cards were printed with the card type “mana source”; these cards have received errata in the Oracle card reference and are now instants."
-status = "missing"
+text = "A spell can never be a mana ability, even if it could put mana into a player's mana pool when it resolves. It's cast and resolves just like any other spell. Some older cards were printed with the card type \"mana source\"; these cards have received errata in the Oracle card reference and are now instants."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Spells are never treated as mana abilities by definition. Mana source card type errata handled by MTGJSON data."

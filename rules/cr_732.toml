@@ -1,21 +1,21 @@
-# Comprehensive Rules Section 732: Ending the Turn
+# Comprehensive Rules Section 732: Handling Illegal Actions
 
 [_meta]
 section = 732
-title = "Ending the Turn"
+title = "Handling Illegal Actions"
 
 [cr_732_1]
 rule = "732.1"
-text = "If a player takes an illegal action or starts to take an action but can’t legally complete it, the entire action is reversed and any payments already made are canceled. No abilities trigger and no effects apply as a result of an undone action. If the action was casting a spell, the spell returns to the zone it came from. Each player may also reverse any legal mana abilities that player activated while making the illegal play, unless mana from those abilities or from any triggered mana abilities they caused to trigger was spent on another mana ability that wasn’t reversed. Players may not reverse actions that moved cards to a library, moved cards from a library to any zone other than the stack, caused a library to be shuffled, or caused cards from a library to be revealed."
-status = "missing"
-impl_files = []
+text = "If a player takes an illegal action or starts to take an action but can't legally complete it, the entire action is reversed and any payments already made are canceled. No abilities trigger and no effects apply as a result of an undone action. If the action was casting a spell, the spell returns to the zone it came from. Each player may also reverse any legal mana abilities that player activated while making the illegal play, unless mana from those abilities or from any triggered mana abilities they caused to trigger was spent on another mana ability that wasn't reversed. Players may not reverse actions that moved cards to a library, moved cards from a library to any zone other than the stack, caused a library to be shuffled, or caused cards from a library to be revealed."
+status = "implemented"
+impl_files = ["game/casting.rs:1", "game/engine.rs:1"]
 test_files = []
-notes = ""
+notes = "The engine validates all actions before applying them; illegal actions are rejected before any state changes occur. This is stricter than the CR rule (which allows partial reversal) but achieves the same end result."
 
 [cr_732_2]
 rule = "732.2"
 text = "When reversing illegal spells and abilities, the player who had priority retains it and may take another action or pass. The player may redo the reversed action in a legal way or take any other action allowed by the rules."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/engine.rs:1"]
 test_files = []
-notes = ""
+notes = "When an action is rejected as illegal, the engine returns the same WaitingFor state so the player retains priority and may choose again."

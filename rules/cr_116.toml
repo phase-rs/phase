@@ -6,35 +6,35 @@ title = "Special Actions"
 
 [cr_116_1]
 rule = "116.1"
-text = "Special actions are actions a player may take when they have priority that don’t use the stack. These are not to be confused with turn-based actions and state-based actions, which the game generates automatically. (See rule 703, “Turn-Based Actions,” and rule 704, “State-Based Actions.”)"
+text = "Special actions are actions a player may take when they have priority that don't use the stack. These are not to be confused with turn-based actions and state-based actions, which the game generates automatically. (See rule 703, \"Turn-Based Actions,\" and rule 704, \"State-Based Actions.\")"
 status = "implemented"
 impl_files = ["game/restrictions.rs:35"]
 test_files = []
-notes = ""
+notes = "Special actions (PlayLand, TurnFaceUp, companion activation) are handled directly without stack interaction."
 
 [cr_116_2]
 rule = "116.2"
 text = "There are twelve special actions:"
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["game/engine.rs:231"]
 test_files = []
-notes = ""
+notes = "Some special actions are implemented (PlayLand, companion, morph face-up). Others are missing."
 
 [cr_116_2a]
 rule = "116.2a"
-text = "Playing a land is a special action. To play a land, a player puts that land onto the battlefield from the zone it was in (usually that player’s hand). By default, a player can take this action only once during each of their turns. A player can take this action any time they have priority and the stack is empty during a main phase of their turn. See rule 305, “Lands.”"
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "Playing a land is a special action. To play a land, a player puts that land onto the battlefield from the zone it was in (usually that player's hand). By default, a player can take this action only once during each of their turns. A player can take this action any time they have priority and the stack is empty during a main phase of their turn. See rule 305, \"Lands.\""
+status = "implemented"
+impl_files = ["game/engine.rs:231", "game/engine.rs:3212"]
+test_files = ["game/engine.rs:3837", "game/engine.rs:3883", "game/engine.rs:3907"]
+notes = "PlayLand special action is implemented. One-land-per-turn limit and main-phase-with-empty-stack restrictions are enforced."
 
 [cr_116_2b]
 rule = "116.2b"
-text = "Turning a face-down creature face up is a special action. A player can take this action any time they have priority. See rule 708, “Face-Down Spells and Permanents.”"
-status = "missing"
-impl_files = []
+text = "Turning a face-down creature face up is a special action. A player can take this action any time they have priority. See rule 708, \"Face-Down Spells and Permanents.\""
+status = "implemented"
+impl_files = ["game/morph.rs:1"]
 test_files = []
-notes = ""
+notes = "TurnFaceUp special action is implemented for morph/manifest creatures."
 
 [cr_116_2c]
 rule = "116.2c"
@@ -42,7 +42,7 @@ text = "Some effects allow a player to take an action at a later time, usually t
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Explicitly ending continuous effects as a special action is not implemented."
 
 [cr_116_2d]
 rule = "116.2d"
@@ -50,76 +50,76 @@ text = "Some effects from static abilities allow a player to take an action to i
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Not commonly needed. No cards with this pattern are currently implemented."
 
 [cr_116_2e]
 rule = "116.2e"
-text = "One card (Circling Vultures) has the ability “You may discard Circling Vultures any time you could cast an instant.” Doing so is a special action. A player can take such an action any time they have priority."
-status = "missing"
+text = "One card (Circling Vultures) has the ability \"You may discard Circling Vultures any time you could cast an instant.\" Doing so is a special action. A player can take such an action any time they have priority."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Circling Vultures is a single-card special case not implemented."
 
 [cr_116_2f]
 rule = "116.2f"
-text = "A player who has a card with suspend in their hand may exile that card. This is a special action. A player can take this action any time they have priority, but only if they could begin to cast that card by putting it onto the stack. See rule 702.62, “Suspend.”"
+text = "A player who has a card with suspend in their hand may exile that card. This is a special action. A player can take this action any time they have priority, but only if they could begin to cast that card by putting it onto the stack. See rule 702.62, \"Suspend.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Suspend special action not implemented."
 
 [cr_116_2g]
 rule = "116.2g"
-text = "A player who has chosen a companion may pay {3} to put that card from outside the game into their hand. This is a special action. A player can take this action any time they have priority and the stack is empty during a main phase of their turn, but only if they haven’t done so yet this game. (See rule 702.139, “Companion.”)"
+text = "A player who has chosen a companion may pay {3} to put that card from outside the game into their hand. This is a special action. A player can take this action any time they have priority and the stack is empty during a main phase of their turn, but only if they haven't done so yet this game. (See rule 702.139, \"Companion.\")"
 status = "implemented"
 impl_files = ["game/engine.rs:2568", "types/actions.rs:128"]
 test_files = []
-notes = ""
+notes = "Companion activation (pay {3} to put companion into hand) is implemented as a special action."
 
 [cr_116_2h]
 rule = "116.2h"
-text = "A player who has a card with foretell in their hand may pay {2} and exile that card face down. This is a special action. A player may take this action any time they have priority during their turn. See rule 702.143, “Foretell.”"
+text = "A player who has a card with foretell in their hand may pay {2} and exile that card face down. This is a special action. A player may take this action any time they have priority during their turn. See rule 702.143, \"Foretell.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Foretell special action not implemented."
 
 [cr_116_2i]
 rule = "116.2i"
-text = "In a Planechase game, rolling the planar die is a special action. A player can take this action any time they have priority and the stack is empty during a main phase of their turn. Taking this action costs a player an amount of mana equal to the number of times they have previously taken this action on that turn. Note that this number won’t be equal to the number of times the player has rolled the planar die that turn if an effect has caused the player to roll the planar die that turn. See rule 901, “Planechase.”"
-status = "missing"
+text = "In a Planechase game, rolling the planar die is a special action. A player can take this action any time they have priority and the stack is empty during a main phase of their turn. Taking this action costs a player an amount of mana equal to the number of times they have previously taken this action on that turn. Note that this number won't be equal to the number of times the player has rolled the planar die that turn if an effect has caused the player to roll the planar die that turn. See rule 901, \"Planechase.\""
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Planechase variant not implemented."
 
 [cr_116_2j]
 rule = "116.2j"
 text = "In a Conspiracy Draft game, turning a face-down conspiracy card in the command zone face up is a special action. A player can take this action any time they have priority. See rule 905.4a."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Conspiracy Draft variant not implemented."
 
 [cr_116_2k]
 rule = "116.2k"
-text = "A player who has a card with plot in their hand may exile that card. This is a special action. A player can take this action any time they have priority during their own turn while the stack is empty. See rule 702.170, “Plot.”"
+text = "A player who has a card with plot in their hand may exile that card. This is a special action. A player can take this action any time they have priority during their own turn while the stack is empty. See rule 702.170, \"Plot.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Plot special action not implemented."
 
 [cr_116_2m]
 rule = "116.2m"
-text = "A player who controls a permanent that has one or more locked halves (see rule 709.5) may pay the mana cost of a locked half of that permanent to give that permanent the appropriate unlocked designation. This cost is referred to as an “unlock cost.” A player can take this action any time they have priority and the stack is empty during a main phase of their turn."
-status = "missing"
+text = "A player who controls a permanent that has one or more locked halves (see rule 709.5) may pay the mana cost of a locked half of that permanent to give that permanent the appropriate unlocked designation. This cost is referred to as an \"unlock cost.\" A player can take this action any time they have priority and the stack is empty during a main phase of their turn."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Locked/unlocked permanent mechanic not implemented."
 
 [cr_116_3]
 rule = "116.3"
 text = "If a player takes a special action, that player receives priority afterward."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/engine.rs:231"]
 test_files = []
-notes = ""
+notes = "After a special action (PlayLand, companion activation, morph), the active player retains priority."

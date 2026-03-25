@@ -6,39 +6,39 @@ title = "Text Box"
 
 [cr_207_1]
 rule = "207.1"
-text = "The text box is printed on the lower half of the card. It usually contains rules text defining the card’s abilities."
-status = "missing"
-impl_files = []
+text = "The text box is printed on the lower half of the card. It usually contains rules text defining the card's abilities."
+status = "implemented"
+impl_files = ["types/card.rs:26", "types/card.rs:30"]
 test_files = []
-notes = ""
+notes = "CardFace.oracle_text stores the raw Oracle text. CardFace.non_ability_text stores flavor-text-like text that is not parsed as an ability."
 
 [cr_207_2]
 rule = "207.2"
 text = "The text box may also contain italicized text that has no game function."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["parser/oracle_util.rs:1"]
 test_files = []
-notes = ""
+notes = "parser/oracle_util.rs contains strip_reminder_text() which removes reminder text in parentheses before parsing."
 
 [cr_207_2a]
 rule = "207.2a"
-text = "Reminder text is italicized text within parentheses that summarizes a rule that applies to that card. It usually appears on the same line as the ability it’s relevant to, but it may appear on its own line if it applies to an aspect of the card other than an ability."
-status = "missing"
-impl_files = []
+text = "Reminder text is italicized text within parentheses that summarizes a rule that applies to that card. It usually appears on the same line as the ability it's relevant to, but it may appear on its own line if it applies to an aspect of the card other than an ability."
+status = "implemented"
+impl_files = ["parser/oracle_util.rs:1"]
 test_files = []
-notes = ""
+notes = "Reminder text in parentheses is stripped before Oracle parsing so it has no game-functional effect."
 
 [cr_207_2b]
 rule = "207.2b"
 text = "Flavor text is italicized text that, like the illustration, adds artistic appeal to the game. It usually appears below the rules text."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/card.rs:26"]
 test_files = []
-notes = ""
+notes = "Flavor text is not stored in the engine model (MTGJSON oracle_text does not include flavor text). It has no game-functional effect."
 
 [cr_207_2c]
 rule = "207.2c"
-text = "An ability word appears in italics at the beginning of some abilities. Ability words are similar to keywords in that they tie together cards that have similar functionality, but they have no special rules meaning and no individual entries in the Comprehensive Rules. The ability words are adamant, addendum, alliance, battalion, bloodrush, celebration, channel, chroma, cohort, constellation, converge, council’s dilemma, coven, delirium, descend 4, descend 8, disappear, domain, eerie, eminence, enrage, fateful hour, fathomless descent, ferocious, flurry, formidable, grandeur, hellbent, heroic, imprint, inspired, join forces, kinship, landfall, lieutenant, magecraft, metalcraft, morbid, pack tactics, paradox, parley, radiance, raid, rally, renew, revolt, secret council, spell mastery, strive, survival, sweep, tempting offer, threshold, undergrowth, valiant, vivid, void, and will of the council."
+text = "An ability word appears in italics at the beginning of some abilities. Ability words are similar to keywords in that they tie together cards that have similar functionality, but they have no special rules meaning and no individual entries in the Comprehensive Rules. The ability words are adamant, addendum, alliance, battalion, bloodrush, celebration, channel, chroma, cohort, constellation, converge, council's dilemma, coven, delirium, descend 4, descend 8, disappear, domain, eerie, eminence, enrage, fateful hour, fathomless descent, ferocious, flurry, formidable, grandeur, hellbent, heroic, imprint, inspired, join forces, kinship, landfall, lieutenant, magecraft, metalcraft, morbid, pack tactics, paradox, parley, radiance, raid, rally, renew, revolt, secret council, spell mastery, strive, survival, sweep, tempting offer, threshold, undergrowth, valiant, vivid, void, and will of the council."
 status = "implemented"
 impl_files = ["game/casting.rs:1414", "game/casting_costs.rs:382", "game/casting_costs.rs:1280", "game/casting_costs.rs:1339", "game/effects/discard.rs:164", "game/game_object.rs:228", "parser/oracle.rs:58", "parser/oracle.rs:132", "parser/oracle.rs:314", "parser/oracle.rs:327", "parser/oracle.rs:3381", "parser/oracle.rs:3397", "parser/oracle.rs:4061", "parser/oracle_cost.rs:133", "types/card.rs:54"]
 test_files = []
@@ -47,10 +47,10 @@ notes = ""
 [cr_207_2d]
 rule = "207.2d"
 text = "Similar to ability words, flavor words appear in italics at the beginning of some abilities. Flavor words provide a flavorful description of abilities, but they have no special rules meaning and are not listed in the Comprehensive Rules. While an ability word ties together several abilities with similar functionality, each flavor word is tailored to the specific ability it appears with."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["parser/oracle.rs:58"]
 test_files = []
-notes = ""
+notes = "oracle.rs strips ability/flavor words at the beginning of ability lines before parsing functional content."
 
 [cr_207_3]
 rule = "207.3"
@@ -58,20 +58,20 @@ text = "Some cards have decorative icons in the background of their text boxes. 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Decorative icons are not part of the data model or engine logic. No implementation needed."
 
 [cr_207_4]
 rule = "207.4"
-text = "The chaos symbol appears in the text box of each plane card to the left of a triggered ability that triggers whenever chaos ensues. The symbol itself has no special rules meaning. See rule 901, “Planechase.”"
+text = "The chaos symbol appears in the text box of each plane card to the left of a triggered ability that triggers whenever chaos ensues. The symbol itself has no special rules meaning. See rule 901, \"Planechase.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Planechase plane cards are not implemented in the engine."
 
 [cr_207_5]
 rule = "207.5"
-text = "One card (Cryptic Spires) has a set of symbols below the text box that represent each color and an ability that instructs a player to circle two of those colors as they create their deck. To circle a color, the player circles (or otherwise clearly indicates) that color’s symbol. The mana symbol of each circled color is considered part of that card’s printed rules text (see rule 613.1) and affects that card’s color identity (see rule 903.4)."
+text = "One card (Cryptic Spires) has a set of symbols below the text box that represent each color and an ability that instructs a player to circle two of those colors as they create their deck. To circle a color, the player circles (or otherwise clearly indicates) that color's symbol. The mana symbol of each circled color is considered part of that card's printed rules text (see rule 613.1) and affects that card's color identity (see rule 903.4)."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Cryptic Spires deck-construction color selection is not implemented."

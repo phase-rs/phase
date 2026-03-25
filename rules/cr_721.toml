@@ -1,8 +1,8 @@
-# Comprehensive Rules Section 721: Handling Illegal Actions
+# Comprehensive Rules Section 721: Station Cards
 
 [_meta]
 section = 721
-title = "Handling Illegal Actions"
+title = "Station Cards"
 
 [cr_721_1]
 rule = "721.1"
@@ -10,31 +10,31 @@ text = "Each station card has a striated text box and may have one or more power
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Station cards (Final Fantasy set) not implemented."
 
 [cr_721_2]
 rule = "721.2"
-text = "A station symbol represents a static ability. The station symbol includes a single number followed by a plus sign, indicated here as “{N+}.” Any abilities printed within the same text box striation as a station symbol are part of its static ability. The same is true of any power and toughness boxes printed within that striation, indicated here as [P/T]."
+text = "A station symbol represents a static ability. The station symbol includes a single number followed by a plus sign, indicated here as \"{N+}.\" Any abilities printed within the same text box striation as a station symbol are part of its static ability. The same is true of any power and toughness boxes printed within that striation, indicated here as [P/T]."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Station cards not implemented."
 
 [cr_721_2a]
 rule = "721.2a"
-text = "“{N+}[abilities]” means “As long as this permanent has N or more charge counters on it, it has [abilities].”"
+text = "\"{N+}[abilities]\" means \"As long as this permanent has N or more charge counters on it, it has [abilities].\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Station cards not implemented."
 
 [cr_721_2b]
 rule = "721.2b"
-text = "“{N+}[abilities][P/T]” means “As long as this permanent has N or more charge counters on it, it has [abilities] and is a creature with base power and toughness [P/T] in addition to its other types.”"
+text = "\"{N+}[abilities][P/T]\" means \"As long as this permanent has N or more charge counters on it, it has [abilities] and is a creature with base power and toughness [P/T] in addition to its other types.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Station cards not implemented."
 
 [cr_721_2c]
 rule = "721.2c"
@@ -42,20 +42,20 @@ text = "While in any zone other than the battlefield, station cards do not have 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Station cards not implemented."
 
 [cr_721_3]
 rule = "721.3"
 text = "The text box striations have no game significance other than clearly demarcating which abilities and which power/toughness box are associated with which station symbol. Station cards each contain only one text box."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Layout guidance; no engine logic needed."
 
 [cr_721_4]
 rule = "721.4"
-text = "Any ability a station card has that isn’t preceded by a station symbol is treated normally. In particular, each station card has its station ability (see rule 702.184) at all times. That ability may be activated regardless of how many charge counters are on it."
+text = "Any ability a station card has that isn't preceded by a station symbol is treated normally. In particular, each station card has its station ability (see rule 702.184) at all times. That ability may be activated regardless of how many charge counters are on it."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Station cards not implemented."

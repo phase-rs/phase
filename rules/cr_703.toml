@@ -6,160 +6,160 @@ title = "Turn-Based Actions"
 
 [cr_703_1]
 rule = "703.1"
-text = "Turn-based actions are game actions that happen automatically when certain steps or phases begin, or when each step and phase ends. Turn-based actions don’t use the stack."
-status = "missing"
-impl_files = []
+text = "Turn-based actions are game actions that happen automatically when certain steps or phases begin, or when each step and phase ends. Turn-based actions don't use the stack."
+status = "implemented"
+impl_files = ["game/turns.rs:1"]
 test_files = []
-notes = ""
+notes = "The overall turn-based action framework is implemented in game/turns.rs."
 
 [cr_703_1a]
 rule = "703.1a"
-text = "Abilities that watch for a specified step or phase to begin are triggered abilities, not turn-based actions. (See rule 603, “Handling Triggered Abilities.”)"
-status = "missing"
+text = "Abilities that watch for a specified step or phase to begin are triggered abilities, not turn-based actions. (See rule 603, \"Handling Triggered Abilities.\")"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Rule clarification; triggered abilities handled in game/triggers.rs."
 
 [cr_703_2]
 rule = "703.2"
 text = "Turn-based actions are not controlled by any player."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/turns.rs:1"]
 test_files = []
-notes = ""
+notes = "Turn-based actions are executed directly by the engine, not attributed to a player controller."
 
 [cr_703_3]
 rule = "703.3"
-text = "Whenever a step or phase begins, if it’s a step or phase that has any turn-based action associated with it, those turn-based actions are automatically dealt with first. This happens before state-based actions are checked, before triggered abilities are put on the stack, and before players receive priority."
-status = "missing"
-impl_files = []
+text = "Whenever a step or phase begins, if it's a step or phase that has any turn-based action associated with it, those turn-based actions are automatically dealt with first. This happens before state-based actions are checked, before triggered abilities are put on the stack, and before players receive priority."
+status = "implemented"
+impl_files = ["game/turns.rs:1", "game/engine.rs:1"]
 test_files = []
-notes = ""
+notes = "The engine's turn advancement in turns.rs applies turn-based actions before priority is granted."
 
 [cr_703_4]
 rule = "703.4"
 text = "The turn-based actions are as follows:"
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Section header; sub-rules cover individual turn-based actions."
 
 [cr_703_4a]
 rule = "703.4a"
 text = "Immediately after the untap step begins, all phased-in permanents with phasing that the active player controls phase out, and all phased-out permanents that the active player controlled when they phased out phase in. This all happens simultaneously. See rule 502.1."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/turns.rs:240", "game/effects/phase_out.rs:5"]
 test_files = []
-notes = ""
+notes = "Phasing turn-based action implemented in turns.rs untap step handler."
 
 [cr_703_4b]
 rule = "703.4b"
-text = "Immediately after the phasing action has been completed during the untap step, if the game has either the day or night designation, it checks to see whether that designation should change. If it’s neither day nor night, this check doesn’t happen. See rule 502.2."
-status = "missing"
-impl_files = []
+text = "Immediately after the phasing action has been completed during the untap step, if the game has either the day or night designation, it checks to see whether that designation should change. If it's neither day nor night, this check doesn't happen. See rule 502.2."
+status = "implemented"
+impl_files = ["game/turns.rs:262", "game/day_night.rs:9"]
 test_files = []
-notes = ""
+notes = "Day/night check during untap step is in turns.rs calling day_night::check_day_night_transition."
 
 [cr_703_4c]
 rule = "703.4c"
-text = "Immediately after the game checks to see if its day or night designation should change during the untap step or, if the game doesn’t have a day or night designation, immediately after the phasing action has been completed during the untap step, the active player determines which permanents they control will untap. Then they untap them all simultaneously. See rule 502.3."
-status = "missing"
-impl_files = []
+text = "Immediately after the game checks to see if its day or night designation should change during the untap step or, if the game doesn't have a day or night designation, immediately after the phasing action has been completed during the untap step, the active player determines which permanents they control will untap. Then they untap them all simultaneously. See rule 502.3."
+status = "implemented"
+impl_files = ["game/turns.rs:270"]
 test_files = []
-notes = ""
+notes = "Untap turn-based action implemented in turns.rs."
 
 [cr_703_4d]
 rule = "703.4d"
 text = "Immediately after the draw step begins, the active player draws a card. See rule 504.1."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/turns.rs:303"]
 test_files = []
-notes = ""
+notes = "Draw step auto-draw implemented in turns.rs."
 
 [cr_703_4e]
 rule = "703.4e"
-text = "In an Archenemy game (see rule 904), immediately after the archenemy’s precombat main phase begins, that player sets the top card of their scheme deck in motion. See rule 701.32."
+text = "In an Archenemy game (see rule 904), immediately after the archenemy's precombat main phase begins, that player sets the top card of their scheme deck in motion. See rule 701.32."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Archenemy variant not implemented."
 
 [cr_703_4f]
 rule = "703.4f"
-text = "Immediately after a player’s precombat main phase begins, that player puts a lore counter on each Saga enchantment they control with one or more chapter abilities. In an Archenemy game, this happens after the archenemy’s scheme action. See rule 714, “Saga Cards.”"
-status = "missing"
-impl_files = []
+text = "Immediately after a player's precombat main phase begins, that player puts a lore counter on each Saga enchantment they control with one or more chapter abilities. In an Archenemy game, this happens after the archenemy's scheme action. See rule 714, \"Saga Cards.\""
+status = "implemented"
+impl_files = ["game/turns.rs:364", "game/turns.rs:439"]
 test_files = []
-notes = ""
+notes = "Saga lore counter placement is a turn-based action implemented in turns.rs."
 
 [cr_703_4g]
 rule = "703.4g"
-text = "Immediately after the action of placing lore counters has been completed, if the active player controls any Attractions, that player rolls to visit their Attractions. See rule 701.52, “Roll to Visit Your Attractions.”"
+text = "Immediately after the action of placing lore counters has been completed, if the active player controls any Attractions, that player rolls to visit their Attractions. See rule 701.52, \"Roll to Visit Your Attractions.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Attraction cards not implemented."
 
 [cr_703_4h]
 rule = "703.4h"
-text = "Immediately after the beginning of combat step begins, if the game being played is a multiplayer game in which the active player’s opponents don’t all automatically become defending players, the active player chooses one of their opponents. That player becomes the defending player. See rule 507.1."
-status = "missing"
-impl_files = []
+text = "Immediately after the beginning of combat step begins, if the game being played is a multiplayer game in which the active player's opponents don't all automatically become defending players, the active player chooses one of their opponents. That player becomes the defending player. See rule 507.1."
+status = "implemented"
+impl_files = ["game/turns.rs:394"]
 test_files = []
-notes = ""
+notes = "Defending player selection for multiplayer is in turns.rs beginning-of-combat handling."
 
 [cr_703_4i]
 rule = "703.4i"
 text = "Immediately after the declare attackers step begins, the active player declares attackers. See rule 508.1."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/turns.rs:408", "game/combat.rs:1"]
 test_files = []
-notes = ""
+notes = "Declare attackers turn-based action implemented in turns.rs and combat.rs."
 
 [cr_703_4j]
 rule = "703.4j"
 text = "Immediately after the declare blockers step begins, the defending player declares blockers. See rule 509.1."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/turns.rs:430", "game/combat.rs:1"]
 test_files = []
-notes = ""
+notes = "Declare blockers turn-based action implemented in turns.rs and combat.rs."
 
 [cr_703_4k]
 rule = "703.4k"
 text = "Immediately after the combat damage step begins, each player in APNAP order announces how each attacking or blocking creature they control assigns its combat damage. See rule 510.1."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/turns.rs:453", "game/combat_damage.rs:1"]
 test_files = []
-notes = ""
+notes = "Combat damage assignment implemented in turns.rs and combat_damage.rs."
 
 [cr_703_4m]
 rule = "703.4m"
 text = "Immediately after combat damage has been assigned during the combat damage step, all combat damage is dealt simultaneously. See rule 510.2."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat_damage.rs:1"]
 test_files = []
-notes = ""
+notes = "Simultaneous combat damage dealing implemented in combat_damage.rs."
 
 [cr_703_4n]
 rule = "703.4n"
-text = "Immediately after the cleanup step begins, if the active player’s hand contains more cards than their maximum hand size (normally seven), they discard enough cards to reduce their hand size to that number. See rule 514.1."
-status = "missing"
-impl_files = []
+text = "Immediately after the cleanup step begins, if the active player's hand contains more cards than their maximum hand size (normally seven), they discard enough cards to reduce their hand size to that number. See rule 514.1."
+status = "implemented"
+impl_files = ["game/turns.rs:529"]
 test_files = []
-notes = ""
+notes = "Cleanup discard-to-hand-size implemented in turns.rs."
 
 [cr_703_4p]
 rule = "703.4p"
-text = "Immediately after the active player has discarded cards (if necessary) during the cleanup step, all damage is removed from permanents and all “until end of turn” and “this turn” effects end. These actions happen simultaneously. See rule 514.2."
-status = "missing"
-impl_files = []
+text = "Immediately after the active player has discarded cards (if necessary) during the cleanup step, all damage is removed from permanents and all \"until end of turn\" and \"this turn\" effects end. These actions happen simultaneously. See rule 514.2."
+status = "implemented"
+impl_files = ["game/turns.rs:547", "game/effects/cleanup.rs:1"]
 test_files = []
-notes = ""
+notes = "End-of-turn cleanup (damage removal, effect expiry) implemented in turns.rs and effects/cleanup.rs."
 
 [cr_703_4q]
 rule = "703.4q"
-text = "As each step or phase ends, any unspent mana left in a player’s mana pool empties. See rule 500.5."
-status = "missing"
-impl_files = []
+text = "As each step or phase ends, any unspent mana left in a player's mana pool empties. See rule 500.5."
+status = "implemented"
+impl_files = ["game/turns.rs:1"]
 test_files = []
-notes = ""
+notes = "Mana pool emptying at end of each step/phase implemented as part of turns.rs step transitions."

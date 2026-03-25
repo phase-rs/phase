@@ -7,22 +7,22 @@ title = "Class Cards"
 [cr_716_1]
 rule = "716.1"
 text = "Each Class card has a striated text box containing two class level bars. Its illustration is vertically oriented on the left side of the card, and its type line is along the bottom of the card."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["parser/oracle_class.rs:1", "game/effects/set_class_level.rs:1"]
 test_files = []
-notes = ""
+notes = "Class card layout modeled via oracle_class.rs parser and set_class_level.rs effect."
 
 [cr_716_2]
 rule = "716.2"
 text = "A class level bar is a keyword ability that represents both an activated ability and a static ability. A class level bar includes the activation cost of its activated ability and a level number. Any abilities printed within the same text box section as the class level bar are part of its static ability."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["parser/oracle_class.rs:1"]
 test_files = []
-notes = ""
+notes = "Class level bars parsed as both activated abilities (to advance level) and static ability conditions."
 
 [cr_716_2a]
 rule = "716.2a"
-text = "“[Cost]: Level N — [Abilities]” means “[Cost]: This Class’s level becomes N. Activate only if this Class is level N-1 and only as a sorcery” and “As long as this Class is level N or greater, it has [abilities].”"
+text = "\"[Cost]: Level N — [Abilities]\" means \"[Cost]: This Class's level becomes N. Activate only if this Class is level N-1 and only as a sorcery\" and \"As long as this Class is level N or greater, it has [abilities].\""
 status = "implemented"
 impl_files = ["types/events.rs:203"]
 test_files = []
@@ -34,27 +34,27 @@ text = "A level is a designation that any permanent can have. A Class retains it
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Level-as-non-copiable-characteristic and retention after subtype loss not explicitly implemented."
 
 [cr_716_2c]
 rule = "716.2c"
-text = "The phrase “to gain a Class level” means “to activate an ability indicated by a class level bar”"
-status = "missing"
+text = "The phrase \"to gain a Class level\" means \"to activate an ability indicated by a class level bar\""
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Rule clarification; implemented via the level activation ability."
 
 [cr_716_2d]
 rule = "716.2d"
-text = "If a rule or effect refers to a permanent’s level and that permanent doesn’t have a level, it is treated as though its level is 1."
+text = "If a rule or effect refers to a permanent's level and that permanent doesn't have a level, it is treated as though its level is 1."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Default level-1 treatment for non-leveled permanents not explicitly implemented."
 
 [cr_716_3]
 rule = "716.3"
-text = "Any ability printed on a Class card that isn’t preceded by a class level bar is treated normally. In particular, the Class has the ability printed in its top text box section at all times. That ability may affect the game if it’s a static ability, it may trigger if it’s a triggered ability, and it can be activated if it’s an activated ability."
+text = "Any ability printed on a Class card that isn't preceded by a class level bar is treated normally. In particular, the Class has the ability printed in its top text box section at all times. That ability may affect the game if it's a static ability, it may trigger if it's a triggered ability, and it can be activated if it's an activated ability."
 status = "implemented"
 impl_files = ["game/effects/set_class_level.rs:60", "game/effects/set_class_level.rs:221", "game/game_object.rs:275", "game/layers.rs:162", "game/printed_cards.rs:66"]
 test_files = []
@@ -62,7 +62,7 @@ notes = ""
 
 [cr_716_4]
 rule = "716.4"
-text = "Some older creature cards, called leveler cards, have level up abilities that add level counters to them. These are not the same as class level abilities. Level counters do not interact with Class cards, and class levels do not interact with leveler cards. See rule 702.87, “Level Up,” and rule 711, “Leveler Cards.”"
+text = "Some older creature cards, called leveler cards, have level up abilities that add level counters to them. These are not the same as class level abilities. Level counters do not interact with Class cards, and class levels do not interact with leveler cards. See rule 702.87, \"Level Up,\" and rule 711, \"Leveler Cards.\""
 status = "implemented"
 impl_files = ["game/effects/set_class_level.rs:114", "game/restrictions.rs:347", "parser/oracle_class.rs:106", "types/ability.rs:2696"]
 test_files = []

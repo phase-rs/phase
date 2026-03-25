@@ -6,11 +6,11 @@ title = "Restarting the Game"
 
 [cr_726_1]
 rule = "726.1"
-text = "One card (Karn Liberated) restarts the game. A game that is restarted immediately ends. No players in that game win, lose, or draw that game. All players in that game when it ended then start a new game following the procedures set forth in rule 103, “Starting the Game,” with the following exception:"
+text = "One card (Karn Liberated) restarts the game. A game that is restarted immediately ends. No players in that game win, lose, or draw that game. All players in that game when it ended then start a new game following the procedures set forth in rule 103, \"Starting the Game,\" with the following exception:"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Restart-the-game effect not implemented."
 
 [cr_726_1a]
 rule = "726.1a"
@@ -18,47 +18,47 @@ text = "The starting player in the new game is the player who controlled the spe
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Restart-the-game effect not implemented."
 
 [cr_726_2]
 rule = "726.2"
-text = "All Magic cards involved in the game that was restarted when it ended, including phased-out permanents and nontraditional Magic cards, are involved in the new game, even if those cards were not originally involved in the restarted game. Ownership of cards in the new game doesn’t change, regardless of their location when the new game begins."
+text = "All Magic cards involved in the game that was restarted when it ended, including phased-out permanents and nontraditional Magic cards, are involved in the new game, even if those cards were not originally involved in the restarted game. Ownership of cards in the new game doesn't change, regardless of their location when the new game begins."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Restart-the-game effect not implemented."
 
 [cr_726_3]
 rule = "726.3"
-text = "Because each player draws seven cards when the new game begins, any player with fewer than seven cards in their library will lose the game when state-based actions are checked during the upkeep step of the first turn, regardless of any mulligans that player takes. (See rule 704, “State-Based Actions.”)"
+text = "Because each player draws seven cards when the new game begins, any player with fewer than seven cards in their library will lose the game when state-based actions are checked during the upkeep step of the first turn, regardless of any mulligans that player takes. (See rule 704, \"State-Based Actions.\")"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Restart-the-game effect not implemented."
 
 [cr_726_4]
 rule = "726.4"
-text = "The effect that restarts the game finishes resolving just before the first turn’s untap step. If the spell or ability that generated that effect has additional instructions, those instructions are followed at this time. No player has priority, and any triggered abilities that trigger as a result will go on the stack the next time a player receives priority, usually during the first turn’s upkeep step."
+text = "The effect that restarts the game finishes resolving just before the first turn's untap step. If the spell or ability that generated that effect has additional instructions, those instructions are followed at this time. No player has priority, and any triggered abilities that trigger as a result will go on the stack the next time a player receives priority, usually during the first turn's upkeep step."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Restart-the-game effect not implemented."
 
 [cr_726_5]
 rule = "726.5"
-text = "Effects may exempt certain cards from the procedure that restarts the game. These cards are not in their owner’s deck as the new game begins."
+text = "Effects may exempt certain cards from the procedure that restarts the game. These cards are not in their owner's deck as the new game begins."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Restart-the-game effect not implemented."
 
 [cr_726_5a]
 rule = "726.5a"
-text = "In a Commander game, a commander that has been exempted from the procedure that restarts the game won’t begin the new game in the command zone. However, it remains that deck’s commander for the new game. See rule 903, “Commander.”"
+text = "In a Commander game, a commander that has been exempted from the procedure that restarts the game won't begin the new game in the command zone. However, it remains that deck's commander for the new game. See rule 903, \"Commander.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Restart-the-game effect not implemented."
 
 [cr_726_6]
 rule = "726.6"
@@ -66,7 +66,7 @@ text = "If a Magic subgame (see rule 728) is restarted, the main game is unaffec
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Subgames not implemented."
 
 [cr_726_7]
 rule = "726.7"
@@ -74,4 +74,4 @@ text = "If a multiplayer game using the limited range of influence option (see r
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Limited range of influence option not implemented."

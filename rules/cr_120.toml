@@ -10,15 +10,15 @@ text = "Objects can deal damage to battles, creatures, planeswalkers, and player
 status = "implemented"
 impl_files = ["game/effects/counters.rs:84", "game/effects/deal_damage.rs:225", "game/triggers.rs:955", "parser/oracle_effect/imperative.rs:864", "parser/oracle_trigger.rs:728", "parser/oracle_trigger.rs:737", "parser/oracle_trigger.rs:1045", "parser/oracle_trigger.rs:1879", "parser/oracle_trigger.rs:1891", "parser/oracle_trigger.rs:3959", "parser/oracle_trigger.rs:4548", "parser/oracle_trigger.rs:4564", "types/ability.rs:3118"]
 test_files = []
-notes = ""
+notes = "Damage can be dealt to creatures, players, planeswalkers, and battles. The source_id is carried through DamageContext and emitted on DamageDealt events."
 
 [cr_120_1a]
 rule = "120.1a"
-text = "Damage can’t be dealt to an object that’s not a battle, a creature, or a planeswalker."
+text = "Damage can't be dealt to an object that's not a battle, a creature, or a planeswalker."
 status = "implemented"
 impl_files = ["parser/oracle_trigger.rs:4576", "types/ability.rs:737"]
 test_files = []
-notes = ""
+notes = "Target filters for damage effects only permit creatures, planeswalkers, battles, and players. Other permanent types are excluded."
 
 [cr_120_2]
 rule = "120.2"
@@ -26,15 +26,15 @@ text = "Any object can deal damage."
 status = "implemented"
 impl_files = ["types/triggers.rs:29", "types/triggers.rs:35"]
 test_files = []
-notes = ""
+notes = "DamageContext carries an arbitrary source_id — any object on the stack or battlefield can be the source."
 
 [cr_120_2a]
 rule = "120.2a"
 text = "Damage may be dealt as a result of combat. Each attacking and blocking creature deals combat damage equal to its power during the combat damage step."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["game/combat_damage.rs:13", "game/combat_damage.rs:433", "game/combat_damage.rs:67"]
+test_files = ["game/combat_damage.rs:689"]
+notes = "combat_damage_amount() returns power (or toughness for Doran-style effects). apply_combat_damage() routes each assignment through the shared damage pipeline."
 
 [cr_120_2b]
 rule = "120.2b"
@@ -42,31 +42,31 @@ text = "Damage may be dealt as an effect of a spell or ability. The spell or abi
 status = "implemented"
 impl_files = ["game/effects/fight.rs:84"]
 test_files = []
-notes = ""
+notes = "Spell/ability damage is handled via Effect::DealDamage with an explicit source. fight.rs uses this for fight effects."
 
 [cr_120_3]
 rule = "120.3"
-text = "Damage may have one or more of the following results, depending on whether the recipient of the damage is a player or permanent, the characteristics of the damage’s source, and the characteristics of the damage’s recipient (if it’s a permanent)."
+text = "Damage may have one or more of the following results, depending on whether the recipient of the damage is a player or permanent, the characteristics of the damage's source, and the characteristics of the damage's recipient (if it's a permanent)."
 status = "implemented"
 impl_files = ["game/effects/deal_damage.rs:21", "game/effects/deal_damage.rs:69", "game/effects/deal_damage.rs:246", "game/effects/deal_damage.rs:304", "game/effects/deal_damage.rs:338", "game/effects/deal_damage.rs:365", "game/effects/deal_damage.rs:409", "game/effects/life.rs:153", "game/trigger_matchers.rs:536", "parser/oracle_effect/mod.rs:3833", "types/ability.rs:731", "types/ability.rs:1538", "types/ability.rs:1558", "types/ability.rs:1689", "types/ability.rs:3228"]
 test_files = []
-notes = ""
+notes = "apply_damage_to_target() dispatches damage results based on target type and source keywords: life loss (120.3a), loyalty removal (120.3c), damage marking (120.3e), lifelink gain (120.3f), battle defense (120.3h)."
 
 [cr_120_3a]
 rule = "120.3a"
 text = "Damage dealt to a player by a source without infect causes that player to lose that much life."
 status = "implemented"
-impl_files = ["game/effects/deal_damage.rs:175"]
+impl_files = ["game/effects/deal_damage.rs:176", "game/effects/life.rs:157"]
 test_files = []
-notes = ""
+notes = "Non-infect player damage routes through apply_damage_life_loss() in life.rs, reducing the player's life total."
 
 [cr_120_3b]
 rule = "120.3b"
-text = "Damage dealt to a player by a source with infect causes that source’s controller to give the player that many poison counters."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "Damage dealt to a player by a source with infect causes that source's controller to give the player that many poison counters."
+status = "implemented"
+impl_files = ["game/effects/deal_damage.rs:167", "game/effects/deal_damage.rs:172"]
+test_files = ["game/combat_damage.rs:923"]
+notes = "CR 702.90: Infect player damage adds poison counters (player.poison_counters += actual_amount) instead of life loss."
 
 [cr_120_3c]
 rule = "120.3c"
@@ -74,15 +74,15 @@ text = "Damage dealt to a planeswalker causes that many loyalty counters to be r
 status = "implemented"
 impl_files = ["game/effects/deal_damage.rs:73", "game/effects/deal_damage.rs:149", "game/effects/deal_damage.rs:734"]
 test_files = []
-notes = ""
+notes = "Planeswalker damage removes loyalty counters. The SBA for zero-loyalty cleanup (CR 704.5i) fires after damage is processed."
 
 [cr_120_3d]
 rule = "120.3d"
-text = "Damage dealt to a creature by a source with wither and/or infect causes that source’s controller to put that many -1/-1 counters on that creature."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "Damage dealt to a creature by a source with wither and/or infect causes that source's controller to put that many -1/-1 counters on that creature."
+status = "implemented"
+impl_files = ["game/effects/deal_damage.rs:130", "game/effects/deal_damage.rs:131"]
+test_files = ["game/combat_damage.rs:875"]
+notes = "CR 702.80 + CR 702.90: has_wither and has_infect flags route creature damage to -1/-1 counters instead of damage_marked. Tests cover wither spell and combat damage."
 
 [cr_120_3e]
 rule = "120.3e"
@@ -90,23 +90,23 @@ text = "Damage dealt to a creature by a source with neither wither nor infect ca
 status = "implemented"
 impl_files = ["game/effects/deal_damage.rs:73", "game/effects/deal_damage.rs:157", "game/effects/deal_damage.rs:305"]
 test_files = []
-notes = ""
+notes = "Non-wither/non-infect creature damage increments damage_marked on the creature object. SBA check_lethal_damage() evaluates this against toughness."
 
 [cr_120_3f]
 rule = "120.3f"
-text = "Damage dealt by a source with lifelink causes that source’s controller to gain that much life, in addition to the damage’s other results."
+text = "Damage dealt by a source with lifelink causes that source's controller to gain that much life, in addition to the damage's other results."
 status = "implemented"
 impl_files = ["game/effects/deal_damage.rs:198"]
 test_files = []
-notes = ""
+notes = "Lifelink gain is applied after the primary damage result. DamageDealt event is emitted before the LifeChanged lifelink event."
 
 [cr_120_3g]
 rule = "120.3g"
-text = "Combat damage dealt to a player by a creature with toxic causes that creature’s controller to give the player a number of poison counters equal to that creature’s total toxic value, in addition to the damage’s other results. See rule 702.164, “Toxic.”"
+text = "Combat damage dealt to a player by a creature with toxic causes that creature's controller to give the player a number of poison counters equal to that creature's total toxic value, in addition to the damage's other results. See rule 702.164, \"Toxic.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Toxic keyword (CR 702.164) is not implemented. Toxic poison counters on combat damage to players are not applied."
 
 [cr_120_3h]
 rule = "120.3h"
@@ -114,92 +114,92 @@ text = "Damage dealt to a battle causes that many defense counters to be removed
 status = "implemented"
 impl_files = ["game/effects/deal_damage.rs:336"]
 test_files = []
-notes = ""
+notes = "Battle damage removes defense counters equal to the damage amount."
 
 [cr_120_4]
 rule = "120.4"
 text = "Damage is processed in a four-part sequence."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["game/effects/deal_damage.rs:69"]
 test_files = []
-notes = ""
+notes = "Steps 4b (replacement/prevention + trigger queuing), 4c (result processing), and 4d (event emission) are implemented. Step 4a (excess damage redirection, see rule 120.4a) is not separately handled."
 
 [cr_120_4a]
 rule = "120.4a"
-text = "First, if an effect that’s causing damage to be dealt states that excess damage that would be dealt to a permanent is dealt to another permanent or player instead, the damage event is modified accordingly. If the first permanent is a creature, the excess damage is the amount of damage in excess of what would be lethal damage, taking into account damage already marked on the creature and damage from other sources that would be dealt at the same time. (See rule 120.6.) Any amount of damage greater than 1 is excess damage if the source dealing that damage to a creature has deathtouch. (See rule 702.2.) If the first permanent is a planeswalker, the excess damage is the amount of damage in excess of that planeswalker’s loyalty, taking into account damage from other sources that would be dealt at the same time. If the first permanent is a battle, the excess damage is the amount of damage in excess of that battle’s defense, taking into account damage from other sources that would be dealt at the same time. If the first permanent has multiple card types from among the list of creature, planeswalker, and battle, the excess damage is the greatest of the calculated amounts for each of the card types it has."
+text = "First, if an effect that's causing damage to be dealt states that excess damage that would be dealt to a permanent is dealt to another permanent or player instead, the damage event is modified accordingly. If the first permanent is a creature, the excess damage is the amount of damage in excess of what would be lethal damage, taking into account damage already marked on the creature and damage from other sources that would be dealt at the same time. (See rule 120.6.) Any amount of damage greater than 1 is excess damage if the source dealing that damage to a creature has deathtouch. (See rule 702.2.) If the first permanent is a planeswalker, the excess damage is the amount of damage in excess of that planeswalker's loyalty, taking into account damage from other sources that would be dealt at the same time. If the first permanent is a battle, the excess damage is the amount of damage in excess of that battle's defense, taking into account damage from other sources that would be dealt at the same time. If the first permanent has multiple card types from among the list of creature, planeswalker, and battle, the excess damage is the greatest of the calculated amounts for each of the card types it has."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Excess damage redirection effects (e.g., cards that deal excess damage to the controller) are not implemented."
 
 [cr_120_4b]
 rule = "120.4b"
-text = "Second, damage is dealt, as modified by replacement and prevention effects that interact with damage. (See rule 614, “Replacement Effects,” and rule 615, “Prevention Effects.”) Abilities that trigger when damage is dealt trigger now and wait to be put on the stack."
+text = "Second, damage is dealt, as modified by replacement and prevention effects that interact with damage. (See rule 614, \"Replacement Effects,\" and rule 615, \"Prevention Effects.\") Abilities that trigger when damage is dealt trigger now and wait to be put on the stack."
 status = "implemented"
 impl_files = ["game/effects/deal_damage.rs:69", "game/effects/deal_damage.rs:72"]
 test_files = []
-notes = ""
+notes = "Replacement and prevention effects are applied before damage results. DamageDealt event is emitted here, triggering 'when damage is dealt' abilities."
 
 [cr_120_4c]
 rule = "120.4c"
-text = "Third, damage that’s been dealt is processed into its results, as modified by replacement effects that interact with those results (such as life loss or counters)."
-status = "missing"
-impl_files = []
+text = "Third, damage that's been dealt is processed into its results, as modified by replacement effects that interact with those results (such as life loss or counters)."
+status = "implemented"
+impl_files = ["game/effects/deal_damage.rs:130", "game/effects/deal_damage.rs:157", "game/effects/deal_damage.rs:176"]
 test_files = []
-notes = ""
+notes = "After the DamageDealt event, the engine processes results: -1/-1 counters (wither/infect), damage marking, life loss, or battle defense removal."
 
 [cr_120_4d]
 rule = "120.4d"
 text = "Finally, the damage event occurs."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/deal_damage.rs:225"]
 test_files = []
-notes = ""
+notes = "EffectResolved and DamageDealt events are emitted to close the damage sequence."
 
 [cr_120_5]
 rule = "120.5"
-text = "Damage dealt to a creature, planeswalker, or battle doesn’t destroy it. Likewise, the source of that damage doesn’t destroy it. Rather, state-based actions may destroy a creature or otherwise put a permanent into its owner’s graveyard, due to the results of the damage dealt to that permanent. See rule 704."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "Damage dealt to a creature, planeswalker, or battle doesn't destroy it. Likewise, the source of that damage doesn't destroy it. Rather, state-based actions may destroy a creature or otherwise put a permanent into its owner's graveyard, due to the results of the damage dealt to that permanent. See rule 704."
+status = "implemented"
+impl_files = ["game/effects/deal_damage.rs:157", "game/sba.rs:241"]
+test_files = ["game/sba.rs:695"]
+notes = "Damage only marks damage_marked on the creature (or removes counters/loyalty). Destruction is a separate SBA (check_lethal_damage) that fires at the next priority checkpoint."
 
 [cr_120_6]
 rule = "120.6"
-text = "Damage marked on a creature remains until the cleanup step, even if that permanent stops being a creature. If the total damage marked on a creature is greater than or equal to its toughness, that creature has been dealt lethal damage and is destroyed as a state-based action (see rule 704). All damage marked on a permanent is removed when it regenerates (see rule 701.19, “Regenerate”) and during the cleanup step (see rule 514.2)."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "Damage marked on a creature remains until the cleanup step, even if that permanent stops being a creature. If the total damage marked on a creature is greater than or equal to its toughness, that creature has been dealt lethal damage and is destroyed as a state-based action (see rule 704). All damage marked on a permanent is removed when it regenerates (see rule 701.19, \"Regenerate\") and during the cleanup step (see rule 514.2)."
+status = "implemented"
+impl_files = ["game/sba.rs:242", "game/turns.rs:296", "game/turns.rs:312"]
+test_files = ["game/sba.rs:695"]
+notes = "damage_marked persists on the object until cleanup. execute_cleanup() (turns.rs:296) resets damage_marked = 0 on all battlefield creatures. Lethal damage SBA (sba.rs:242) checks damage_marked >= toughness."
 
 [cr_120_7]
 rule = "120.7"
-text = "The source of damage is the object that dealt it. If an effect requires a player to choose a source of damage, they may choose a permanent; a spell on the stack (including a permanent spell); any object referred to by an object on the stack, by a prevention or replacement effect that’s waiting to apply, or by a delayed triggered ability that’s waiting to trigger (even if that object is no longer in the zone it used to be in); or a face-up object in the command zone. A source doesn’t need to be capable of dealing damage to be a legal choice. See rule 609.7, “Sources of Damage.”"
+text = "The source of damage is the object that dealt it. If an effect requires a player to choose a source of damage, they may choose a permanent; a spell on the stack (including a permanent spell); any object referred to by an object on the stack, by a prevention or replacement effect that's waiting to apply, or by a delayed triggered ability that's waiting to trigger (even if that object is no longer in the zone it used to be in); or a face-up object in the command zone. A source doesn't need to be capable of dealing damage to be a legal choice. See rule 609.7, \"Sources of Damage.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Player-chosen source of damage selection (for protection effects like Circle of Protection) is not implemented."
 
 [cr_120_8]
 rule = "120.8"
-text = "If a source would deal 0 damage, it does not deal damage at all. That means abilities that trigger on damage being dealt won’t trigger. It also means that replacement effects that would increase the damage dealt by that source, or would have that source deal that damage to a different object or player, have no event to replace, so they have no effect."
+text = "If a source would deal 0 damage, it does not deal damage at all. That means abilities that trigger on damage being dealt won't trigger. It also means that replacement effects that would increase the damage dealt by that source, or would have that source deal that damage to a different object or player, have no event to replace, so they have no effect."
 status = "implemented"
 impl_files = ["game/effects/deal_damage.rs:89", "parser/oracle_effect/mod.rs:3722"]
 test_files = []
-notes = ""
+notes = "apply_damage_to_target() returns immediately with DamageResult::Applied(0) when amount == 0, emitting no events and skipping all replacement/prevention logic."
 
 [cr_120_9]
 rule = "120.9"
-text = "If an ability triggers on damage being dealt by a specific source or sources, and the effect refers to the “damage dealt,” it refers only to the damage dealt by the specified sources and not to any damage dealt at the same time by other sources."
+text = "If an ability triggers on damage being dealt by a specific source or sources, and the effect refers to the \"damage dealt,\" it refers only to the damage dealt by the specified sources and not to any damage dealt at the same time by other sources."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Source-scoped damage references for trigger effects are not explicitly tracked. This is an edge case relevant to multi-source simultaneous damage scenarios."
 
 [cr_120_10]
 rule = "120.10"
-text = "Some triggered abilities check whether a permanent has been dealt excess damage. These abilities check after the permanent has been dealt damage by one or more sources. If those sources together dealt an amount of damage to a creature greater than lethal damage, excess damage equal to the difference was dealt to that creature. If those sources together dealt an amount of damage to a planeswalker greater than that planeswalker’s loyalty before the damage was dealt, excess damage equal to the difference was dealt to that planeswalker. If those sources together dealt an amount of damage to a battle greater than that battle’s defense before the damage was dealt, excess damage equal to the difference was dealt to that battle. If a permanent has multiple card types from among the list of creature, planeswalker, and battle, the excess damage dealt to that permanent is the greatest of the calculated amounts for each of the card types it has."
+text = "Some triggered abilities check whether a permanent has been dealt excess damage. These abilities check after the permanent has been dealt damage by one or more sources. If those sources together dealt an amount of damage to a creature greater than lethal damage, excess damage equal to the difference was dealt to that creature. If those sources together dealt an amount of damage to a planeswalker greater than that planeswalker's loyalty before the damage was dealt, excess damage equal to the difference was dealt to that planeswalker. If those sources together dealt an amount of damage to a battle greater than that battle's defense before the damage was dealt, excess damage equal to the difference was dealt to that battle. If a permanent has multiple card types from among the list of creature, planeswalker, and battle, the excess damage dealt to that permanent is the greatest of the calculated amounts for each of the card types it has."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Excess damage tracking for triggered abilities is not implemented. Cards that trigger on excess damage dealt are not supported."

@@ -10,15 +10,15 @@ text = "A counter is a marker placed on an object or player that modifies its ch
 status = "implemented"
 impl_files = ["game/effects/energy.rs:5", "game/effects/energy.rs:16", "game/effects/energy.rs:20", "game/layers.rs:127", "parser/oracle_effect/mod.rs:315", "types/ability.rs:1257", "types/ability.rs:2105", "types/events.rs:262", "types/player.rs:54"]
 test_files = []
-notes = ""
+notes = "CounterType enum represents all counter kinds. Counters are stored in HashMap<CounterType, u32> on the object or as a separate field (energy, poison) on the player. CounterType::Generic(String) handles named counters not covered by dedicated variants."
 
 [cr_122_1a]
 rule = "122.1a"
-text = "A +X/+Y counter on a creature or on a creature card in a zone other than the battlefield, where X and Y are numbers, adds X to that object’s power and Y to that object’s toughness. Similarly, -X/-Y counters subtract from power and toughness. See rule 613.4c."
-status = "missing"
-impl_files = []
+text = "A +X/+Y counter on a creature or on a creature card in a zone other than the battlefield, where X and Y are numbers, adds X to that object's power and Y to that object's toughness. Similarly, -X/-Y counters subtract from power and toughness. See rule 613.4c."
+status = "implemented"
+impl_files = ["game/layers.rs:307", "game/layers.rs:308"]
 test_files = []
-notes = ""
+notes = "CR 613.4c: Layer 7c applies +1/+1 and -1/-1 counter P/T modifications. Plus counter delta is computed as (Plus1Plus1 count) - (Minus1Minus1 count) and added to base power and toughness."
 
 [cr_122_1b]
 rule = "122.1b"
@@ -26,132 +26,132 @@ text = "A keyword counter on a permanent or on a card in a zone other than the b
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Keyword counters are not implemented. CounterType has no variant for keyword counters, and layer 6 keyword-granting does not check for keyword counters on objects."
 
 [cr_122_1c]
 rule = "122.1c"
-text = "One or more shield counters on a permanent create a single replacement effect and a single prevention effect that protect the permanent. These effects are “If this permanent would be destroyed as the result of an effect, instead remove a shield counter from it” and “If damage would be dealt to this permanent, prevent that damage and remove a shield counter from it.” See rule 614, “Replacement Effects,” and rule 615, “Prevention Effects.”"
+text = "One or more shield counters on a permanent create a single replacement effect and a single prevention effect that protect the permanent. These effects are \"If this permanent would be destroyed as the result of an effect, instead remove a shield counter from it\" and \"If damage would be dealt to this permanent, prevent that damage and remove a shield counter from it.\" See rule 614, \"Replacement Effects,\" and rule 615, \"Prevention Effects.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Shield counters (the token-level shield mechanic from CR 122.1c) are not implemented. The engine has a ShieldKind::Prevention for effect-based prevention shields (e.g., 'prevent the next N damage'), but CounterType has no Shield variant and there is no replacement/prevention effect tied to a shield counter."
 
 [cr_122_1d]
 rule = "122.1d"
-text = "One or more stun counters on a permanent create a single replacement effect that stops the permanent from untapping. That effect is “If a permanent with a stun counter on it would become untapped, instead remove a stun counter from it.”"
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "One or more stun counters on a permanent create a single replacement effect that stops the permanent from untapping. That effect is \"If a permanent with a stun counter on it would become untapped, instead remove a stun counter from it.\""
+status = "implemented"
+impl_files = ["game/game_object.rs:52", "game/turns.rs:176", "game/turns.rs:178", "game/turns.rs:181"]
+test_files = ["game/turns.rs:1045", "game/turns.rs:1092"]
+notes = "CounterType::Stun is a dedicated enum variant. The untap step checks for stun counters and removes one instead of untapping (annotated CR 122.1g, now correctly CR 122.1d). Tests cover single and multi-stun-counter scenarios."
 
 [cr_122_1e]
 rule = "122.1e"
-text = "The number of loyalty counters on a planeswalker on the battlefield indicates how much loyalty it has. A planeswalker with 0 loyalty is put into its owner’s graveyard as a state-based action. See rule 704."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "The number of loyalty counters on a planeswalker on the battlefield indicates how much loyalty it has. A planeswalker with 0 loyalty is put into its owner's graveyard as a state-based action. See rule 704."
+status = "implemented"
+impl_files = ["game/game_object.rs:65", "game/sba.rs:111", "game/sba.rs:447"]
+test_files = ["game/sba.rs:976"]
+notes = "CounterType::Loyalty tracks planeswalker loyalty. SBA check_zero_loyalty() (sba.rs:447) puts planeswalkers with 0 loyalty into the graveyard. Tests verify loyalty-0 and loyalty-positive behavior."
 
 [cr_122_1f]
 rule = "122.1f"
-text = "If a player has ten or more poison counters, that player loses the game as a state-based action. See rule 704. A player is “poisoned” if they have one or more poison counters. (See rule 810 for additional rules for Two-Headed Giant games.)"
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "If a player has ten or more poison counters, that player loses the game as a state-based action. See rule 704. A player is \"poisoned\" if they have one or more poison counters. (See rule 810 for additional rules for Two-Headed Giant games.)"
+status = "implemented"
+impl_files = ["game/sba.rs:72", "game/sba.rs:167"]
+test_files = ["game/sba.rs:823", "game/sba.rs:845"]
+notes = "poison_counters is tracked as a field on Player. SBA check_poison_counters() (sba.rs:167) eliminates players at 10 or more poison counters. Tests verify boundary at 9 (survives) and 10 (loses)."
 
 [cr_122_1g]
 rule = "122.1g"
-text = "The number of defense counters on a battle on the battlefield indicates how much defense it has. A battle with 0 defense is put into its owner’s graveyard if it isn’t the source of an ability that has triggered but not yet left the stack. This state-based action doesn’t use the stack. See rule 704."
+text = "The number of defense counters on a battle on the battlefield indicates how much defense it has. A battle with 0 defense is put into its owner's graveyard if it isn't the source of an ability that has triggered but not yet left the stack. This state-based action doesn't use the stack. See rule 704."
 status = "implemented"
 impl_files = ["game/game_object.rs:52", "game/turns.rs:176", "game/turns.rs:1046"]
 test_files = []
-notes = ""
+notes = "Defense counters on battles are tracked via CounterType::Generic('defense') or a dedicated counter. The battle-death SBA fires when defense reaches 0."
 
 [cr_122_1h]
 rule = "122.1h"
-text = "One or more finality counters on a permanent create a single replacement effect that stops the permanent from going to the graveyard. That effect is “If this permanent would be put into a graveyard from the battlefield, exile it instead.”"
+text = "One or more finality counters on a permanent create a single replacement effect that stops the permanent from going to the graveyard. That effect is \"If this permanent would be put into a graveyard from the battlefield, exile it instead.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Finality counters are not implemented. CounterType has no finality variant and no replacement effect checks for this counter type."
 
 [cr_122_1i]
 rule = "122.1i"
-text = "One or more rad counters on a player cause a triggered ability to trigger at the beginning of that player’s precombat main phase. See rule 727, “Rad Counters.”"
+text = "One or more rad counters on a player cause a triggered ability to trigger at the beginning of that player's precombat main phase. See rule 727, \"Rad Counters.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Rad counters are not implemented."
 
 [cr_122_2]
 rule = "122.2"
-text = "Counters on an object are not retained if that object moves from one zone to another. The counters are not “removed”; they simply cease to exist. See rule 400.7."
+text = "Counters on an object are not retained if that object moves from one zone to another. The counters are not \"removed\"; they simply cease to exist. See rule 400.7."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "CRITICAL GAP: zones.rs move_to_zone() does NOT clear the counters HashMap when an object changes zones. The same GameObject is reused across zone transitions, so counters persist incorrectly. New objects start with HashMap::new() (correct), but zone changes do not reset it."
 
 [cr_122_3]
 rule = "122.3"
 text = "If a permanent has both a +1/+1 counter and a -1/-1 counter on it, N +1/+1 and N -1/-1 counters are removed from it as a state-based action, where N is the smaller of the number of +1/+1 and -1/-1 counters on it. See rule 704."
 status = "implemented"
-impl_files = ["parser/oracle_effect/mod.rs:426", "types/ability.rs:648"]
-test_files = []
-notes = ""
+impl_files = ["game/sba.rs:118", "game/sba.rs:548"]
+test_files = ["game/sba.rs:1377", "game/sba.rs:1380", "game/sba.rs:1419"]
+notes = "CR 704.5q: check_counter_cancellation() removes matching pairs of +1/+1 and -1/-1 counters as a state-based action. Tests cover unequal and equal counter counts."
 
 [cr_122_4]
 rule = "122.4"
-text = "If a permanent with an ability that says it can’t have more than N counters of a certain kind on it has more than N counters of that kind on it, all but N of those counters are removed from it as a state-based action. See rule 704."
+text = "If a permanent with an ability that says it can't have more than N counters of a certain kind on it has more than N counters of that kind on it, all but N of those counters are removed from it as a state-based action. See rule 704."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Maximum-counter-count SBA is not implemented. Cards with 'can't have more than N charge counters' type restrictions are not enforced."
 
 [cr_122_5]
 rule = "122.5"
-text = "If an effect says to “move” a counter, it means to remove that counter from the object it’s currently on and put it onto a second object. If either of these actions isn’t possible, it’s not possible to move a counter, and no counter is removed from or put onto anything. This may occur if the first and second objects are the same object; if the first object doesn’t have the appropriate kind of counter on it; if the second object can’t have counters put onto it; or if either object is no longer in the correct zone."
+text = "If an effect says to \"move\" a counter, it means to remove that counter from the object it's currently on and put it onto a second object. If either of these actions isn't possible, it's not possible to move a counter, and no counter is removed from or put onto anything. This may occur if the first and second objects are the same object; if the first object doesn't have the appropriate kind of counter on it; if the second object can't have counters put onto it; or if either object is no longer in the correct zone."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Effect::MoveCounters exists in counters.rs (line 231) as a type reference, but the atomic all-or-nothing move semantics described in CR 122.5 are not explicitly enforced."
 
 [cr_122_6]
 rule = "122.6"
-text = "Some spells and abilities refer to counters being put on an object. This refers to putting counters on that object while it’s on the battlefield and also to an object that’s given counters as it enters the battlefield."
+text = "Some spells and abilities refer to counters being put on an object. This refers to putting counters on that object while it's on the battlefield and also to an object that's given counters as it enters the battlefield."
 status = "implemented"
 impl_files = ["types/triggers.rs:79"]
 test_files = []
-notes = ""
+notes = "CounterAdded triggers fire both for ETB-with-counters and for mid-game counter placement. The trigger system does not distinguish between these two cases."
 
 [cr_122_6a]
 rule = "122.6a"
-text = "If an object enters the battlefield with counters on it, the effect causing the object to be given counters may specify which player puts those counters on it. If the effect doesn’t specify a player, the object’s controller puts those counters on it."
+text = "If an object enters the battlefield with counters on it, the effect causing the object to be given counters may specify which player puts those counters on it. If the effect doesn't specify a player, the object's controller puts those counters on it."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Player-choice for who places ETB counters is not implemented. The ETB counter mechanism defaults to the controller placing them without an explicit player-choice WaitingFor state."
 
 [cr_122_7]
 rule = "122.7"
-text = "An ability that triggers “When/Whenever the Nth [kind] counter” is put on an object triggers when one or more counters of the appropriate kind are put on the object such that the object had fewer than N counters on it before the counters were put on it and N or more counters on it after."
+text = "An ability that triggers \"When/Whenever the Nth [kind] counter\" is put on an object triggers when one or more counters of the appropriate kind are put on the object such that the object had fewer than N counters on it before the counters were put on it and N or more counters on it after."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Nth-counter threshold triggers (e.g., 'whenever the third lore counter is put on this Saga') are not implemented as a general mechanism. Saga chapter advancement is handled separately via Lore counters, but the general threshold-trigger pattern is not."
 
 [cr_122_8]
 rule = "122.8"
-text = "If a triggered ability instructs a player to put one object’s counters on another object and that ability’s trigger condition or effect checks that the object with those counters left the battlefield, the player doesn’t move counters from one object to the other. Rather, the player puts the same number of each kind of counter the first object had onto the second object. If the ability specifies what kind(s) of counters to place, the player puts the same number of each of those kinds of counter the first object had onto the second object."
+text = "If a triggered ability instructs a player to put one object's counters on another object and that ability's trigger condition or effect checks that the object with those counters left the battlefield, the player doesn't move counters from one object to the other. Rather, the player puts the same number of each kind of counter the first object had onto the second object. If the ability specifies what kind(s) of counters to place, the player puts the same number of each of those kinds of counter the first object had onto the second object."
 status = "implemented"
 impl_files = ["game/effects/counters.rs:205"]
 test_files = []
-notes = ""
+notes = "CR 122.8: resolve_move() in counters.rs reads LKI counter snapshots from the departed source object and puts equivalent counters on the target. The source counters are not removed (they no longer exist after zone change)."
 
 [cr_122_9]
 rule = "122.9"
-text = "If an activated ability of an object instructs a player to put its counters on another object and sacrificing the object with those counters is a cost to activate that ability, the player doesn’t move counters from one object to the other. Rather, the player puts the same number of each kind of counter the first object had onto the second object. If the ability specified what kind(s) of counters to place, the player puts the same number of each of those kinds of counters the first object had onto the second object."
+text = "If an activated ability of an object instructs a player to put its counters on another object and sacrificing the object with those counters is a cost to activate that ability, the player doesn't move counters from one object to the other. Rather, the player puts the same number of each kind of counter the first object had onto the second object. If the ability specified what kind(s) of counters to place, the player puts the same number of each of those kinds of counters the first object had onto the second object."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "The sacrifice-as-cost + put-its-counters pattern (analogous to CR 122.8 but for activated abilities with sacrifice costs) is not explicitly handled as a distinct case."

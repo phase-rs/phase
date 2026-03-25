@@ -6,15 +6,15 @@ title = "Mana Cost and Color"
 
 [cr_202_1]
 rule = "202.1"
-text = "A card’s mana cost is indicated by mana symbols near the top of the card. (See rule 107.4.) On most cards, these symbols are printed in the upper right corner. Some cards from the Future Sight set have alternate frames in which the mana symbols appear to the left of the illustration."
-status = "missing"
-impl_files = []
+text = "A card's mana cost is indicated by mana symbols near the top of the card. (See rule 107.4.) On most cards, these symbols are printed in the upper right corner. Some cards from the Future Sight set have alternate frames in which the mana symbols appear to the left of the illustration."
+status = "implemented"
+impl_files = ["types/mana.rs:1", "types/card.rs:20"]
 test_files = []
-notes = ""
+notes = "ManaCost type models card mana costs. CardFace.mana_cost stores the parsed mana cost for each face."
 
 [cr_202_1a]
 rule = "202.1a"
-text = "The mana cost of an object represents what a player must spend from their mana pool to cast that card. Unless an object’s mana cost includes Phyrexian mana symbols (see rule 107.4f), paying that mana cost requires matching the type of any colored or colorless mana symbols as well as paying the generic mana indicated in the cost."
+text = "The mana cost of an object represents what a player must spend from their mana pool to cast that card. Unless an object's mana cost includes Phyrexian mana symbols (see rule 107.4f), paying that mana cost requires matching the type of any colored or colorless mana symbols as well as paying the generic mana indicated in the cost."
 status = "implemented"
 impl_files = ["game/mana_payment.rs:129", "game/mana_payment.rs:131"]
 test_files = []
@@ -22,67 +22,67 @@ notes = ""
 
 [cr_202_1b]
 rule = "202.1b"
-text = "Some objects have no mana cost. This normally includes all land cards, any other cards that have no mana symbols where their mana cost would appear, tokens (unless the effect that creates them specifies otherwise), and nontraditional Magic cards. Having no mana cost represents an unpayable cost (see rule 118.6). Note that lands are played without paying any costs (see rule 305, “Lands”)."
-status = "missing"
-impl_files = []
+text = "Some objects have no mana cost. This normally includes all land cards, any other cards that have no mana symbols where their mana cost would appear, tokens (unless the effect that creates them specifies otherwise), and nontraditional Magic cards. Having no mana cost represents an unpayable cost (see rule 118.6). Note that lands are played without paying any costs (see rule 305, \"Lands\")."
+status = "implemented"
+impl_files = ["types/mana.rs:403", "game/mana_payment.rs:144"]
 test_files = []
-notes = ""
+notes = "ManaCost::NoCost represents an absent mana cost. can_pay_cost() returns true for NoCost (used as baseline), and casting.rs prevents casting NoCost spells without alternative cost."
 
 [cr_202_2]
 rule = "202.2"
 text = "An object is the color or colors of the mana symbols in its mana cost, regardless of the color of its frame."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["game/printed_cards.rs:313"]
+test_files = ["game/deck_loading.rs:514"]
+notes = "derive_colors_from_mana_cost() derives the color list by iterating mana cost shards. color_override overrides this for color indicators."
 
 [cr_202_2a]
 rule = "202.2a"
 text = "The five colors are white, blue, black, red, and green. The white mana symbol is represented by {W}, blue by {U}, black by {B}, red by {R}, and green by {G}."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["types/mana.rs:9", "types/mana.rs:19"]
+test_files = ["types/mana.rs:542"]
+notes = "ManaColor enum defines White, Blue, Black, Red, Green. ManaColor::ALL provides canonical WUBRG order."
 
 [cr_202_2b]
 rule = "202.2b"
 text = "Objects with no colored mana symbols in their mana costs are colorless."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["game/printed_cards.rs:313", "game/printed_cards.rs:309"]
+test_files = ["game/deck_loading.rs:524"]
+notes = "derive_colors_from_mana_cost() returns an empty Vec for costs with only colorless/snow/X shards or for NoCost, yielding a colorless object."
 
 [cr_202_2c]
 rule = "202.2c"
 text = "An object with two or more different colored mana symbols in its mana cost is each of the colors of those mana symbols. Most multicolored cards are printed with a gold frame, but this is not a requirement for a card to be multicolored."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["game/printed_cards.rs:313", "game/filter.rs:288"]
+test_files = ["game/deck_loading.rs:514"]
+notes = "derive_colors_from_mana_cost() collects all color contributions from all shards. FilterProp::Multicolored checks obj.color.len() > 1."
 
 [cr_202_2d]
 rule = "202.2d"
 text = "An object with one or more hybrid mana symbols and/or Phyrexian mana symbols in its mana cost is all of the colors of those mana symbols, in addition to any other colors the object might be. (Most cards with hybrid mana symbols in their mana costs are printed in a two-tone frame. See rule 107.4e.)"
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["game/printed_cards.rs:257", "game/printed_cards.rs:274"]
+test_files = ["game/deck_loading.rs:530"]
+notes = "shard_colors() returns both colors for hybrid shards (e.g. WhiteBlue → [White, Blue]) and the single color for Phyrexian shards."
 
 [cr_202_2e]
 rule = "202.2e"
 text = "An object may have a color indicator printed to the left of the type line. That object is each color denoted by that color indicator. (See rule 204.)"
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["types/card.rs:34", "game/printed_cards.rs:29"]
+test_files = ["game/deck_loading.rs:350"]
+notes = "CardFace.color_override stores color indicator data. apply_card_face_to_object() prefers color_override over mana-cost-derived colors."
 
 [cr_202_2f]
 rule = "202.2f"
-text = "Effects may change an object’s color, give a color to a colorless object, or make a colored object become colorless; see rule 105.3."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "Effects may change an object's color, give a color to a colorless object, or make a colored object become colorless; see rule 105.3."
+status = "implemented"
+impl_files = ["game/layers.rs:683", "types/ability.rs:1"]
+test_files = ["game/layers.rs:1430"]
+notes = "ContinuousModification::SetColor applies in layer evaluation (game/layers.rs). Layer evaluation propagates color changes to obj.color."
 
 [cr_202_3]
 rule = "202.3"
@@ -95,18 +95,18 @@ notes = ""
 [cr_202_3a]
 rule = "202.3a"
 text = "The mana value of an object with no mana cost is 0, unless that object is the back face of a nonmodal double-faced permanent or spell, or it is a melded permanent."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["types/mana.rs:403"]
 test_files = []
-notes = ""
+notes = "ManaCost::NoCost and SelfManaCost both return mana_value() = 0. The special back-face DFC case (use front face MV) is modeled via ManaCost::SelfManaCost on back faces, but the mana_value() call returns 0 for SelfManaCost instead of delegating to the front face."
 
 [cr_202_3b]
 rule = "202.3b"
-text = "The mana value of the back face of a nonmodal double-faced permanent or spell’s back face is calculated as though it had the mana cost of its front face. If a permanent or spell is a copy of the back face of a nonmodal double-faced object (even if the card representing that copy is itself a double-faced card), the mana value of the copy is 0."
-status = "missing"
-impl_files = []
+text = "The mana value of the back face of a nonmodal double-faced permanent or spell's back face is calculated as though it had the mana cost of its front face. If a permanent or spell is a copy of the back face of a nonmodal double-faced object (even if the card representing that copy is itself a double-faced card), the mana value of the copy is 0."
+status = "partial"
+impl_files = ["types/mana.rs:380", "game/casting.rs:561"]
 test_files = []
-notes = ""
+notes = "ManaCost::SelfManaCost is used for DFC back faces to signal they use the front-face mana cost for casting, but mana_value() returns 0 for SelfManaCost rather than looking up the front face cost."
 
 [cr_202_3c]
 rule = "202.3c"
@@ -114,15 +114,15 @@ text = "The mana value of a melded permanent is calculated as though it had the 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meld is modeled in CardLayout::Meld but combined mana value for a melded permanent is not implemented."
 
 [cr_202_3d]
 rule = "202.3d"
-text = "The mana value of a split card not on the stack or of a fused split spell on the stack is determined from the combined mana costs of its halves. Otherwise, while a split card is on the stack, the mana value of the spell is determined by the mana cost of the half that was chosen to be cast. See rule 709, “Split Cards.”"
+text = "The mana value of a split card not on the stack or of a fused split spell on the stack is determined from the combined mana costs of its halves. Otherwise, while a split card is on the stack, the mana value of the spell is determined by the mana cost of the half that was chosen to be cast. See rule 709, \"Split Cards.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Split cards (CardLayout::Split) are in the codebase but combined mana value calculation for split cards not on the stack is not implemented."
 
 [cr_202_3e]
 rule = "202.3e"
@@ -135,23 +135,23 @@ notes = ""
 [cr_202_3f]
 rule = "202.3f"
 text = "When calculating the mana value of an object with a hybrid mana symbol in its mana cost, use the largest component of each hybrid symbol."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["types/mana.rs:404"]
 test_files = []
-notes = ""
+notes = "mana_value() counts each hybrid shard as 1 (not 2, the largest component of {2/W} for example). Standard hybrid symbols like {W/U} are correctly counted as 1 (max component is 1 mana), but two-hybrid symbols like {2/W} should count as 2 and currently count as 1."
 
 [cr_202_3g]
 rule = "202.3g"
-text = "Each Phyrexian mana symbol in a card’s mana cost contributes 1 to its mana value."
-status = "missing"
-impl_files = []
+text = "Each Phyrexian mana symbol in a card's mana cost contributes 1 to its mana value."
+status = "implemented"
+impl_files = ["types/mana.rs:404"]
 test_files = []
-notes = ""
+notes = "mana_value() counts Phyrexian shards as 1 each (they are not filtered out like X). Correct per CR 202.3g."
 
 [cr_202_4]
 rule = "202.4"
-text = "Any additional cost listed in an object’s rules text or imposed by an effect isn’t part of the mana cost. (See rule 601, “Casting Spells.”) Such costs are paid at the same time as the spell’s other costs."
-status = "missing"
-impl_files = []
+text = "Any additional cost listed in an object's rules text or imposed by an effect isn't part of the mana cost. (See rule 601, \"Casting Spells.\") Such costs are paid at the same time as the spell's other costs."
+status = "implemented"
+impl_files = ["types/card.rs:44", "game/casting_costs.rs:1"]
 test_files = []
-notes = ""
+notes = "CardFace.additional_cost stores additional costs separately from mana_cost. casting_costs.rs handles them independently during spell casting."

@@ -7,23 +7,23 @@ title = "General (Parts of a Card)"
 [cr_200_1]
 rule = "200.1"
 text = "The parts of a card are name, mana cost, illustration, color indicator, type line, expansion symbol, text box, power and toughness, loyalty, defense, hand modifier, life modifier, illustration credit, legal text, and collector number. Some cards may have more than one of any or all of these parts."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/card.rs:18"]
 test_files = []
-notes = ""
+notes = "CardFace struct models all characteristic card parts: name, mana_cost, card_type, power, toughness, loyalty, defense, oracle_text."
 
 [cr_200_2]
 rule = "200.2"
 text = "Some parts of a card are also characteristics of the object that has them. See rule 109.3."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/game_object.rs:1"]
 test_files = []
-notes = ""
+notes = "GameObject mirrors the characteristic parts of CardFace: name, mana_cost, card_types, power, toughness, loyalty, color — all are characteristics tracked on game objects."
 
 [cr_200_3]
 rule = "200.3"
-text = "Some objects that aren’t cards (tokens, copies of cards, and copies of spells) have some of the parts of a card, but only the ones that are also characteristics. See rule 111 and rule 707."
-status = "missing"
-impl_files = []
+text = "Some objects that aren't cards (tokens, copies of cards, and copies of spells) have some of the parts of a card, but only the ones that are also characteristics. See rule 111 and rule 707."
+status = "implemented"
+impl_files = ["game/effects/token.rs:1", "game/effects/become_copy.rs:1"]
 test_files = []
-notes = ""
+notes = "Tokens are created as GameObjects with characteristic fields only (no physical card parts like illustration or collector number). become_copy copies only characteristic fields."

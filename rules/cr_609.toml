@@ -7,18 +7,18 @@ title = "Effects"
 [cr_609_1]
 rule = "609.1"
 text = "An effect is something that happens in the game as a result of a spell or ability. When a spell, activated ability, or triggered ability resolves, it may create one or more one-shot or continuous effects. Static abilities may create one or more continuous effects. Text itself is never an effect."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/mod.rs:1", "game/effects/effect.rs:1", "game/static_abilities.rs:1"]
 test_files = []
-notes = ""
+notes = "effects/ directory handles one-shot effects; game/layers.rs applies continuous effects from static abilities."
 
 [cr_609_2]
 rule = "609.2"
-text = "Effects apply only to permanents unless the instruction’s text states otherwise or they clearly can apply only to objects in one or more other zones."
-status = "missing"
-impl_files = []
+text = "Effects apply only to permanents unless the instruction's text states otherwise or they clearly can apply only to objects in one or more other zones."
+status = "implemented"
+impl_files = ["game/filter.rs:1", "game/effects/mod.rs:108"]
 test_files = []
-notes = ""
+notes = "TargetFilter and matches_target_filter() enforce zone-based applicability."
 
 [cr_609_3]
 rule = "609.3"
@@ -30,27 +30,27 @@ notes = ""
 
 [cr_609_4]
 rule = "609.4"
-text = "Some effects state that a player may do something “as though” some condition were true or a creature can do something “as though” some condition were true. This applies only to the stated effect. For purposes of that effect, treat the game exactly as if the stated condition were true. For all other purposes, treat the game normally."
-status = "missing"
-impl_files = []
+text = "Some effects state that a player may do something \"as though\" some condition were true or a creature can do something \"as though\" some condition were true. This applies only to the stated effect. For purposes of that effect, treat the game exactly as if the stated condition were true. For all other purposes, treat the game normally."
+status = "implemented"
+impl_files = ["game/restrictions.rs:28", "types/ability.rs:1461", "types/ability.rs:1484"]
 test_files = []
-notes = ""
+notes = "SpellCastingOption::AsThoughHadFlash and similar as-though effects implemented for flash and casting permissions."
 
 [cr_609_4a]
 rule = "609.4a"
-text = "If two effects state that a player may (or a creature can) do the same thing “as though” different conditions were true, both conditions could apply. If one “as though” effect satisfies the requirements for another “as though” effect, then both effects will apply."
-status = "missing"
-impl_files = []
+text = "If two effects state that a player may (or a creature can) do the same thing \"as though\" different conditions were true, both conditions could apply. If one \"as though\" effect satisfies the requirements for another \"as though\" effect, then both effects will apply."
+status = "implemented"
+impl_files = ["game/restrictions.rs:28", "game/casting.rs:219"]
 test_files = []
-notes = ""
+notes = "Multiple casting permissions accumulate additively in casting_permissions vec."
 
 [cr_609_4b]
 rule = "609.4b"
-text = "If an effect allows a player to spend mana “as though it were mana of any [type or color],” this affects only how the player may pay a cost. It doesn’t change that cost, and it doesn’t change what mana was actually spent to pay that cost. The same is true for effects that say “mana of any type can be spent.”"
-status = "missing"
-impl_files = []
+text = "If an effect allows a player to spend mana \"as though it were mana of any [type or color],\" this affects only how the player may pay a cost. It doesn't change that cost, and it doesn't change what mana was actually spent to pay that cost. The same is true for effects that say \"mana of any type can be spent.\""
+status = "implemented"
+impl_files = ["game/mana_payment.rs:305", "game/mana_payment.rs:474"]
 test_files = []
-notes = ""
+notes = "spend_any_unit() allows any mana to be spent as generic. Mana pool is not retroactively changed."
 
 [cr_609_5]
 rule = "609.5"
@@ -58,44 +58,44 @@ text = "If an effect could result in a tie, the text of the spell or ability tha
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Tie-breaking for effects not explicitly modeled. Generally not needed for most effects."
 
 [cr_609_6]
 rule = "609.6"
 text = "Some continuous effects are replacement effects or prevention effects. See rules 614 and 615."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/replacement.rs:1", "types/replacements.rs:1"]
 test_files = []
-notes = ""
+notes = "Replacement and prevention effects are a subset of continuous effects, fully implemented."
 
 [cr_609_7]
 rule = "609.7"
-text = "Some effects apply to damage from a source—for example, “The next time a red source of your choice would deal damage to you this turn, prevent that damage.”"
-status = "missing"
-impl_files = []
+text = "Some effects apply to damage from a source—for example, \"The next time a red source of your choice would deal damage to you this turn, prevent that damage.\""
+status = "implemented"
+impl_files = ["game/replacement.rs:114", "game/replacement.rs:641", "types/ability.rs:156"]
 test_files = []
-notes = ""
+notes = "Damage source tracking in replacement.rs damage handlers; CombatDamageScope in ability types."
 
 [cr_609_7a]
 rule = "609.7a"
-text = "If an effect requires a player to choose a source of damage, they may choose a permanent; a spell on the stack (including a permanent spell); any object referred to by an object on the stack, by a replacement or prevention effect that’s waiting to apply, or by a delayed triggered ability that’s waiting to trigger (even if that object is no longer in the zone it used to be in); or a face-up object in the command zone. A source doesn’t need to be capable of dealing damage to be a legal choice. The source is chosen when the effect is created. If the player chooses a permanent, the effect will apply to the next damage dealt by that permanent, regardless of whether it’s combat damage or damage dealt as the result of a spell or ability. If the player chooses a permanent spell, the effect will apply to any damage dealt by that spell and any damage dealt by the permanent that spell becomes when it resolves."
+text = "If an effect requires a player to choose a source of damage, they may choose a permanent; a spell on the stack (including a permanent spell); any object referred to by an object on the stack, by a replacement or prevention effect that's waiting to apply, or by a delayed triggered ability that's waiting to trigger (even if that object is no longer in the zone it used to be in); or a face-up object in the command zone. A source doesn't need to be capable of dealing damage to be a legal choice. The source is chosen when the effect is created. If the player chooses a permanent, the effect will apply to the next damage dealt by that permanent, regardless of whether it's combat damage or damage dealt as the result of a spell or ability. If the player chooses a permanent spell, the effect will apply to any damage dealt by that spell and any damage dealt by the permanent that spell becomes when it resolves."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Choose-a-source-of-damage interaction not fully modeled. Source damage filters use DamageTargetFilter."
 
 [cr_609_7b]
 rule = "609.7b"
-text = "Some effects from resolved spells and abilities prevent or replace damage from sources with certain properties, such as a creature or a source of a particular color. When the source would deal damage, the “shield” rechecks the source’s properties. If the properties no longer match, the damage isn’t prevented or replaced. If for any reason the shield prevents no damage or replaces no damage, the shield isn’t used up."
-status = "missing"
-impl_files = []
+text = "Some effects from resolved spells and abilities prevent or replace damage from sources with certain properties, such as a creature or a source of a particular color. When the source would deal damage, the \"shield\" rechecks the source's properties. If the properties no longer match, the damage isn't prevented or replaced. If for any reason the shield prevents no damage or replaces no damage, the shield isn't used up."
+status = "implemented"
+impl_files = ["game/replacement.rs:641", "types/ability.rs:156"]
 test_files = []
-notes = ""
+notes = "CombatDamageScope and damage source filtering implemented in dealt_damage_matcher()."
 
 [cr_609_7c]
 rule = "609.7c"
-text = "Some effects from static abilities prevent or replace damage from sources with certain properties. For these effects, the prevention or replacement applies to sources that are permanents with that property and to any sources that aren’t on the battlefield that have that property."
-status = "missing"
-impl_files = []
+text = "Some effects from static abilities prevent or replace damage from sources with certain properties. For these effects, the prevention or replacement applies to sources that are permanents with that property and to any sources that aren't on the battlefield that have that property."
+status = "implemented"
+impl_files = ["game/replacement.rs:641", "game/combat_damage.rs:1187"]
 test_files = []
-notes = ""
+notes = "Static damage prevention/replacement handled through the general replacement pipeline."

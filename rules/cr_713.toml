@@ -7,63 +7,63 @@ title = "Substitute Cards"
 [cr_713_1]
 rule = "713.1"
 text = "A substitute card is a game supplement that can be used to represent a double-faced card or meld card. A substitute card has a normal Magic card back."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Physical play supplement; not applicable to digital engine. Double-faced cards are tracked digitally."
 
 [cr_713_2]
 rule = "713.2"
 text = "Each substitute card must clearly indicate the name of at least the front face of the card that it represents. Other information from the printed card (e.g. card type, mana cost, and power and toughness) may also be written on the substitute card."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Physical play guidance; not applicable to digital engine."
 
 [cr_713_2a]
 rule = "713.2a"
 text = "Some substitute cards list the names and mana costs of the cards they can represent. Exactly one of the fill-in circles must be marked to denote which card the substitute card represents. This style of substitute card was found in Magic products that released 2011–2018."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Physical play guidance; not applicable to digital engine."
 
 [cr_713_2b]
 rule = "713.2b"
 text = "Some substitute cards represent one specific listed card. This style of substitute card was found in the Core Set 2019 release, and it represents the card Nicol Bolas, the Ravager."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Physical play guidance; not applicable to digital engine."
 
 [cr_713_2c]
 rule = "713.2c"
 text = "Some substitute cards can represent any modal double-faced card. These substitute cards include the front-face and back-face symbols on the front face of the card. To use one of them, write in the name of each face of the card it represents. This style of substitute card is found in the Zendikar Rising release."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Physical play guidance; not applicable to digital engine."
 
 [cr_713_3]
 rule = "713.3"
-text = "If a substitute card is used in a deck, the card it represents is set aside prior to the beginning of the game (see rule 103.2a) and must remain available throughout the game. A substitute card can’t be included in a deck unless it is representing a double-faced card or a meld card."
-status = "missing"
+text = "If a substitute card is used in a deck, the card it represents is set aside prior to the beginning of the game (see rule 103.2a) and must remain available throughout the game. A substitute card can't be included in a deck unless it is representing a double-faced card or a meld card."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Physical play guidance; not applicable to digital engine."
 
 [cr_713_4]
 rule = "713.4"
-text = "For all game purposes, the substitute card is considered to be the card it’s representing."
-status = "missing"
+text = "For all game purposes, the substitute card is considered to be the card it's representing."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Physical play guidance; not applicable to digital engine."
 
 [cr_713_5]
 rule = "713.5"
 text = "If the substitute card is face up in a public zone, it should be set aside and the double-faced card or meld card that it represents should be used instead."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Physical play guidance; not applicable to digital engine."

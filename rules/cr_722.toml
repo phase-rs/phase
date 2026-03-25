@@ -1,16 +1,16 @@
-# Comprehensive Rules Section 722: Ending Turns and Phases
+# Comprehensive Rules Section 722: Controlling Another Player
 
 [_meta]
 section = 722
-title = "Ending Turns and Phases"
+title = "Controlling Another Player"
 
 [cr_722_1]
 rule = "722.1"
-text = "Some cards allow a player to control another player during that player’s next turn. This effect applies to the next turn that the affected player actually takes. The affected player is controlled during the entire turn; the effect doesn’t end until the beginning of the next turn."
+text = "Some cards allow a player to control another player during that player's next turn. This effect applies to the next turn that the affected player actually takes. The affected player is controlled during the entire turn; the effect doesn't end until the beginning of the next turn."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Player-control-for-a-turn effects not implemented."
 
 [cr_722_1a]
 rule = "722.1a"
@@ -18,7 +18,7 @@ text = "Multiple player-controlling effects that affect the same player overwrit
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Player-control-for-a-turn effects not implemented."
 
 [cr_722_1b]
 rule = "722.1b"
@@ -26,7 +26,7 @@ text = "If a turn is skipped, any pending player-controlling effects wait until 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Player-control-for-a-turn effects not implemented."
 
 [cr_722_2]
 rule = "722.2"
@@ -34,11 +34,11 @@ text = "Two cards (Word of Command and Opposition Agent) allow a player to contr
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Limited-duration player control not implemented."
 
 [cr_722_3]
 rule = "722.3"
-text = "Only control of the player changes. All objects are controlled by their normal controllers. A player who’s being controlled during their turn is still the active player."
+text = "Only control of the player changes. All objects are controlled by their normal controllers. A player who's being controlled during their turn is still the active player."
 status = "implemented"
 impl_files = ["game/triggers.rs:425"]
 test_files = []
@@ -46,7 +46,7 @@ notes = ""
 
 [cr_722_4]
 rule = "722.4"
-text = "If information about an object in the game would be visible to the player being controlled, it’s visible to both that player and the controller of the player. If information about cards outside the game would be visible to the player being controlled, it’s visible only to that player, not the controller of the player."
+text = "If information about an object in the game would be visible to the player being controlled, it's visible to both that player and the controller of the player. If information about cards outside the game would be visible to the player being controlled, it's visible only to that player, not the controller of the player."
 status = "implemented"
 impl_files = ["game/triggers.rs:453"]
 test_files = []
@@ -58,31 +58,31 @@ text = "While controlling another player, a player makes all choices and decisio
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Full player control decision delegation not implemented."
 
 [cr_722_5a]
 rule = "722.5a"
-text = "The controller of another player can use only that player’s resources (cards, mana, and so on) to pay costs for that player."
+text = "The controller of another player can use only that player's resources (cards, mana, and so on) to pay costs for that player."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Player control resource restriction not implemented."
 
 [cr_722_5b]
 rule = "722.5b"
-text = "The controller of another player can’t make choices or decisions for that player that aren’t called for by the rules or by any objects. The controller also can’t make any choices or decisions for the player that would be called for by the tournament rules."
+text = "The controller of another player can't make choices or decisions for that player that aren't called for by the rules or by any objects. The controller also can't make any choices or decisions for the player that would be called for by the tournament rules."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Player control limitation not implemented."
 
 [cr_722_6]
 rule = "722.6"
-text = "The controller of another player can’t make that player concede. A player may concede the game at any time, even if they are controlled by another player. See rule 104.3a."
+text = "The controller of another player can't make that player concede. A player may concede the game at any time, even if they are controlled by another player. See rule 104.3a."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Player control concede restriction not implemented."
 
 [cr_722_7]
 rule = "722.7"
@@ -90,7 +90,7 @@ text = "The effect that gives control of a player to another player may restrict
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Player control action restrictions not implemented."
 
 [cr_722_8]
 rule = "722.8"
@@ -98,7 +98,7 @@ text = "A player who controls another player also continues to make their own ch
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Player control not implemented."
 
 [cr_722_9]
 rule = "722.9"
@@ -106,4 +106,4 @@ text = "An effect may give a player control of themselves. That player will make
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Self-control edge case not implemented."

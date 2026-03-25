@@ -6,56 +6,56 @@ title = "Spells"
 
 [cr_112_1]
 rule = "112.1"
-text = "A spell is a card on the stack. As the first step of being cast (see rule 601, “Casting Spells”), the card becomes a spell and is moved to the top of the stack from the zone it was in, which is usually its owner’s hand. (See rule 405, “Stack.”) A spell remains on the stack as a spell until it resolves (see rule 608, “Resolving Spells and Abilities”), is countered (see rule 701.6), or otherwise leaves the stack. For more information, see section 6, “Spells, Abilities, and Effects.”"
-status = "missing"
-impl_files = []
+text = "A spell is a card on the stack. As the first step of being cast (see rule 601, \"Casting Spells\"), the card becomes a spell and is moved to the top of the stack from the zone it was in, which is usually its owner's hand. (See rule 405, \"Stack.\") A spell remains on the stack as a spell until it resolves (see rule 608, \"Resolving Spells and Abilities\"), is countered (see rule 701.6), or otherwise leaves the stack. For more information, see section 6, \"Spells, Abilities, and Effects.\""
+status = "implemented"
+impl_files = ["game/casting.rs:1", "game/stack.rs:1"]
 test_files = []
-notes = ""
+notes = "Cards move to Zone::Stack when cast. Spells remain there until resolved (stack.rs) or countered (effects/counter.rs)."
 
 [cr_112_1a]
 rule = "112.1a"
 text = "A copy of a spell is also a spell, even if it has no card associated with it. See rule 707.10."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/copy_spell.rs:1"]
 test_files = []
-notes = ""
+notes = "copy_spell creates a new stack object with is_copy=true. It's treated as a spell on the stack."
 
 [cr_112_1b]
 rule = "112.1b"
 text = "Some effects allow a player to cast a copy of a card; if the player does, that copy is a spell as well. See rule 707.12."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/cast_from_zone.rs:1"]
 test_files = []
-notes = ""
+notes = "cast_from_zone supports casting copies of cards."
 
 [cr_112_2]
 rule = "112.2"
-text = "A spell’s owner is the same as the owner of the card that represents it, unless it’s a copy. In that case, the owner of the spell is the player under whose control it was put on the stack. A spell’s controller is, by default, the player who put it on the stack. Every spell has a controller."
-status = "missing"
-impl_files = []
+text = "A spell's owner is the same as the owner of the card that represents it, unless it's a copy. In that case, the owner of the spell is the player under whose control it was put on the stack. A spell's controller is, by default, the player who put it on the stack. Every spell has a controller."
+status = "implemented"
+impl_files = ["game/casting.rs:1"]
 test_files = []
-notes = ""
+notes = "Spell ownership and controller are set during casting. Copies set owner to the player who created the copy."
 
 [cr_112_2a]
 rule = "112.2a"
 text = "Some effects instruct a player to create a copy of a card and say they may cast it. In that case, the owner of that copy is the player who is instructed to create it and given permission to cast it."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/copy_spell.rs:1"]
 test_files = []
-notes = ""
+notes = "Copy ownership rules are tracked in copy_spell.rs."
 
 [cr_112_3]
 rule = "112.3"
-text = "A noncopy spell’s characteristics are the same as those printed on its card, as modified by any continuous effects. See rule 613, “Interaction of Continuous Effects.”"
+text = "A noncopy spell's characteristics are the same as those printed on its card, as modified by any continuous effects. See rule 613, \"Interaction of Continuous Effects.\""
 status = "implemented"
 impl_files = ["parser/oracle_cost.rs:167", "parser/oracle_cost.rs:416"]
 test_files = []
-notes = ""
+notes = "Spells on the stack have characteristics from their printed card data, modified by continuous effects evaluated in layers."
 
 [cr_112_4]
 rule = "112.4"
 text = "If an effect of a resolving spell or ability changes any characteristics of a permanent spell, the effect continues to apply to the permanent when the spell resolves. See rule 400.7."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["game/layers.rs:1"]
 test_files = []
-notes = ""
+notes = "Continuous effects that modify spell characteristics persist to the permanent. Full tracking of 'while on stack' vs 'after resolution' modifications is partial."

@@ -6,11 +6,11 @@ title = "Interaction of Replacement and/or Prevention Effects"
 
 [cr_616_1]
 rule = "616.1"
-text = "If two or more replacement and/or prevention effects are attempting to modify the way an event affects an object or player, the affected object’s controller (or its owner if it has no controller) or the affected player chooses one to apply, following the steps listed below. If two or more players have to make these choices at the same time, choices are made in APNAP order (see rule 101.4)."
-status = "missing"
-impl_files = []
+text = "If two or more replacement and/or prevention effects are attempting to modify the way an event affects an object or player, the affected object's controller (or its owner if it has no controller) or the affected player chooses one to apply, following the steps listed below. If two or more players have to make these choices at the same time, choices are made in APNAP order (see rule 101.4)."
+status = "implemented"
+impl_files = ["game/replacement.rs:1317", "game/replacement.rs:1363", "game/replacement.rs:1376"]
 test_files = []
-notes = ""
+notes = "pipeline_loop() implements multi-replacement choice. WaitingFor::ReplacementChoice is presented when multiple effects apply."
 
 [cr_616_1a]
 rule = "616.1a"
@@ -18,7 +18,7 @@ text = "If any of the replacement and/or prevention effects are self-replacement
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Self-replacement priority ordering not implemented in pipeline_loop()."
 
 [cr_616_1b]
 rule = "616.1b"
@@ -26,7 +26,7 @@ text = "If any of the replacement and/or prevention effects would modify under w
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Control-modification priority ordering not implemented."
 
 [cr_616_1c]
 rule = "616.1c"
@@ -34,44 +34,44 @@ text = "If any of the replacement and/or prevention effects would cause an objec
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Copy-as-enters priority ordering not implemented."
 
 [cr_616_1d]
 rule = "616.1d"
-text = "If any of the replacement and/or prevention effects would cause a card to enter the battlefield with its back face up, one of them must be chosen (See rule 701.27, “Transform,” and rule 701.28, “Convert.”). If not, proceed to 616.1e."
+text = "If any of the replacement and/or prevention effects would cause a card to enter the battlefield with its back face up, one of them must be chosen (See rule 701.27, \"Transform,\" and rule 701.28, \"Convert.\"). If not, proceed to 616.1e."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Back-face-up entry priority ordering not implemented."
 
 [cr_616_1e]
 rule = "616.1e"
 text = "Any of the applicable replacement and/or prevention effects may be chosen."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/replacement.rs:1363", "game/replacement.rs:1376"]
 test_files = []
-notes = ""
+notes = "Default case: when no higher-priority categorization applies, affected player/controller chooses freely. pipeline_loop() implements this via WaitingFor::ReplacementChoice."
 
 [cr_616_1f]
 rule = "616.1f"
 text = "Once the chosen effect has been applied, this process is repeated (taking into account only replacement or prevention effects that would now be applicable) until there are no more left to apply."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/replacement.rs:1317", "game/replacement.rs:1396"]
 test_files = []
-notes = ""
+notes = "pipeline_loop() iterates, re-evaluating candidates after each application."
 
 [cr_616_1g]
 rule = "616.1g"
-text = "While following the steps in 616.1a–f, one replacement or prevention effect may apply to an event, and another may apply to an event contained within the first event. In this case, the second effect can’t be chosen until after the first effect has been chosen."
-status = "missing"
-impl_files = []
+text = "While following the steps in 616.1a–f, one replacement or prevention effect may apply to an event, and another may apply to an event contained within the first event. In this case, the second effect can't be chosen until after the first effect has been chosen."
+status = "implemented"
+impl_files = ["game/replacement.rs:1363"]
 test_files = []
-notes = ""
+notes = "Replacement pipeline processes outer event before nested events. depth counter prevents infinite loops."
 
 [cr_616_2]
 rule = "616.2"
 text = "A replacement or prevention effect can become applicable to an event as the result of another replacement or prevention effect that modifies the event."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/replacement.rs:1317", "game/replacement.rs:1329"]
 test_files = []
-notes = ""
+notes = "pipeline_loop() re-evaluates find_applicable_replacements() after each modification, allowing newly applicable effects to be considered."

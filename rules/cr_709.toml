@@ -10,7 +10,7 @@ text = "Split cards have two card faces on a single card. The back of a split ca
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Split cards not implemented."
 
 [cr_709_2]
 rule = "709.2"
@@ -18,7 +18,7 @@ text = "Although split cards have two castable halves, each split card is only o
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Split cards not implemented."
 
 [cr_709_3]
 rule = "709.3"
@@ -26,7 +26,7 @@ text = "A player chooses which half of a split card they are casting before putt
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Split cards not implemented."
 
 [cr_709_3a]
 rule = "709.3a"
@@ -34,15 +34,15 @@ text = "Only the chosen half is evaluated to see if it can be cast. Only that ha
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Split cards not implemented."
 
 [cr_709_3b]
 rule = "709.3b"
-text = "While on the stack, only the characteristics of the half being cast exist. The other half’s characteristics are treated as though they didn’t exist."
+text = "While on the stack, only the characteristics of the half being cast exist. The other half's characteristics are treated as though they didn't exist."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Split cards not implemented."
 
 [cr_709_3c]
 rule = "709.3c"
@@ -50,7 +50,7 @@ text = "An effect may create a copy of a split card and allow a player to cast t
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Split cards not implemented."
 
 [cr_709_4]
 rule = "709.4"
@@ -58,23 +58,23 @@ text = "In every zone except the stack, the characteristics of a split card are 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Split cards not implemented."
 
 [cr_709_4a]
 rule = "709.4a"
-text = "Each split card has two names. If an effect instructs a player to choose a card name and the player wants to choose a split card’s name, the player must choose one of those names and not both. An object has the chosen name if one of its names is the chosen name."
+text = "Each split card has two names. If an effect instructs a player to choose a card name and the player wants to choose a split card's name, the player must choose one of those names and not both. An object has the chosen name if one of its names is the chosen name."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Split cards not implemented."
 
 [cr_709_4b]
 rule = "709.4b"
-text = "The mana cost of a split card is the combined mana costs of its two halves. A split card’s colors and mana value are determined from its combined mana cost. An effect that refers specifically to the symbols in a split card’s mana cost sees the separate symbols rather than the whole mana cost."
+text = "The mana cost of a split card is the combined mana costs of its two halves. A split card's colors and mana value are determined from its combined mana cost. An effect that refers specifically to the symbols in a split card's mana cost sees the separate symbols rather than the whole mana cost."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Split cards not implemented."
 
 [cr_709_4c]
 rule = "709.4c"
@@ -82,79 +82,79 @@ text = "A split card has each card type specified on either of its halves and ea
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Split cards not implemented."
 
 [cr_709_4d]
 rule = "709.4d"
-text = "The characteristics of a fused split spell on the stack are also those of its two halves combined (see rule 702.102, “Fuse”)."
+text = "The characteristics of a fused split spell on the stack are also those of its two halves combined (see rule 702.102, \"Fuse\")."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Split cards/Fuse not implemented."
 
 [cr_709_5]
 rule = "709.5"
-text = "Some split cards are permanent cards with a single shared type line. A shared type line on such an object represents two static abilities that function on the battlefield. These are “As long as this permanent doesn’t have the ‘left half unlocked’ designation, it doesn’t have the name, mana cost, or rules text of this object’s left half” and “As long as this permanent doesn’t have the ‘right half unlocked’ designation, it doesn’t have the name, mana cost, or rules text of this object’s right half.” These abilities, as well as which half of that permanent a characteristic is in, are part of that object’s copiable values."
+text = "Some split cards are permanent cards with a single shared type line. A shared type line on such an object represents two static abilities that function on the battlefield. These are \"As long as this permanent doesn't have the 'left half unlocked' designation, it doesn't have the name, mana cost, or rules text of this object's left half\" and \"As long as this permanent doesn't have the 'right half unlocked' designation, it doesn't have the name, mana cost, or rules text of this object's right half.\" These abilities, as well as which half of that permanent a characteristic is in, are part of that object's copiable values."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Room cards (shared type line split cards) not implemented."
 
 [cr_709_5a]
 rule = "709.5a"
-text = "Each half of a split card with a shared type line shares the types and subtypes listed on that card’s shared type line."
+text = "Each half of a split card with a shared type line shares the types and subtypes listed on that card's shared type line."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Room cards not implemented."
 
 [cr_709_5b]
 rule = "709.5b"
-text = "The existence of each half of an object with a shared type line is part of that object’s copiable values, even if that object is a spell on the stack. This is an exception to rule 709.3b."
+text = "The existence of each half of an object with a shared type line is part of that object's copiable values, even if that object is a spell on the stack. This is an exception to rule 709.3b."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Room cards not implemented."
 
 [cr_709_5c]
 rule = "709.5c"
-text = "“Left half unlocked” and “right half unlocked” are designations that a permanent on the battlefield can have. Together, they are called the unlocked designations. A particular half of a permanent is said to be “unlocked” if it has the appropriate unlocked designation. Otherwise, that half is said to be “locked.”"
+text = "\"Left half unlocked\" and \"right half unlocked\" are designations that a permanent on the battlefield can have. Together, they are called the unlocked designations. A particular half of a permanent is said to be \"unlocked\" if it has the appropriate unlocked designation. Otherwise, that half is said to be \"locked.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Room cards not implemented."
 
 [cr_709_5d]
 rule = "709.5d"
-text = "A permanent with a shared type line is given the “left half unlocked” designation as it enters the battlefield if its left half was cast as a spell. It is given the “right half unlocked” designation as it enters the battlefield if its right half was a cast as a spell. If it’s entering the battlefield and neither half was cast as a spell, it enters with neither unlocked designation."
+text = "A permanent with a shared type line is given the \"left half unlocked\" designation as it enters the battlefield if its left half was cast as a spell. It is given the \"right half unlocked\" designation as it enters the battlefield if its right half was a cast as a spell. If it's entering the battlefield and neither half was cast as a spell, it enters with neither unlocked designation."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Room cards not implemented."
 
 [cr_709_5e]
 rule = "709.5e"
-text = "A player who controls a permanent that has one or more locked halves may pay the mana cost of a locked half of that permanent to give that permanent the appropriate unlocked designation. This cost is referred to as an “unlock cost.” This is a special action (see rule 116). A player can take this action any time they have priority and the stack is empty during a main phase of their turn."
+text = "A player who controls a permanent that has one or more locked halves may pay the mana cost of a locked half of that permanent to give that permanent the appropriate unlocked designation. This cost is referred to as an \"unlock cost.\" This is a special action (see rule 116). A player can take this action any time they have priority and the stack is empty during a main phase of their turn."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Room cards not implemented."
 
 [cr_709_5f]
 rule = "709.5f"
-text = "Some spells and abilities instruct a player to “unlock” half of a permanent. To unlock half of a permanent, a player chooses a locked half of that permanent, and that permanent is given the appropriate unlocked designation."
+text = "Some spells and abilities instruct a player to \"unlock\" half of a permanent. To unlock half of a permanent, a player chooses a locked half of that permanent, and that permanent is given the appropriate unlocked designation."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Room cards not implemented."
 
 [cr_709_5g]
 rule = "709.5g"
-text = "Some spells and abilities instruct a player to “lock” half of a permanent. To lock half of a permanent, a player chooses an unlocked half of that permanent, and that permanent loses the appropriate unlocked designation."
+text = "Some spells and abilities instruct a player to \"lock\" half of a permanent. To lock half of a permanent, a player chooses an unlocked half of that permanent, and that permanent loses the appropriate unlocked designation."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Room cards not implemented."
 
 [cr_709_5h]
 rule = "709.5h"
@@ -162,20 +162,20 @@ text = "Some abilities trigger when a player unlocks a particular half of a perm
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Room cards not implemented."
 
 [cr_709_5i]
 rule = "709.5i"
-text = "Some abilities trigger when a player “fully unlocks” a permanent with a shared type line. Such an ability triggers when that permanent has one of the two unlocked designations and gets the other, or when it has neither designation and gains both."
+text = "Some abilities trigger when a player \"fully unlocks\" a permanent with a shared type line. Such an ability triggers when that permanent has one of the two unlocked designations and gets the other, or when it has neither designation and gains both."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Room cards not implemented."
 
 [cr_709_5j]
 rule = "709.5j"
-text = "Some cards refer to a “door” of a Room permanent. A door is a half of that permanent."
+text = "Some cards refer to a \"door\" of a Room permanent. A door is a half of that permanent."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Room cards not implemented."

@@ -10,28 +10,28 @@ text = "A player is one of the people in the game. The active player is the play
 status = "implemented"
 impl_files = ["game/effects/choose.rs:153", "game/players.rs:12"]
 test_files = []
-notes = ""
+notes = "PlayerId type and active_player tracking in GameState. players.rs provides helper functions for querying active/nonactive status."
 
 [cr_102_2]
 rule = "102.2"
-text = "In a two-player game, a player’s opponent is the other player."
+text = "In a two-player game, a player's opponent is the other player."
 status = "implemented"
 impl_files = ["game/players.rs:37"]
 test_files = []
-notes = ""
+notes = "opponents_of() in players.rs returns all players that are not the given player, covering both two-player and multiplayer cases."
 
 [cr_102_3]
 rule = "102.3"
-text = "In a multiplayer game between teams, a player’s teammates are the other players on their team, and the player’s opponents are all players not on their team."
+text = "In a multiplayer game between teams, a player's teammates are the other players on their team, and the player's opponents are all players not on their team."
 status = "implemented"
 impl_files = ["game/players.rs:37"]
 test_files = []
-notes = ""
+notes = "opponents_of() handles multiplayer opponents. Team-based play is partially handled via FormatConfig::team_based field."
 
 [cr_102_4]
 rule = "102.4"
-text = "A spell or ability may use the term “your team” as shorthand for “you and/or your teammates.” In a game that isn’t a multiplayer game between teams, “your team” means the same thing as “you.”"
+text = "A spell or ability may use the term \"your team\" as shorthand for \"you and/or your teammates.\" In a game that isn't a multiplayer game between teams, \"your team\" means the same thing as \"you.\""
 status = "implemented"
 impl_files = ["parser/oracle.rs:1205"]
 test_files = []
-notes = ""
+notes = "Parser handles 'your team' phrase, mapping it to controller in non-team games."

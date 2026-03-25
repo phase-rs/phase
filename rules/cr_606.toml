@@ -30,7 +30,7 @@ notes = ""
 
 [cr_606_4]
 rule = "606.4"
-text = "The cost to activate a loyalty ability of a permanent is to put on or remove from that permanent a certain number of loyalty counters, as shown by the loyalty symbol in the ability’s cost. This cost may be modified by other effects."
+text = "The cost to activate a loyalty ability of a permanent is to put on or remove from that permanent a certain number of loyalty counters, as shown by the loyalty symbol in the ability's cost. This cost may be modified by other effects."
 status = "implemented"
 impl_files = ["game/planeswalker.rs:59", "game/planeswalker.rs:101"]
 test_files = []
@@ -42,11 +42,11 @@ text = "If the total cost to activate a loyalty ability contains multiple costs 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple loyalty counter cost combination not yet implemented. Edge case for unusual planeswalker designs."
 
 [cr_606_6]
 rule = "606.6"
-text = "A loyalty ability with a negative loyalty cost, taking into account any additional costs, can’t be activated unless the permanent has at least that many loyalty counters on it."
+text = "A loyalty ability with a negative loyalty cost, taking into account any additional costs, can't be activated unless the permanent has at least that many loyalty counters on it."
 status = "implemented"
 impl_files = ["game/planeswalker.rs:90"]
 test_files = []

@@ -6,7 +6,7 @@ title = "Planeswalkers"
 
 [cr_306_1]
 rule = "306.1"
-text = "A player who has priority may cast a planeswalker card from their hand during a main phase of their turn when the stack is empty. Casting a planeswalker as a spell uses the stack. (See rule 601, “Casting Spells.”)"
+text = "A player who has priority may cast a planeswalker card from their hand during a main phase of their turn when the stack is empty. Casting a planeswalker as a spell uses the stack. (See rule 601, \"Casting Spells.\")"
 status = "implemented"
 impl_files = ["game/casting.rs:526"]
 test_files = []
@@ -15,46 +15,46 @@ notes = ""
 [cr_306_2]
 rule = "306.2"
 text = "When a planeswalker spell resolves, its controller puts it onto the battlefield under their control."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/stack.rs:106", "game/stack.rs:259"]
 test_files = []
-notes = ""
+notes = "is_permanent_type() includes CoreType::Planeswalker; planeswalker spells resolve to Zone::Battlefield."
 
 [cr_306_3]
 rule = "306.3"
-text = "Planeswalker subtypes are always a single word and are listed after a long dash: “Planeswalker — Jace.” Each word after the dash is a separate subtype. Planeswalker subtypes are also called planeswalker types. Planeswalkers may have multiple subtypes. See rule 205.3j for the complete list of planeswalker types."
-status = "missing"
-impl_files = []
+text = "Planeswalker subtypes are always a single word and are listed after a long dash: \"Planeswalker — Jace.\" Each word after the dash is a separate subtype. Planeswalker subtypes are also called planeswalker types. Planeswalkers may have multiple subtypes. See rule 205.3j for the complete list of planeswalker types."
+status = "implemented"
+impl_files = ["types/card_type.rs:110"]
 test_files = []
-notes = ""
+notes = "Planeswalker subtypes stored as strings in CardType.subtypes. Used in legend rule grouping by subtype (now by name after Oracle errata)."
 
 [cr_306_4]
 rule = "306.4"
-text = "Previously, planeswalkers were subject to a “planeswalker uniqueness rule” that stopped a player from controlling two planeswalkers of the same planeswalker type. This rule has been removed and planeswalker cards printed before this change have received errata in the Oracle card reference to have the legendary supertype. Like other legendary permanents, they are subject to the “legend rule” (see rule 704.5j)."
-status = "missing"
-impl_files = []
+text = "Previously, planeswalkers were subject to a \"planeswalker uniqueness rule\" that stopped a player from controlling two planeswalkers of the same planeswalker type. This rule has been removed and planeswalker cards printed before this change have received errata in the Oracle card reference to have the legendary supertype. Like other legendary permanents, they are subject to the \"legend rule\" (see rule 704.5j)."
+status = "implemented"
+impl_files = ["game/sba.rs:327"]
 test_files = []
-notes = ""
+notes = "check_legend_rule() applies to all Legendary permanents including planeswalkers. No planeswalker-specific uniqueness rule exists; the legend rule handles it."
 
 [cr_306_5]
 rule = "306.5"
 text = "Loyalty is a characteristic only planeswalkers have."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/card.rs:24", "game/game_object.rs:1"]
 test_files = []
-notes = ""
+notes = "CardFace.loyalty stores the printed loyalty value. GameObject.loyalty mirrors it and is updated by loyalty counter changes."
 
 [cr_306_5a]
 rule = "306.5a"
 text = "The loyalty of a planeswalker card not on the battlefield is equal to the number printed in its lower right corner."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/card.rs:24", "game/printed_cards.rs:25"]
 test_files = []
-notes = ""
+notes = "CardFace.loyalty stores the printed value. apply_card_face_to_object() parses it as u32 for the initial loyalty counter count."
 
 [cr_306_5b]
 rule = "306.5b"
-text = "A planeswalker has the intrinsic ability “This permanent enters with a number of loyalty counters on it equal to its printed loyalty number.” This ability creates a replacement effect (see rule 614.1c)."
+text = "A planeswalker has the intrinsic ability \"This permanent enters with a number of loyalty counters on it equal to its printed loyalty number.\" This ability creates a replacement effect (see rule 614.1c)."
 status = "implemented"
 impl_files = ["game/printed_cards.rs:38"]
 test_files = []
@@ -63,14 +63,14 @@ notes = ""
 [cr_306_5c]
 rule = "306.5c"
 text = "The loyalty of a planeswalker on the battlefield is equal to the number of loyalty counters on it."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/game_object.rs:1"]
 test_files = []
-notes = ""
+notes = "GameObject.loyalty tracks loyalty counter count on the battlefield. Loyalty ability costs add/remove loyalty counters via the counter system."
 
 [cr_306_5d]
 rule = "306.5d"
-text = "Each planeswalker has a number of loyalty abilities, which are activated abilities with loyalty symbols in their costs. Loyalty abilities follow special rules: A player may activate a loyalty ability of a permanent they control any time they have priority and the stack is empty during a main phase of their turn, but only if none of that permanent’s loyalty abilities have been activated that turn. See rule 606, “Loyalty Abilities.”"
+text = "Each planeswalker has a number of loyalty abilities, which are activated abilities with loyalty symbols in their costs. Loyalty abilities follow special rules: A player may activate a loyalty ability of a permanent they control any time they have priority and the stack is empty during a main phase of their turn, but only if none of that permanent's loyalty abilities have been activated that turn. See rule 606, \"Loyalty Abilities.\""
 status = "implemented"
 impl_files = ["game/planeswalker.rs:14", "game/planeswalker.rs:27"]
 test_files = []
@@ -78,19 +78,19 @@ notes = ""
 
 [cr_306_6]
 rule = "306.6"
-text = "Planeswalkers can be attacked. (See rule 508, “Declare Attackers Step.”)"
-status = "missing"
-impl_files = []
+text = "Planeswalkers can be attacked. (See rule 508, \"Declare Attackers Step.\")"
+status = "implemented"
+impl_files = ["game/combat.rs:143", "game/combat.rs:1"]
 test_files = []
-notes = ""
+notes = "combat.rs allows planeswalkers as attack targets. Attackers can be declared against planeswalker objects on the battlefield."
 
 [cr_306_7]
 rule = "306.7"
-text = "Previously, planeswalkers were subject to a redirection effect that allowed a player to have noncombat damage that would be dealt to an opponent be dealt to a planeswalker under that opponent’s control instead. This rule has been removed and certain cards have received errata in the Oracle card reference to deal damage directly to planeswalkers."
-status = "missing"
-impl_files = []
+text = "Previously, planeswalkers were subject to a redirection effect that allowed a player to have noncombat damage that would be dealt to an opponent be dealt to a planeswalker under that opponent's control instead. This rule has been removed and certain cards have received errata in the Oracle card reference to deal damage directly to planeswalkers."
+status = "implemented"
+impl_files = ["game/effects/deal_damage.rs:1"]
 test_files = []
-notes = ""
+notes = "No damage redirection to planeswalkers exists in the engine. Damage to planeswalkers comes from direct targeting (Oracle errata)."
 
 [cr_306_8]
 rule = "306.8"
@@ -102,7 +102,7 @@ notes = ""
 
 [cr_306_9]
 rule = "306.9"
-text = "If a planeswalker’s loyalty is 0, it’s put into its owner’s graveyard. (This is a state-based action. See rule 704.)"
+text = "If a planeswalker's loyalty is 0, it's put into its owner's graveyard. (This is a state-based action. See rule 704.)"
 status = "implemented"
 impl_files = ["game/sba.rs:111", "game/sba.rs:446"]
 test_files = []

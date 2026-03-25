@@ -6,19 +6,19 @@ title = "Drawing a Card"
 
 [cr_121_1]
 rule = "121.1"
-text = "A player draws a card by putting the top card of their library into their hand. This is done as a turn-based action during each player’s draw step. It may also be done as part of a cost or effect of a spell or ability."
+text = "A player draws a card by putting the top card of their library into their hand. This is done as a turn-based action during each player's draw step. It may also be done as part of a cost or effect of a spell or ability."
 status = "implemented"
 impl_files = ["game/effects/draw.rs:12", "game/effects/gift_delivery.rs:89", "types/triggers.rs:109"]
-test_files = []
-notes = ""
+test_files = ["game/effects/draw.rs:112"]
+notes = "draw.rs:12 annotates CR 121.1 — top card of library moves to hand. Tests verify card is moved from library zone to hand."
 
 [cr_121_2]
 rule = "121.2"
 text = "Cards may only be drawn one at a time. If a player is instructed to draw multiple cards, that player performs that many individual card draws."
 status = "implemented"
 impl_files = ["game/triggers.rs:852", "parser/oracle_trigger.rs:2088"]
-test_files = []
-notes = ""
+test_files = ["game/effects/draw.rs:131"]
+notes = "draw.rs loops count times, performing one draw per iteration. Each draw fires its own CardDrawn trigger independently."
 
 [cr_121_2a]
 rule = "121.2a"
@@ -26,15 +26,15 @@ text = "An instruction to draw multiple cards can be modified by replacement eff
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Replacement effects that modify the total number of cards drawn (e.g., 'draw X instead' effects on the entire draw instruction) are not implemented."
 
 [cr_121_2b]
 rule = "121.2b"
-text = "Some effects say that a player can’t draw more than one card each turn. Such an effect applies to individual card draws. Instructions to draw multiple cards may still be partially carried out. However, if an effect offers the player a choice to draw multiple cards, the affected player can’t choose to do so. Similarly, the player can’t pay a cost that includes drawing multiple cards."
+text = "Some effects say that a player can't draw more than one card each turn. Such an effect applies to individual card draws. Instructions to draw multiple cards may still be partially carried out. However, if an effect offers the player a choice to draw multiple cards, the affected player can't choose to do so. Similarly, the player can't pay a cost that includes drawing multiple cards."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "'Can't draw more than one card per turn' restriction is not implemented."
 
 [cr_121_2c]
 rule = "121.2c"
@@ -42,47 +42,47 @@ text = "If more than one player is instructed to draw cards, the active player p
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multi-player simultaneous draw ordering (APNAP) is not explicitly enforced for group draw effects."
 
 [cr_121_2d]
 rule = "121.2d"
-text = "If more than one player is instructed to draw cards in a game that’s using the shared team turns option (such as a Two-Headed Giant game), first each player on the active team, in whatever order that team likes, performs their draws, then each player on each nonactive team in turn order does the same."
-status = "missing"
+text = "If more than one player is instructed to draw cards in a game that's using the shared team turns option (such as a Two-Headed Giant game), first each player on the active team, in whatever order that team likes, performs their draws, then each player on each nonactive team in turn order does the same."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Shared team turns option (Two-Headed Giant) is not implemented."
 
 [cr_121_3]
 rule = "121.3"
-text = "If there are no cards in a player’s library and an effect offers that player the choice to draw a card, that player can choose to do so. However, if an effect says that a player can’t draw cards and another effect offers that player the choice to draw a card, that player can’t choose to do so."
+text = "If there are no cards in a player's library and an effect offers that player the choice to draw a card, that player can choose to do so. However, if an effect says that a player can't draw cards and another effect offers that player the choice to draw a card, that player can't choose to do so."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Optional draw choices from empty libraries and 'can't draw' restrictions on choice availability are not explicitly handled."
 
 [cr_121_3a]
 rule = "121.3a"
-text = "The same principles apply if the player who’s making the choice is not the player who would draw the card. If the latter player has no cards in their library, the choice can be taken. If an effect says that the latter player can’t draw a card, the choice can’t be taken."
+text = "The same principles apply if the player who's making the choice is not the player who would draw the card. If the latter player has no cards in their library, the choice can be taken. If an effect says that the latter player can't draw a card, the choice can't be taken."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Third-party draw choices (e.g., 'target player draws a card') with empty-library or can't-draw validation are not explicitly handled."
 
 [cr_121_4]
 rule = "121.4"
 text = "A player who attempts to draw a card from a library with no cards in it loses the game the next time a player would receive priority. (This is a state-based action. See rule 704.)"
 status = "implemented"
-impl_files = ["game/effects/draw.rs:52"]
-test_files = []
-notes = ""
+impl_files = ["game/effects/draw.rs:52", "game/sba.rs:64", "game/sba.rs:147"]
+test_files = ["game/effects/draw.rs:183", "game/sba.rs:1319"]
+notes = "draw.rs sets drew_from_empty_library = true when attempting to draw with an empty library. SBA check_draw_from_empty() at sba.rs:147 eliminates the player at the next priority checkpoint."
 
 [cr_121_5]
 rule = "121.5"
-text = "If an effect moves cards from a player’s library to that player’s hand without using the word “draw,” the player has not drawn those cards. This makes a difference for abilities that trigger on drawing cards and effects that replace card draws, as well as if the player’s library is empty."
+text = "If an effect moves cards from a player's library to that player's hand without using the word \"draw,\" the player has not drawn those cards. This makes a difference for abilities that trigger on drawing cards and effects that replace card draws, as well as if the player's library is empty."
 status = "implemented"
 impl_files = ["parser/oracle_effect/counter.rs:129", "parser/oracle_effect/types.rs:435", "types/ability.rs:1847"]
 test_files = []
-notes = ""
+notes = "Effects that 'put into hand' use Effect::ChangeZone rather than Effect::DrawCards. This bypasses CardDrawn triggers and draw replacement effects."
 
 [cr_121_6]
 rule = "121.6"
@@ -90,15 +90,15 @@ text = "Some effects replace card draws."
 status = "implemented"
 impl_files = ["parser/oracle_effect/mod.rs:416", "parser/oracle_effect/mod.rs:619", "parser/oracle_trigger.rs:2121", "parser/oracle_trigger.rs:2153", "parser/oracle_trigger.rs:2193", "parser/oracle_trigger.rs:4601", "parser/oracle_trigger.rs:4613"]
 test_files = []
-notes = ""
+notes = "ReplacementEvent::DrawCard is supported. Looting-style replacements ('draw, then discard') and draw replacement triggers are implemented."
 
 [cr_121_6a]
 rule = "121.6a"
-text = "An effect that replaces a card draw is applied even if no cards could be drawn because there are no cards in the affected player’s library."
+text = "An effect that replaces a card draw is applied even if no cards could be drawn because there are no cards in the affected player's library."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Draw replacement effects are not explicitly applied when the library is empty; the empty-draw flag logic may prevent the replacement from seeing the draw event."
 
 [cr_121_6b]
 rule = "121.6b"
@@ -106,31 +106,31 @@ text = "If an effect replaces a draw within a sequence of card draws, the replac
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Per-draw replacement ordering within a multi-draw sequence is not explicitly enforced."
 
 [cr_121_6c]
 rule = "121.6c"
-text = "Some effects perform additional actions on a card after it’s drawn. If the draw is replaced, the additional action is not performed on any cards that are drawn as a result of that replacement effect or any subsequent replacement effects."
+text = "Some effects perform additional actions on a card after it's drawn. If the draw is replaced, the additional action is not performed on any cards that are drawn as a result of that replacement effect or any subsequent replacement effects."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Post-draw additional actions (e.g., 'draw a card, if you do, put it on top') interaction with draw replacements is not explicitly modeled."
 
 [cr_121_7]
 rule = "121.7"
-text = "Some replacement effects and prevention effects result in one or more card draws. In such a case, if there are any parts of the original event that haven’t been replaced, those parts occur first, then the card draws happen one at a time."
+text = "Some replacement effects and prevention effects result in one or more card draws. In such a case, if there are any parts of the original event that haven't been replaced, those parts occur first, then the card draws happen one at a time."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Partial-replacement ordering (original event first, then draw) is not explicitly sequenced in the replacement engine."
 
 [cr_121_8]
 rule = "121.8"
-text = "If a spell or ability causes a card to be drawn while another spell is being cast, the drawn card is kept face down until that spell becomes cast (see rule 601.2i) or until the casting process is reversed (see rule 732, “Handling Illegal Actions”). The same is true with relation to another ability being activated. If an effect allows or instructs a player to reveal the card as it’s being drawn, it’s revealed after the spell becomes cast or the ability becomes activated. While face down, the drawn card is considered to have no characteristics and can’t be used to pay any part of the cost of the spell or ability that would require the card to have specific characteristics."
+text = "If a spell or ability causes a card to be drawn while another spell is being cast, the drawn card is kept face down until that spell becomes cast (see rule 601.2i) or until the casting process is reversed (see rule 732, \"Handling Illegal Actions\"). The same is true with relation to another ability being activated. If an effect allows or instructs a player to reveal the card as it's being drawn, it's revealed after the spell becomes cast or the ability becomes activated. While face down, the drawn card is considered to have no characteristics and can't be used to pay any part of the cost of the spell or ability that would require the card to have specific characteristics."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Drawing during casting (e.g., Gitaxian Probe-style effects as additional costs) with face-down treatment is not implemented."
 
 [cr_121_9]
 rule = "121.9"
@@ -138,4 +138,4 @@ text = "If an effect gives a player the option to reveal a card as they draw it,
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Optional reveal-on-draw choices are not implemented."

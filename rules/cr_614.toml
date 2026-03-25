@@ -6,7 +6,7 @@ title = "Replacement Effects"
 
 [cr_614_1]
 rule = "614.1"
-text = "Some continuous effects are replacement effects. Like prevention effects (see rule 615), replacement effects apply continuously as events happen—they aren’t locked in ahead of time. Such effects watch for a particular event that would happen and completely or partially replace that event with a different event. They act like “shields” around whatever they’re affecting."
+text = "Some continuous effects are replacement effects. Like prevention effects (see rule 615), replacement effects apply continuously as events happen—they aren't locked in ahead of time. Such effects watch for a particular event that would happen and completely or partially replace that event with a different event. They act like \"shields\" around whatever they're affecting."
 status = "implemented"
 impl_files = ["game/effects/change_zone.rs:64", "game/effects/change_zone.rs:112", "game/effects/counters.rs:12", "game/replacement.rs:19", "game/replacement.rs:720", "game/turns.rs:383", "parser/oracle_effect/sequence.rs:441", "parser/oracle_effect/sequence.rs:698", "parser/oracle_effect/types.rs:151", "types/ability.rs:1720", "types/replacements.rs:10"]
 test_files = []
@@ -14,7 +14,7 @@ notes = ""
 
 [cr_614_1a]
 rule = "614.1a"
-text = "Effects that use the word “instead” are replacement effects. Most replacement effects use the word “instead” to indicate what events will be replaced with other events."
+text = "Effects that use the word \"instead\" are replacement effects. Most replacement effects use the word \"instead\" to indicate what events will be replaced with other events."
 status = "implemented"
 impl_files = ["game/effects/discard.rs:207", "game/effects/draw.rs:31", "game/effects/life.rs:61", "game/effects/token.rs:375", "game/replacement.rs:118", "game/replacement.rs:132", "game/replacement.rs:354", "game/replacement.rs:479", "game/replacement.rs:537", "game/replacement.rs:572", "game/replacement.rs:942", "game/replacement.rs:968", "game/replacement.rs:1151", "game/replacement.rs:1160", "game/replacement.rs:1170", "game/replacement.rs:1184", "parser/oracle.rs:1270", "parser/oracle_replacement.rs:158", "parser/oracle_replacement.rs:191", "parser/oracle_replacement.rs:197", "parser/oracle_replacement.rs:203", "parser/oracle_replacement.rs:707", "parser/oracle_replacement.rs:883", "parser/oracle_replacement.rs:914", "parser/oracle_replacement.rs:932", "parser/oracle_replacement.rs:974", "parser/oracle_replacement.rs:1012", "parser/oracle_replacement.rs:2055", "parser/oracle_replacement.rs:2070", "parser/oracle_replacement.rs:2086", "parser/oracle_replacement.rs:2097", "parser/oracle_replacement.rs:2118", "parser/oracle_replacement.rs:2129", "types/ability.rs:3432", "types/ability.rs:3446", "types/ability.rs:3459", "types/ability.rs:3471", "types/ability.rs:3510", "types/ability.rs:3513", "types/ability.rs:3518", "types/ability.rs:3523", "types/ability.rs:3530", "types/ability.rs:3533", "types/proposed_event.rs:78", "types/replacements.rs:10", "types/replacements.rs:19", "types/replacements.rs:23", "types/replacements.rs:27", "types/replacements.rs:29", "types/replacements.rs:33", "types/replacements.rs:37", "types/replacements.rs:39", "types/replacements.rs:41", "types/replacements.rs:43", "types/replacements.rs:45", "types/replacements.rs:47", "types/replacements.rs:51", "types/replacements.rs:53", "types/replacements.rs:55", "types/replacements.rs:57", "types/replacements.rs:65", "types/replacements.rs:67", "types/replacements.rs:69"]
 test_files = []
@@ -22,7 +22,7 @@ notes = ""
 
 [cr_614_1b]
 rule = "614.1b"
-text = "Effects that use the word “skip” are replacement effects. These replacement effects use the word “skip” to indicate what events, steps, phases, or turns will be replaced with nothing."
+text = "Effects that use the word \"skip\" are replacement effects. These replacement effects use the word \"skip\" to indicate what events, steps, phases, or turns will be replaced with nothing."
 status = "implemented"
 impl_files = ["types/replacements.rs:11", "types/replacements.rs:74", "types/replacements.rs:76"]
 test_files = []
@@ -30,7 +30,7 @@ notes = ""
 
 [cr_614_1c]
 rule = "614.1c"
-text = "Effects that read “[This permanent] enters with . . . ,” “As [this permanent] enters . . . ,” or “[This permanent] enters as . . . “ are replacement effects."
+text = "Effects that read \"[This permanent] enters with . . . ,\" \"As [this permanent] enters . . . ,\" or \"[This permanent] enters as . . . \" are replacement effects."
 status = "implemented"
 impl_files = ["game/effects/discard.rs:194", "game/replacement.rs:1021", "parser/oracle_replacement.rs:316", "parser/oracle_replacement.rs:411", "types/ability.rs:3144", "types/replacements.rs:11"]
 test_files = []
@@ -38,7 +38,7 @@ notes = ""
 
 [cr_614_1d]
 rule = "614.1d"
-text = "Continuous effects that read “[This permanent] enters . . .” or “[Objects] enter [the battlefield] . . .” are replacement effects."
+text = "Continuous effects that read \"[This permanent] enters . . .\" or \"[Objects] enter [the battlefield] . . .\" are replacement effects."
 status = "implemented"
 impl_files = ["game/replacement.rs:1037", "game/replacement.rs:1048", "game/replacement.rs:1053", "game/static_abilities.rs:107", "game/zones.rs:46", "game/zones.rs:326", "parser/oracle_replacement.rs:48", "parser/oracle_replacement.rs:62", "parser/oracle_replacement.rs:73", "parser/oracle_replacement.rs:469", "parser/oracle_replacement.rs:498", "parser/oracle_replacement.rs:1027", "parser/oracle_replacement.rs:1060", "parser/oracle_replacement.rs:1087", "types/ability.rs:3151", "types/ability.rs:3156", "types/ability.rs:3159", "types/ability.rs:3162"]
 test_files = []
@@ -46,7 +46,7 @@ notes = ""
 
 [cr_614_1e]
 rule = "614.1e"
-text = "Effects that read “As [this permanent] is turned face up . . . ,” are replacement effects."
+text = "Effects that read \"As [this permanent] is turned face up . . . ,\" are replacement effects."
 status = "implemented"
 impl_files = ["types/replacements.rs:31"]
 test_files = []
@@ -62,7 +62,7 @@ notes = ""
 
 [cr_614_3]
 rule = "614.3"
-text = "There are no special restrictions on casting a spell or activating an ability that generates a replacement effect. Such effects last until they’re used up or their duration has expired."
+text = "There are no special restrictions on casting a spell or activating an ability that generates a replacement effect. Such effects last until they're used up or their duration has expired."
 status = "implemented"
 impl_files = ["game/sba.rs:95"]
 test_files = []
@@ -70,7 +70,7 @@ notes = ""
 
 [cr_614_4]
 rule = "614.4"
-text = "Replacement effects must exist before the appropriate event occurs—they can’t “go back in time” and change something that’s already happened. Spells or abilities that generate these effects are often cast or activated in response to whatever would produce the event and thus resolve before that event would occur."
+text = "Replacement effects must exist before the appropriate event occurs—they can't \"go back in time\" and change something that's already happened. Spells or abilities that generate these effects are often cast or activated in response to whatever would produce the event and thus resolve before that event would occur."
 status = "implemented"
 impl_files = ["game/replacement.rs:1364"]
 test_files = []
@@ -78,7 +78,7 @@ notes = ""
 
 [cr_614_5]
 rule = "614.5"
-text = "A replacement effect doesn’t invoke itself repeatedly; it gets only one opportunity to affect an event or any modified events that may replace that event."
+text = "A replacement effect doesn't invoke itself repeatedly; it gets only one opportunity to affect an event or any modified events that may replace that event."
 status = "implemented"
 impl_files = ["types/replacements.rs:12"]
 test_files = []
@@ -86,7 +86,7 @@ notes = ""
 
 [cr_614_6]
 rule = "614.6"
-text = "If an event is replaced, it never happens. A modified event occurs instead, which may in turn trigger abilities. Note that the modified event may contain instructions that can’t be carried out, in which case the impossible instruction is simply ignored."
+text = "If an event is replaced, it never happens. A modified event occurs instead, which may in turn trigger abilities. Note that the modified event may contain instructions that can't be carried out, in which case the impossible instruction is simply ignored."
 status = "implemented"
 impl_files = ["game/replacement.rs:1135", "game/replacement.rs:1256", "game/replacement.rs:1283", "game/replacement.rs:1928", "types/ability.rs:3506"]
 test_files = []
@@ -94,7 +94,7 @@ notes = ""
 
 [cr_614_7]
 rule = "614.7"
-text = "If a replacement effect would replace an event, but that event never happens, the replacement effect simply doesn’t do anything."
+text = "If a replacement effect would replace an event, but that event never happens, the replacement effect simply doesn't do anything."
 status = "implemented"
 impl_files = ["game/effects/deal_damage.rs:184", "game/effects/deal_damage.rs:204", "game/effects/life.rs:88", "game/effects/life.rs:106", "game/effects/life.rs:145", "game/effects/life.rs:156", "game/effects/life.rs:195", "types/replacements.rs:13"]
 test_files = []
@@ -103,14 +103,14 @@ notes = ""
 [cr_614_7a]
 rule = "614.7a"
 text = "If a source would deal 0 damage, it does not deal damage at all. Replacement effects that would increase the damage dealt by that source, or would have that source deal that damage to a different object or player, have no event to replace, so they have no effect."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/deal_damage.rs:184", "game/effects/deal_damage.rs:204"]
 test_files = []
-notes = ""
+notes = "deal_damage.rs guards against 0-damage events before entering replacement pipeline."
 
 [cr_614_8]
 rule = "614.8"
-text = "Regeneration is a destruction-replacement effect. The word “instead” doesn’t appear on the card but is implicit in the definition of regeneration. “Regenerate [permanent]” means “The next time [permanent] would be destroyed this turn, instead remove all damage marked on it and its controller taps it. If it’s an attacking or blocking creature, remove it from combat.” Abilities that trigger from damage being dealt still trigger even if the permanent regenerates. See rule 701.19."
+text = "Regeneration is a destruction-replacement effect. The word \"instead\" doesn't appear on the card but is implicit in the definition of regeneration. \"Regenerate [permanent]\" means \"The next time [permanent] would be destroyed this turn, instead remove all damage marked on it and its controller taps it. If it's an attacking or blocking creature, remove it from combat.\" Abilities that trigger from damage being dealt still trigger even if the permanent regenerates. See rule 701.19."
 status = "implemented"
 impl_files = ["game/effects/regenerate.rs:45", "types/replacements.rs:21"]
 test_files = []
@@ -122,11 +122,11 @@ text = "Some effects replace damage dealt to one battle, creature, planeswalker,
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Redirection effects not yet implemented."
 
 [cr_614_10]
 rule = "614.10"
-text = "An effect that causes a player to skip an event, step, phase, or turn is a replacement effect. “Skip [something]” is the same as “Instead of doing [something], do nothing.” Once a step, phase, or turn has started, it can no longer be skipped—any skip effects will wait until the next occurrence."
+text = "An effect that causes a player to skip an event, step, phase, or turn is a replacement effect. \"Skip [something]\" is the same as \"Instead of doing [something], do nothing.\" Once a step, phase, or turn has started, it can no longer be skipped—any skip effects will wait until the next occurrence."
 status = "implemented"
 impl_files = ["types/replacements.rs:76"]
 test_files = []
@@ -134,11 +134,11 @@ notes = ""
 
 [cr_614_10a]
 rule = "614.10a"
-text = "Anything scheduled for a skipped step, phase, or turn won’t happen. Anything scheduled for the “next” occurrence of something waits for the first occurrence that isn’t skipped. If two effects each cause a player to skip their next occurrence, that player must skip the next two; one effect will be satisfied in skipping the first occurrence, while the other will remain until another occurrence can be skipped."
+text = "Anything scheduled for a skipped step, phase, or turn won't happen. Anything scheduled for the \"next\" occurrence of something waits for the first occurrence that isn't skipped. If two effects each cause a player to skip their next occurrence, that player must skip the next two; one effect will be satisfied in skipping the first occurrence, while the other will remain until another occurrence can be skipped."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple-skip stacking not explicitly tracked."
 
 [cr_614_10b]
 rule = "614.10b"
@@ -146,11 +146,11 @@ text = "Some effects cause a player to skip a step, phase, or turn, then take an
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Skip-then-take-action not modeled."
 
 [cr_614_11]
 rule = "614.11"
-text = "Some effects replace card draws. These effects are applied even if no cards could be drawn because there are no cards in the affected player’s library."
+text = "Some effects replace card draws. These effects are applied even if no cards could be drawn because there are no cards in the affected player's library."
 status = "implemented"
 impl_files = ["types/replacements.rs:25", "types/replacements.rs:61"]
 test_files = []
@@ -159,10 +159,10 @@ notes = ""
 [cr_614_11a]
 rule = "614.11a"
 text = "If an effect replaces a draw within a sequence of card draws, all actions required by the replacement are completed, if possible, before resuming the sequence."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/draw.rs:31", "game/replacement.rs:332"]
 test_files = []
-notes = ""
+notes = "Draw replacement is applied per-draw within a multi-draw sequence."
 
 [cr_614_11b]
 rule = "614.11b"
@@ -170,11 +170,11 @@ text = "If an effect would have a player both draw a card and perform an additio
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Draw-with-additional-action replacement not explicitly modeled."
 
 [cr_614_12]
 rule = "614.12"
-text = "Some replacement effects modify how a permanent enters the battlefield. (See rules 614.1c–d.) Such effects may come from the permanent itself if they affect only that permanent (as opposed to a general subset of permanents that includes it). They may also come from other sources. To determine which replacement effects apply and how they apply, check the characteristics of the permanent as it would exist on the battlefield, taking into account replacement effects that have already modified how it enters the battlefield (see rule 616.1), continuous effects from the permanent’s own static abilities that would apply to it once it’s on the battlefield, and continuous effects that already exist and would apply to the permanent."
+text = "Some replacement effects modify how a permanent enters the battlefield. (See rules 614.1c–d.) Such effects may come from the permanent itself if they affect only that permanent (as opposed to a general subset of permanents that includes it). They may also come from other sources. To determine which replacement effects apply and how they apply, check the characteristics of the permanent as it would exist on the battlefield, taking into account replacement effects that have already modified how it enters the battlefield (see rule 616.1), continuous effects from the permanent's own static abilities that would apply to it once it's on the battlefield, and continuous effects that already exist and would apply to the permanent."
 status = "implemented"
 impl_files = ["game/replacement.rs:1076", "parser/oracle_replacement.rs:638", "types/replacements.rs:35"]
 test_files = []
@@ -183,10 +183,10 @@ notes = ""
 [cr_614_12a]
 rule = "614.12a"
 text = "If a replacement effect that modifies how a permanent enters the battlefield requires a choice, that choice is made before the permanent enters the battlefield."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/replacement.rs:1076", "game/engine.rs:3190"]
 test_files = []
-notes = ""
+notes = "ETB replacement choices (e.g. enters with counters) are evaluated before the zone change."
 
 [cr_614_12b]
 rule = "614.12b"
@@ -194,67 +194,67 @@ text = "If multiple replacement effects that require choices from a player would
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multi-permanent simultaneous ETB replacement choice constraint not modeled."
 
 [cr_614_12c]
 rule = "614.12c"
-text = "Some replacement effects cause a permanent to enter the battlefield with its controller’s choice of one of two abilities, each marked with an anchor word and preceded by a bullet point. “[Anchor word] — [ability]” means “As long as [anchor word] was chosen as this permanent entered the battlefield, this permanent has [ability].” The abilities preceded by anchor words are each linked to the ability that causes a player to choose between them. See rule 607, “Linked Abilities.”"
+text = "Some replacement effects cause a permanent to enter the battlefield with its controller's choice of one of two abilities, each marked with an anchor word and preceded by a bullet point. \"[Anchor word] — [ability]\" means \"As long as [anchor word] was chosen as this permanent entered the battlefield, this permanent has [ability].\" The abilities preceded by anchor words are each linked to the ability that causes a player to choose between them. See rule 607, \"Linked Abilities.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Anchor word abilities not implemented."
 
 [cr_614_13]
 rule = "614.13"
 text = "An effect that modifies how a permanent enters the battlefield may cause other objects to change zones."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/replacement.rs:1076", "game/zones.rs:46"]
 test_files = []
-notes = ""
+notes = "ETB replacement effects like 'exile X cards' cause zone changes during ETB processing."
 
 [cr_614_13a]
 rule = "614.13a"
-text = "While applying an effect that modifies how a permanent enters the battlefield, you may have to choose a number of objects that will also change zones. You can’t choose the object that will become that permanent or any other object entering the battlefield at the same time as that object."
+text = "While applying an effect that modifies how a permanent enters the battlefield, you may have to choose a number of objects that will also change zones. You can't choose the object that will become that permanent or any other object entering the battlefield at the same time as that object."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "ETB zone-change choice restriction not modeled."
 
 [cr_614_13b]
 rule = "614.13b"
-text = "The same object can’t be chosen to change zones more than once when applying replacement effects that modify how one or more permanents enter the battlefield."
+text = "The same object can't be chosen to change zones more than once when applying replacement effects that modify how one or more permanents enter the battlefield."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Duplicate-choice prevention for ETB zone changes not implemented."
 
 [cr_614_13c]
 rule = "614.13c"
-text = "While applying a replacement effect that modifies how a permanent enters the battlefield, another replacement effect may cause a player to mill cards or exile cards from the top of a library. In that case, any card that is entering the battlefield from that library won’t be included in that effect, even though those cards are in the library as the effect is applied."
+text = "While applying a replacement effect that modifies how a permanent enters the battlefield, another replacement effect may cause a player to mill cards or exile cards from the top of a library. In that case, any card that is entering the battlefield from that library won't be included in that effect, even though those cards are in the library as the effect is applied."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "ETB-from-library exclusion during mill/exile replacement not explicitly handled."
 
 [cr_614_14]
 rule = "614.14"
-text = "An object may have one ability printed on it that generates a replacement effect which causes one or more cards to be exiled, and another ability that refers either to “the exiled cards” or to cards “exiled with [this object].” These abilities are linked: the second refers only to cards in the exile zone that were put there as a direct result of the replacement event caused by the first. If another object gains a pair of linked abilities, the abilities will be similarly linked on that object. They can’t be linked to any other ability, regardless of what other abilities the object may currently have or may have had in the past. See rule 607, “Linked Abilities.”"
+text = "An object may have one ability printed on it that generates a replacement effect which causes one or more cards to be exiled, and another ability that refers either to \"the exiled cards\" or to cards \"exiled with [this object].\" These abilities are linked: the second refers only to cards in the exile zone that were put there as a direct result of the replacement event caused by the first. If another object gains a pair of linked abilities, the abilities will be similarly linked on that object. They can't be linked to any other ability, regardless of what other abilities the object may currently have or may have had in the past. See rule 607, \"Linked Abilities.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Replacement-effect exile linking distinct from activated ability exile linking not tracked."
 
 [cr_614_15]
 rule = "614.15"
-text = "Some replacement effects are not continuous effects. Rather, they are an effect of a resolving spell or ability that replace part or all of that spell or ability’s own effect(s). Such effects are called self-replacement effects. The text creating a self-replacement effect is usually part of the ability whose effect is being replaced, but the text can be a separate ability, particularly when preceded by an ability word. When applying replacement effects to an event, self-replacement effects are applied before other replacement effects."
+text = "Some replacement effects are not continuous effects. Rather, they are an effect of a resolving spell or ability that replace part or all of that spell or ability's own effect(s). Such effects are called self-replacement effects. The text creating a self-replacement effect is usually part of the ability whose effect is being replaced, but the text can be a separate ability, particularly when preceded by an ability word. When applying replacement effects to an event, self-replacement effects are applied before other replacement effects."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Self-replacement effects not distinguished from other replacement effects in the pipeline."
 
 [cr_614_16]
 rule = "614.16"
-text = "Some replacement effects apply “if an effect would create one or more tokens” or “if an effect would put one or more counters on a permanent.” These replacement effects apply if the effect of a resolving spell or ability creates a token or puts a counter on a permanent, and they also apply if another replacement or prevention effect does so, even if the original event being modified wasn’t itself an effect."
+text = "Some replacement effects apply \"if an effect would create one or more tokens\" or \"if an effect would put one or more counters on a permanent.\" These replacement effects apply if the effect of a resolving spell or ability creates a token or puts a counter on a permanent, and they also apply if another replacement or prevention effect does so, even if the original event being modified wasn't itself an effect."
 status = "implemented"
 impl_files = ["game/effects/add_restriction.rs:5", "game/replacement.rs:887", "game/replacement.rs:1178", "parser/oracle_effect/mod.rs:211", "parser/oracle_effect/mod.rs:348", "types/ability.rs:605", "types/ability.rs:2018"]
 test_files = []
@@ -262,40 +262,40 @@ notes = ""
 
 [cr_614_17]
 rule = "614.17"
-text = "Some effects state that something can’t happen. These effects aren’t replacement effects, but follow similar rules."
-status = "missing"
-impl_files = []
+text = "Some effects state that something can't happen. These effects aren't replacement effects, but follow similar rules."
+status = "implemented"
+impl_files = ["game/restrictions.rs:1", "game/static_abilities.rs:168"]
 test_files = []
-notes = ""
+notes = "Can't-happen effects modeled as restrictions and static prohibitions."
 
 [cr_614_17a]
 rule = "614.17a"
-text = "“Can’t” effects must exist before the appropriate event occurs—they can’t “go back in time” and change something that’s already happened."
-status = "missing"
-impl_files = []
+text = "\"Can't\" effects must exist before the appropriate event occurs—they can't \"go back in time\" and change something that's already happened."
+status = "implemented"
+impl_files = ["game/restrictions.rs:1"]
 test_files = []
-notes = ""
+notes = "Restrictions are checked prospectively, not retroactively."
 
 [cr_614_17b]
 rule = "614.17b"
-text = "If an event can’t happen, a player can’t choose to pay a cost that includes that event."
-status = "missing"
-impl_files = []
+text = "If an event can't happen, a player can't choose to pay a cost that includes that event."
+status = "implemented"
+impl_files = ["game/casting.rs:1516", "game/restrictions.rs:259"]
 test_files = []
-notes = ""
+notes = "can_pay_ability_cost_now() checks restrictions before allowing cost payment."
 
 [cr_614_17c]
 rule = "614.17c"
-text = "If an event can’t happen, it can only be replaced by a self-replacement effect (see rule 614.15). Other replacement and/or prevention effects can’t modify or replace it."
+text = "If an event can't happen, it can only be replaced by a self-replacement effect (see rule 614.15). Other replacement and/or prevention effects can't modify or replace it."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Self-replacement priority for can't-happen events not modeled."
 
 [cr_614_17d]
 rule = "614.17d"
-text = "Some “can’t” effects modify how a permanent enters the battlefield or whether it can enter the battlefield. Such effects may come from the permanent itself if they affect only that permanent (as opposed to a general subset of permanents that includes it). They may also come from other sources. To determine which “can’t” effects apply, check the characteristics of the permanent as it would exist on the battlefield, taking into account replacement effects that have already modified how it enters the battlefield (see rule 616.1), continuous effects from the permanent’s own static abilities that would apply to it once it’s on the battlefield, and continuous effects that already exist and would apply to the permanent."
+text = "Some \"can't\" effects modify how a permanent enters the battlefield or whether it can enter the battlefield. Such effects may come from the permanent itself if they affect only that permanent (as opposed to a general subset of permanents that includes it). They may also come from other sources. To determine which \"can't\" effects apply, check the characteristics of the permanent as it would exist on the battlefield, taking into account replacement effects that have already modified how it enters the battlefield (see rule 616.1), continuous effects from the permanent's own static abilities that would apply to it once it's on the battlefield, and continuous effects that already exist and would apply to the permanent."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Can't-enter-battlefield effects not explicitly modeled."

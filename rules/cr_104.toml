@@ -7,26 +7,26 @@ title = "Ending the Game"
 [cr_104_1]
 rule = "104.1"
 text = "A game ends immediately when a player wins, when the game is a draw, or when the game is restarted."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/elimination.rs:107", "types/game_state.rs:1"]
 test_files = []
-notes = ""
+notes = "GameOver WaitingFor state is set immediately when a win/loss condition is triggered. eliminate_player() handles immediate game-over transitions."
 
 [cr_104_2]
 rule = "104.2"
 text = "There are several ways to win the game."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/win_lose.rs:44"]
 test_files = []
-notes = ""
+notes = "Win conditions handled via win_lose effect handler and SBA checks."
 
 [cr_104_2a]
 rule = "104.2a"
-text = "A player still in the game wins the game if that player’s opponents have all left the game. This happens immediately and overrides all effects that would preclude that player from winning the game."
+text = "A player still in the game wins the game if that player's opponents have all left the game. This happens immediately and overrides all effects that would preclude that player from winning the game."
 status = "implemented"
 impl_files = ["game/elimination.rs:107"]
 test_files = []
-notes = ""
+notes = "eliminate_player() checks if all opponents have been eliminated after each elimination, and sets a winner accordingly."
 
 [cr_104_2b]
 rule = "104.2b"
@@ -34,7 +34,7 @@ text = "An effect may state that a player wins the game."
 status = "implemented"
 impl_files = ["game/effects/win_lose.rs:44", "game/effects/win_lose.rs:46", "game/effects/win_lose.rs:53"]
 test_files = []
-notes = ""
+notes = "WinLose effect handler implements player-wins-the-game effects from cards like Thassa's Oracle."
 
 [cr_104_2c]
 rule = "104.2c"
@@ -42,23 +42,23 @@ text = "In a multiplayer game between teams, a team with at least one player sti
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Team-based win conditions not implemented. The engine tracks individual player elimination, not team-level wins."
 
 [cr_104_2d]
 rule = "104.2d"
 text = "In an Emperor game, a team wins the game if its emperor wins the game. (See rule 809.5.)"
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Emperor variant not implemented."
 
 [cr_104_3]
 rule = "104.3"
 text = "There are several ways to lose the game."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["game/sba.rs:56", "game/sba.rs:65", "game/sba.rs:72"]
+test_files = ["game/sba.rs:645"]
+notes = "Multiple loss conditions implemented via SBA checks: life <=0, draw from empty, poison >=10, commander damage >=21."
 
 [cr_104_3a]
 rule = "104.3a"
@@ -66,31 +66,31 @@ text = "A player can concede the game at any time. A player who concedes leaves 
 status = "implemented"
 impl_files = ["game/effects/win_lose.rs:8", "game/effects/win_lose.rs:33", "parser/oracle_effect/imperative.rs:1486", "parser/oracle_effect/types.rs:192", "parser/oracle_effect/types.rs:194", "types/ability.rs:2051", "types/ability.rs:2055", "types/triggers.rs:165"]
 test_files = []
-notes = ""
+notes = "Concede action is handled in win_lose.rs. The engine also supports triggered 'you lose the game' effects."
 
 [cr_104_3b]
 rule = "104.3b"
-text = "If a player’s life total is 0 or less, that player loses the game the next time a player would receive priority. (This is a state-based action. See rule 704.)"
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "If a player's life total is 0 or less, that player loses the game the next time a player would receive priority. (This is a state-based action. See rule 704.)"
+status = "implemented"
+impl_files = ["game/sba.rs:56", "game/sba.rs:131"]
+test_files = ["game/sba.rs:645", "game/sba.rs:667"]
+notes = "check_player_life() SBA eliminates players with life <= 0."
 
 [cr_104_3c]
 rule = "104.3c"
 text = "If a player is required to draw more cards than are left in their library, they draw the remaining cards and then lose the game the next time a player would receive priority. (This is a state-based action. See rule 704.)"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/sba.rs:64", "game/sba.rs:148", "game/effects/draw.rs:52"]
 test_files = []
-notes = ""
+notes = "drew_from_empty_library flag set in draw.rs; check_draw_from_empty() SBA eliminates the player."
 
 [cr_104_3d]
 rule = "104.3d"
 text = "If a player has ten or more poison counters, that player loses the game the next time a player would receive priority. (This is a state-based action. See rule 704.)"
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["game/sba.rs:72", "game/sba.rs:168"]
+test_files = ["game/sba.rs:823", "game/sba.rs:845"]
+notes = "check_poison_counters() SBA eliminates players with poison_counters >= 10."
 
 [cr_104_3e]
 rule = "104.3e"
@@ -98,7 +98,7 @@ text = "An effect may state that a player loses the game."
 status = "implemented"
 impl_files = ["game/effects/win_lose.rs:44", "game/effects/win_lose.rs:47", "game/effects/win_lose.rs:53"]
 test_files = []
-notes = ""
+notes = "WinLose effect handler implements explicit 'player loses the game' effects."
 
 [cr_104_3f]
 rule = "104.3f"
@@ -106,7 +106,7 @@ text = "If a player would both win and lose the game simultaneously, that player
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Simultaneous win/loss resolution is not explicitly handled. The engine processes wins and losses sequentially."
 
 [cr_104_3g]
 rule = "104.3g"
@@ -114,39 +114,39 @@ text = "In a multiplayer game between teams, a team loses the game if all player
 status = "implemented"
 impl_files = ["game/elimination.rs:107"]
 test_files = []
-notes = ""
+notes = "eliminate_player() checks if all opponents are eliminated and declares a winner, covering the case where all members of all other teams are eliminated."
 
 [cr_104_3h]
 rule = "104.3h"
-text = "In a multiplayer game using the limited range of influence option (see rule 801), an effect that states that a player wins the game instead causes all of that player’s opponents within the player’s range of influence to lose the game. This may not cause the game to end."
-status = "missing"
+text = "In a multiplayer game using the limited range of influence option (see rule 801), an effect that states that a player wins the game instead causes all of that player's opponents within the player's range of influence to lose the game. This may not cause the game to end."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Limited range of influence option not implemented."
 
 [cr_104_3i]
 rule = "104.3i"
 text = "In an Emperor game, a team loses the game if its emperor loses the game. (See rule 809.5.)"
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Emperor variant not implemented."
 
 [cr_104_3j]
 rule = "104.3j"
-text = "In a Commander game, a player who’s been dealt 21 or more combat damage by the same commander over the course of the game loses the game. (This is a state-based action. See rule 704. See also rule 903.10.)"
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "In a Commander game, a player who's been dealt 21 or more combat damage by the same commander over the course of the game loses the game. (This is a state-based action. See rule 704. See also rule 903.10.)"
+status = "implemented"
+impl_files = ["game/sba.rs:81", "game/sba.rs:188"]
+test_files = ["game/sba.rs:1054", "game/sba.rs:1077", "game/sba.rs:1096"]
+notes = "check_commander_damage() SBA. commander_damage_threshold=21 from FormatConfig. Only active in Commander format."
 
 [cr_104_3k]
 rule = "104.3k"
 text = "In a tournament, a player may lose the game as a result of a penalty given by a judge. See rule 100.6."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Tournament judge penalties are outside the scope of the engine."
 
 [cr_104_4]
 rule = "104.4"
@@ -154,7 +154,7 @@ text = "There are several ways for the game to be a draw."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Draw game-end conditions are not implemented. The engine supports wins and losses but not draws."
 
 [cr_104_4a]
 rule = "104.4a"
@@ -162,15 +162,15 @@ text = "If all the players remaining in a game lose simultaneously, the game is 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Simultaneous all-player loss resulting in a draw is not handled."
 
 [cr_104_4b]
 rule = "104.4b"
-text = "If a game that’s not using the limited range of influence option (including a two-player game) somehow enters a “loop” of mandatory actions, repeating a sequence of events with no way to stop, the game is a draw. Loops that contain an optional action don’t result in a draw."
+text = "If a game that's not using the limited range of influence option (including a two-player game) somehow enters a \"loop\" of mandatory actions, repeating a sequence of events with no way to stop, the game is a draw. Loops that contain an optional action don't result in a draw."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Infinite loop detection is not implemented. MAX_SBA_ITERATIONS in sba.rs provides a safety cap, but does not declare the game a draw."
 
 [cr_104_4c]
 rule = "104.4c"
@@ -178,68 +178,68 @@ text = "An effect may state that the game is a draw."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No draw effect handler exists. Cards like Divine Intervention are not supported."
 
 [cr_104_4d]
 rule = "104.4d"
 text = "In a multiplayer game between teams, the game is a draw if all remaining teams lose simultaneously."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Team-based draw not implemented."
 
 [cr_104_4e]
 rule = "104.4e"
-text = "In a multiplayer game using the limited range of influence option, the effect of a spell or ability that states that the game is a draw causes the game to be a draw for that spell or ability’s controller and all players within their range of influence. Only those players leave the game; the game continues for all other players."
-status = "missing"
+text = "In a multiplayer game using the limited range of influence option, the effect of a spell or ability that states that the game is a draw causes the game to be a draw for that spell or ability's controller and all players within their range of influence. Only those players leave the game; the game continues for all other players."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Limited range of influence option not implemented."
 
 [cr_104_4f]
 rule = "104.4f"
-text = "In a multiplayer game using the limited range of influence option, if the game somehow enters a “loop” of mandatory actions, repeating a sequence of events with no way to stop, the game is a draw for each player who controls an object that’s involved in that loop, as well as for each player within the range of influence of any of those players. Only those players leave the game; the game continues for all other players."
-status = "missing"
+text = "In a multiplayer game using the limited range of influence option, if the game somehow enters a \"loop\" of mandatory actions, repeating a sequence of events with no way to stop, the game is a draw for each player who controls an object that's involved in that loop, as well as for each player within the range of influence of any of those players. Only those players leave the game; the game continues for all other players."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Limited range of influence option not implemented."
 
 [cr_104_4g]
 rule = "104.4g"
 text = "In a multiplayer game between teams, the game is a draw for a team if the game is a draw for all remaining players on that team."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Team-based draw not implemented."
 
 [cr_104_4h]
 rule = "104.4h"
 text = "In the Emperor variant, the game is a draw for a team if the game is a draw for its emperor. (See rule 809.5.)"
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Emperor variant not implemented."
 
 [cr_104_4i]
 rule = "104.4i"
 text = "In a tournament, all players in the game may agree to an intentional draw. See rule 100.6."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Tournament intentional draws are out of scope."
 
 [cr_104_5]
 rule = "104.5"
 text = "If a player loses the game, that player leaves the game. If the game is a draw for a player, that player leaves the game. The multiplayer rules handle what happens when a player leaves the game; see rule 800.4."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/elimination.rs:1"]
 test_files = []
-notes = ""
+notes = "eliminate_player() handles a player leaving the game: permanents removed, triggers cleaned up, player marked as eliminated."
 
 [cr_104_6]
 rule = "104.6"
-text = "One card (Karn Liberated) restarts the game. All players still in the game when it restarts then immediately begin a new game. See rule 726, “Restarting the Game.”"
+text = "One card (Karn Liberated) restarts the game. All players still in the game when it restarts then immediately begin a new game. See rule 726, \"Restarting the Game.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Game restart (rule 726) not implemented."

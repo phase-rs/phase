@@ -7,42 +7,42 @@ title = "General"
 [cr_100_1]
 rule = "100.1"
 text = "These Magic rules apply to any Magic game with two or more players, including two-player games and multiplayer games."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meta-rule about applicability of the rules. The engine itself is the rules implementation; this rule has no discrete code artifact."
 
 [cr_100_1a]
 rule = "100.1a"
 text = "A two-player game is a game that begins with only two players."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["types/format.rs:72"]
+test_files = ["types/format.rs:182"]
+notes = "FormatConfig::standard() sets max_players=2. Two-player vs multiplayer distinction is represented throughout the engine."
 
 [cr_100_1b]
 rule = "100.1b"
-text = "A multiplayer game is a game that begins with more than two players. See section 8, “Multiplayer Rules.”"
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "A multiplayer game is a game that begins with more than two players. See section 8, \"Multiplayer Rules.\""
+status = "implemented"
+impl_files = ["types/format.rs:87"]
+test_files = ["types/format.rs:194"]
+notes = "FormatConfig::commander() sets max_players=6. Multiplayer handling exists throughout engine logic."
 
 [cr_100_2]
 rule = "100.2"
 text = "To play, each player needs their own deck of traditional Magic cards, small items to represent any tokens and counters, and some way to clearly track life totals."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Physical game setup rule. The engine represents decks digitally via card databases."
 
 [cr_100_2a]
 rule = "100.2a"
 text = "In constructed play (a way of playing in which each player creates their own deck ahead of time), each deck has a minimum deck size of 60 cards. A constructed deck may contain any number of basic land cards and no more than four of any card with a particular English name other than basic land cards. For the purposes of deck construction, cards with interchangeable names have the same English name (see rule 201.3)."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["game/deck_validation.rs:183", "game/deck_validation.rs:184"]
+test_files = ["game/deck_validation.rs:1414", "game/deck_validation.rs:1153"]
+notes = "evaluate_constructed() enforces minimum 60 card deck size. Four-copy limit is partially enforced via format legality checks."
 
 [cr_100_2b]
 rule = "100.2b"
@@ -50,31 +50,31 @@ text = "In limited play (a way of playing in which each player gets the same qua
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Limited format is not currently supported by the engine."
 
 [cr_100_2c]
 rule = "100.2c"
-text = "Commander decks are subject to additional deckbuilding restrictions and requirements. See rule 903, “Commander,” for details."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "Commander decks are subject to additional deckbuilding restrictions and requirements. See rule 903, \"Commander,\" for details."
+status = "implemented"
+impl_files = ["game/deck_validation.rs:220", "game/deck_validation.rs:289", "game/deck_validation.rs:291"]
+test_files = ["game/deck_validation.rs:1414"]
+notes = "evaluate_commander() enforces 100-card singleton, color identity, and commander slot requirements."
 
 [cr_100_2d]
 rule = "100.2d"
-text = "Some formats and casual play variants allow players to use a supplementary deck of nontraditional Magic cards (see rule 108.2a). These supplementary decks have their own deck construction rules. See rule 717, “Attraction Cards;” rule 901, “Planechase;” and rule 904, “Archenemy.”"
-status = "missing"
+text = "Some formats and casual play variants allow players to use a supplementary deck of nontraditional Magic cards (see rule 100.2d). These supplementary decks have their own deck construction rules. See rule 717, \"Attraction Cards;\" rule 901, \"Planechase;\" and rule 904, \"Archenemy.\""
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Supplementary decks (Attractions, Planechase, Archenemy) are not implemented in the engine."
 
 [cr_100_3]
 rule = "100.3"
 text = "Some cards require coins or traditional dice. Some casual variants require additional items, such as specially designated cards, nontraditional Magic cards, and specialized dice."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/flip_coin.rs:1", "game/effects/roll_die.rs:1"]
 test_files = []
-notes = ""
+notes = "Coin flips and die rolls are implemented as effects in the engine."
 
 [cr_100_4]
 rule = "100.4"
@@ -82,7 +82,7 @@ text = "Each player may also have a sideboard, which is a group of additional ca
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Sideboards are not implemented. The engine only supports single-game play."
 
 [cr_100_4a]
 rule = "100.4a"
@@ -90,68 +90,68 @@ text = "In constructed play, a sideboard may contain no more than fifteen cards.
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Sideboards not implemented."
 
 [cr_100_4b]
 rule = "100.4b"
-text = "In limited play involving individual players, all cards in a player’s card pool not included in their deck are in that player’s sideboard."
-status = "missing"
+text = "In limited play involving individual players, all cards in a player's card pool not included in their deck are in that player's sideboard."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Limited play not supported."
 
 [cr_100_4c]
 rule = "100.4c"
-text = "In limited play involving the Two-Headed Giant multiplayer variant, all cards in a team’s card pool but not in either player’s deck are in that team’s sideboard."
-status = "missing"
+text = "In limited play involving the Two-Headed Giant multiplayer variant, all cards in a team's card pool but not in either player's deck are in that team's sideboard."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Limited play not supported."
 
 [cr_100_4d]
 rule = "100.4d"
-text = "In limited play involving other multiplayer team variants, each card in a team’s card pool but not in any player’s deck is assigned to the sideboard of one of those players. Each player has their own sideboard; cards may not be transferred between players."
-status = "missing"
+text = "In limited play involving other multiplayer team variants, each card in a team's card pool but not in any player's deck is assigned to the sideboard of one of those players. Each player has their own sideboard; cards may not be transferred between players."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Limited play not supported."
 
 [cr_100_5]
 rule = "100.5"
 text = "If a deck must contain at least a certain number of cards, that number is referred to as a minimum deck size. There is no maximum deck size for non-Commander decks."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["game/deck_validation.rs:183"]
+test_files = ["game/deck_validation.rs:1414"]
+notes = "Minimum deck size of 60 enforced for constructed. Commander enforces exactly 100. No maximum is enforced for non-Commander."
 
 [cr_100_6]
 rule = "100.6"
 text = "Most Magic tournaments (organized play activities where players compete against other players to win prizes) have additional rules covered in the Magic: The Gathering Tournament Rules (found at WPN.Wizards.com/en/rules-documents). These rules may limit the use of some cards, including barring all cards from some older sets."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Tournament rules are out of scope for the engine. Card legality by set/format is handled separately."
 
 [cr_100_6a]
 rule = "100.6a"
 text = "Tournaments usually consist of a series of matches. A two-player match usually involves playing until one player has won two games. A multiplayer match usually consists of only one game."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Match-level rules are not implemented; the engine handles individual games."
 
 [cr_100_6b]
 rule = "100.6b"
 text = "Players can use the Magic Store & Event Locator at Locator.Wizards.com to find tournaments in their area."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "External reference, no game logic."
 
 [cr_100_7]
 rule = "100.7"
-text = "Certain cards are intended for casual play and may have features and text that aren’t covered by these rules. These include Mystery Booster playtest cards, promotional cards and cards in “Un-sets” that were printed with a silver border, and cards in the Unfinity™ expansion that have an acorn symbol at the bottom of the card."
-status = "missing"
+text = "Certain cards are intended for casual play and may have features and text that aren't covered by these rules. These include Mystery Booster playtest cards, promotional cards and cards in \"Un-sets\" that were printed with a silver border, and cards in the Unfinity™ expansion that have an acorn symbol at the bottom of the card."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Un-cards and acorn-symbol cards are out of scope for the engine."

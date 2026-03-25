@@ -7,34 +7,34 @@ title = "Prototype Cards"
 [cr_718_1]
 rule = "718.1"
 text = "Prototype cards have a two-part frame, with a smaller frame inset below the type line of the card. The inset frame contains the prototype keyword ability as well as a second set of power, toughness, and mana cost characteristics."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["types/keywords.rs:261"]
 test_files = []
-notes = ""
+notes = "Prototype keyword parsed into Keyword::Prototype(ManaCost) but alternative P/T casting logic not implemented."
 
 [cr_718_2]
 rule = "718.2"
-text = "The mana cost, power, and toughness in the inset frame represent alternative characteristics that the object may have while it is a spell or while it is a permanent on the battlefield. The card’s normal characteristics appear as usual."
-status = "missing"
-impl_files = []
+text = "The mana cost, power, and toughness in the inset frame represent alternative characteristics that the object may have while it is a spell or while it is a permanent on the battlefield. The card's normal characteristics appear as usual."
+status = "partial"
+impl_files = ["types/keywords.rs:261"]
 test_files = []
-notes = ""
+notes = "Prototype keyword parsed but alternative P/T/cost characteristics not applied during casting or on battlefield."
 
 [cr_718_2a]
 rule = "718.2a"
-text = "The existence and values of these alternative characteristics are part of the object’s copiable values."
+text = "The existence and values of these alternative characteristics are part of the object's copiable values."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Prototype alternative characteristics not tracked in copiable values."
 
 [cr_718_3]
 rule = "718.3"
-text = "As a player casts a prototype card, the player chooses whether they cast the card normally or cast it as a prototyped spell using the prototype keyword ability (see rule 702.160, “Prototype”)."
+text = "As a player casts a prototype card, the player chooses whether they cast the card normally or cast it as a prototyped spell using the prototype keyword ability (see rule 702.160, \"Prototype\")."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Prototype casting choice not implemented."
 
 [cr_718_3a]
 rule = "718.3a"
@@ -42,7 +42,7 @@ text = "While casting a prototyped spell, use only its alternative power, toughn
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Prototype alternative cost evaluation not implemented."
 
 [cr_718_3b]
 rule = "718.3b"
@@ -50,7 +50,7 @@ text = "Both a prototyped spell and the permanent it becomes have only its alter
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Prototype color/P/T overrides not applied."
 
 [cr_718_3c]
 rule = "718.3c"
@@ -58,7 +58,7 @@ text = "If a prototyped spell is copied, the copy is also a prototyped spell. It
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Prototype spell copying not implemented."
 
 [cr_718_3d]
 rule = "718.3d"
@@ -66,7 +66,7 @@ text = "If a permanent that was a prototyped spell is copied, the copy has the a
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Prototype permanent copying not implemented."
 
 [cr_718_4]
 rule = "718.4"
@@ -74,12 +74,12 @@ text = "In every zone except the stack or the battlefield, and while on the stac
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Prototype zone-based characteristic isolation not implemented."
 
 [cr_718_5]
 rule = "718.5"
-text = "A prototype card’s characteristics other than its power, toughness, and mana cost (and other than color) remain the same whether it was cast as a prototyped spell or cast normally."
+text = "A prototype card's characteristics other than its power, toughness, and mana cost (and other than color) remain the same whether it was cast as a prototyped spell or cast normally."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Prototype characteristic override scope not implemented."

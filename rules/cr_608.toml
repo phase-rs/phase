@@ -6,15 +6,15 @@ title = "Resolving Spells and Abilities"
 
 [cr_608_1]
 rule = "608.1"
-text = "Each time all players pass in succession, the spell or ability on top of the stack resolves. (See rule 609, “Effects.”)"
-status = "missing"
-impl_files = []
+text = "Each time all players pass in succession, the spell or ability on top of the stack resolves. (See rule 609, \"Effects.\")"
+status = "implemented"
+impl_files = ["game/stack.rs:19", "game/priority.rs:1"]
 test_files = []
-notes = ""
+notes = "resolve_top() is called when all players pass in succession. Priority logic in priority.rs drives this."
 
 [cr_608_2]
 rule = "608.2"
-text = "If the object that’s resolving is an instant spell, a sorcery spell, or an ability, its resolution may involve several steps. The steps described in rules 608.2a and 608.2b are followed first. The steps described in rules 608.2c–m are then followed as appropriate, in no specific order. The steps described in rule 608.2n and 608.2p are followed last."
+text = "If the object that's resolving is an instant spell, a sorcery spell, or an ability, its resolution may involve several steps. The steps described in rules 608.2a and 608.2b are followed first. The steps described in rules 608.2c–m are then followed as appropriate, in no specific order. The steps described in rule 608.2n and 608.2p are followed last."
 status = "implemented"
 impl_files = ["game/effects/mod.rs:502", "game/stack.rs:19"]
 test_files = []
@@ -22,15 +22,15 @@ notes = ""
 
 [cr_608_2a]
 rule = "608.2a"
-text = "If a triggered ability has an intervening “if” clause, it checks whether the clause’s condition is true. If it isn’t, the ability is removed from the stack and does nothing. Otherwise, it continues to resolve. See rule 603.4."
-status = "missing"
-impl_files = []
+text = "If a triggered ability has an intervening \"if\" clause, it checks whether the clause's condition is true. If it isn't, the ability is removed from the stack and does nothing. Otherwise, it continues to resolve. See rule 603.4."
+status = "implemented"
+impl_files = ["game/stack.rs:27", "game/stack.rs:115"]
 test_files = []
-notes = ""
+notes = "Intervening-if rechecked at resolution time in resolve_top() via check_trigger_condition()."
 
 [cr_608_2b]
 rule = "608.2b"
-text = "If the spell or ability specifies targets, it checks whether the targets are still legal. A target that’s no longer in the zone it was in when it was targeted is illegal. Other changes to the game state may cause a target to no longer be legal; for example, its characteristics may have changed or an effect may have changed the text of the spell. If the source of an ability has left the zone it was in, its last known information is used during this process. If all its targets, for every instance of the word “target,” are now illegal, the spell or ability doesn’t resolve. It’s removed from the stack and, if it’s a spell, put into its owner’s graveyard. Otherwise, the spell or ability will resolve normally. Illegal targets, if any, won’t be affected by parts of a resolving spell’s effect for which they’re illegal. Other parts of the effect for which those targets are not illegal may still affect them. If the spell or ability creates any continuous effects that affect game rules (see rule 613.11), those effects don’t apply to illegal targets. If part of the effect requires information about an illegal target, it fails to determine any such information. Any part of the effect that requires that information won’t happen."
+text = "If the spell or ability specifies targets, it checks whether the targets are still legal. A target that's no longer in the zone it was in when it was targeted is illegal. Other changes to the game state may cause a target to no longer be legal; for example, its characteristics may have changed or an effect may have changed the text of the spell. If the source of an ability has left the zone it was in, its last known information is used during this process. If all its targets, for every instance of the word \"target,\" are now illegal, the spell or ability doesn't resolve. It's removed from the stack and, if it's a spell, put into its owner's graveyard. Otherwise, the spell or ability will resolve normally. Illegal targets, if any, won't be affected by parts of a resolving spell's effect for which they're illegal. Other parts of the effect for which those targets are not illegal may still affect them. If the spell or ability creates any continuous effects that affect game rules (see rule 613.11), those effects don't apply to illegal targets. If part of the effect requires information about an illegal target, it fails to determine any such information. Any part of the effect that requires that information won't happen."
 status = "implemented"
 impl_files = ["game/ability_utils.rs:249", "game/ability_utils.rs:353", "game/effects/counter.rs:130", "game/effects/mod.rs:108", "game/effects/mod.rs:586", "game/filter.rs:180", "game/filter.rs:380", "game/filter.rs:382", "game/quantity.rs:413", "game/stack.rs:80", "game/targeting.rs:138", "parser/oracle_static.rs:2032", "types/ability.rs:725"]
 test_files = []
@@ -38,7 +38,7 @@ notes = ""
 
 [cr_608_2c]
 rule = "608.2c"
-text = "The controller of the spell or ability follows its instructions in the order written. However, replacement effects may modify these actions. In some cases, later text on the card may modify the meaning of earlier text (for example, “Destroy target creature. It can’t be regenerated” or “Counter target spell. If that spell is countered this way, put it on top of its owner’s library instead of into its owner’s graveyard.”) Don’t just apply effects step by step without thinking in these cases—read the whole text and apply the rules of English to the text."
+text = "The controller of the spell or ability follows its instructions in the order written. However, replacement effects may modify these actions. In some cases, later text on the card may modify the meaning of earlier text (for example, \"Destroy target creature. It can't be regenerated\" or \"Counter target spell. If that spell is countered this way, put it on top of its owner's library instead of into its owner's graveyard.\") Don't just apply effects step by step without thinking in these cases—read the whole text and apply the rules of English to the text."
 status = "implemented"
 impl_files = ["game/effects/dig.rs:5", "game/effects/mod.rs:536", "game/effects/mod.rs:705", "game/effects/mod.rs:865", "game/effects/mod.rs:884", "game/effects/mod.rs:902", "game/effects/mod.rs:914", "game/engine.rs:598", "game/engine.rs:1683", "parser/oracle_effect/mod.rs:868", "parser/oracle_effect/mod.rs:1045", "parser/oracle_effect/mod.rs:1409", "parser/oracle_effect/mod.rs:1860", "parser/oracle_effect/mod.rs:1908", "parser/oracle_effect/mod.rs:1957", "parser/oracle_effect/mod.rs:2060", "parser/oracle_effect/mod.rs:2717", "parser/oracle_effect/mod.rs:2750", "parser/oracle_effect/mod.rs:2794", "parser/oracle_effect/mod.rs:2865", "parser/oracle_effect/mod.rs:2938", "parser/oracle_effect/mod.rs:3007", "parser/oracle_effect/sequence.rs:544", "parser/oracle_effect/sequence.rs:546", "parser/oracle_effect/sequence.rs:661", "parser/oracle_effect/sequence.rs:662", "parser/oracle_effect/types.rs:143", "types/ability.rs:1736", "types/ability.rs:2749", "types/ability.rs:3005", "types/ability.rs:3014", "types/ability.rs:3018", "types/ability.rs:3032", "types/ability.rs:3765"]
 test_files = []
@@ -46,7 +46,7 @@ notes = ""
 
 [cr_608_2d]
 rule = "608.2d"
-text = "If an effect of a spell or ability offers any choices other than choices already made as part of casting the spell, activating the ability, or otherwise putting the spell or ability on the stack, the player announces these while applying the effect. The player can’t choose an option that’s illegal or impossible, with the exception that having a library with no cards in it doesn’t make drawing a card an impossible action (see rule 121.3). If an effect divides or distributes something, such as damage or counters, as a player chooses among any number of untargeted players and/or objects, the player chooses the amount and division such that each chosen player or object receives at least one of whatever is being divided. (Note that if an effect divides or distributes something, such as damage or counters, as a player chooses among some number of target objects and/or players, the amount and division were determined as the spell or ability was put onto the stack rather than at this time; see rule 601.2d.)"
+text = "If an effect of a spell or ability offers any choices other than choices already made as part of casting the spell, activating the ability, or otherwise putting the spell or ability on the stack, the player announces these while applying the effect. The player can't choose an option that's illegal or impossible, with the exception that having a library with no cards in it doesn't make drawing a card an impossible action (see rule 121.3). If an effect divides or distributes something, such as damage or counters, as a player chooses among any number of untargeted players and/or objects, the player chooses the amount and division such that each chosen player or object receives at least one of whatever is being divided. (Note that if an effect divides or distributes something, such as damage or counters, as a player chooses among some number of target objects and/or players, the amount and division were determined as the spell or ability was put onto the stack rather than at this time; see rule 601.2d.)"
 status = "implemented"
 impl_files = ["game/effects/mod.rs:362", "game/engine.rs:623", "game/engine.rs:642", "game/engine.rs:672", "game/engine.rs:705", "parser/oracle_effect/mod.rs:258", "parser/oracle_effect/mod.rs:309", "parser/oracle_effect/mod.rs:2731", "parser/oracle_effect/mod.rs:3099", "parser/oracle_target.rs:615", "parser/oracle_target.rs:854", "types/ability.rs:34", "types/ability.rs:2776", "types/ability.rs:3029", "types/ability.rs:3057", "types/ability.rs:3782", "types/game_state.rs:475", "types/game_state.rs:483"]
 test_files = []
@@ -62,47 +62,47 @@ notes = ""
 
 [cr_608_2f]
 rule = "608.2f"
-text = "Some spells and abilities include actions taken on multiple players and/or objects. In most cases, each such action is processed simultaneously. If the action can’t be processed simultaneously, it’s instead processed considering each affected player or object individually. APNAP order is used to make the primary determination of the order of those actions. Secondarily, if the action is to be taken on both a player and an object they control or on multiple objects controlled by the same player, the player who controls the resolving spell or ability chooses the relative order of those actions."
-status = "missing"
-impl_files = []
+text = "Some spells and abilities include actions taken on multiple players and/or objects. In most cases, each such action is processed simultaneously. If the action can't be processed simultaneously, it's instead processed considering each affected player or object individually. APNAP order is used to make the primary determination of the order of those actions. Secondarily, if the action is to be taken on both a player and an object they control or on multiple objects controlled by the same player, the player who controls the resolving spell or ability chooses the relative order of those actions."
+status = "implemented"
+impl_files = ["game/effects/mod.rs:450", "game/effects/mod.rs:691"]
 test_files = []
-notes = ""
+notes = "Simultaneous multi-target actions handled in resolve_ability_chain(). APNAP ordering partially implemented."
 
 [cr_608_2g]
 rule = "608.2g"
-text = "If an effect gives a player the option to pay mana, they may activate mana abilities before taking that action. If an effect specifically instructs or allows a player to cast a spell during resolution, they do so by following the steps in rules 601.2a–i, except no player receives priority after it’s cast. That spell becomes the topmost object on the stack, and the currently resolving spell or ability continues to resolve, which may include casting other spells this way. No other spells can normally be cast and no other abilities can normally be activated during resolution."
-status = "missing"
-impl_files = []
+text = "If an effect gives a player the option to pay mana, they may activate mana abilities before taking that action. If an effect specifically instructs or allows a player to cast a spell during resolution, they do so by following the steps in rules 601.2a–i, except no player receives priority after it's cast. That spell becomes the topmost object on the stack, and the currently resolving spell or ability continues to resolve, which may include casting other spells this way. No other spells can normally be cast and no other abilities can normally be activated during resolution."
+status = "implemented"
+impl_files = ["game/effects/mod.rs:536", "game/effects/cast_from_zone.rs:10"]
 test_files = []
-notes = ""
+notes = "CastFromZone effect handler implements cast-during-resolution."
 
 [cr_608_2h]
 rule = "608.2h"
-text = "If an effect requires information from the game (such as the number of creatures on the battlefield), the answer is determined only once, when the effect is applied. If the effect requires information from a specific object, including the source of the ability itself, the effect uses the current information of that object if it’s in the public zone it was expected to be in; if it’s no longer in that zone, or if the effect has moved it from a public zone to a hidden zone, the effect uses the object’s last known information. See rule 113.7a. If an ability states that an object does something, it’s the object as it exists—or as it most recently existed—that does it, not the ability."
-status = "missing"
-impl_files = []
+text = "If an effect requires information from the game (such as the number of creatures on the battlefield), the answer is determined only once, when the effect is applied. If the effect requires information from a specific object, including the source of the ability itself, the effect uses the current information of that object if it's in the public zone it was expected to be in; if it's no longer in that zone, or if the effect has moved it from a public zone to a hidden zone, the effect uses the object's last known information. See rule 113.7a. If an ability states that an object does something, it's the object as it exists—or as it most recently existed—that does it, not the ability."
+status = "implemented"
+impl_files = ["game/game_object.rs:1", "game/effects/mod.rs:108"]
 test_files = []
-notes = ""
+notes = "Last known info tracked on GameObject. Quantity resolution reads current state at resolution time."
 
 [cr_608_2i]
 rule = "608.2i"
-text = "Some effects look back in time and require information about previous game states and actions rather than considering the current game state. If such an effect requires information from the game about an object or group of objects, and that effect is not taking any actions on those objects, they don’t need to be currently in the zone they were in at the time of that previous game state or action, nor do they need to currently meet the criteria described in the action, as long as they did so at the specified time. This is an exception to 608.2h."
+text = "Some effects look back in time and require information about previous game states and actions rather than considering the current game state. If such an effect requires information from the game about an object or group of objects, and that effect is not taking any actions on those objects, they don't need to be currently in the zone they were in at the time of that previous game state or action, nor do they need to currently meet the criteria described in the action, as long as they did so at the specified time. This is an exception to 608.2h."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Historical game state lookup (e.g. 'number of creatures that died this turn') not explicitly modeled beyond basic counters."
 
 [cr_608_2j]
 rule = "608.2j"
 text = "If an effect refers to certain characteristics, it checks only for the value of the specified characteristics, regardless of any related ones an object may also have."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/filter.rs:1"]
 test_files = []
-notes = ""
+notes = "filter.rs evaluates each characteristic independently. No cross-characteristic inference."
 
 [cr_608_2k]
 rule = "608.2k"
-text = "If an ability’s effect refers to a specific untargeted object that has been previously referred to by that ability’s cost or trigger condition, it still affects that object even if the object has changed characteristics."
+text = "If an ability's effect refers to a specific untargeted object that has been previously referred to by that ability's cost or trigger condition, it still affects that object even if the object has changed characteristics."
 status = "implemented"
 impl_files = ["parser/oracle_effect/counter.rs:43", "parser/oracle_effect/counter.rs:107", "parser/oracle_effect/counter.rs:179", "parser/oracle_effect/counter.rs:202", "parser/oracle_effect/counter.rs:246", "parser/oracle_effect/imperative.rs:886", "parser/oracle_effect/mod.rs:52", "parser/oracle_effect/mod.rs:1839", "parser/oracle_effect/mod.rs:6878", "parser/oracle_effect/subject.rs:273", "parser/oracle_trigger.rs:49", "parser/oracle_trigger.rs:512", "parser/oracle_trigger.rs:4625"]
 test_files = []
@@ -111,14 +111,14 @@ notes = ""
 [cr_608_2m]
 rule = "608.2m"
 text = "If an instant spell, sorcery spell, or ability that can legally resolve leaves the stack once it starts to resolve, it will continue to resolve fully."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/stack.rs:19", "game/effects/mod.rs:502"]
 test_files = []
-notes = ""
+notes = "resolve_top() captures entry before executing effects; resolution continues even if entry is no longer on stack."
 
 [cr_608_2n]
 rule = "608.2n"
-text = "As the final part of an instant or sorcery spell’s resolution, the spell is put into its owner’s graveyard. As the final part of an ability’s resolution, the ability is removed from the stack and ceases to exist."
+text = "As the final part of an instant or sorcery spell's resolution, the spell is put into its owner's graveyard. As the final part of an ability's resolution, the ability is removed from the stack and ceases to exist."
 status = "implemented"
 impl_files = ["game/stack.rs:110"]
 test_files = []
@@ -127,14 +127,14 @@ notes = ""
 [cr_608_2p]
 rule = "608.2p"
 text = "Once all possible steps described in 608.2c–n are completed, any abilities that trigger when that spell or ability resolves trigger."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/triggers.rs:822", "game/stack.rs:233"]
 test_files = []
-notes = ""
+notes = "check_and_collect_triggers() runs after each resolution step including StackResolved event."
 
 [cr_608_3]
 rule = "608.3"
-text = "If the object that’s resolving is a permanent spell, its resolution may involve several steps. The instructions in rules 608.3a and b are always performed first. Then one of the steps in rule 608.3c–e is performed, if appropriate."
+text = "If the object that's resolving is a permanent spell, its resolution may involve several steps. The instructions in rules 608.3a and b are always performed first. Then one of the steps in rule 608.3c–e is performed, if appropriate."
 status = "implemented"
 impl_files = ["game/stack.rs:94", "game/stack.rs:107"]
 test_files = []
@@ -142,56 +142,56 @@ notes = ""
 
 [cr_608_3a]
 rule = "608.3a"
-text = "If the object that’s resolving has no targets, it becomes a permanent and enters the battlefield under the control of the spell’s controller."
-status = "missing"
-impl_files = []
+text = "If the object that's resolving has no targets, it becomes a permanent and enters the battlefield under the control of the spell's controller."
+status = "implemented"
+impl_files = ["game/stack.rs:107", "game/zones.rs:46"]
 test_files = []
-notes = ""
+notes = "Permanent spells with no targets resolve to battlefield via move_to_zone(…, Zone::Battlefield)."
 
 [cr_608_3b]
 rule = "608.3b"
-text = "If the object that’s resolving has a target, it checks whether the target is still legal, as described in 608.2b. If a spell with an illegal target is a bestowed Aura spell (see rule 702.103e) or a mutating creature spell (see rule 702.140b), it becomes a creature spell and will resolve as described in rule 608.3a. Otherwise, the spell doesn’t resolve. It is removed from the stack and put into its owner’s graveyard."
-status = "missing"
-impl_files = []
+text = "If the object that's resolving has a target, it checks whether the target is still legal, as described in 608.2b. If a spell with an illegal target is a bestowed Aura spell (see rule 702.103e) or a mutating creature spell (see rule 702.140b), it becomes a creature spell and will resolve as described in rule 608.3a. Otherwise, the spell doesn't resolve. It is removed from the stack and put into its owner's graveyard."
+status = "implemented"
+impl_files = ["game/stack.rs:76", "game/stack.rs:80"]
 test_files = []
-notes = ""
+notes = "Fizzle logic in resolve_top() handles illegal targets for permanent spells. Bestow/mutate exceptions not implemented."
 
 [cr_608_3c]
 rule = "608.3c"
-text = "If the object that’s resolving is an Aura spell, it becomes a permanent and is put onto the battlefield under the control of the spell’s controller attached to the player or object it was targeting."
-status = "missing"
-impl_files = []
+text = "If the object that's resolving is an Aura spell, it becomes a permanent and is put onto the battlefield under the control of the spell's controller attached to the player or object it was targeting."
+status = "implemented"
+impl_files = ["game/stack.rs:138", "game/effects/attach.rs:1"]
 test_files = []
-notes = ""
+notes = "Aura resolution attaches to target at stack.rs:138 via attach_to()."
 
 [cr_608_3d]
 rule = "608.3d"
-text = "If the object that’s resolving is a mutating creature spell, the object representing that spell merges with the permanent it is targeting (see rule 729, “Merging with Permanents”)."
+text = "If the object that's resolving is a mutating creature spell, the object representing that spell merges with the permanent it is targeting (see rule 729, \"Merging with Permanents\")."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutate not yet implemented."
 
 [cr_608_3e]
 rule = "608.3e"
-text = "If a permanent spell resolves but its controller can’t put it onto the battlefield, that player puts it into its owner’s graveyard."
+text = "If a permanent spell resolves but its controller can't put it onto the battlefield, that player puts it into its owner's graveyard."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Can't-enter-battlefield exception not explicitly handled."
 
 [cr_608_3f]
 rule = "608.3f"
-text = "If the object that’s resolving is a copy of a permanent spell, it will become a token permanent as it is put onto the battlefield in any of the steps above. A token put onto the battlefield this way is no longer a copy of a spell and is not “created” for the purposes of any rules or effects that refer to creating a token."
+text = "If the object that's resolving is a copy of a permanent spell, it will become a token permanent as it is put onto the battlefield in any of the steps above. A token put onto the battlefield this way is no longer a copy of a spell and is not \"created\" for the purposes of any rules or effects that refer to creating a token."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Copied permanent spell becoming a token permanent not explicitly tracked."
 
 [cr_608_3g]
 rule = "608.3g"
-text = "If the object that’s resolving has a static ability that functions on the stack and creates a delayed triggered ability, that delayed triggered ability is created as that permanent is put onto the battlefield in any of the steps above. (See rules 702.109, “Dash,” 702.152, “Blitz,” and 702.185, “Warp.”)"
-status = "missing"
-impl_files = []
+text = "If the object that's resolving has a static ability that functions on the stack and creates a delayed triggered ability, that delayed triggered ability is created as that permanent is put onto the battlefield in any of the steps above. (See rules 702.109, \"Dash,\" 702.152, \"Blitz,\" and 702.185, \"Warp.\")"
+status = "implemented"
+impl_files = ["game/stack.rs:157", "game/stack.rs:161"]
 test_files = []
-notes = ""
+notes = "Warp keyword creates delayed trigger to exile at end step (stack.rs:157). Dash/Blitz follow same pattern."

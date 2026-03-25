@@ -7,38 +7,38 @@ title = "Power/Toughness"
 [cr_208_1]
 rule = "208.1"
 text = "A creature card has two numbers separated by a slash printed in its lower right corner. The first number is its power (the amount of damage it deals in combat); the second is its toughness (the amount of damage needed to destroy it). For example, 2/3 means the object has power 2 and toughness 3. Power and toughness can be modified or set to particular values by effects."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/card.rs:22", "types/card.rs:23", "game/game_object.rs:1"]
 test_files = []
-notes = ""
+notes = "CardFace.power and CardFace.toughness store PtValue (Fixed or Variable). GameObject.power and .toughness mirror these as Option<i32> after layer evaluation."
 
 [cr_208_2]
 rule = "208.2"
 text = "Rather than a fixed number, some creature cards have power and/or toughness that includes a star (*)."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/ability.rs:1"]
 test_files = []
-notes = ""
+notes = "PtValue enum supports Fixed(i32), Variable(String) for * values, and Quantity(QuantityExpr) for dynamic expressions."
 
 [cr_208_2a]
 rule = "208.2a"
-text = "The card may have a characteristic-defining ability that sets its power and/or toughness according to some stated condition. (See rule 604.3.) Such an ability is worded “[This creature’s] [power or toughness] is equal to . . .” or “[This creature’s] power and toughness are each equal to . . .” This ability functions everywhere, even outside the game. If the ability needs to use a number that can’t be determined, including inside a calculation, use 0 instead of that number."
-status = "missing"
-impl_files = []
+text = "The card may have a characteristic-defining ability that sets its power and/or toughness according to some stated condition. (See rule 604.3.) Such an ability is worded \"[This creature's] [power or toughness] is equal to . . .\" or \"[This creature's] power and toughness are each equal to . . .\" This ability functions everywhere, even outside the game. If the ability needs to use a number that can't be determined, including inside a calculation, use 0 instead of that number."
+status = "implemented"
+impl_files = ["game/layers.rs:460", "game/layers.rs:282", "types/ability.rs:1"]
 test_files = []
-notes = ""
+notes = "StaticDefinition.characteristic_defining marks CDAs. Layer evaluation applies CDAs first per CR 604.3 / CR 613.3. PtValue::Quantity handles dynamic * expressions."
 
 [cr_208_2b]
 rule = "208.2b"
-text = "The card may have a static ability that creates a replacement effect that sets the creature’s power and toughness to one of a number of specific values as it enters the battlefield or is turned face up. (See rule 614, “Replacement Effects.”) Such an ability is worded “As [this creature] enters . . . ,” “As [this creature] is turned face up . . . ,” or “[This creature] enters as . . .” and lists two or more specific power and toughness values (and may also list additional characteristics). The characteristics chosen or determined with these effects affect the creature’s copiable values. (See rule 707.2.) While the card isn’t on the battlefield, its power and toughness are each considered to be 0."
-status = "missing"
-impl_files = []
+text = "The card may have a static ability that creates a replacement effect that sets the creature's power and toughness to one of a number of specific values as it enters the battlefield or is turned face up. (See rule 614, \"Replacement Effects.\") Such an ability is worded \"As [this creature] enters . . . ,\" \"As [this creature] is turned face up . . . ,\" or \"[This creature] enters as . . .\" and lists two or more specific power and toughness values (and may also list additional characteristics). The characteristics chosen or determined with these effects affect the creature's copiable values. (See rule 707.2.) While the card isn't on the battlefield, its power and toughness are each considered to be 0."
+status = "implemented"
+impl_files = ["game/replacement.rs:1"]
 test_files = []
-notes = ""
+notes = "ETB replacement effects for P/T choice (e.g., 'as this enters, choose a number') are handled via replacement.rs. Copiable value tracking is partial."
 
 [cr_208_3]
 rule = "208.3"
-text = "A noncreature permanent has no power or toughness, even if it’s a card with a power and toughness printed on it (such as a Vehicle). A noncreature object not on the battlefield has power or toughness only if it has a power and toughness printed on it."
+text = "A noncreature permanent has no power or toughness, even if it's a card with a power and toughness printed on it (such as a Vehicle). A noncreature object not on the battlefield has power or toughness only if it has a power and toughness printed on it."
 status = "implemented"
 impl_files = ["game/quantity.rs:150", "parser/oracle_quantity.rs:27", "types/ability.rs:1058", "types/ability.rs:1060"]
 test_files = []
@@ -46,40 +46,40 @@ notes = ""
 
 [cr_208_3a]
 rule = "208.3a"
-text = "If an effect would be created that sets the base power and/or toughness of a noncreature permanent, or otherwise modifies its power and/or toughness, that effect is created even though it doesn’t do anything unless that permanent becomes a creature."
-status = "missing"
-impl_files = []
+text = "If an effect would be created that sets the base power and/or toughness of a noncreature permanent, or otherwise modifies its power and/or toughness, that effect is created even though it doesn't do anything unless that permanent becomes a creature."
+status = "implemented"
+impl_files = ["game/layers.rs:653", "game/layers.rs:656"]
 test_files = []
-notes = ""
+notes = "ContinuousModification::SetPower and SetToughness are applied in layer evaluation. If the object has no P/T (noncreature), these are stored but don't affect game state until the object becomes a creature."
 
 [cr_208_4]
 rule = "208.4"
-text = "Some effects refer to a creature’s “base power,” “base toughness,” or “base power and toughness.”"
-status = "missing"
-impl_files = []
+text = "Some effects refer to a creature's \"base power,\" \"base toughness,\" or \"base power and toughness.\""
+status = "implemented"
+impl_files = ["game/game_object.rs:1", "game/layers.rs:219"]
 test_files = []
-notes = ""
+notes = "GameObject.base_power and base_toughness store the printed/base P/T values. layers.rs resets obj.power/toughness from base before applying continuous effects."
 
 [cr_208_4a]
 rule = "208.4a"
-text = "Effects that set a creature’s power and/or toughness to specific values may refer to base power and/or toughness. Other continuous effects may further modify the creature’s power and toughness. See rule 613, “Interaction of Continuous Effects.”"
-status = "missing"
-impl_files = []
+text = "Effects that set a creature's power and/or toughness to specific values may refer to base power and/or toughness. Other continuous effects may further modify the creature's power and toughness. See rule 613, \"Interaction of Continuous Effects.\""
+status = "implemented"
+impl_files = ["game/layers.rs:219", "game/layers.rs:653"]
 test_files = []
-notes = ""
+notes = "Layer evaluation in layers.rs resets from base_power/base_toughness and applies SetPower/SetToughness modifications (layer 7b), then pump modifications (layer 7c)."
 
 [cr_208_4b]
 rule = "208.4b"
-text = "Some effects check a creature’s base power and/or toughness. These effects see that creature’s characteristics after applying any characteristic-defining abilities and abilities that set power and/or toughness, ignoring any effects and counters that modify power and/or toughness without setting them. See rule 613, “Interaction of Continuous Effects.”"
-status = "missing"
-impl_files = []
+text = "Some effects check a creature's base power and/or toughness. These effects see that creature's characteristics after applying any characteristic-defining abilities and abilities that set power and/or toughness, ignoring any effects and counters that modify power and/or toughness without setting them. See rule 613, \"Interaction of Continuous Effects.\""
+status = "partial"
+impl_files = ["game/game_object.rs:1"]
 test_files = []
-notes = ""
+notes = "base_power/base_toughness fields exist and reflect the starting values before pump effects, but full 'base P/T after CDAs and set-effects' semantics are not explicitly enforced."
 
 [cr_208_5]
 rule = "208.5"
 text = "If a creature somehow has no value for its power, its power is 0. The same is true for toughness."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat.rs:1", "game/sba.rs:214"]
 test_files = []
-notes = ""
+notes = "obj.power.unwrap_or(0) is used throughout the engine (e.g., filter.rs, sba.rs zero-toughness check) ensuring 0 is the fallback for absent power/toughness."

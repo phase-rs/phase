@@ -8,57 +8,57 @@ title = "Colors"
 rule = "105.1"
 text = "There are five colors in the Magic game: white, blue, black, red, and green."
 status = "implemented"
-impl_files = ["game/effects/choose.rs:132"]
+impl_files = ["game/effects/choose.rs:132", "types/mana.rs:9"]
 test_files = []
-notes = ""
+notes = "ManaColor enum defines the five colors: White, Blue, Black, Red, Green."
 
 [cr_105_2]
 rule = "105.2"
-text = "An object can be one or more of the five colors, or it can be no color at all. An object is the color or colors of the mana symbols in its mana cost, regardless of the color of its frame. An object’s color or colors may also be defined by a color indicator or a characteristic-defining ability. See rule 202.2."
-status = "missing"
-impl_files = []
+text = "An object can be one or more of the five colors, or it can be no color at all. An object is the color or colors of the mana symbols in its mana cost, regardless of the color of its frame. An object's color or colors may also be defined by a color indicator or a characteristic-defining ability. See rule 202.2."
+status = "implemented"
+impl_files = ["game/printed_cards.rs:29", "game/printed_cards.rs:313"]
 test_files = []
-notes = ""
+notes = "apply_card_face_to_object() derives object color from mana cost via derive_colors_from_mana_cost(). color_override field supports color indicators."
 
 [cr_105_2a]
 rule = "105.2a"
 text = "A monocolored object is exactly one of the five colors."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/filter.rs:272"]
 test_files = []
-notes = ""
+notes = "HasColor filter checks obj.color.contains(). Single-color detection works correctly via the Vec<ManaColor> representation."
 
 [cr_105_2b]
 rule = "105.2b"
 text = "A multicolored object is two or more of the five colors."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/filter.rs:288"]
 test_files = []
-notes = ""
+notes = "FilterProp::Multicolored checks obj.color.len() > 1."
 
 [cr_105_2c]
 rule = "105.2c"
 text = "A colorless object has no color."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/printed_cards.rs:315"]
 test_files = []
-notes = ""
+notes = "ManaCost::NoCost and objects with no colored mana symbols derive an empty color vec, making them colorless."
 
 [cr_105_3]
 rule = "105.3"
-text = "Effects may change an object’s color or give a color to a colorless object. If an effect gives an object a new color, the new color replaces all previous colors the object had (unless the effect said the object became that color “in addition” to its other colors). Effects may also make a colored object become colorless."
+text = "Effects may change an object's color or give a color to a colorless object. If an effect gives an object a new color, the new color replaces all previous colors the object had (unless the effect said the object became that color \"in addition\" to its other colors). Effects may also make a colored object become colorless."
 status = "implemented"
 impl_files = ["game/layers.rs:722", "parser/oracle_effect/subject.rs:511", "types/ability.rs:3709"]
 test_files = []
-notes = ""
+notes = "Color changes are applied in layer 5 (game/layers.rs). The 'in addition to its other colors' distinction is parsed and handled."
 
 [cr_105_4]
 rule = "105.4"
-text = "If a player is asked to choose a color, they must choose one of the five colors. “Multicolored” is not a color. Neither is “colorless.”"
-status = "missing"
-impl_files = []
+text = "If a player is asked to choose a color, they must choose one of the five colors. \"Multicolored\" is not a color. Neither is \"colorless.\""
+status = "implemented"
+impl_files = ["game/effects/choose.rs:132"]
 test_files = []
-notes = ""
+notes = "ChooseColor presents exactly the five colors as options. 'Multicolored' and 'colorless' are not offered as valid choices."
 
 [cr_105_5]
 rule = "105.5"
@@ -66,4 +66,4 @@ text = "If an effect refers to a color pair, it means exactly two of the five co
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Color pair references are not explicitly implemented. Individual color checks work, but a dedicated 'color pair' concept is absent."

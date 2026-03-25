@@ -1,12 +1,12 @@
-# Comprehensive Rules Section 730: Miscellaneous
+# Comprehensive Rules Section 730: Day and Night
 
 [_meta]
 section = 730
-title = "Miscellaneous"
+title = "Day and Night"
 
 [cr_730_1]
 rule = "730.1"
-text = "Day and night are designations that the game itself can have. The game starts with neither designation. “It becomes day” and “it becomes night” refer to the game gaining the day or night designation. It can become day or night through the daybound and nightbound keyword abilities (see rule 702.145). Other effects can also make it day or night. Once it has become day or night, the game will have exactly one of those designations from that point forward."
+text = "Day and night are designations that the game itself can have. The game starts with neither designation. \"It becomes day\" and \"it becomes night\" refer to the game gaining the day or night designation. It can become day or night through the daybound and nightbound keyword abilities (see rule 702.145). Other effects can also make it day or night. Once it has become day or night, the game will have exactly one of those designations from that point forward."
 status = "implemented"
 impl_files = ["game/day_night.rs:57"]
 test_files = []
@@ -14,15 +14,15 @@ notes = ""
 
 [cr_730_1a]
 rule = "730.1a"
-text = "The phrases “day becomes night” and “night becomes day” refer to the game losing the first designation and gaining the second one."
-status = "missing"
-impl_files = []
+text = "The phrases \"day becomes night\" and \"night becomes day\" refer to the game losing the first designation and gaining the second one."
+status = "implemented"
+impl_files = ["game/day_night.rs:57"]
 test_files = []
-notes = ""
+notes = "Day/night transitions tracked in day_night.rs."
 
 [cr_730_2]
 rule = "730.2"
-text = "As the second part of the untap step, the game checks the previous turn to see if the game’s day/night designation should change. See rule 502, “Untap Step.”"
+text = "As the second part of the untap step, the game checks the previous turn to see if the game's day/night designation should change. See rule 502, \"Untap Step.\""
 status = "implemented"
 impl_files = ["game/turns.rs:261"]
 test_files = []
@@ -30,7 +30,7 @@ notes = ""
 
 [cr_730_2a]
 rule = "730.2a"
-text = "If it’s day and the previous turn’s active player didn’t cast any spells during that turn, it becomes night. Multiplayer games using the shared team turns option (see rule 805) use a modified rule: if it’s day and no player from the previous turn’s active team cast a spell during that turn, it becomes night."
+text = "If it's day and the previous turn's active player didn't cast any spells during that turn, it becomes night. Multiplayer games using the shared team turns option (see rule 805) use a modified rule: if it's day and no player from the previous turn's active team cast a spell during that turn, it becomes night."
 status = "implemented"
 impl_files = ["game/day_night.rs:9"]
 test_files = []
@@ -38,16 +38,16 @@ notes = ""
 
 [cr_730_2b]
 rule = "730.2b"
-text = "If it’s night, and previous turn’s active player cast two or more spells during the previous turn, it becomes day. Multiplayer games using the shared team turns option (see rule 805) use a modified rule: if it’s night and any player from the previous turn’s active team cast two or more spells during that turn, it becomes day."
-status = "missing"
-impl_files = []
+text = "If it's night, and previous turn's active player cast two or more spells during the previous turn, it becomes day. Multiplayer games using the shared team turns option (see rule 805) use a modified rule: if it's night and any player from the previous turn's active team cast two or more spells during that turn, it becomes day."
+status = "implemented"
+impl_files = ["game/day_night.rs:9"]
 test_files = []
-notes = ""
+notes = "Both day-to-night and night-to-day transitions implemented in day_night.rs."
 
 [cr_730_2c]
 rule = "730.2c"
-text = "If it’s neither day nor night, this check doesn’t happen and it remains neither."
-status = "missing"
-impl_files = []
+text = "If it's neither day nor night, this check doesn't happen and it remains neither."
+status = "implemented"
+impl_files = ["game/day_night.rs:57"]
 test_files = []
-notes = ""
+notes = "The day/night check is gated on the game having a day/night designation."

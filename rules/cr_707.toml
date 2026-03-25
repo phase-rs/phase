@@ -6,15 +6,15 @@ title = "Copying Objects"
 
 [cr_707_1]
 rule = "707.1"
-text = "Some objects become or turn another object into a “copy” of a spell, permanent, or card. Some effects create a token that’s a copy of another object. (Certain older cards were printed with the phrase “search for a copy.” This section doesn’t cover those cards, which have received new text in the Oracle card reference.)"
-status = "missing"
-impl_files = []
+text = "Some objects become or turn another object into a \"copy\" of a spell, permanent, or card. Some effects create a token that's a copy of another object. (Certain older cards were printed with the phrase \"search for a copy.\" This section doesn't cover those cards, which have received new text in the Oracle card reference.)"
+status = "implemented"
+impl_files = ["game/effects/become_copy.rs:1", "game/effects/token_copy.rs:1"]
 test_files = []
-notes = ""
+notes = "Copy effects implemented via become_copy.rs and token_copy.rs handlers."
 
 [cr_707_2]
 rule = "707.2"
-text = "When copying an object, the copy acquires the copiable values of the original object’s characteristics and, for an object on the stack, choices made when casting or activating it (mode, targets, the value of X, whether it was kicked, how it will affect multiple targets, and so on). The copiable values are the values derived from the text printed on the object (that text being name, mana cost, color indicator, card type, subtype, supertype, rules text, power, toughness, and/or loyalty), as modified by other copy effects, by its face-down status, and by “as . . . enters” and “as . . . is turned face up” abilities that set power and toughness (and may also set additional characteristics). Other effects (including type-changing and text-changing effects), status, counters, and stickers are not copied."
+text = "When copying an object, the copy acquires the copiable values of the original object's characteristics and, for an object on the stack, choices made when casting or activating it (mode, targets, the value of X, whether it was kicked, how it will affect multiple targets, and so on). The copiable values are the values derived from the text printed on the object (that text being name, mana cost, color indicator, card type, subtype, supertype, rules text, power, toughness, and/or loyalty), as modified by other copy effects, by its face-down status, and by \"as . . . enters\" and \"as . . . is turned face up\" abilities that set power and toughness (and may also set additional characteristics). Other effects (including type-changing and text-changing effects), status, counters, and stickers are not copied."
 status = "implemented"
 impl_files = ["game/effects/become_copy.rs:5", "game/effects/become_copy.rs:14", "game/effects/become_copy.rs:27", "game/effects/token_copy.rs:10", "game/effects/token_copy.rs:45", "game/effects/token_copy.rs:46", "game/effects/token_copy.rs:76", "game/engine.rs:1444", "game/filter.rs:373", "parser/oracle_effect/subject.rs:439", "parser/oracle_target.rs:911", "types/ability.rs:858", "types/ability.rs:1793", "types/ability.rs:1807"]
 test_files = []
@@ -22,47 +22,47 @@ notes = ""
 
 [cr_707_2a]
 rule = "707.2a"
-text = "A copy acquires the color of the object it’s copying because that value is derived from its mana cost or color indicator. A copy acquires the abilities of the object it’s copying because those values are derived from its rules text. A copy doesn’t wind up with two values of each ability (that is, it doesn’t copy the object’s abilities and its rules text, then have that rules text define a new set of abilities)."
-status = "missing"
-impl_files = []
+text = "A copy acquires the color of the object it's copying because that value is derived from its mana cost or color indicator. A copy acquires the abilities of the object it's copying because those values are derived from its rules text. A copy doesn't wind up with two values of each ability (that is, it doesn't copy the object's abilities and its rules text, then have that rules text define a new set of abilities)."
+status = "implemented"
+impl_files = ["game/effects/become_copy.rs:14", "game/effects/token_copy.rs:45"]
 test_files = []
-notes = ""
+notes = "Copiable characteristic acquisition follows the same logic as the parent rule."
 
 [cr_707_2b]
 rule = "707.2b"
-text = "Once an object has been copied, changing the copiable values of the original object won’t cause the copy to change."
-status = "missing"
-impl_files = []
+text = "Once an object has been copied, changing the copiable values of the original object won't cause the copy to change."
+status = "implemented"
+impl_files = ["game/effects/become_copy.rs:27"]
 test_files = []
-notes = ""
+notes = "Copy is a snapshot of characteristics at the time of copying."
 
 [cr_707_2c]
 rule = "707.2c"
-text = "If a static ability generates a continuous effect that’s a copy effect, the copiable values that effect grants are determined only at the time that effect first starts to apply."
+text = "If a static ability generates a continuous effect that's a copy effect, the copiable values that effect grants are determined only at the time that effect first starts to apply."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Static copy effects with snapshot semantics not explicitly tracked."
 
 [cr_707_3]
 rule = "707.3"
-text = "The copy’s copiable values become the copied information, as modified by the copy’s status (see rule 110.5). Objects that copy the object will use the new copiable values."
-status = "missing"
-impl_files = []
+text = "The copy's copiable values become the copied information, as modified by the copy's status (see rule 110.5). Objects that copy the object will use the new copiable values."
+status = "implemented"
+impl_files = ["game/effects/become_copy.rs:27", "game/effects/token_copy.rs:76"]
 test_files = []
-notes = ""
+notes = "Copiable values propagate through the copy chain."
 
 [cr_707_4]
 rule = "707.4"
-text = "Some effects cause a permanent that’s copying a permanent to copy a different object while remaining on the battlefield. The change doesn’t cause enters-the-battlefield or leaves-the-battlefield abilities to trigger. This also doesn’t change any noncopy effects presently affecting the permanent."
+text = "Some effects cause a permanent that's copying a permanent to copy a different object while remaining on the battlefield. The change doesn't cause enters-the-battlefield or leaves-the-battlefield abilities to trigger. This also doesn't change any noncopy effects presently affecting the permanent."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Changing what a permanent copies while it remains on the battlefield not explicitly handled."
 
 [cr_707_5]
 rule = "707.5"
-text = "An object that enters the battlefield “as a copy” or “that’s a copy” of another object becomes a copy as it enters the battlefield. It doesn’t enter the battlefield, and then become a copy of that permanent. If the text that’s being copied includes any abilities that replace the enters-the-battlefield event (such as “enters with” or “as [this] enters” abilities), those abilities will take effect. Also, any enters-the-battlefield triggered abilities of the copy will have a chance to trigger."
+text = "An object that enters the battlefield \"as a copy\" or \"that's a copy\" of another object becomes a copy as it enters the battlefield. It doesn't enter the battlefield, and then become a copy of that permanent. If the text that's being copied includes any abilities that replace the enters-the-battlefield event (such as \"enters with\" or \"as [this] enters\" abilities), those abilities will take effect. Also, any enters-the-battlefield triggered abilities of the copy will have a chance to trigger."
 status = "implemented"
 impl_files = ["game/effects/token_copy.rs:10", "types/ability.rs:1793"]
 test_files = []
@@ -70,27 +70,27 @@ notes = ""
 
 [cr_707_6]
 rule = "707.6"
-text = "When copying a permanent, any choices that have been made for that permanent aren’t copied. Instead, if an object enters the battlefield as a copy of another permanent, the object’s controller will get to make any “as [this] enters the battlefield” choices for it."
+text = "When copying a permanent, any choices that have been made for that permanent aren't copied. Instead, if an object enters the battlefield as a copy of another permanent, the object's controller will get to make any \"as [this] enters the battlefield\" choices for it."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "ETB choices for copies not explicitly re-prompted."
 
 [cr_707_7]
 rule = "707.7"
-text = "If a pair of linked abilities are copied, those abilities will be similarly linked to one another on the object that copied them. One ability refers only to actions that were taken or objects that were affected by the other. They can’t be linked to any other ability, regardless of what other abilities the copy may currently have or may have had in the past. See rule 607, “Linked Abilities.”"
+text = "If a pair of linked abilities are copied, those abilities will be similarly linked to one another on the object that copied them. One ability refers only to actions that were taken or objects that were affected by the other. They can't be linked to any other ability, regardless of what other abilities the copy may currently have or may have had in the past. See rule 607, \"Linked Abilities.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Linked ability preservation through copy effects not implemented."
 
 [cr_707_8]
 rule = "707.8"
-text = "When copying a melded permanent or other double-faced permanent, use the copiable values of the face that’s currently up to determine the characteristics of the copy. See rule 712, “Double-Faced Cards.”"
+text = "When copying a melded permanent or other double-faced permanent, use the copiable values of the face that's currently up to determine the characteristics of the copy. See rule 712, \"Double-Faced Cards.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Double-faced permanent copying uses current face characteristics."
 
 [cr_707_8a]
 rule = "707.8a"
@@ -98,7 +98,7 @@ text = "If an effect creates a token that is a copy of a double-faced permanent 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Double-faced token copies not implemented."
 
 [cr_707_9]
 rule = "707.9"
@@ -122,51 +122,51 @@ text = "Some copy effects modify a characteristic as part of the copying process
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Characteristic-modifying copy effects not explicitly tracked in copiable values."
 
 [cr_707_9c]
 rule = "707.9c"
-text = "Some copy effects specifically state that they don’t copy certain characteristics and the affected objects instead retain their original values. Copy effects may also simply state that certain characteristics are not copied."
+text = "Some copy effects specifically state that they don't copy certain characteristics and the affected objects instead retain their original values. Copy effects may also simply state that certain characteristics are not copied."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Selective characteristic exclusion from copy effects not implemented."
 
 [cr_707_9d]
 rule = "707.9d"
-text = "When applying a copy effect that doesn’t copy a certain characteristic, retains one or more original values for a certain characteristic, or provides a specific set of values for a certain characteristic, any characteristic-defining ability (see rule 604.3) of the object being copied that defines that characteristic is not copied. If that characteristic is color, any color indicator (see rule 204) of that object is also not copied. This rule does not apply to copy effects with exceptions that state the object is a certain card type, supertype, and/or subtype “in addition to its other types.” In those cases, any characteristic-defining ability that defines card type, supertype, and/or subtype is copied."
+text = "When applying a copy effect that doesn't copy a certain characteristic, retains one or more original values for a certain characteristic, or provides a specific set of values for a certain characteristic, any characteristic-defining ability (see rule 604.3) of the object being copied that defines that characteristic is not copied. If that characteristic is color, any color indicator (see rule 204) of that object is also not copied. This rule does not apply to copy effects with exceptions that state the object is a certain card type, supertype, and/or subtype \"in addition to its other types.\" In those cases, any characteristic-defining ability that defines card type, supertype, and/or subtype is copied."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "CDA exclusion in partial copy effects not implemented."
 
 [cr_707_9e]
 rule = "707.9e"
-text = "Some replacement effects that generate copy effects include an exception that’s an additional effect rather than a modification of the affected object’s characteristics. If another copy effect is applied to that object after applying the copy effect with that exception, the exception’s effect doesn’t happen."
+text = "Some replacement effects that generate copy effects include an exception that's an additional effect rather than a modification of the affected object's characteristics. If another copy effect is applied to that object after applying the copy effect with that exception, the exception's effect doesn't happen."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Replacement-effect copy exception ordering not implemented."
 
 [cr_707_9f]
 rule = "707.9f"
-text = "Some exceptions to the copying process apply only if the copy is or has certain characteristics. To determine whether such an exception applies, consider what the resulting permanent’s characteristics would be if the copy effect were applied without that exception, taking into account any other exceptions that effect includes."
+text = "Some exceptions to the copying process apply only if the copy is or has certain characteristics. To determine whether such an exception applies, consider what the resulting permanent's characteristics would be if the copy effect were applied without that exception, taking into account any other exceptions that effect includes."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Conditional copy exceptions not implemented."
 
 [cr_707_9g]
 rule = "707.9g"
-text = "Some replacement effects that generate copy effects are linked to triggered abilities written in the same paragraph. (See rule 603.11.) If another copy effect is applied to that object after applying the copy effect with the linked triggered ability, the ability doesn’t trigger."
+text = "Some replacement effects that generate copy effects are linked to triggered abilities written in the same paragraph. (See rule 603.11.) If another copy effect is applied to that object after applying the copy effect with the linked triggered ability, the ability doesn't trigger."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Linked trigger suppression through copy stacking not implemented."
 
 [cr_707_10]
 rule = "707.10"
-text = "To copy a spell, activated ability, or triggered ability means to put a copy of it onto the stack; a copy of a spell isn’t cast and a copy of an activated ability isn’t activated. A copy of a spell or ability copies both the characteristics of the spell or ability and all decisions made for it, including modes, targets, the value of X, and additional or alternative costs. (See rule 601, “Casting Spells.”) Choices that are normally made on resolution are not copied. If an effect of the copy refers to objects used to pay its costs, it uses the objects used to pay the costs of the original spell or ability. A copy of a spell is owned by the player under whose control it was put on the stack. A copy of a spell or ability is controlled by the player under whose control it was put on the stack. A copy of a spell is itself a spell, even though it has no spell card associated with it. A copy of an ability is itself an ability."
+text = "To copy a spell, activated ability, or triggered ability means to put a copy of it onto the stack; a copy of a spell isn't cast and a copy of an activated ability isn't activated. A copy of a spell or ability copies both the characteristics of the spell or ability and all decisions made for it, including modes, targets, the value of X, and additional or alternative costs. (See rule 601, \"Casting Spells.\") Choices that are normally made on resolution are not copied. If an effect of the copy refers to objects used to pay its costs, it uses the objects used to pay the costs of the original spell or ability. A copy of a spell is owned by the player under whose control it was put on the stack. A copy of a spell or ability is controlled by the player under whose control it was put on the stack. A copy of a spell is itself a spell, even though it has no spell card associated with it. A copy of an ability is itself an ability."
 status = "implemented"
 impl_files = ["game/effects/copy_spell.rs:6", "parser/oracle_trigger.rs:1851", "parser/oracle_trigger.rs:4534"]
 test_files = []
@@ -178,7 +178,7 @@ text = "If a copy of a spell is in a zone other than the stack, it ceases to exi
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Spell/card copy expiry SBA not explicitly implemented."
 
 [cr_707_10b]
 rule = "707.10b"
@@ -186,11 +186,11 @@ text = "A copy of an ability has the same source as the original ability. If the
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Source tracking for copied abilities not fully verified."
 
 [cr_707_10c]
 rule = "707.10c"
-text = "Some effects copy a spell or ability and state that its controller may choose new targets for the copy. The player may leave any number of the targets unchanged, even if those targets would be illegal. If the player chooses to change some or all of the targets, the new targets must be legal. Once the player has decided what the copy’s targets will be, the copy is put onto the stack with those targets."
+text = "Some effects copy a spell or ability and state that its controller may choose new targets for the copy. The player may leave any number of the targets unchanged, even if those targets would be illegal. If the player chooses to change some or all of the targets, the new targets must be legal. Once the player has decided what the copy's targets will be, the copy is put onto the stack with those targets."
 status = "implemented"
 impl_files = ["ai_support/candidates.rs:601", "game/effects/copy_spell.rs:7", "game/effects/copy_spell.rs:35", "game/effects/copy_spell.rs:203", "game/engine.rs:2613", "types/game_state.rs:602", "types/game_state.rs:642"]
 test_files = []
@@ -198,19 +198,19 @@ notes = ""
 
 [cr_707_10d]
 rule = "707.10d"
-text = "Some effects copy a spell or ability for each player or object it “could target.” The copies are put onto the stack with those targets in the order of their controller’s choice. If the spell or ability has more than one target, each of its targets must be the same player or object. If that player or object isn’t a legal target for each instance of the word “target,” a copy isn’t created for that player or object."
+text = "Some effects copy a spell or ability for each player or object it \"could target.\" The copies are put onto the stack with those targets in the order of their controller's choice. If the spell or ability has more than one target, each of its targets must be the same player or object. If that player or object isn't a legal target for each instance of the word \"target,\" a copy isn't created for that player or object."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Fork-style copy-for-each-target not implemented."
 
 [cr_707_10e]
 rule = "707.10e"
-text = "Some effects copy a spell or ability and specify a new target for the copy. If the spell or ability has more than one target, each of the copy’s targets must be that player or object. If that player or object isn’t a legal target for each instance of the word “target,” the copy isn’t created. In the case where a replacement effect causes the copy to target more than one object, the copy’s controller chooses one of them to be the new target. The chosen target must be a legal target for that spell or ability."
+text = "Some effects copy a spell or ability and specify a new target for the copy. If the spell or ability has more than one target, each of the copy's targets must be that player or object. If that player or object isn't a legal target for each instance of the word \"target,\" the copy isn't created. In the case where a replacement effect causes the copy to target more than one object, the copy's controller chooses one of them to be the new target. The chosen target must be a legal target for that spell or ability."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Specified new target copy effects not fully implemented."
 
 [cr_707_10f]
 rule = "707.10f"
@@ -218,15 +218,15 @@ text = "Some effects copy a permanent spell. As that copy resolves, it ceases be
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Permanent spell copy to token token resolution not explicitly handled."
 
 [cr_707_10g]
 rule = "707.10g"
-text = "If an effect creates a copy of a double-faced permanent spell, the copy is also a double-faced permanent spell that has both a front face and a back face. The characteristics of its front and back face are determined by the copiable values of the same face of the spell it is a copy of, as modified by any other copy effects. If the spell it is a copy of has its back face up, the copy is created with its back face up. The token that’s put onto the battlefield as that spell resolves is a double-faced token."
+text = "If an effect creates a copy of a double-faced permanent spell, the copy is also a double-faced permanent spell that has both a front face and a back face. The characteristics of its front and back face are determined by the copiable values of the same face of the spell it is a copy of, as modified by any other copy effects. If the spell it is a copy of has its back face up, the copy is created with its back face up. The token that's put onto the battlefield as that spell resolves is a double-faced token."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Double-faced spell copies not implemented."
 
 [cr_707_11]
 rule = "707.11"
@@ -234,15 +234,15 @@ text = "If an effect refers to a permanent by name, the effect still tracks that
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Object identity tracking through name changes not explicitly implemented."
 
 [cr_707_12]
 rule = "707.12"
-text = "An effect that instructs a player to cast a copy of an object (and not just copy a spell) follows the rules for casting spells, except that the copy is created in the same zone the object is in and then cast while another spell or ability is resolving. Casting a copy of an object follows steps 601.2a–h of rule 601, “Casting Spells,” and then the copy becomes cast. Once cast, the copy is a spell on the stack, and just like any other spell it can resolve or be countered."
+text = "An effect that instructs a player to cast a copy of an object (and not just copy a spell) follows the rules for casting spells, except that the copy is created in the same zone the object is in and then cast while another spell or ability is resolving. Casting a copy of an object follows steps 601.2a–h of rule 601, \"Casting Spells,\" and then the copy becomes cast. Once cast, the copy is a spell on the stack, and just like any other spell it can resolve or be countered."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Cast-a-copy-of-an-object (vs copy-a-spell) distinction not implemented."
 
 [cr_707_13]
 rule = "707.13"
@@ -250,7 +250,7 @@ text = "One card (Garth One-Eye) instructs a player to create a copy of a card d
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Name-based copy creation (Garth One-Eye) not implemented."
 
 [cr_707_14]
 rule = "707.14"
@@ -258,4 +258,4 @@ text = "One card (Magar of the Magic Strings) instructs a player to note the nam
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Graveyard-name-noting copy creation (Magar) not implemented."

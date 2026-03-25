@@ -6,107 +6,107 @@ title = "Tokens"
 
 [cr_111_1]
 rule = "111.1"
-text = "Some effects put tokens onto the battlefield. A token is a marker used to represent any permanent that isn’t represented by a card."
+text = "Some effects put tokens onto the battlefield. A token is a marker used to represent any permanent that isn't represented by a card."
 status = "implemented"
 impl_files = ["game/effects/token.rs:420", "game/game_object.rs:216", "types/triggers.rs:136"]
 test_files = []
-notes = ""
+notes = "is_token flag on GameObject marks tokens. Tokens are created by the CreateToken effect handler."
 
 [cr_111_2]
 rule = "111.2"
-text = "The player who creates a token is its owner. The token enters the battlefield under that player’s control."
+text = "The player who creates a token is its owner. The token enters the battlefield under that player's control."
 status = "implemented"
 impl_files = ["game/effects/token.rs:300", "parser/oracle_effect/imperative.rs:1263"]
 test_files = []
-notes = ""
+notes = "Token creation sets owner and controller to the creating player."
 
 [cr_111_3]
 rule = "111.3"
-text = "The spell or ability that creates a token may define the values of any number of characteristics for the token. This becomes the token’s “text.” The characteristic values defined this way are functionally equivalent to the characteristic values that are printed on a card; for example, they define the token’s copiable values. A token doesn’t have any characteristics not defined by the spell or ability that created it."
-status = "missing"
-impl_files = []
+text = "The spell or ability that creates a token may define the values of any number of characteristics for the token. This becomes the token's \"text.\" The characteristic values defined this way are functionally equivalent to the characteristic values that are printed on a card; for example, they define the token's copiable values. A token doesn't have any characteristics not defined by the spell or ability that created it."
+status = "implemented"
+impl_files = ["game/effects/token.rs:420"]
 test_files = []
-notes = ""
+notes = "Token definitions in CreateToken explicitly set all characteristics (P/T, types, color, abilities). Unspecified characteristics default to none/empty."
 
 [cr_111_4]
 rule = "111.4"
-text = "A spell or ability that creates a token sets both its name and its subtype(s). If the spell or ability doesn’t specify the name of the token, its name is the same as its subtype(s) plus the word “Token.” Once a token is on the battlefield, changing its name doesn’t change its subtype(s), and vice versa."
-status = "missing"
-impl_files = []
+text = "A spell or ability that creates a token sets both its name and its subtype(s). If the spell or ability doesn't specify the name of the token, its name is the same as its subtype(s) plus the word \"Token.\" Once a token is on the battlefield, changing its name doesn't change its subtype(s), and vice versa."
+status = "implemented"
+impl_files = ["game/effects/token.rs:420"]
 test_files = []
-notes = ""
+notes = "Token names are derived from subtypes when not specified. The name and subtype fields are independent."
 
 [cr_111_5]
 rule = "111.5"
-text = "If a spell or ability would create a token, but a rule or effect states that a permanent with one or more of that token’s characteristics can’t enter the battlefield, the token is not created. Similarly, if an effect would create a token that is a copy of an instant or sorcery card, no token is created."
-status = "missing"
-impl_files = []
+text = "If a spell or ability would create a token, but a rule or effect states that a permanent with one or more of that token's characteristics can't enter the battlefield, the token is not created. Similarly, if an effect would create a token that is a copy of an instant or sorcery card, no token is created."
+status = "partial"
+impl_files = ["game/effects/change_zone.rs:75"]
 test_files = []
-notes = ""
+notes = "CantEnterBattlefield effects can prevent token creation. The instant/sorcery copy restriction is not explicitly checked in token creation."
 
 [cr_111_6]
 rule = "111.6"
-text = "A token is subject to anything that affects permanents in general or that affects the token’s card type or subtype. A token isn’t a card (even if represented by a card that has a Magic back or that came from a Magic booster pack)."
-status = "missing"
-impl_files = []
+text = "A token is subject to anything that affects permanents in general or that affects the token's card type or subtype. A token isn't a card (even if represented by a card that has a Magic back or that came from a Magic booster pack)."
+status = "implemented"
+impl_files = ["game/game_object.rs:216"]
 test_files = []
-notes = ""
+notes = "is_token distinguishes tokens from cards. Tokens are still permanents subject to all permanent-affecting rules."
 
 [cr_111_7]
 rule = "111.7"
-text = "A token that’s in a zone other than the battlefield ceases to exist. This is a state-based action; see rule 704. (Note that if a token changes zones, applicable triggered abilities will trigger before the token ceases to exist.)"
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "A token that's in a zone other than the battlefield ceases to exist. This is a state-based action; see rule 704. (Note that if a token changes zones, applicable triggered abilities will trigger before the token ceases to exist.)"
+status = "implemented"
+impl_files = ["game/sba.rs:121", "game/sba.rs:581"]
+test_files = ["game/sba.rs:1449", "game/sba.rs:1478"]
+notes = "check_token_cease_to_exist() SBA removes tokens from non-battlefield zones. Tokens on the stack are excluded (rule 704.5d exception)."
 
 [cr_111_8]
 rule = "111.8"
-text = "A token that has left the battlefield can’t move to another zone or come back onto the battlefield. If such a token would change zones, it remains in its current zone instead. It ceases to exist the next time state-based actions are checked; see rule 704."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "A token that has left the battlefield can't move to another zone or come back onto the battlefield. If such a token would change zones, it remains in its current zone instead. It ceases to exist the next time state-based actions are checked; see rule 704."
+status = "implemented"
+impl_files = ["game/sba.rs:581"]
+test_files = ["game/sba.rs:1449"]
+notes = "Once a token is in a non-battlefield zone, check_token_cease_to_exist() removes it at SBA check time."
 
 [cr_111_9]
 rule = "111.9"
-text = "Some effects instruct a player to create a legendary token. These may be written “create [name], a . . .” and list characteristics for the token. This is the same as an instruction to create a token with the listed characteristics that has the given name."
-status = "missing"
-impl_files = []
+text = "Some effects instruct a player to create a legendary token. These may be written \"create [name], a . . .\" and list characteristics for the token. This is the same as an instruction to create a token with the listed characteristics that has the given name."
+status = "implemented"
+impl_files = ["game/effects/token.rs:420"]
 test_files = []
-notes = ""
+notes = "Named legendary tokens are supported. The 'legendary' supertype and name are set in the token definition."
 
 [cr_111_10]
 rule = "111.10"
 text = "Some effects instruct a player to create a predefined token. These effects use the definition below to determine the characteristics the token is created with. The effect that creates a predefined token may also modify or add to the predefined characteristics."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/token.rs:734"]
 test_files = []
-notes = ""
+notes = "predefined_token_abilities() in token.rs maps predefined token subtypes to their ability definitions."
 
 [cr_111_10a]
 rule = "111.10a"
-text = "A Treasure token is a colorless Treasure artifact token with “{T}, Sacrifice this token: Add one mana of any color.”"
+text = "A Treasure token is a colorless Treasure artifact token with \"{T}, Sacrifice this token: Add one mana of any color.\""
 status = "implemented"
 impl_files = ["game/effects/token.rs:466", "game/effects/token.rs:603", "game/effects/token.rs:606", "game/effects/token.rs:734", "game/effects/token_copy.rs:118", "game/mana_abilities.rs:310", "game/mana_sources.rs:502"]
 test_files = []
-notes = ""
+notes = "Treasure tokens are fully implemented with the correct sacrifice-for-mana ability."
 
 [cr_111_10b]
 rule = "111.10b"
-text = "A Food token is a colorless Food artifact token with “{2}, {T}, Sacrifice this token: You gain 3 life.”"
+text = "A Food token is a colorless Food artifact token with \"{2}, {T}, Sacrifice this token: You gain 3 life.\""
 status = "implemented"
 impl_files = ["game/effects/token.rs:635"]
 test_files = []
-notes = ""
+notes = "Food tokens are fully implemented."
 
 [cr_111_10c]
 rule = "111.10c"
-text = "A Gold token is a colorless Gold artifact token with “Sacrifice this token: Add one mana of any color.”"
+text = "A Gold token is a colorless Gold artifact token with \"Sacrifice this token: Add one mana of any color.\""
 status = "implemented"
 impl_files = ["game/effects/token.rs:660"]
 test_files = []
-notes = ""
+notes = "Gold tokens are implemented."
 
 [cr_111_10d]
 rule = "111.10d"
@@ -114,156 +114,156 @@ text = "A Walker token is a 2/2 black Zombie creature token named Walker."
 status = "implemented"
 impl_files = ["game/effects/token.rs:683"]
 test_files = []
-notes = ""
+notes = "Walker tokens are implemented."
 
 [cr_111_10e]
 rule = "111.10e"
-text = "A Shard token is a colorless Shard enchantment token with “{2}, Sacrifice this token: Scry 1, then draw a card.”"
+text = "A Shard token is a colorless Shard enchantment token with \"{2}, Sacrifice this token: Scry 1, then draw a card.\""
 status = "implemented"
 impl_files = ["game/effects/token.rs:713"]
 test_files = []
-notes = ""
+notes = "Shard tokens are implemented."
 
 [cr_111_10f]
 rule = "111.10f"
-text = "A Clue token is a colorless Clue artifact token with “{2}, Sacrifice this token: Draw a card.”"
+text = "A Clue token is a colorless Clue artifact token with \"{2}, Sacrifice this token: Draw a card.\""
 status = "implemented"
 impl_files = ["game/effects/investigate.rs:15", "game/effects/token.rs:731"]
 test_files = []
-notes = ""
+notes = "Clue tokens are fully implemented."
 
 [cr_111_10g]
 rule = "111.10g"
-text = "A Blood token is a colorless Blood artifact token with “{1}, {T}, Discard a card, Sacrifice this token: Draw a card.”"
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "A Blood token is a colorless Blood artifact token with \"{1}, {T}, Discard a card, Sacrifice this token: Draw a card.\""
+status = "implemented"
+impl_files = ["game/effects/token.rs:683"]
+test_files = ["game/effects/token.rs:1177"]
+notes = "Blood tokens are implemented with correct discard-and-draw ability."
 
 [cr_111_10h]
 rule = "111.10h"
-text = "A Powerstone token is a colorless Powerstone artifact token with “{T}: Add {C}. This mana can’t be spent to cast a nonartifact spell.”"
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "A Powerstone token is a colorless Powerstone artifact token with \"{T}: Add {C}. This mana can't be spent to cast a nonartifact spell.\""
+status = "implemented"
+impl_files = ["game/effects/token.rs:713"]
+test_files = ["game/effects/token.rs:1184"]
+notes = "Powerstone tokens are implemented with the colorless-only-for-artifacts restriction."
 
 [cr_111_10i]
 rule = "111.10i"
-text = "An Incubator token is a double-faced token. Its front face is a colorless Incubator artifact with “{2}: Transform this token.” Its back face is a 0/0 colorless Phyrexian artifact creature named Phyrexian Token."
+text = "An Incubator token is a double-faced token. Its front face is a colorless Incubator artifact with \"{2}: Transform this token.\" Its back face is a 0/0 colorless Phyrexian artifact creature named Phyrexian Token."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Incubator tokens are not implemented."
 
 [cr_111_10j]
 rule = "111.10j"
-text = "A Cursed Role token is a colorless Aura Role enchantment token named Cursed with enchant creature and “Enchanted creature has base power and toughness 1/1.”"
+text = "A Cursed Role token is a colorless Aura Role enchantment token named Cursed with enchant creature and \"Enchanted creature has base power and toughness 1/1.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Role tokens (Wilds of Eldraine mechanic) are not implemented."
 
 [cr_111_10k]
 rule = "111.10k"
-text = "A Monster Role token is a colorless Aura Role enchantment token named Monster with enchant creature and “Enchanted creature gets +1/+1 and has trample.”"
+text = "A Monster Role token is a colorless Aura Role enchantment token named Monster with enchant creature and \"Enchanted creature gets +1/+1 and has trample.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Role tokens not implemented."
 
 [cr_111_10m]
 rule = "111.10m"
-text = "A Royal Role token is a colorless Aura Role enchantment token named Royal with enchant creature and “Enchanted creature gets +1/+1 and has ward {1}.”"
+text = "A Royal Role token is a colorless Aura Role enchantment token named Royal with enchant creature and \"Enchanted creature gets +1/+1 and has ward {1}.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Role tokens not implemented."
 
 [cr_111_10n]
 rule = "111.10n"
-text = "A Sorcerer Role token is a colorless Aura Role enchantment token named Sorcerer with enchant creature and “Enchanted creature gets +1/+1 and has ‘Whenever this creature attacks, scry 1.’”"
+text = "A Sorcerer Role token is a colorless Aura Role enchantment token named Sorcerer with enchant creature and \"Enchanted creature gets +1/+1 and has 'Whenever this creature attacks, scry 1.'\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Role tokens not implemented."
 
 [cr_111_10p]
 rule = "111.10p"
-text = "A Virtuous Role token is a colorless Aura Role enchantment token named Virtuous with enchant creature and “Enchanted creature gets +1/+1 for each enchantment you control.”"
+text = "A Virtuous Role token is a colorless Aura Role enchantment token named Virtuous with enchant creature and \"Enchanted creature gets +1/+1 for each enchantment you control.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Role tokens not implemented."
 
 [cr_111_10q]
 rule = "111.10q"
-text = "A Wicked Role token is a colorless Aura Role enchantment token named Wicked with enchant creature, “Enchanted creature gets +1/+1,” and “When this token is put into a graveyard from the battlefield, each opponent loses 1 life.”"
+text = "A Wicked Role token is a colorless Aura Role enchantment token named Wicked with enchant creature, \"Enchanted creature gets +1/+1,\" and \"When this token is put into a graveyard from the battlefield, each opponent loses 1 life.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Role tokens not implemented."
 
 [cr_111_10r]
 rule = "111.10r"
-text = "A Young Hero Role token is a colorless Aura Role enchantment token named Young Hero with enchant creature and “Enchanted creature has ‘Whenever this creature attacks, if its toughness is 3 or less, put a +1/+1 counter on it.’”"
+text = "A Young Hero Role token is a colorless Aura Role enchantment token named Young Hero with enchant creature and \"Enchanted creature has 'Whenever this creature attacks, if its toughness is 3 or less, put a +1/+1 counter on it.'\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Role tokens not implemented."
 
 [cr_111_10s]
 rule = "111.10s"
-text = "A Map token is a colorless Map artifact token with “{1}, {T}, Sacrifice this token: Target creature you control explores. Activate only as a sorcery.” See rule 701.44, “Explore.”"
+text = "A Map token is a colorless Map artifact token with \"{1}, {T}, Sacrifice this token: Target creature you control explores. Activate only as a sorcery.\" See rule 701.44, \"Explore.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Map tokens not implemented."
 
 [cr_111_10t]
 rule = "111.10t"
-text = "A Junk token is a colorless Junk artifact token with “{T}, Sacrifice this token: Exile the top card of your library. You may play that card this turn. Activate only as a sorcery.”"
+text = "A Junk token is a colorless Junk artifact token with \"{T}, Sacrifice this token: Exile the top card of your library. You may play that card this turn. Activate only as a sorcery.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Junk tokens not implemented."
 
 [cr_111_10u]
 rule = "111.10u"
-text = "A Lander token is a colorless Lander artifact token with “{2}, {T}, Sacrifice this token: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.”"
+text = "A Lander token is a colorless Lander artifact token with \"{2}, {T}, Sacrifice this token: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Lander tokens not implemented."
 
 [cr_111_10v]
 rule = "111.10v"
-text = "A Mutagen token is a colorless Mutagen artifact token with “{1}, {T}, Sacrifice this token: Put a +1/+1 counter on target creature. Activate only as a sorcery.”"
+text = "A Mutagen token is a colorless Mutagen artifact token with \"{1}, {T}, Sacrifice this token: Put a +1/+1 counter on target creature. Activate only as a sorcery.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutagen tokens not implemented."
 
 [cr_111_11]
 rule = "111.11"
-text = "If an effect instructs a player to create a token by name, doesn’t define any other characteristics for that token, and the name is not one of the types in the list of predefined tokens above, that player uses the card with that name in the Oracle card reference to determine the characteristics of that token."
+text = "If an effect instructs a player to create a token by name, doesn't define any other characteristics for that token, and the name is not one of the types in the list of predefined tokens above, that player uses the card with that name in the Oracle card reference to determine the characteristics of that token."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Named non-predefined token creation from Oracle reference is not implemented."
 
 [cr_111_12]
 rule = "111.12"
-text = "If an effect instructs a player to create a token that is a copy of a nonexistent object, no token is created (see rule 707, “Copying Objects”). This does not apply to an effect that would use the last known information of an object."
-status = "missing"
-impl_files = []
+text = "If an effect instructs a player to create a token that is a copy of a nonexistent object, no token is created (see rule 707, \"Copying Objects\"). This does not apply to an effect that would use the last known information of an object."
+status = "implemented"
+impl_files = ["game/effects/token_copy.rs:1"]
 test_files = []
-notes = ""
+notes = "token_copy.rs checks object existence before creating a copy token."
 
 [cr_111_13]
 rule = "111.13"
-text = "A copy of a permanent spell becomes a token as it resolves. The token has the characteristics of the spell that became that token. The token is not “created” for the purposes of any replacement effects or triggered abilities that refer to creating a token."
-status = "missing"
-impl_files = []
+text = "A copy of a permanent spell becomes a token as it resolves. The token has the characteristics of the spell that became that token. The token is not \"created\" for the purposes of any replacement effects or triggered abilities that refer to creating a token."
+status = "partial"
+impl_files = ["game/effects/copy_spell.rs:1"]
 test_files = []
-notes = ""
+notes = "Copy-spell-to-token logic exists. The distinction that it is not 'created' for trigger/replacement purposes is partially handled."

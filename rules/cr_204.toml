@@ -1,21 +1,21 @@
-# Comprehensive Rules Section 204: Mana Value
+# Comprehensive Rules Section 204: Color Indicator
 
 [_meta]
 section = 204
-title = "Mana Value"
+title = "Color Indicator"
 
 [cr_204_1]
 rule = "204.1"
 text = "The color indicator is printed to the left of the type line directly below the illustration. It consists of a circular symbol filled in with one or more colors. A color indicator is usually found on nonland cards without a mana cost."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["types/card.rs:34", "game/printed_cards.rs:29"]
+test_files = ["game/deck_loading.rs:350"]
+notes = "CardFace.color_override stores color indicator data. When Some, it overrides derive_colors_from_mana_cost() in apply_card_face_to_object()."
 
 [cr_204_2]
 rule = "204.2"
 text = "An object with a color indicator is each color denoted by that color indicator."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["game/printed_cards.rs:29", "game/printed_cards.rs:32"]
+test_files = ["game/deck_loading.rs:350"]
+notes = "apply_card_face_to_object() uses color_override directly as the object's color when present, per CR 204.2."

@@ -7,71 +7,71 @@ title = "Leveler Cards"
 [cr_711_1]
 rule = "711.1"
 text = "Each leveler card has a striated text box and three power/toughness boxes. The text box of a leveler card contains two level symbols."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["parser/oracle_level.rs:1"]
 test_files = []
-notes = ""
+notes = "Level-up cards parsed via parser/oracle_level.rs."
 
 [cr_711_2]
 rule = "711.2"
-text = "A level symbol is a keyword ability that represents a static ability. The level symbol includes either a range of numbers, indicated here as “N1-N2,” or a single number followed by a plus sign, indicated here as “N3+.” Any abilities printed within the same text box striation as a level symbol are part of its static ability. The same is true of the power/toughness box printed within that striation, indicated here as “[P/T].”"
-status = "missing"
-impl_files = []
+text = "A level symbol is a keyword ability that represents a static ability. The level symbol includes either a range of numbers, indicated here as \"N1-N2,\" or a single number followed by a plus sign, indicated here as \"N3+.\" Any abilities printed within the same text box striation as a level symbol are part of its static ability. The same is true of the power/toughness box printed within that striation, indicated here as \"[P/T].\""
+status = "implemented"
+impl_files = ["parser/oracle_level.rs:1"]
 test_files = []
-notes = ""
+notes = "Level symbol ranges (N1-N2 and N+) parsed in oracle_level.rs."
 
 [cr_711_2a]
 rule = "711.2a"
-text = "“{LEVEL N1-N2} [Abilities] [P/T]” means “As long as this creature has at least N1 level counters on it, but no more than N2 level counters on it, it has base power and toughness [P/T] and has [abilities].”"
-status = "missing"
-impl_files = []
+text = "\"{LEVEL N1-N2} [Abilities] [P/T]\" means \"As long as this creature has at least N1 level counters on it, but no more than N2 level counters on it, it has base power and toughness [P/T] and has [abilities].\""
+status = "implemented"
+impl_files = ["parser/oracle_level.rs:1"]
 test_files = []
-notes = ""
+notes = "Range level symbols implemented."
 
 [cr_711_2b]
 rule = "711.2b"
-text = "“{LEVEL N3+} [Abilities] [P/T]” means “As long as this creature has N3 or more level counters on it, it has base power and toughness [P/T] and has [abilities].”"
-status = "missing"
-impl_files = []
+text = "\"{LEVEL N3+} [Abilities] [P/T]\" means \"As long as this creature has N3 or more level counters on it, it has base power and toughness [P/T] and has [abilities].\""
+status = "implemented"
+impl_files = ["parser/oracle_level.rs:1"]
 test_files = []
-notes = ""
+notes = "Open-ended N+ level symbols implemented."
 
 [cr_711_3]
 rule = "711.3"
 text = "The text box striations have no game significance other than clearly demarcating which abilities and which power/toughness box are associated with which level symbol. Leveler cards each contain only one text box."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Layout guidance; no engine logic needed."
 
 [cr_711_4]
 rule = "711.4"
-text = "Any ability a leveler card has that isn’t preceded by a level symbol is treated normally. In particular, each leveler permanent has its level up ability (see rule 702.87) at all times; it may be activated regardless of how many level counters are on that permanent."
-status = "missing"
-impl_files = []
+text = "Any ability a leveler card has that isn't preceded by a level symbol is treated normally. In particular, each leveler permanent has its level up ability (see rule 702.87) at all times; it may be activated regardless of how many level counters are on that permanent."
+status = "implemented"
+impl_files = ["game/effects/set_class_level.rs:114"]
 test_files = []
-notes = ""
+notes = "Level up activated ability always available regardless of current counter count."
 
 [cr_711_5]
 rule = "711.5"
 text = "If the number of level counters on a leveler creature is less than N1 (the first number printed in its {LEVEL N1-N2} symbol), it has the power and toughness denoted by its uppermost power/toughness box."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["parser/oracle_level.rs:1"]
 test_files = []
-notes = ""
+notes = "Below-minimum-level default P/T handled in the level parser/static ability logic."
 
 [cr_711_6]
 rule = "711.6"
 text = "In every zone other than the battlefield, a leveler card has the power and toughness denoted by its uppermost power/toughness box."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["parser/oracle_level.rs:1"]
 test_files = []
-notes = ""
+notes = "Non-battlefield leveler cards use base P/T."
 
 [cr_711_7]
 rule = "711.7"
-text = "Some enchantments have the subtype Class and associated abilities that give them a class level. These are not level up abilities and class levels do not interact with level counters. See rule 716, “Class Cards.”"
-status = "missing"
-impl_files = []
+text = "Some enchantments have the subtype Class and associated abilities that give them a class level. These are not level up abilities and class levels do not interact with level counters. See rule 702.87, \"Level Up,\" and rule 716, \"Class Cards.\""
+status = "implemented"
+impl_files = ["game/effects/set_class_level.rs:114", "game/restrictions.rs:347"]
 test_files = []
-notes = ""
+notes = "Class levels and level counters are distinct systems; both implemented separately."

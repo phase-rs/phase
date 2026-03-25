@@ -6,7 +6,7 @@ title = "Interaction of Continuous Effects"
 
 [cr_613_1]
 rule = "613.1"
-text = "The values of an object’s characteristics are determined by starting with the actual object. For a card, that means the values of the characteristics printed on that card. For a token or a copy of a spell or card, that means the values of the characteristics defined by the effect that created it. Then all applicable continuous effects are applied in a series of layers in the following order:"
+text = "The values of an object's characteristics are determined by starting with the actual object. For a card, that means the values of the characteristics printed on that card. For a token or a copy of a spell or card, that means the values of the characteristics defined by the effect that created it. Then all applicable continuous effects are applied in a series of layers in the following order:"
 status = "implemented"
 impl_files = ["game/effects/animate.rs:11", "game/effects/animate.rs:52", "game/layers.rs:211", "game/layers.rs:326", "parser/oracle_static.rs:1647"]
 test_files = []
@@ -30,15 +30,15 @@ notes = ""
 
 [cr_613_1c]
 rule = "613.1c"
-text = "Layer 3: Text-changing effects are applied. See rule 612, “Text-Changing Effects.”"
-status = "missing"
-impl_files = []
+text = "Layer 3: Text-changing effects are applied. See rule 612, \"Text-Changing Effects.\""
+status = "partial"
+impl_files = ["types/layers.rs:13"]
 test_files = []
-notes = ""
+notes = "Layer::Text exists in the layer enum and is iterated in evaluate_layers(), but no ContinuousModification variant maps to it yet. CR 612 is largely unimplemented."
 
 [cr_613_1d]
 rule = "613.1d"
-text = "Layer 4: Type-changing effects are applied. These include effects that change an object’s card type, subtype, and/or supertype."
+text = "Layer 4: Type-changing effects are applied. These include effects that change an object's card type, subtype, and/or supertype."
 status = "implemented"
 impl_files = ["types/layers.rs:226"]
 test_files = []
@@ -47,26 +47,26 @@ notes = ""
 [cr_613_1e]
 rule = "613.1e"
 text = "Layer 5: Color-changing effects are applied."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/layers.rs:14", "game/layers.rs:683", "game/layers.rs:686", "types/ability.rs:3712", "types/ability.rs:3715"]
 test_files = []
-notes = ""
+notes = "Layer::Color applied via ContinuousModification::SetColor and AddColor variants."
 
 [cr_613_1f]
 rule = "613.1f"
-text = "Layer 6: Ability-adding effects, keyword counters, ability-removing effects, and effects that say an object can’t have an ability are applied."
-status = "missing"
-impl_files = []
+text = "Layer 6: Ability-adding effects, keyword counters, ability-removing effects, and effects that say an object can't have an ability are applied."
+status = "implemented"
+impl_files = ["types/layers.rs:15", "game/layers.rs:659", "game/layers.rs:664", "game/layers.rs:668", "types/ability.rs:3660", "types/ability.rs:3664", "types/ability.rs:3666", "types/ability.rs:3669"]
 test_files = []
-notes = ""
+notes = "Layer::Ability applied via AddKeyword, RemoveKeyword, GrantAbility, RemoveAllAbilities, AddStaticMode."
 
 [cr_613_1g]
 rule = "613.1g"
 text = "Layer 7: Power- and/or toughness-changing effects are applied."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/layers.rs:17", "types/layers.rs:18", "types/layers.rs:19", "types/layers.rs:20", "game/layers.rs:304", "game/layers.rs:643", "game/layers.rs:648", "game/layers.rs:653", "game/layers.rs:656"]
 test_files = []
-notes = ""
+notes = "Layer 7 sublayers (CharDef, SetPT, ModifyPT, SwitchPT) all implemented."
 
 [cr_613_2]
 rule = "613.2"
@@ -78,27 +78,27 @@ notes = ""
 
 [cr_613_2a]
 rule = "613.2a"
-text = "Layer 1a: Copiable effects are applied. This includes copy effects (see rule 707, “Copying Objects”) and changes to an object’s characteristics determined by merging an object with a permanent (see rule 729, “Merging with Permanents”). “As . . . enters” and “as . . . is turned face up” abilities generate copiable effects if they set power and toughness, even if they also define other characteristics."
-status = "missing"
-impl_files = []
+text = "Layer 1a: Copiable effects are applied. This includes copy effects (see rule 707, \"Copying Objects\") and changes to an object's characteristics determined by merging an object with a permanent (see rule 729, \"Merging with Permanents\"). \"As . . . enters\" and \"as . . . is turned face up\" abilities generate copiable effects if they set power and toughness, even if they also define other characteristics."
+status = "implemented"
+impl_files = ["game/effects/become_copy.rs:5", "game/layers.rs:245"]
 test_files = []
-notes = ""
+notes = "BecomeCopy effect implements Layer 1a copy effects."
 
 [cr_613_2b]
 rule = "613.2b"
 text = "Layer 1b: Face-down spells and permanents have their characteristics modified as defined in rule 708.2."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/morph.rs:1"]
 test_files = []
-notes = ""
+notes = "Morph face-down characteristic modification handled in morph.rs."
 
 [cr_613_2c]
 rule = "613.2c"
-text = "After all rules and effects in layer 1 have been applied, the object’s characteristics are its copiable values. (See rule 707.2.)"
-status = "missing"
-impl_files = []
+text = "After all rules and effects in layer 1 have been applied, the object's characteristics are its copiable values. (See rule 707.2.)"
+status = "implemented"
+impl_files = ["game/layers.rs:245"]
 test_files = []
-notes = ""
+notes = "Layer 1 application sets copiable values before subsequent layers are applied."
 
 [cr_613_3]
 rule = "613.3"
@@ -119,22 +119,22 @@ notes = ""
 [cr_613_4a]
 rule = "613.4a"
 text = "Layer 7a: Effects from characteristic-defining abilities that define power and/or toughness are applied. See rule 604.3."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/layers.rs:17", "game/layers.rs:282"]
 test_files = []
-notes = ""
+notes = "Layer::CharDef processes SetDynamicPower/Toughness CDA effects."
 
 [cr_613_4b]
 rule = "613.4b"
 text = "Layer 7b: Effects that set power and/or toughness to a specific number or value are applied. Effects that refer to the base power and/or toughness of a creature apply in this layer."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/layers.rs:18", "game/layers.rs:653", "game/layers.rs:656", "types/ability.rs:3654", "types/ability.rs:3656"]
 test_files = []
-notes = ""
+notes = "Layer::SetPT handles SetPower/SetToughness modifications."
 
 [cr_613_4c]
 rule = "613.4c"
-text = "Layer 7c: Effects and counters that modify power and/or toughness (but don’t set power and/or toughness to a specific number or value) are applied."
+text = "Layer 7c: Effects and counters that modify power and/or toughness (but don't set power and/or toughness to a specific number or value) are applied."
 status = "implemented"
 impl_files = ["game/layers.rs:304", "game/layers.rs:738", "parser/oracle_static.rs:1022", "parser/oracle_static.rs:2124", "parser/oracle_static.rs:2200", "parser/oracle_static.rs:2303", "parser/oracle_static.rs:2351", "parser/oracle_static.rs:4770", "types/ability.rs:3690", "types/ability.rs:3694"]
 test_files = []
@@ -142,27 +142,27 @@ notes = ""
 
 [cr_613_4d]
 rule = "613.4d"
-text = "Layer 7d: Effects that switch a creature’s power and toughness are applied. Such effects take the value of power and apply it to the creature’s toughness, and take the value of toughness and apply it to the creature’s power."
+text = "Layer 7d: Effects that switch a creature's power and toughness are applied. Such effects take the value of power and apply it to the creature's toughness, and take the value of toughness and apply it to the creature's power."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Layer::SwitchPT exists in the enum and is iterated, but no ContinuousModification variant maps to it. P/T switching (e.g. Twisted Image) not yet implemented."
 
 [cr_613_5]
 rule = "613.5"
-text = "The application of continuous effects as described by the layer system is continually and automatically performed by the game. All resulting changes to an object’s characteristics are instantaneous."
-status = "missing"
-impl_files = []
+text = "The application of continuous effects as described by the layer system is continually and automatically performed by the game. All resulting changes to an object's characteristics are instantaneous."
+status = "implemented"
+impl_files = ["game/layers.rs:211", "game/layers.rs:322"]
 test_files = []
-notes = ""
+notes = "evaluate_layers() is called whenever layers_dirty flag is set, ensuring continuous re-evaluation."
 
 [cr_613_6]
 rule = "613.6"
 text = "If an effect should be applied in different layers and/or sublayers, the parts of the effect each apply in their appropriate ones. If an effect starts to apply in one layer and/or sublayer, it will continue to be applied to the same set of objects in each other applicable layer and/or sublayer, even if the ability generating the effect is removed during this process."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/layers.rs:211", "types/ability.rs:3365"]
 test_files = []
-notes = ""
+notes = "ActiveContinuousEffect has one layer per modification; multi-layer effects create multiple ActiveContinuousEffect entries."
 
 [cr_613_7]
 rule = "613.7"
@@ -182,27 +182,27 @@ notes = ""
 
 [cr_613_7b]
 rule = "613.7b"
-text = "A continuous effect generated by the resolution of a spell or ability receives a timestamp at the time it’s created."
-status = "missing"
-impl_files = []
+text = "A continuous effect generated by the resolution of a spell or ability receives a timestamp at the time it's created."
+status = "implemented"
+impl_files = ["game/effects/pump.rs:11", "game/layers.rs:408"]
 test_files = []
-notes = ""
+notes = "Transient continuous effects receive a timestamp at creation from state.timestamp_counter."
 
 [cr_613_7c]
 rule = "613.7c"
-text = "Each counter receives a timestamp as it’s put on an object or player. If that object or player already has a counter of that kind on it, each counter of that kind receives a new timestamp identical to that of the new counter."
+text = "Each counter receives a timestamp as it's put on an object or player. If that object or player already has a counter of that kind on it, each counter of that kind receives a new timestamp identical to that of the new counter."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Counter timestamps not explicitly tracked. Counters contribute to P/T in layer 7c but without per-counter timestamp ordering."
 
 [cr_613_7d]
 rule = "613.7d"
 text = "An object receives a timestamp at the time it enters a zone."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/zones.rs:46", "game/layers.rs:459"]
 test_files = []
-notes = ""
+notes = "Objects receive timestamps when entering the battlefield. Tracked via enter_timestamp on GameObject."
 
 [cr_613_7e]
 rule = "613.7e"
@@ -210,7 +210,7 @@ text = "An Aura, Equipment, or Fortification receives a new timestamp each time 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Attachment-triggered timestamp refresh not implemented."
 
 [cr_613_7f]
 rule = "613.7f"
@@ -218,7 +218,7 @@ text = "A permanent receives a new timestamp each time it turns face up or face 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Face-up/down timestamp refresh not implemented."
 
 [cr_613_7g]
 rule = "613.7g"
@@ -226,55 +226,55 @@ text = "A double-faced permanent receives a new timestamp each time it transform
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Transform-triggered timestamp refresh not implemented."
 
 [cr_613_7h]
 rule = "613.7h"
-text = "A face-up plane card, phenomenon card, or scheme card receives a timestamp at the time it’s turned face up."
-status = "missing"
+text = "A face-up plane card, phenomenon card, or scheme card receives a timestamp at the time it's turned face up."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Planechase/Archenemy not implemented."
 
 [cr_613_7i]
 rule = "613.7i"
 text = "A face-up vanguard card receives a timestamp at the beginning of the game."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Vanguard format not implemented."
 
 [cr_613_7j]
 rule = "613.7j"
-text = "A conspiracy card receives a timestamp at the beginning of the game. If it’s face down, it receives a new timestamp at the time it turns face up."
-status = "missing"
+text = "A conspiracy card receives a timestamp at the beginning of the game. If it's face down, it receives a new timestamp at the time it turns face up."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Conspiracy format not implemented."
 
 [cr_613_7k]
 rule = "613.7k"
-text = "A sticker receives a new timestamp each time it’s put on an object. If the object a sticker is on receives a new timestamp, the sticker receives a new timestamp immediately after that one. If the object a sticker is on becomes part of a merged permanent on the battlefield, the sticker receives a new timestamp at that time. If an object has more than one sticker on it as it enters a zone or becomes part of a merged permanent, the relative timestamp order of those stickers remains unchanged."
-status = "missing"
+text = "A sticker receives a new timestamp each time it's put on an object. If the object a sticker is on receives a new timestamp, the sticker receives a new timestamp immediately after that one. If the object a sticker is on becomes part of a merged permanent on the battlefield, the sticker receives a new timestamp at that time. If an object has more than one sticker on it as it enters a zone or becomes part of a merged permanent, the relative timestamp order of those stickers remains unchanged."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Stickers (Unfinity) not implemented."
 
 [cr_613_7m]
 rule = "613.7m"
-text = "If two or more objects would receive a timestamp simultaneously, such as by entering a zone simultaneously or becoming attached simultaneously, their relative timestamps are determined in APNAP order (see rule 101.4). Objects controlled by the active player (or owned by the active player, if they have no controller) have an earlier relative timestamp in the order of that player’s choice, followed by each other player in turn order."
+text = "If two or more objects would receive a timestamp simultaneously, such as by entering a zone simultaneously or becoming attached simultaneously, their relative timestamps are determined in APNAP order (see rule 101.4). Objects controlled by the active player (or owned by the active player, if they have no controller) have an earlier relative timestamp in the order of that player's choice, followed by each other player in turn order."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Simultaneous timestamp APNAP ordering not explicitly modeled."
 
 [cr_613_7n]
 rule = "613.7n"
-text = "If a continuous effect generated by a static ability of an object and a continuous effect generated by a resolving spell or ability that applies to that object would receive a timestamp simultaneously, such as due to an effect that puts that object onto the battlefield and sets its characteristics (see rule 611.2e), the continuous effect from the object’s own static ability receives an earlier relative timestamp."
+text = "If a continuous effect generated by a static ability of an object and a continuous effect generated by a resolving spell or ability that applies to that object would receive a timestamp simultaneously, such as due to an effect that puts that object onto the battlefield and sets its characteristics (see rule 611.2e), the continuous effect from the object's own static ability receives an earlier relative timestamp."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Simultaneous static-vs-transient timestamp ordering not modeled."
 
 [cr_613_8]
 rule = "613.8"
@@ -286,48 +286,48 @@ notes = ""
 
 [cr_613_8a]
 rule = "613.8a"
-text = "An effect is said to “depend on” another if (a) it’s applied in the same layer (and, if applicable, sublayer) as the other effect; (b) applying the other would change the text or the existence of the first effect, what it applies to, or what it does to any of the things it applies to; and (c) neither effect is from a characteristic-defining ability or both effects are from characteristic-defining abilities. Otherwise, the effect is considered to be independent of the other effect."
-status = "missing"
-impl_files = []
+text = "An effect is said to \"depend on\" another if (a) it's applied in the same layer (and, if applicable, sublayer) as the other effect; (b) applying the other would change the text or the existence of the first effect, what it applies to, or what it does to any of the things it applies to; and (c) neither effect is from a characteristic-defining ability or both effects are from characteristic-defining abilities. Otherwise, the effect is considered to be independent of the other effect."
+status = "implemented"
+impl_files = ["game/layers.rs:501", "game/layers.rs:534", "game/layers.rs:547"]
 test_files = []
-notes = ""
+notes = "depends_on() function in layers.rs evaluates type-reference and ability-reference dependencies."
 
 [cr_613_8b]
 rule = "613.8b"
-text = "An effect dependent on one or more other effects waits to apply until just after all of those effects have been applied. If multiple dependent effects would apply simultaneously in this way, they’re applied in timestamp order relative to each other. If several dependent effects form a dependency loop, then this rule is ignored and the effects in the dependency loop are applied in timestamp order."
-status = "missing"
-impl_files = []
+text = "An effect dependent on one or more other effects waits to apply until just after all of those effects have been applied. If multiple dependent effects would apply simultaneously in this way, they're applied in timestamp order relative to each other. If several dependent effects form a dependency loop, then this rule is ignored and the effects in the dependency loop are applied in timestamp order."
+status = "implemented"
+impl_files = ["game/layers.rs:450", "game/layers.rs:493"]
 test_files = []
-notes = ""
+notes = "order_with_dependencies() implements dependency ordering with timestamp fallback."
 
 [cr_613_8c]
 rule = "613.8c"
 text = "After each effect is applied, the order of remaining effects is reevaluated and may change if an effect that has not yet been applied becomes dependent on or independent of one or more other effects that have not yet been applied."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/layers.rs:450"]
 test_files = []
-notes = ""
+notes = "order_with_dependencies() re-evaluates dependency ordering at each step."
 
 [cr_613_9]
 rule = "613.9"
 text = "One continuous effect can override another. Sometimes the results of one effect determine whether another effect applies or what another effect does."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/layers.rs:450", "game/layers.rs:493"]
 test_files = []
-notes = ""
+notes = "Dependency system allows one effect to determine another's applicability."
 
 [cr_613_10]
 rule = "613.10"
-text = "Some continuous effects affect players rather than objects. For example, an effect might give a player protection from red. All such effects are applied in timestamp order after the determination of objects’ characteristics. See also the rules for timestamp order and dependency (rules 613.7 and 613.8)."
-status = "missing"
-impl_files = []
+text = "Some continuous effects affect players rather than objects. For example, an effect might give a player protection from red. All such effects are applied in timestamp order after the determination of objects' characteristics. See also the rules for timestamp order and dependency (rules 613.7 and 613.8)."
+status = "implemented"
+impl_files = ["game/static_abilities.rs:168", "game/effects/pump.rs:1"]
 test_files = []
-notes = ""
+notes = "Player-affecting continuous effects handled through static_abilities.rs evaluation."
 
 [cr_613_11]
 rule = "613.11"
-text = "Some continuous effects affect game rules rather than objects. For example, effects may modify a player’s maximum hand size, or say that a creature must attack this turn if able. These effects are applied after all other continuous effects have been applied. Continuous effects that affect the costs of spells or abilities are applied according to the order specified in rule 601.2f. All other such effects are applied in timestamp order. See also the rules for timestamp order and dependency (rules 613.7 and 613.8)."
-status = "missing"
-impl_files = []
+text = "Some continuous effects affect game rules rather than objects. For example, effects may modify a player's maximum hand size, or say that a creature must attack this turn if able. These effects are applied after all other continuous effects have been applied. Continuous effects that affect the costs of spells or abilities are applied according to the order specified in rule 601.2f. All other such effects are applied in timestamp order. See also the rules for timestamp order and dependency (rules 613.7 and 613.8)."
+status = "implemented"
+impl_files = ["game/static_abilities.rs:168", "game/casting.rs:593", "types/statics.rs:82"]
 test_files = []
-notes = ""
+notes = "Game-rule-modifying statics (max hand size, must attack, cost reduction) handled in static_abilities.rs."

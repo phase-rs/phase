@@ -10,15 +10,15 @@ text = "Some effects put emblems into the command zone. An emblem is a marker us
 status = "implemented"
 impl_files = ["game/effects/create_emblem.rs:8", "game/effects/create_emblem.rs:20", "parser/oracle_effect/mod.rs:1450", "parser/oracle_effect/mod.rs:1541", "types/ability.rs:2022"]
 test_files = []
-notes = ""
+notes = "Emblems are created by the CreateEmblem effect, placed in the command zone, and tracked in GameState."
 
 [cr_114_2]
 rule = "114.2"
-text = "An effect that creates an emblem is written “[Player] gets an emblem with [ability].” This means that [player] puts an emblem with [ability] into the command zone. The emblem is both owned and controlled by that player."
-status = "missing"
-impl_files = []
+text = "An effect that creates an emblem is written \"[Player] gets an emblem with [ability].\" This means that [player] puts an emblem with [ability] into the command zone. The emblem is both owned and controlled by that player."
+status = "implemented"
+impl_files = ["game/effects/create_emblem.rs:20"]
 test_files = []
-notes = ""
+notes = "create_emblem() sets both owner and controller to the player who created the emblem."
 
 [cr_114_3]
 rule = "114.3"
@@ -26,20 +26,20 @@ text = "An emblem has no characteristics other than the abilities defined by the
 status = "implemented"
 impl_files = ["game/layers.rs:366", "game/static_abilities.rs:127"]
 test_files = []
-notes = ""
+notes = "Emblem objects have only their ability definitions — no types, no mana cost, no color. The layer evaluator skips characteristic-setting layers for emblems."
 
 [cr_114_4]
 rule = "114.4"
 text = "Abilities of emblems function in the command zone."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/layers.rs:366", "game/static_abilities.rs:127"]
 test_files = []
-notes = ""
+notes = "Emblem static abilities are included in layer evaluation even though they are in the command zone, not the battlefield."
 
 [cr_114_5]
 rule = "114.5"
-text = "An emblem is neither a card nor a permanent. Emblem isn’t a card type."
+text = "An emblem is neither a card nor a permanent. Emblem isn't a card type."
 status = "implemented"
 impl_files = ["game/effects/bounce.rs:38", "game/effects/change_zone.rs:211", "game/effects/create_emblem.rs:29", "game/effects/destroy.rs:28", "game/effects/sacrifice.rs:20", "game/game_object.rs:212"]
 test_files = []
-notes = ""
+notes = "Emblems are excluded from effects that target 'permanents' or 'cards'. The is_emblem distinction prevents them from being destroyed, bounced, or sacrificed."

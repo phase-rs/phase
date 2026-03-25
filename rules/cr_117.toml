@@ -10,103 +10,103 @@ text = "Unless a spell or ability is instructing a player to take an action, whi
 status = "implemented"
 impl_files = ["game/effects/pay.rs:10", "game/effects/pay.rs:23", "game/quantity.rs:351", "game/restrictions.rs:119", "parser/oracle_effect/imperative.rs:1136", "types/ability.rs:1107", "types/game_state.rs:1002"]
 test_files = []
-notes = ""
+notes = "WaitingFor::Priority tracks which player currently holds priority. Only that player's actions are accepted."
 
 [cr_117_1a]
 rule = "117.1a"
 text = "A player may cast an instant spell any time they have priority. A player may cast a noninstant spell during their main phase any time they have priority and the stack is empty."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/casting.rs:139", "game/casting.rs:231"]
 test_files = []
-notes = ""
+notes = "Cast timing is enforced in casting.rs: sorcery-speed spells require main phase + empty stack."
 
 [cr_117_1b]
 rule = "117.1b"
 text = "A player may activate an activated ability any time they have priority."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/casting.rs:378"]
 test_files = []
-notes = ""
+notes = "Activated ability activation is gated on the player having priority (WaitingFor::Priority)."
 
 [cr_117_1c]
 rule = "117.1c"
-text = "A player may take some special actions any time they have priority. A player may take other special actions during their main phase any time they have priority and the stack is empty. See rule 116, “Special Actions.”"
+text = "A player may take some special actions any time they have priority. A player may take other special actions during their main phase any time they have priority and the stack is empty. See rule 116, \"Special Actions.\""
 status = "implemented"
 impl_files = ["game/casting.rs:139", "game/casting.rs:231", "game/casting.rs:378"]
 test_files = []
-notes = ""
+notes = "PlayLand requires main phase + empty stack. Companion activation requires main phase + empty stack. Morph face-up can happen any time with priority."
 
 [cr_117_1d]
 rule = "117.1d"
 text = "A player may activate a mana ability whenever they have priority, whenever they are casting a spell or activating an ability that requires a mana payment, or whenever a rule or effect asks for a mana payment (even in the middle of casting or resolving a spell or activating or resolving an ability)."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/mana_abilities.rs:1"]
 test_files = []
-notes = ""
+notes = "Mana abilities can be activated during casting (before paying costs) and during resolution when mana is needed."
 
 [cr_117_2]
 rule = "117.2"
 text = "Other kinds of abilities and actions are automatically generated or performed by the game rules, or are performed by players without receiving priority."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/turns.rs:1", "game/sba.rs:1"]
 test_files = []
-notes = ""
+notes = "Turn-based actions and SBAs are automatically applied by the engine without any priority-based player interaction."
 
 [cr_117_2a]
 rule = "117.2a"
-text = "Triggered abilities can trigger at any time, including while a spell is being cast, an ability is being activated, or a spell or ability is resolving. (See rule 603, “Handling Triggered Abilities.”) However, nothing actually happens at the time an ability triggers. Each time a player would receive priority, each ability that has triggered but hasn’t yet been put on the stack is put on the stack. See rule 117.5."
-status = "missing"
-impl_files = []
+text = "Triggered abilities can trigger at any time, including while a spell is being cast, an ability is being activated, or a spell or ability is resolving. (See rule 603, \"Handling Triggered Abilities.\") However, nothing actually happens at the time an ability triggers. Each time a player would receive priority, each ability that has triggered but hasn't yet been put on the stack is put on the stack. See rule 117.5."
+status = "implemented"
+impl_files = ["game/triggers.rs:1", "game/engine.rs:2953"]
 test_files = []
-notes = ""
+notes = "Triggers are queued and placed on the stack at the next priority checkpoint in run_post_action_pipeline()."
 
 [cr_117_2b]
 rule = "117.2b"
-text = "Static abilities continuously affect the game. Priority doesn’t apply to them. (See rule 604, “Handling Static Abilities,” and rule 611, “Continuous Effects.”)"
-status = "missing"
-impl_files = []
+text = "Static abilities continuously affect the game. Priority doesn't apply to them. (See rule 604, \"Handling Static Abilities,\" and rule 611, \"Continuous Effects.\")"
+status = "implemented"
+impl_files = ["game/static_abilities.rs:1", "game/layers.rs:1"]
 test_files = []
-notes = ""
+notes = "Static abilities are evaluated continuously via the layer system, outside of the priority flow."
 
 [cr_117_2c]
 rule = "117.2c"
-text = "Turn-based actions happen automatically when certain steps or phases begin. They’re dealt with before a player would receive priority. See rule 117.3a. Turn-based actions also happen automatically when each step and phase ends; no player receives priority afterward. See rule 703, “Turn-Based Actions.”"
-status = "missing"
-impl_files = []
+text = "Turn-based actions happen automatically when certain steps or phases begin. They're dealt with before a player would receive priority. See rule 117.3a. Turn-based actions also happen automatically when each step and phase ends; no player receives priority afterward. See rule 703, \"Turn-Based Actions.\""
+status = "implemented"
+impl_files = ["game/turns.rs:1"]
 test_files = []
-notes = ""
+notes = "Turn-based actions (untap, draw, combat) are applied automatically by turns.rs before granting priority."
 
 [cr_117_2d]
 rule = "117.2d"
-text = "State-based actions happen automatically when certain conditions are met. See rule 704. They’re dealt with before a player would receive priority. See rule 117.5."
-status = "missing"
-impl_files = []
+text = "State-based actions happen automatically when certain conditions are met. See rule 704. They're dealt with before a player would receive priority. See rule 117.5."
+status = "implemented"
+impl_files = ["game/sba.rs:1", "game/engine.rs:2924"]
 test_files = []
-notes = ""
+notes = "SBAs are checked in run_post_action_pipeline() before granting priority to any player."
 
 [cr_117_2e]
 rule = "117.2e"
-text = "Resolving spells and abilities may instruct players to make choices or take actions, or may allow players to activate mana abilities. Even if a player is doing so, no player has priority while a spell or ability is resolving. See rule 608, “Resolving Spells and Abilities.”"
-status = "missing"
-impl_files = []
+text = "Resolving spells and abilities may instruct players to make choices or take actions, or may allow players to activate mana abilities. Even if a player is doing so, no player has priority while a spell or ability is resolving. See rule 608, \"Resolving Spells and Abilities.\""
+status = "implemented"
+impl_files = ["game/stack.rs:1"]
 test_files = []
-notes = ""
+notes = "During resolution, the engine uses WaitingFor states other than Priority (e.g., WaitingFor::ChooseTarget) to collect player input without granting full priority."
 
 [cr_117_3]
 rule = "117.3"
 text = "Which player has priority is determined by the following rules:"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/priority.rs:1"]
 test_files = []
-notes = ""
+notes = "Priority routing is managed in priority.rs."
 
 [cr_117_3a]
 rule = "117.3a"
-text = "The active player receives priority at the beginning of most steps and phases, after any turn-based actions (such as drawing a card during the draw step; see rule 703) have been dealt with and abilities that trigger at the beginning of that phase or step have been put on the stack. No player receives priority during the untap step. Players usually don’t get priority during the cleanup step (see rule 514.3)."
+text = "The active player receives priority at the beginning of most steps and phases, after any turn-based actions (such as drawing a card during the draw step; see rule 703) have been dealt with and abilities that trigger at the beginning of that phase or step have been put on the stack. No player receives priority during the untap step. Players usually don't get priority during the cleanup step (see rule 514.3)."
 status = "implemented"
 impl_files = ["game/priority.rs:99", "game/turns.rs:62", "game/turns.rs:414"]
 test_files = []
-notes = ""
+notes = "The active player receives priority at the start of each phase/step after turn-based actions. Untap step grants no priority. Cleanup step grants priority only if hand-size discards occurred."
 
 [cr_117_3b]
 rule = "117.3b"
@@ -114,23 +114,23 @@ text = "The active player receives priority after a spell or ability (other than
 status = "implemented"
 impl_files = ["game/engine.rs:583", "game/engine.rs:880"]
 test_files = []
-notes = ""
+notes = "After stack resolution, priority returns to the active player."
 
 [cr_117_3c]
 rule = "117.3c"
 text = "If a player has priority when they cast a spell, activate an ability, or take a special action, that player receives priority afterward."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/engine.rs:2963"]
 test_files = []
-notes = ""
+notes = "After casting/activating, priority returns to the casting player (active player check)."
 
 [cr_117_3d]
 rule = "117.3d"
-text = "If a player has priority and chooses not to take any actions, that player passes. If any mana is in that player’s mana pool, they announce what mana is there. Then the next player in turn order receives priority."
+text = "If a player has priority and chooses not to take any actions, that player passes. If any mana is in that player's mana pool, they announce what mana is there. Then the next player in turn order receives priority."
 status = "implemented"
 impl_files = ["game/priority.rs:60"]
 test_files = []
-notes = ""
+notes = "PassPriority action advances priority to the next player in turn order."
 
 [cr_117_4]
 rule = "117.4"
@@ -138,28 +138,28 @@ text = "If all players pass in succession (that is, if all players pass without 
 status = "implemented"
 impl_files = ["game/priority.rs:8", "game/priority.rs:11", "game/priority.rs:26", "game/priority.rs:31", "game/priority.rs:35", "types/actions.rs:143"]
 test_files = []
-notes = ""
+notes = "The priority system tracks how many players have passed. When all pass, the stack resolves or the step/phase ends."
 
 [cr_117_5]
 rule = "117.5"
-text = "Each time a player would get priority, the game first performs all applicable state-based actions as a single event (see rule 704, “State-Based Actions”), then repeats this process until no state-based actions are performed. Then triggered abilities are put on the stack (see rule 603, “Handling Triggered Abilities”). These steps repeat in order until no further state-based actions are performed and no abilities trigger. Then the player who would have received priority does so."
-status = "missing"
-impl_files = []
+text = "Each time a player would get priority, the game first performs all applicable state-based actions as a single event (see rule 704, \"State-Based Actions\"), then repeats this process until no state-based actions are performed. Then triggered abilities are put on the stack (see rule 603, \"Handling Triggered Abilities\"). These steps repeat in order until no further state-based actions are performed and no abilities trigger. Then the player who would have received priority does so."
+status = "implemented"
+impl_files = ["game/engine.rs:2919", "game/engine.rs:2924", "game/engine.rs:2953"]
 test_files = []
-notes = ""
+notes = "run_post_action_pipeline() implements the SBA-then-trigger loop before granting priority. SBAs and triggers are both checked before any player receives priority."
 
 [cr_117_6]
 rule = "117.6"
-text = "In a multiplayer game using the shared team turns option, teams rather than individual players have priority. See rule 805, “Shared Team Turns Option.”"
-status = "missing"
+text = "In a multiplayer game using the shared team turns option, teams rather than individual players have priority. See rule 805, \"Shared Team Turns Option.\""
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Shared team turns option not implemented."
 
 [cr_117_7]
 rule = "117.7"
-text = "If a player with priority casts a spell or activates an activated ability while another spell or ability is already on the stack, the new spell or ability has been cast or activated “in response to” the earlier spell or ability. The new spell or ability will resolve first. See rule 608, “Resolving Spells and Abilities.”"
-status = "missing"
-impl_files = []
+text = "If a player with priority casts a spell or activates an activated ability while another spell or ability is already on the stack, the new spell or ability has been cast or activated \"in response to\" the earlier spell or ability. The new spell or ability will resolve first. See rule 608, \"Resolving Spells and Abilities.\""
+status = "implemented"
+impl_files = ["game/stack.rs:1"]
 test_files = []
-notes = ""
+notes = "The stack is LIFO; newly added spells/abilities resolve before previously added ones."

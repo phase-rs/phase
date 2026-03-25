@@ -10,7 +10,7 @@ text = "Mana is the primary resource in the game. Players spend mana to pay cost
 status = "implemented"
 impl_files = ["parser/oracle_effect/mana.rs:30", "parser/oracle_effect/mana.rs:75", "parser/oracle_effect/mana.rs:208", "parser/oracle_effect/mana.rs:225", "parser/oracle_effect/mana.rs:507"]
 test_files = []
-notes = ""
+notes = "Mana production and payment are core engine functions. The mana effect parser and payment resolver implement the full mana resource system."
 
 [cr_106_1a]
 rule = "106.1a"
@@ -18,7 +18,7 @@ text = "There are five colors of mana: white, blue, black, red, and green."
 status = "implemented"
 impl_files = ["game/effects/mana.rs:116", "game/effects/mana.rs:154"]
 test_files = []
-notes = ""
+notes = "ManaColor::ALL defines the five colors. ManaPool tracks each color separately."
 
 [cr_106_1b]
 rule = "106.1b"
@@ -26,47 +26,47 @@ text = "There are six types of mana: white, blue, black, red, green, and colorle
 status = "implemented"
 impl_files = ["game/effects/mana.rs:118", "game/effects/mana.rs:155"]
 test_files = []
-notes = ""
+notes = "ManaCostShard and ManaPool include colorless mana as a distinct type separate from the five colors."
 
 [cr_106_2]
 rule = "106.2"
 text = "Mana is represented by mana symbols (see rule 107.4). Mana symbols also represent mana costs (see rule 202)."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/mana.rs:1"]
 test_files = []
-notes = ""
+notes = "ManaCostShard enum in types/mana.rs represents all mana symbols. ManaCost represents the full mana cost."
 
 [cr_106_3]
 rule = "106.3"
-text = "Mana is produced by the effects of mana abilities (see rule 605). It may also be produced by the effects of spells, as well as by the effects of abilities that aren’t mana abilities. A spell or ability that produces mana instructs a player to add that mana. If mana is produced by a spell, the source of that mana is that spell. If mana is produced by an ability, the source of that mana is the source of that ability (see rule 113.7)."
+text = "Mana is produced by the effects of mana abilities (see rule 605). It may also be produced by the effects of spells, as well as by the effects of abilities that aren't mana abilities. A spell or ability that produces mana instructs a player to add that mana. If mana is produced by a spell, the source of that mana is that spell. If mana is produced by an ability, the source of that mana is the source of that ability (see rule 113.7)."
 status = "implemented"
 impl_files = ["game/effects/mana.rs:23", "game/mana_payment.rs:93", "game/mana_payment.rs:95", "parser/oracle_effect/mana.rs:30", "parser/oracle_effect/mana.rs:507"]
 test_files = []
-notes = ""
+notes = "Mana production goes through the AddMana effect. Source tracking is included in mana pool entries."
 
 [cr_106_4]
 rule = "106.4"
-text = "When an effect instructs a player to add mana, that mana goes into a player’s mana pool. From there, it can be used to pay costs immediately, or it can stay in the player’s mana pool as unspent mana. Each player’s mana pool empties at the end of each step and phase, and the player is said to lose this mana. Cards with abilities that produce mana or refer to unspent mana have received errata in the Oracle™ card reference to no longer explicitly refer to the mana pool."
+text = "When an effect instructs a player to add mana, that mana goes into a player's mana pool. From there, it can be used to pay costs immediately, or it can stay in the player's mana pool as unspent mana. Each player's mana pool empties at the end of each step and phase, and the player is said to lose this mana. Cards with abilities that produce mana or refer to unspent mana have received errata in the Oracle™ card reference to no longer explicitly refer to the mana pool."
 status = "implemented"
 impl_files = ["game/effects/mana.rs:9", "game/effects/mana.rs:48", "game/mana_payment.rs:93", "game/mana_payment.rs:97", "types/triggers.rs:189"]
 test_files = []
-notes = ""
+notes = "ManaPool on GameState empties at the end of each step/phase in turns.rs. ManaPoolEmptied event triggers at end-of-step."
 
 [cr_106_4a]
 rule = "106.4a"
-text = "If any mana remains in a player’s mana pool after mana is spent to pay a cost, that player announces what mana is still there."
-status = "missing"
+text = "If any mana remains in a player's mana pool after mana is spent to pay a cost, that player announces what mana is still there."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Announcement is a UI/display concern. The engine tracks remaining mana in ManaPool accurately; display is handled client-side."
 
 [cr_106_4b]
 rule = "106.4b"
 text = "If a player passes priority (see rule 117) while there is mana in their mana pool, that player announces what mana is there."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Announcement is a UI/display concern. Mana pool state is serialized in GameState for the client to display."
 
 [cr_106_5]
 rule = "106.5"
@@ -74,15 +74,15 @@ text = "If an ability would produce one or more mana of an undefined type, it pr
 status = "implemented"
 impl_files = ["game/effects/mana.rs:125"]
 test_files = []
-notes = ""
+notes = "Mana production with undefined/unresolvable type produces no mana. Handled in the AddMana effect resolver."
 
 [cr_106_6]
 rule = "106.6"
-text = "Some spells or abilities that produce mana restrict how that mana can be spent, have an additional effect that affects the spell or ability that mana is spent on, or create a delayed triggered ability (see rule 603.7a) that triggers when that mana is spent. This doesn’t affect the mana’s type."
+text = "Some spells or abilities that produce mana restrict how that mana can be spent, have an additional effect that affects the spell or ability that mana is spent on, or create a delayed triggered ability (see rule 603.7a) that triggers when that mana is spent. This doesn't affect the mana's type."
 status = "implemented"
 impl_files = ["game/effects/mana.rs:77", "game/mana_payment.rs:139", "game/mana_payment.rs:373", "types/mana.rs:70", "types/mana.rs:102", "types/mana.rs:117", "types/mana.rs:122"]
 test_files = []
-notes = ""
+notes = "ManaRestriction type in types/mana.rs tracks spending restrictions. mana_payment.rs enforces restrictions during payment."
 
 [cr_106_6a]
 rule = "106.6a"
@@ -90,76 +90,76 @@ text = "Some replacement effects increase the amount of mana produced by a spell
 status = "implemented"
 impl_files = ["types/replacements.rs:63"]
 test_files = []
-notes = ""
+notes = "ManaDoubling and mana production replacement effects apply restrictions to all produced mana."
 
 [cr_106_7]
 rule = "106.7"
-text = "Some abilities produce mana based on the type of mana another permanent or permanents “could produce.” The type of mana a permanent could produce at any time includes any type of mana that an ability of that permanent would produce if the ability were to resolve at that time, taking into account any applicable replacement effects in any possible order. Ignore whether any costs of the ability could or could not be paid. If that permanent wouldn’t produce any mana under these conditions, or no type of mana can be defined this way, there’s no type of mana it could produce."
-status = "missing"
-impl_files = []
+text = "Some abilities produce mana based on the type of mana another permanent or permanents \"could produce.\" The type of mana a permanent could produce at any time includes any type of mana that an ability of that permanent would produce if the ability were to resolve at that time, taking into account any applicable replacement effects in any possible order. Ignore whether any costs of the ability could or could not be paid. If that permanent wouldn't produce any mana under these conditions, or no type of mana can be defined this way, there's no type of mana it could produce."
+status = "partial"
+impl_files = ["game/mana_sources.rs:1"]
 test_files = []
-notes = ""
+notes = "mana_sources.rs implements 'could produce' logic for basic land detection. Full hypothetical evaluation of all replacement effects is not exhaustively implemented."
 
 [cr_106_8]
 rule = "106.8"
-text = "If an effect would add mana represented by a hybrid mana symbol to a player’s mana pool, that player chooses one half of that symbol. If a colored half is chosen, one mana of that color is added to that player’s mana pool. If a generic half is chosen, an amount of colorless mana represented by that half’s number is added to that player’s mana pool."
-status = "missing"
-impl_files = []
+text = "If an effect would add mana represented by a hybrid mana symbol to a player's mana pool, that player chooses one half of that symbol. If a colored half is chosen, one mana of that color is added to that player's mana pool. If a generic half is chosen, an amount of colorless mana represented by that half's number is added to that player's mana pool."
+status = "partial"
+impl_files = ["game/effects/mana.rs:1"]
 test_files = []
-notes = ""
+notes = "Hybrid mana payment is implemented (mana_payment.rs). Producing hybrid mana where the player chooses which half to add to the pool is partially implemented."
 
 [cr_106_9]
 rule = "106.9"
-text = "If an effect would add mana represented by a Phyrexian mana symbol to a player’s mana pool, one mana of the color of that symbol is added to that player’s mana pool."
-status = "missing"
-impl_files = []
+text = "If an effect would add mana represented by a Phyrexian mana symbol to a player's mana pool, one mana of the color of that symbol is added to that player's mana pool."
+status = "partial"
+impl_files = ["game/mana_payment.rs:83"]
 test_files = []
-notes = ""
+notes = "Phyrexian mana payment (pay 2 life) is implemented. Adding Phyrexian-symbol mana to the pool as colored mana is handled in the payment pathway."
 
 [cr_106_10]
 rule = "106.10"
-text = "If an effect would add mana represented by a generic mana symbol to a player’s mana pool, that much colorless mana is added to that player’s mana pool."
-status = "missing"
-impl_files = []
+text = "If an effect would add mana represented by a generic mana symbol to a player's mana pool, that much colorless mana is added to that player's mana pool."
+status = "implemented"
+impl_files = ["game/effects/mana.rs:1", "types/mana.rs:1"]
 test_files = []
-notes = ""
+notes = "Generic mana symbols produce colorless mana. ManaCostShard::Colorless represents colorless mana in the pool."
 
 [cr_106_11]
 rule = "106.11"
-text = "If an effect would add mana represented by one or more snow mana symbols to a player’s mana pool, that much colorless mana is added to that player’s mana pool."
-status = "missing"
+text = "If an effect would add mana represented by one or more snow mana symbols to a player's mana pool, that much colorless mana is added to that player's mana pool."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No cards that add snow mana to the pool as a production effect are implemented. Snow costs are payable from snow sources (mana_payment.rs:516)."
 
 [cr_106_12]
 rule = "106.12"
-text = "To “tap [a permanent] for mana” is to activate a mana ability of that permanent that includes the {T} symbol in its activation cost. See rule 605, “Mana Abilities.”"
+text = "To \"tap [a permanent] for mana\" is to activate a mana ability of that permanent that includes the {T} symbol in its activation cost. See rule 605, \"Mana Abilities.\""
 status = "implemented"
 impl_files = ["game/effects/mana.rs:94", "parser/oracle_effect/mana.rs:455", "parser/oracle_effect/mod.rs:323", "types/ability.rs:569", "types/mana.rs:109"]
 test_files = []
-notes = ""
+notes = "Tap-for-mana abilities are activated through mana_abilities.rs. The {T} cost is part of the activation cost definition."
 
 [cr_106_12a]
 rule = "106.12a"
-text = "An ability that triggers whenever a permanent “is tapped for mana” or is tapped for mana of a specified type triggers whenever such a mana ability resolves and produces mana or the specified type of mana."
+text = "An ability that triggers whenever a permanent \"is tapped for mana\" or is tapped for mana of a specified type triggers whenever such a mana ability resolves and produces mana or the specified type of mana."
 status = "implemented"
 impl_files = ["types/triggers.rs:96"]
 test_files = []
-notes = ""
+notes = "TappedForMana trigger event fires when a mana ability resolves. Trigger matchers check the mana type produced."
 
 [cr_106_12b]
 rule = "106.12b"
-text = "A replacement effect that applies if a permanent “is tapped for mana” or tapped for mana of a specific type and/or amount modifies the mana production event while such an ability is resolving and producing mana or the specified type and/or amount of mana."
+text = "A replacement effect that applies if a permanent \"is tapped for mana\" or tapped for mana of a specific type and/or amount modifies the mana production event while such an ability is resolving and producing mana or the specified type and/or amount of mana."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Replacement effects that intercept tapping-for-mana events (e.g., Doubling Cube, Mana Flare effects) are not implemented."
 
 [cr_106_13]
 rule = "106.13"
-text = "One card (Drain Power) causes one player to lose unspent mana and another to add “the mana lost this way.” (Note that these may be the same player.) This empties the former player’s mana pool and causes the mana emptied this way to be put into the latter player’s mana pool. Which permanents, spells, and/or abilities produced that mana are unchanged, as are any restrictions or additional effects associated with any of that mana."
+text = "One card (Drain Power) causes one player to lose unspent mana and another to add \"the mana lost this way.\" (Note that these may be the same player.) This empties the former player's mana pool and causes the mana emptied this way to be put into the latter player's mana pool. Which permanents, spells, and/or abilities produced that mana are unchanged, as are any restrictions or additional effects associated with any of that mana."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Drain Power-specific mana transfer effect not implemented."

@@ -6,59 +6,59 @@ title = "The Magic Golden Rules"
 
 [cr_101_1]
 rule = "101.1"
-text = "Whenever a card’s text directly contradicts these rules, the card takes precedence. The card overrides only the rule that applies to that specific situation. The only exception is that a player can concede the game at any time (see rule 104.3a)."
-status = "missing"
-impl_files = []
+text = "Whenever a card's text directly contradicts these rules, the card takes precedence. The card overrides only the rule that applies to that specific situation. The only exception is that a player can concede the game at any time (see rule 104.3a)."
+status = "implemented"
+impl_files = ["game/static_abilities.rs:78", "game/replacement.rs:1"]
 test_files = []
-notes = ""
+notes = "Card text overriding base rules is the foundation of the engine's ability/effect system. Static abilities, replacements, and permissions implement this golden rule throughout."
 
 [cr_101_2]
 rule = "101.2"
-text = "When a rule or effect allows or directs something to happen, and another effect states that it can’t happen, the “can’t” effect takes precedence."
+text = "When a rule or effect allows or directs something to happen, and another effect states that it can't happen, the \"can't\" effect takes precedence."
 status = "implemented"
 impl_files = ["game/casting.rs:405", "game/casting.rs:414", "game/casting.rs:1861", "game/casting.rs:1893", "game/casting.rs:1909", "game/effects/counter.rs:83", "parser/oracle.rs:1201", "parser/oracle_static.rs:490", "parser/oracle_static.rs:536", "parser/oracle_static.rs:1992", "parser/oracle_static.rs:3155", "parser/oracle_static.rs:5342", "parser/oracle_static.rs:5355", "types/statics.rs:11", "types/statics.rs:41", "types/statics.rs:129", "types/statics.rs:135"]
 test_files = []
-notes = ""
+notes = "\"Can't\" effects dominate \"can\" effects. Implemented via CantCast, CantActivate, CantAttack, and similar static ability types."
 
 [cr_101_2a]
 rule = "101.2a"
-text = "Adding abilities to objects and removing abilities from objects don’t fall under this rule. (See rule 113.10.)"
-status = "missing"
+text = "Adding abilities to objects and removing abilities from objects don't fall under this rule. (See rule 113.10.)"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "This is a clarifying sub-rule about the scope of rule 101.2. The engine handles ability addition/removal via layer 6 (game/layers.rs)."
 
 [cr_101_3]
 rule = "101.3"
-text = "Any part of an instruction that’s impossible to perform is ignored. (In many cases the card will specify consequences for this; if it doesn’t, there’s no effect.)"
-status = "missing"
-impl_files = []
+text = "Any part of an instruction that's impossible to perform is ignored. (In many cases the card will specify consequences for this; if it doesn't, there's no effect.)"
+status = "partial"
+impl_files = ["game/effects/draw.rs:52", "game/effects/change_zone.rs:75"]
 test_files = []
-notes = ""
+notes = "The engine handles many impossible actions gracefully (e.g., drawing from empty library records a flag rather than panicking, moving a nonexistent object is a no-op). However, there is no single central enforcement point for this rule — it is applied case-by-case in individual effect handlers."
 
 [cr_101_4]
 rule = "101.4"
-text = "If multiple players would make choices and/or take actions at the same time, the active player (the player whose turn it is) makes any choices required, then the next player in turn order (usually the player seated to the active player’s left) makes any choices required, followed by the remaining nonactive players in turn order. Then the actions happen simultaneously. This rule is often referred to as the “Active Player, Nonactive Player (APNAP) order” rule."
+text = "If multiple players would make choices and/or take actions at the same time, the active player (the player whose turn it is) makes any choices required, then the next player in turn order (usually the player seated to the active player's left) makes any choices required, followed by the remaining nonactive players in turn order. Then the actions happen simultaneously. This rule is often referred to as the \"Active Player, Nonactive Player (APNAP) order\" rule."
 status = "implemented"
 impl_files = ["game/effects/mod.rs:362", "game/players.rs:49", "game/priority.rs:70", "game/priority.rs:73", "game/turns.rs:73", "types/game_state.rs:483"]
 test_files = []
-notes = ""
+notes = "APNAP ordering implemented for trigger stacking, simultaneous actions, and priority pass ordering."
 
 [cr_101_4a]
 rule = "101.4a"
-text = "If an effect has each player choose a card in a hidden zone, such as their hand or library, those cards may remain face down as they’re chosen. However, each player must clearly indicate which face-down card they are choosing."
-status = "missing"
+text = "If an effect has each player choose a card in a hidden zone, such as their hand or library, those cards may remain face down as they're chosen. However, each player must clearly indicate which face-down card they are choosing."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Digital implementation: hidden zones are enforced by server-side state filtering, not face-down physical cards."
 
 [cr_101_4b]
 rule = "101.4b"
 text = "A player knows the choices made by the previous players when making their choice, except as specified in 101.4a."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Digital UI concern, not an engine logic rule."
 
 [cr_101_4c]
 rule = "101.4c"
@@ -66,7 +66,7 @@ text = "If a player would make more than one choice at the same time, the player
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multi-choice ordering within a single decision is not explicitly enforced. Individual WaitingFor states handle sequential choices."
 
 [cr_101_4d]
 rule = "101.4d"
@@ -74,12 +74,12 @@ text = "If a choice made by a nonactive player causes the active player, or a di
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Complex APNAP restart not explicitly implemented; the engine processes outstanding triggered abilities and state changes iteratively via the priority loop."
 
 [cr_101_4e]
 rule = "101.4e"
 text = "If multiple players would make choices or take actions while starting the game, the starting player is considered the active player and each other player is considered a nonactive player."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/mulligan.rs:30"]
 test_files = []
-notes = ""
+notes = "start_mulligan() processes players in seat_order, with the starting player (seat_order[0]) going first."

@@ -1,8 +1,8 @@
-# Comprehensive Rules Section 728: Merging with Permanents
+# Comprehensive Rules Section 728: Subgames
 
 [_meta]
 section = 728
-title = "Merging with Permanents"
+title = "Subgames"
 
 [cr_728_1]
 rule = "728.1"
@@ -10,15 +10,15 @@ text = "One card (Shahrazad) allows players to play a Magic subgame."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Subgames not implemented."
 
 [cr_728_1a]
 rule = "728.1a"
-text = "A “subgame” is a completely separate Magic game created by an effect. Essentially, it’s a game within a game. The “main game” is the game in which the spell or ability that created the subgame was cast or activated. The main game is temporarily discontinued while the subgame is in progress. It resumes when the subgame ends."
+text = "A \"subgame\" is a completely separate Magic game created by an effect. Essentially, it's a game within a game. The \"main game\" is the game in which the spell or ability that created the subgame was cast or activated. The main game is temporarily discontinued while the subgame is in progress. It resumes when the subgame ends."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Subgames not implemented."
 
 [cr_728_1b]
 rule = "728.1b"
@@ -26,15 +26,15 @@ text = "No effects or definitions created in either the main game or the subgame
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Subgames not implemented."
 
 [cr_728_2]
 rule = "728.2"
-text = "As the subgame starts, an entirely new set of game zones is created. Each player takes all the cards in their main-game library, moves them to their subgame library, and shuffles them. No other cards in a main-game zone are moved to their corresponding subgame zone, except as specified in rules 728.2a–c. Randomly determine which player goes first. The subgame proceeds like a normal game, following all other rules in rule 103, “Starting the Game.”"
+text = "As the subgame starts, an entirely new set of game zones is created. Each player takes all the cards in their main-game library, moves them to their subgame library, and shuffles them. No other cards in a main-game zone are moved to their corresponding subgame zone, except as specified in rules 728.2a–c. Randomly determine which player goes first. The subgame proceeds like a normal game, following all other rules in rule 103, \"Starting the Game.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Subgames not implemented."
 
 [cr_728_2a]
 rule = "728.2a"
@@ -42,7 +42,7 @@ text = "As a subgame begins, if one or more supplementary decks of nontraditiona
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Subgames not implemented."
 
 [cr_728_2b]
 rule = "728.2b"
@@ -50,23 +50,23 @@ text = "As a subgame of a Vanguard game starts, each player moves their vanguard
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Subgames not implemented."
 
 [cr_728_2c]
 rule = "728.2c"
-text = "As a subgame of a Commander game starts, each player moves their commander from the main-game command zone (if it’s there) to the subgame command zone."
+text = "As a subgame of a Commander game starts, each player moves their commander from the main-game command zone (if it's there) to the subgame command zone."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Subgames not implemented."
 
 [cr_728_3]
 rule = "728.3"
-text = "Because each player draws seven cards when a game begins, any player with fewer than seven cards in their deck will lose the subgame when state-based actions are checked during the upkeep step of the first turn, regardless of any mulligans that player takes. (See rule 704, “State-Based Actions.”)"
+text = "Because each player draws seven cards when a game begins, any player with fewer than seven cards in their deck will lose the subgame when state-based actions are checked during the upkeep step of the first turn, regardless of any mulligans that player takes. (See rule 704, \"State-Based Actions.\")"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Subgames not implemented."
 
 [cr_728_4]
 rule = "728.4"
@@ -74,31 +74,31 @@ text = "All objects in the main game and all cards outside the main game are con
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Subgames not implemented."
 
 [cr_728_4a]
 rule = "728.4a"
-text = "Some effects can bring cards into a game from outside of it. If a card is brought into a subgame from a main game, abilities in the main game that trigger on objects leaving a main-game zone will trigger, but they won’t be put onto the stack until the main game resumes."
+text = "Some effects can bring cards into a game from outside of it. If a card is brought into a subgame from a main game, abilities in the main game that trigger on objects leaving a main-game zone will trigger, but they won't be put onto the stack until the main game resumes."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Subgames not implemented."
 
 [cr_728_4b]
 rule = "728.4b"
-text = "A player’s main-game counters aren’t considered part of the subgame, although the player will still have them when the main game resumes. Similarly, any counters a player gets during a subgame will cease to exist when the subgame ends."
+text = "A player's main-game counters aren't considered part of the subgame, although the player will still have them when the main game resumes. Similarly, any counters a player gets during a subgame will cease to exist when the subgame ends."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Subgames not implemented."
 
 [cr_728_5]
 rule = "728.5"
-text = "At the end of a subgame, each player takes all traditional cards they own that are in the subgame other than those in the subgame command zone, puts them into their main-game library, then shuffles them. This includes cards in the subgame’s exile zone and cards that represent phased-out permanents as the subgame ends. Except as specified in rules 728.5a–c, all other objects in the subgame cease to exist, as do the zones created for the subgame. The main game continues from the point at which it was discontinued: First, the spell or ability that created the subgame finishes resolving, even if it was created by a spell card that’s no longer on the stack. Then, if any main-game abilities triggered while the subgame was in progress due to cards being removed from the main game, those abilities are put onto the stack."
+text = "At the end of a subgame, each player takes all traditional cards they own that are in the subgame other than those in the subgame command zone, puts them into their main-game library, then shuffles them. This includes cards in the subgame's exile zone and cards that represent phased-out permanents as the subgame ends. Except as specified in rules 728.5a–c, all other objects in the subgame cease to exist, as do the zones created for the subgame. The main game continues from the point at which it was discontinued: First, the spell or ability that created the subgame finishes resolving, even if it was created by a spell card that's no longer on the stack. Then, if any main-game abilities triggered while the subgame was in progress due to cards being removed from the main game, those abilities are put onto the stack."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Subgames not implemented."
 
 [cr_728_5a]
 rule = "728.5a"
@@ -106,7 +106,7 @@ text = "At the end of a subgame, each nontraditional card not in a supplementary
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Subgames not implemented."
 
 [cr_728_5b]
 rule = "728.5b"
@@ -114,15 +114,15 @@ text = "At the end of a subgame of a Vanguard game, each player moves their vang
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Subgames not implemented."
 
 [cr_728_5c]
 rule = "728.5c"
-text = "At the end of a subgame of a Commander game, each player moves their commander from the subgame command zone (if it’s there) to the main-game command zone."
+text = "At the end of a subgame of a Commander game, each player moves their commander from the subgame command zone (if it's there) to the main-game command zone."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Subgames not implemented."
 
 [cr_728_6]
 rule = "728.6"
@@ -130,4 +130,4 @@ text = "A subgame can be created within a subgame. The existing subgame becomes 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Subgames not implemented."

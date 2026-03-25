@@ -6,19 +6,19 @@ title = "Commander"
 
 [cr_903_1]
 rule = "903.1"
-text = "In the Commander variant, a variant created and popularized by fans, each deck is led by a legendary creature designated as that deck’s commander. The Commander variant uses all the normal rules for a Magic game, with the following additions."
-status = "missing"
-impl_files = []
+text = "In the Commander variant, a variant created and popularized by fans, each deck is led by a legendary creature designated as that deck's commander. The Commander variant uses all the normal rules for a Magic game, with the following additions."
+status = "implemented"
+impl_files = ["game/commander.rs:1"]
 test_files = []
-notes = ""
+notes = "Commander variant implemented in game/commander.rs."
 
 [cr_903_2]
 rule = "903.2"
-text = "A Commander game may be a two-player game or a multiplayer game. The default multiplayer setup is the Free-for-All variant with the attack multiple players option and without the limited range of influence option. See rule 806, “Free-for-All Variant.”"
-status = "missing"
-impl_files = []
+text = "A Commander game may be a two-player game or a multiplayer game. The default multiplayer setup is the Free-for-All variant with the attack multiple players option and without the limited range of influence option. See rule 806, \"Free-for-All Variant.\""
+status = "implemented"
+impl_files = ["game/engine.rs:1"]
 test_files = []
-notes = ""
+notes = "Commander supports both 2-player and multiplayer Free-for-All."
 
 [cr_903_3]
 rule = "903.3"
@@ -34,43 +34,43 @@ text = "Some cards have an ability that states the card can be your commander. T
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "\"Can be your commander\" ability (e.g. Planeswalkers as commanders) not specifically parsed from Oracle text."
 
 [cr_903_3b]
 rule = "903.3b"
-text = "If a player’s commander is a meld card and it’s melded with the other member of its meld pair, the resulting melded permanent is that player’s commander."
+text = "If a player's commander is a meld card and it's melded with the other member of its meld pair, the resulting melded permanent is that player's commander."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meld not implemented."
 
 [cr_903_3c]
 rule = "903.3c"
-text = "If a player’s commander is a component of a merged permanent, the resulting merged permanent is that player’s commander."
+text = "If a player's commander is a component of a merged permanent, the resulting merged permanent is that player's commander."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mutate/merging not implemented."
 
 [cr_903_3d]
 rule = "903.3d"
 text = "If an effect refers to controlling a commander, it refers to a permanent on the battlefield that is a commander. If an effect refers to casting a commander, it refers to a spell that is a commander. If an effect refers to a commander in a specific zone, it refers to a card in that zone that is a commander."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/commander.rs:1"]
 test_files = []
-notes = ""
+notes = "Commander designation tracked across zones in game/commander.rs."
 
 [cr_903_3e]
 rule = "903.3e"
-text = "If an effect refers to a characteristic of “your commander,” it can find the appropriate player’s commander and see its current characteristics, as modified by continuous effects and other rules, in all zones, including that player’s library and hand."
+text = "If an effect refers to a characteristic of \"your commander,\" it can find the appropriate player's commander and see its current characteristics, as modified by continuous effects and other rules, in all zones, including that player's library and hand."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Effects querying commander characteristics across all zones not fully implemented."
 
 [cr_903_4]
 rule = "903.4"
-text = "The Commander variant uses color identity to determine what cards can be in a deck with a certain commander. The color identity of a card is the color or colors of any mana symbols in that card’s mana cost or rules text, plus any colors defined by its characteristic-defining abilities (see rule 604.3) or color indicator (see rule 204)."
+text = "The Commander variant uses color identity to determine what cards can be in a deck with a certain commander. The color identity of a card is the color or colors of any mana symbols in that card's mana cost or rules text, plus any colors defined by its characteristic-defining abilities (see rule 604.3) or color indicator (see rule 204)."
 status = "implemented"
 impl_files = ["game/commander.rs:48", "game/commander.rs:50", "game/commander.rs:64", "game/commander.rs:88", "game/commander.rs:104", "game/commander.rs:140", "game/commander.rs:153", "game/commander.rs:395", "game/commander.rs:427", "game/commander.rs:530", "game/commander.rs:553", "game/deck_validation.rs:349", "game/deck_validation.rs:532", "game/deck_validation.rs:719"]
 test_files = []
@@ -79,30 +79,30 @@ notes = ""
 [cr_903_4a]
 rule = "903.4a"
 text = "Color identity is established before the game begins. If a rule or effect refers to the color identity of an object in the game represented by a card, it uses the color identity established for that card as the game began."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/commander.rs:48"]
 test_files = []
-notes = ""
+notes = "Color identity computed at deck validation/game start time."
 
 [cr_903_4b]
 rule = "903.4b"
-text = "If a commander has a static ability that causes a player to choose its color before the game begins, that choice applies during deck construction and throughout the game, even as the commander changes zones. That choice affects the commander’s color identity. The player reveals that choice as they put their commander into the command zone before the game begins. See rules 103.2c and 607.2p."
+text = "If a commander has a static ability that causes a player to choose its color before the game begins, that choice applies during deck construction and throughout the game, even as the commander changes zones. That choice affects the commander's color identity. The player reveals that choice as they put their commander into the command zone before the game begins. See rules 103.2c and 607.2p."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Pre-game color choice for commanders not implemented."
 
 [cr_903_4c]
 rule = "903.4c"
-text = "Reminder text is ignored when determining a card’s color identity. See rule 207.2."
-status = "missing"
-impl_files = []
+text = "Reminder text is ignored when determining a card's color identity. See rule 207.2."
+status = "implemented"
+impl_files = ["game/commander.rs:64"]
 test_files = []
-notes = ""
+notes = "Reminder text stripped before color identity computation."
 
 [cr_903_4d]
 rule = "903.4d"
-text = "The back face of a double-faced card (see rule 712) is included when determining a card’s color identity. This is an exception to rule 712.8a."
+text = "The back face of a double-faced card (see rule 712) is included when determining a card's color identity. This is an exception to rule 712.8a."
 status = "implemented"
 impl_files = ["game/commander.rs:53"]
 test_files = []
@@ -110,27 +110,27 @@ notes = ""
 
 [cr_903_4e]
 rule = "903.4e"
-text = "If a card has any alternative characteristics, such as those of adventurer cards (see rule 715, “Adventurer Cards”), those characteristics are included when determining the card’s color identity."
+text = "If a card has any alternative characteristics, such as those of adventurer cards (see rule 715, \"Adventurer Cards\"), those characteristics are included when determining the card's color identity."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Adventure alternative characteristics not included in color identity calculation."
 
 [cr_903_4f]
 rule = "903.4f"
-text = "If an ability refers to the colors or number of colors in a commander’s color identity, that quality is undefined if that player doesn’t have a commander. That part of the ability won’t do anything. Costs that refer to that quality are unpayable."
+text = "If an ability refers to the colors or number of colors in a commander's color identity, that quality is undefined if that player doesn't have a commander. That part of the ability won't do anything. Costs that refer to that quality are unpayable."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No-commander edge case for color identity queries not implemented."
 
 [cr_903_5]
 rule = "903.5"
 text = "Each Commander deck is subject to the following deck construction rules."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/deck_validation.rs:1"]
 test_files = []
-notes = ""
+notes = "Commander deck construction rules enforced in deck_validation.rs."
 
 [cr_903_5a]
 rule = "903.5a"
@@ -150,47 +150,47 @@ notes = ""
 
 [cr_903_5c]
 rule = "903.5c"
-text = "A card can be included in a Commander deck only if every color in its color identity is also found in the color identity of the deck’s commander."
-status = "missing"
-impl_files = []
+text = "A card can be included in a Commander deck only if every color in its color identity is also found in the color identity of the deck's commander."
+status = "implemented"
+impl_files = ["game/deck_validation.rs:349", "game/deck_validation.rs:532", "game/deck_validation.rs:719"]
 test_files = []
-notes = ""
+notes = "Color identity constraint enforcement implemented in deck_validation.rs."
 
 [cr_903_5d]
 rule = "903.5d"
-text = "A card with a basic land type may be included in a Commander deck only if each color of mana it could produce is included in the commander’s color identity."
-status = "missing"
-impl_files = []
+text = "A card with a basic land type may be included in a Commander deck only if each color of mana it could produce is included in the commander's color identity."
+status = "implemented"
+impl_files = ["game/deck_validation.rs:349"]
 test_files = []
-notes = ""
+notes = "Basic land type color identity restriction enforced in deck_validation.rs."
 
 [cr_903_5e]
 rule = "903.5e"
 text = "Commander games do not use sideboards."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Sideboards not implemented in the engine; this constraint holds by default."
 
 [cr_903_6]
 rule = "903.6"
-text = "At the start of the game, each player puts their commander from their deck face up into the command zone. Then each player shuffles the remaining cards of their deck so that the cards are in a random order. Those cards become the player’s library."
-status = "missing"
-impl_files = []
+text = "At the start of the game, each player puts their commander from their deck face up into the command zone. Then each player shuffles the remaining cards of their deck so that the cards are in a random order. Those cards become the player's library."
+status = "implemented"
+impl_files = ["game/deck_loading.rs:1"]
 test_files = []
-notes = ""
+notes = "Commander initial zone placement and library setup implemented in deck_loading.rs."
 
 [cr_903_7]
 rule = "903.7"
 text = "Once the starting player has been determined, each player sets their life total to 40 and draws a hand of seven cards."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/match_flow.rs:1"]
 test_files = []
-notes = ""
+notes = "40 starting life total and initial hand draw implemented in match_flow.rs."
 
 [cr_903_8]
 rule = "903.8"
-text = "A player may cast a commander they own from the command zone. A commander cast from the command zone costs an additional {2} for each previous time the player casting it has cast it from the command zone that game. This additional cost is informally known as the “commander tax.”"
+text = "A player may cast a commander they own from the command zone. A commander cast from the command zone costs an additional {2} for each previous time the player casting it has cast it from the command zone that game. This additional cost is informally known as the \"commander tax.\""
 status = "implemented"
 impl_files = ["game/casting.rs:547", "game/commander.rs:9", "game/commander.rs:19", "game/derived.rs:19", "game/derived.rs:60", "game/game_object.rs:207", "game/keywords.rs:167"]
 test_files = []
@@ -199,10 +199,10 @@ notes = ""
 [cr_903_9]
 rule = "903.9"
 text = "A commander may return to the command zone during a Commander game."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/commander.rs:24", "game/zones.rs:37"]
 test_files = []
-notes = ""
+notes = "Commander return-to-command-zone replacement effect implemented."
 
 [cr_903_9a]
 rule = "903.9a"
@@ -214,51 +214,51 @@ notes = ""
 
 [cr_903_9b]
 rule = "903.9b"
-text = "If a commander would be put into its owner’s hand or library from anywhere, its owner may put it into the command zone instead. This replacement effect may apply more than once to the same event. This is an exception to rule 614.5."
+text = "If a commander would be put into its owner's hand or library from anywhere, its owner may put it into the command zone instead. This replacement effect may apply more than once to the same event. This is an exception to rule 614.5."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Replacement effect for commander going to hand/library not implemented (only graveyard/exile handled in 903.9a)."
 
 [cr_903_9c]
 rule = "903.9c"
-text = "If a commander is a melded permanent or a merged permanent and its owner chooses to put it into the command zone using the replacement effect described in rule 903.9b, that permanent and each component representing it that isn’t a commander are put into the appropriate zone, and the card that represents it and is a commander is put into the command zone."
+text = "If a commander is a melded permanent or a merged permanent and its owner chooses to put it into the command zone using the replacement effect described in rule 903.9b, that permanent and each component representing it that isn't a commander are put into the appropriate zone, and the card that represents it and is a commander is put into the command zone."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meld/mutate not implemented."
 
 [cr_903_10]
 rule = "903.10"
 text = "The Commander variant includes the following specification for winning and losing the game. All other rules for ending the game also apply. (See rule 104.)"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/sba.rs:1"]
 test_files = []
-notes = ""
+notes = "Commander-specific win/loss conditions implemented alongside general rules in sba.rs."
 
 [cr_903_10a]
 rule = "903.10a"
-text = "A player who’s been dealt 21 or more combat damage by the same commander over the course of the game loses the game. (This is a state-based action. See rule 704.)"
-status = "missing"
-impl_files = []
+text = "A player who's been dealt 21 or more combat damage by the same commander over the course of the game loses the game. (This is a state-based action. See rule 704.)"
+status = "implemented"
+impl_files = ["game/sba.rs:1", "game/commander.rs:395", "game/commander.rs:427"]
 test_files = []
-notes = ""
+notes = "21-commander-damage loss SBA implemented in commander.rs and checked in sba.rs."
 
 [cr_903_11]
 rule = "903.11"
 text = "Except via rules, special actions, and effects that specifically bring cards into Commander games from outside the game, traditional cards from outside the game cannot be brought into a Commander game."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Outside-the-game card restrictions not applicable to digital engine (no physical 'outside the game')."
 
 [cr_903_11a]
 rule = "903.11a"
-text = "If a player is allowed to bring a card from outside the game into a Commander game, that player can’t bring a card into the game this way if it has the same name as a card that player had in their starting deck, if it has the same name as a card that the player owns in the current game, or if any color in its color identity isn’t in the color identity of the player’s commander."
+text = "If a player is allowed to bring a card from outside the game into a Commander game, that player can't bring a card into the game this way if it has the same name as a card that player had in their starting deck, if it has the same name as a card that the player owns in the current game, or if any color in its color identity isn't in the color identity of the player's commander."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Outside-game card restrictions for wish effects not implemented."
 
 [cr_903_12]
 rule = "903.12"
@@ -266,7 +266,7 @@ text = "Brawl Option"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Brawl variant not implemented."
 
 [cr_903_12a]
 rule = "903.12a"
@@ -274,7 +274,7 @@ text = "Brawl is an option for a different style of Commander game. Brawl games 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Brawl variant not implemented."
 
 [cr_903_12b]
 rule = "903.12b"
@@ -282,7 +282,7 @@ text = "Brawl decks are usually constructed using cards from the Standard format
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Brawl variant not implemented."
 
 [cr_903_12c]
 rule = "903.12c"
@@ -290,47 +290,47 @@ text = "Each deck has a legendary card designated as its commander. That card mu
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Brawl variant not implemented."
 
 [cr_903_12d]
 rule = "903.12d"
-text = "A player’s deck must contain exactly 60 cards, including its commander. In other words, the minimum deck size and the maximum deck size are both 60."
+text = "A player's deck must contain exactly 60 cards, including its commander. In other words, the minimum deck size and the maximum deck size are both 60."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Brawl variant not implemented."
 
 [cr_903_12e]
 rule = "903.12e"
-text = "If a player’s commander has no colors in its color identity, that player’s deck may contain any number of basic lands of one basic land type of their choice. This is an exception to rule 903.5d."
+text = "If a player's commander has no colors in its color identity, that player's deck may contain any number of basic lands of one basic land type of their choice. This is an exception to rule 903.5d."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Brawl variant not implemented."
 
 [cr_903_12f]
 rule = "903.12f"
-text = "In a two-player Brawl game, each player’s starting life total is 25. In a multiplayer Brawl game, each player’s starting life total is 30."
+text = "In a two-player Brawl game, each player's starting life total is 25. In a multiplayer Brawl game, each player's starting life total is 30."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Brawl variant not implemented."
 
 [cr_903_12g]
 rule = "903.12g"
-text = "In any Brawl game, the first mulligan a player takes doesn’t count toward the number of cards that player will put on the bottom of their library or the number of mulligans that player may take. Subsequent mulligans are counted toward these numbers as normal."
+text = "In any Brawl game, the first mulligan a player takes doesn't count toward the number of cards that player will put on the bottom of their library or the number of mulligans that player may take. Subsequent mulligans are counted toward these numbers as normal."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Brawl variant not implemented."
 
 [cr_903_12h]
 rule = "903.12h"
-text = "Brawl games do not use the state-based action described in rule 704.6c, which causes a player to lose the game if they’ve been dealt 21 or more combat damage by a commander."
+text = "Brawl games do not use the state-based action described in rule 704.6c, which causes a player to lose the game if they've been dealt 21 or more combat damage by a commander."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Brawl variant not implemented."
 
 [cr_903_13]
 rule = "903.13"
@@ -338,7 +338,7 @@ text = "Commander Draft"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Commander Draft variant not implemented."
 
 [cr_903_13a]
 rule = "903.13a"
@@ -346,7 +346,7 @@ text = "Commander Draft is an option for a different style of Commander game. It
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Commander Draft variant not implemented."
 
 [cr_903_13b]
 rule = "903.13b"
@@ -354,15 +354,15 @@ text = "A draft typically consists of three draft rounds. In each draft round, e
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Commander Draft variant not implemented."
 
 [cr_903_13c]
 rule = "903.13c"
-text = "In the first and third draft rounds, booster packs are passed to each player’s left. In the second draft round, booster packs are passed to each player’s right."
+text = "In the first and third draft rounds, booster packs are passed to each player's left. In the second draft round, booster packs are passed to each player's right."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Commander Draft variant not implemented."
 
 [cr_903_13d]
 rule = "903.13d"
@@ -370,23 +370,23 @@ text = "During the draft, a player can look only at cards in the booster pack th
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Commander Draft variant not implemented."
 
 [cr_903_13e]
 rule = "903.13e"
-text = "After the draft is complete, the cards a player drafted become that player’s card pool. If the draft contained draft boosters from Commander Legends or Commander Masters, each player may add up to two cards named The Prismatic Piper to their card pool, but only if those cards are used as the player’s commander(s). If the draft contained draft boosters from Commander Legends: Battle for Baldur’s Gate®, each player may add up to two cards named Faceless One to their card pool, but only if those cards are used as the player’s commander(s)."
+text = "After the draft is complete, the cards a player drafted become that player's card pool. If the draft contained draft boosters from Commander Legends or Commander Masters, each player may add up to two cards named The Prismatic Piper to their card pool, but only if those cards are used as the player's commander(s). If the draft contained draft boosters from Commander Legends: Battle for Baldur's Gate®, each player may add up to two cards named Faceless One to their card pool, but only if those cards are used as the player's commander(s)."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Commander Draft variant not implemented."
 
 [cr_903_13f]
 rule = "903.13f"
-text = "Commander Draft deck construction follows the same rules as Commander deck construction (see rule 903.5) with three exceptions: (1) A player’s deck must contain at least 60 cards. There is no maximum deck size. (2) A player’s deck may include any number of cards from that player’s card pool with the same name. (3) If the draft contained draft boosters from Commander Masters, any card which can be a player’s commander by itself and whose color identity includes one or fewer colors is considered to have the partner ability for the purposes of deckbuilding. (See rule 702.124, “Partner.”)"
+text = "Commander Draft deck construction follows the same rules as Commander deck construction (see rule 903.5) with three exceptions: (1) A player's deck must contain at least 60 cards. There is no maximum deck size. (2) A player's deck may include any number of cards from that player's card pool with the same name. (3) If the draft contained draft boosters from Commander Masters, any card which can be a player's commander by itself and whose color identity includes one or fewer colors is considered to have the partner ability for the purposes of deckbuilding. (See rule 702.124, \"Partner.\")"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Commander Draft variant not implemented."
 
 [cr_903_13g]
 rule = "903.13g"
@@ -394,4 +394,4 @@ text = "Commander Draft games follow the same rules as Commander games. See rule
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Commander Draft variant not implemented."

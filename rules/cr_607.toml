@@ -7,34 +7,34 @@ title = "Linked Abilities"
 [cr_607_1]
 rule = "607.1"
 text = "An object may have two abilities printed on it such that one of them causes actions to be taken or objects or players to be affected and the other one directly refers to those actions, objects, or players. If so, these two abilities are linked: the second refers only to actions that were taken or objects or players that were affected by the first, and not by any other ability."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["types/game_state.rs:914", "game/filter.rs:131", "types/ability.rs:1015"]
+test_files = ["game/filter.rs:920"]
+notes = "ExileLink in game_state.rs tracks exile_links per source. TargetFilter::ExiledBySource resolves via exile_links."
 
 [cr_607_1a]
 rule = "607.1a"
-text = "An ability printed on an object within another ability that grants that ability to that object is considered to be “printed on” that object for these purposes."
+text = "An ability printed on an object within another ability that grants that ability to that object is considered to be \"printed on\" that object for these purposes."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Granted ability linking not explicitly tracked."
 
 [cr_607_1b]
 rule = "607.1b"
-text = "An ability printed on either face of a nonmodal double-faced object (see rule 712) is considered to be “printed on” that object for these purposes, regardless of which face is up."
+text = "An ability printed on either face of a nonmodal double-faced object (see rule 712) is considered to be \"printed on\" that object for these purposes, regardless of which face is up."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "DFC linked ability cross-face tracking not explicitly modeled."
 
 [cr_607_1c]
 rule = "607.1c"
 text = "An ability printed on an object that fulfills both criteria described in rule 607.1 is linked to itself."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Self-linked abilities are an edge case handled naturally by ExileLink tracking."
 
 [cr_607_1d]
 rule = "607.1d"
@@ -42,19 +42,19 @@ text = "Abilities printed on two objects can be linked if one object is a token,
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Cross-object linking (e.g. token created by permanent) not explicitly modeled."
 
 [cr_607_2]
 rule = "607.2"
 text = "There are different kinds of linked abilities."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/game_state.rs:914", "game/effects/change_zone.rs:870"]
 test_files = []
-notes = ""
+notes = "Multiple linked ability kinds covered through ExileLink infrastructure."
 
 [cr_607_2a]
 rule = "607.2a"
-text = "If an object has an activated or triggered ability printed on it that instructs a player to exile one or more cards and an ability printed on it that refers either to “the exiled cards” or to cards “exiled with [this object],” these abilities are linked. The second ability refers only to cards in the exile zone that were put there as a result of an instruction to exile them in the first ability."
+text = "If an object has an activated or triggered ability printed on it that instructs a player to exile one or more cards and an ability printed on it that refers either to \"the exiled cards\" or to cards \"exiled with [this object],\" these abilities are linked. The second ability refers only to cards in the exile zone that were put there as a result of an instruction to exile them in the first ability."
 status = "implemented"
 impl_files = ["game/effects/change_zone.rs:870", "game/engine.rs:3701", "game/filter.rs:129", "types/game_state.rs:129", "types/game_state.rs:914"]
 test_files = []
@@ -62,27 +62,27 @@ notes = ""
 
 [cr_607_2b]
 rule = "607.2b"
-text = "If an object has an ability printed on it that generates a replacement effect which causes one or more cards to be exiled and an ability printed on it that refers either to “the exiled cards” or to cards “exiled with [this object],” these abilities are linked. The second ability refers only to cards in the exile zone that were put there as a direct result of a replacement event caused by the first ability. See rule 614, “Replacement Effects.”"
+text = "If an object has an ability printed on it that generates a replacement effect which causes one or more cards to be exiled and an ability printed on it that refers either to \"the exiled cards\" or to cards \"exiled with [this object],\" these abilities are linked. The second ability refers only to cards in the exile zone that were put there as a direct result of a replacement event caused by the first ability. See rule 614, \"Replacement Effects.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Replacement-effect-generated exile links not explicitly tracked separately from activated ability exile links."
 
 [cr_607_2c]
 rule = "607.2c"
-text = "If an object has an activated or triggered ability printed on it that puts one or more objects onto the battlefield and an ability printed on it that refers to objects “put onto the battlefield with [this object]” or “created with [this object],” those abilities are linked. The second can refer only to objects put onto the battlefield as a result of the first."
+text = "If an object has an activated or triggered ability printed on it that puts one or more objects onto the battlefield and an ability printed on it that refers to objects \"put onto the battlefield with [this object]\" or \"created with [this object],\" those abilities are linked. The second can refer only to objects put onto the battlefield as a result of the first."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "ETB-with-source linking not implemented."
 
 [cr_607_2d]
 rule = "607.2d"
-text = "If an object has an ability printed on it that causes a player to “choose a [value]” and an ability printed on it that refers to “the chosen [value],” “the last chosen [value],” or similar, those abilities are linked. The second ability refers only to a choice made as a result of the first ability."
-status = "missing"
-impl_files = []
+text = "If an object has an ability printed on it that causes a player to \"choose a [value]\" and an ability printed on it that refers to \"the chosen [value],\" \"the last chosen [value],\" or similar, those abilities are linked. The second ability refers only to a choice made as a result of the first ability."
+status = "implemented"
+impl_files = ["game/engine.rs:672", "game/engine.rs:705", "types/game_state.rs:475"]
 test_files = []
-notes = ""
+notes = "ChooseValue state and chosen_attributes on GameObject tracks chosen values for linked ability references."
 
 [cr_607_2e]
 rule = "607.2e"
@@ -90,7 +90,7 @@ text = "If an object has an ability printed on it that allows some information t
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Noted-information linking not explicitly modeled."
 
 [cr_607_2f]
 rule = "607.2f"
@@ -98,15 +98,15 @@ text = "If an object has an ability printed on it that causes a player to choose
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Flavor-word choice linking not implemented."
 
 [cr_607_2g]
 rule = "607.2g"
-text = "If an object has an ability printed on it that causes a player to pay a cost as it enters the battlefield and an ability printed on it that refers to the cost paid “as [this object] entered,” these abilities are linked. The second ability refers only to a cost paid as a result of the first ability."
+text = "If an object has an ability printed on it that causes a player to pay a cost as it enters the battlefield and an ability printed on it that refers to the cost paid \"as [this object] entered,\" these abilities are linked. The second ability refers only to a cost paid as a result of the first ability."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "ETB-cost-paid linking not implemented."
 
 [cr_607_2h]
 rule = "607.2h"
@@ -114,31 +114,31 @@ text = "If an object has both a static ability and one or more triggered abiliti
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Static+triggered linked ability paragraph structure not explicitly tracked."
 
 [cr_607_2i]
 rule = "607.2i"
 text = "If an object has an ability printed on it that allows an additional cost to be paid and an ability printed on it that refers to whether that cost was paid, those abilities are linked. The second refers only to whether the intent to pay the additional cost listed in the first was declared as the object was cast as a spell. If an ability lists multiple such costs, it may have multiple abilities linked to it. Each of those abilities will specify which cost it refers to."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/casting_costs.rs:132", "game/engine.rs:416", "types/game_state.rs:528"]
 test_files = []
-notes = ""
+notes = "Kicker/additional cost tracking stored per cast in PendingCast; resolved ability context carries paid_kicker etc."
 
 [cr_607_2j]
 rule = "607.2j"
-text = "If an object has an ability printed on it that causes a player to pay a variable additional cost as it’s cast and an ability printed on it that refers to the cost paid “as [this object] was cast,” these abilities are linked. The second refers only to the value chosen for the cost listed in the first as the object was cast as a spell. See rule 601.2b."
-status = "missing"
-impl_files = []
+text = "If an object has an ability printed on it that causes a player to pay a variable additional cost as it's cast and an ability printed on it that refers to the cost paid \"as [this object] was cast,\" these abilities are linked. The second refers only to the value chosen for the cost listed in the first as the object was cast as a spell. See rule 601.2b."
+status = "implemented"
+impl_files = ["game/casting_costs.rs:132", "types/game_state.rs:528", "types/game_state.rs:539"]
 test_files = []
-notes = ""
+notes = "Variable kicker cost value stored in AbilityContext and carried through resolution."
 
 [cr_607_2k]
 rule = "607.2k"
-text = "The two abilities represented by the champion keyword are linked abilities. See rule 702.72, “Champion.”"
+text = "The two abilities represented by the champion keyword are linked abilities. See rule 702.72, \"Champion.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Champion keyword not yet implemented."
 
 [cr_607_2m]
 rule = "607.2m"
@@ -146,15 +146,15 @@ text = "Abilities preceded by an anchor word are linked to the ability that allo
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Anchor word / ward abilities not implemented."
 
 [cr_607_2n]
 rule = "607.2n"
-text = "If an object has a static ability printed on it that allows a player to exile one or more cards “before you shuffle your deck to start the game” and an ability printed on it that refers to cards “exiled with cards named [this object’s name],” the second ability is linked to the first ability of any objects that had the specified name before the game began."
+text = "If an object has a static ability printed on it that allows a player to exile one or more cards \"before you shuffle your deck to start the game\" and an ability printed on it that refers to cards \"exiled with cards named [this object's name],\" the second ability is linked to the first ability of any objects that had the specified name before the game began."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Pre-game exile linking not implemented."
 
 [cr_607_2p]
 rule = "607.2p"
@@ -162,23 +162,23 @@ text = "If an object has both a static ability that causes a player to make a ch
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Pre-game CDA choice linking not implemented."
 
 [cr_607_2q]
 rule = "607.2q"
-text = "If a permanent spell has an ability printed on it that allows one or more cards to be exiled while paying a cost to cast it and the permanent that spell becomes has an ability that refers to cards “exiled with [this object],” those abilities are linked. The second ability refers only to cards exiled to pay the cost of the spell that became that permanent."
+text = "If a permanent spell has an ability printed on it that allows one or more cards to be exiled while paying a cost to cast it and the permanent that spell becomes has an ability that refers to cards \"exiled with [this object],\" those abilities are linked. The second ability refers only to cards exiled to pay the cost of the spell that became that permanent."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Cast-cost exile linking not yet tracked."
 
 [cr_607_3]
 rule = "607.3"
-text = "If, within a pair of linked abilities, one ability refers to a single object as “the exiled card,” “a card exiled with [this object],” or a similar phrase, and the other ability has exiled multiple cards (usually because it was copied), the ability refers to each of the exiled cards. If that ability asks for any information about the exiled card, such as a characteristic or mana value, it gets multiple answers. If these answers are used to determine the value of a variable, the sum of the answers is used. If that ability performs any actions on “the” card, it performs that action on each exiled card. If that ability creates a token that is a copy of “the” card, then for each exiled card, it creates a token that is a copy of that card. If that ability performs any actions on “a” card, the controller of the ability chooses which card is affected."
+text = "If, within a pair of linked abilities, one ability refers to a single object as \"the exiled card,\" \"a card exiled with [this object],\" or a similar phrase, and the other ability has exiled multiple cards (usually because it was copied), the ability refers to each of the exiled cards. If that ability asks for any information about the exiled card, such as a characteristic or mana value, it gets multiple answers. If these answers are used to determine the value of a variable, the sum of the answers is used. If that ability performs any actions on \"the\" card, it performs that action on each exiled card. If that ability creates a token that is a copy of \"the\" card, then for each exiled card, it creates a token that is a copy of that card. If that ability performs any actions on \"a\" card, the controller of the ability chooses which card is affected."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multi-card linked ability resolution (from copied abilities) not explicitly modeled."
 
 [cr_607_4]
 rule = "607.4"
@@ -186,20 +186,20 @@ text = "An ability may be part of more than one pair of linked abilities."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multi-pair linking not explicitly tracked."
 
 [cr_607_5]
 rule = "607.5"
-text = "If an object acquires a pair of linked abilities as part of the same effect, the abilities will be similarly linked to one another on that object even though they weren’t printed on that object. They can’t be linked to any other ability, regardless of what other abilities the object may currently have or may have had in the past."
+text = "If an object acquires a pair of linked abilities as part of the same effect, the abilities will be similarly linked to one another on that object even though they weren't printed on that object. They can't be linked to any other ability, regardless of what other abilities the object may currently have or may have had in the past."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Acquired linked ability pair tracking not implemented."
 
 [cr_607_5a]
 rule = "607.5a"
-text = "If an object gains an ability that refers to a choice, but either (a) doesn’t copy that ability’s linked ability or (b) does copy the linked ability but no choice is made for it, then the choice is considered to be “undefined.” If an ability refers to an undefined choice, that part of the ability won’t do anything."
+text = "If an object gains an ability that refers to a choice, but either (a) doesn't copy that ability's linked ability or (b) does copy the linked ability but no choice is made for it, then the choice is considered to be \"undefined.\" If an ability refers to an undefined choice, that part of the ability won't do anything."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Undefined-choice handling for acquired abilities not modeled."

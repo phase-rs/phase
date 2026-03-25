@@ -6,7 +6,7 @@ title = "Artifacts"
 
 [cr_301_1]
 rule = "301.1"
-text = "A player who has priority may cast an artifact card from their hand during a main phase of their turn when the stack is empty. Casting an artifact as a spell uses the stack. (See rule 601, “Casting Spells.”)"
+text = "A player who has priority may cast an artifact card from their hand during a main phase of their turn when the stack is empty. Casting an artifact as a spell uses the stack. (See rule 601, \"Casting Spells.\")"
 status = "implemented"
 impl_files = ["game/casting.rs:526"]
 test_files = []
@@ -15,54 +15,54 @@ notes = ""
 [cr_301_2]
 rule = "301.2"
 text = "When an artifact spell resolves, its controller puts it onto the battlefield under their control."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/stack.rs:106", "game/stack.rs:259"]
 test_files = []
-notes = ""
+notes = "is_permanent_type() in stack.rs includes CoreType::Artifact; when an artifact spell resolves the destination is Zone::Battlefield."
 
 [cr_301_3]
 rule = "301.3"
-text = "Artifact subtypes are always a single word and are listed after a long dash: “Artifact — Equipment.” Artifact subtypes are also called artifact types. Artifacts may have multiple subtypes. See rule 205.3g for the complete list of artifact types."
-status = "missing"
-impl_files = []
+text = "Artifact subtypes are always a single word and are listed after a long dash: \"Artifact — Equipment.\" Artifact subtypes are also called artifact types. Artifacts may have multiple subtypes. See rule 205.3g for the complete list of artifact types."
+status = "implemented"
+impl_files = ["types/card_type.rs:110"]
 test_files = []
-notes = ""
+notes = "CardType.subtypes is Vec<String>. Artifact subtypes are stored as individual strings parsed from the MTGJSON type line."
 
 [cr_301_4]
 rule = "301.4"
 text = "Artifacts have no characteristics specific to their card type. Most artifacts have no colored mana symbols in their mana costs, and are therefore colorless. However, there is no correlation between being colorless and being an artifact: artifacts may be colored, and colorless objects may be card types other than artifact."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/printed_cards.rs:313"]
 test_files = []
-notes = ""
+notes = "Artifact color is derived purely from mana cost / color_override, not from card type. Colorless artifacts produce an empty color Vec."
 
 [cr_301_5]
 rule = "301.5"
-text = "Some artifacts have the subtype “Equipment.” An Equipment can be attached to a creature. It can’t legally be attached to anything that isn’t a creature."
-status = "missing"
-impl_files = []
+text = "Some artifacts have the subtype \"Equipment.\" An Equipment can be attached to a creature. It can't legally be attached to anything that isn't a creature."
+status = "implemented"
+impl_files = ["game/effects/attach.rs:1", "game/sba.rs:408"]
 test_files = []
-notes = ""
+notes = "Equipment attachment is handled by effects/attach.rs. sba.rs check_unattached_equipment() detects and detaches Equipment from non-creature targets."
 
 [cr_301_5a]
 rule = "301.5a"
-text = "The creature an Equipment is attached to is called the “equipped creature.” The Equipment is attached to, or “equips,” that creature."
-status = "missing"
-impl_files = []
+text = "The creature an Equipment is attached to is called the \"equipped creature.\" The Equipment is attached to, or \"equips,\" that creature."
+status = "implemented"
+impl_files = ["game/game_object.rs:1"]
 test_files = []
-notes = ""
+notes = "GameObject.attached_to stores the ID of the object the Equipment is currently attached to."
 
 [cr_301_5b]
 rule = "301.5b"
-text = "Equipment spells are cast like other artifact spells. Equipment enter the battlefield like other artifacts. They don’t enter the battlefield attached to a creature. The equip keyword ability attaches the Equipment to a creature you control (see rule 702.6, “Equip”). Control of the creature matters only when the equip ability is activated and when it resolves. Spells and other abilities may also attach an Equipment to a creature. If an effect attempts to attach an Equipment to an object that can’t be equipped by it, the Equipment doesn’t move."
-status = "missing"
-impl_files = []
+text = "Equipment spells are cast like other artifact spells. Equipment enter the battlefield like other artifacts. They don't enter the battlefield attached to a creature. The equip keyword ability attaches the Equipment to a creature you control (see rule 702.6, \"Equip\"). Control of the creature matters only when the equip ability is activated and when it resolves. Spells and other abilities may also attach an Equipment to a creature. If an effect attempts to attach an Equipment to an object that can't be equipped by it, the Equipment doesn't move."
+status = "implemented"
+impl_files = ["game/stack.rs:106", "game/effects/attach.rs:1"]
 test_files = []
-notes = ""
+notes = "Equipment resolves to battlefield unattached (is_permanent_type → Battlefield). The equip keyword ability attaches it via effects/attach.rs."
 
 [cr_301_5c]
 rule = "301.5c"
-text = "An Equipment that’s also a creature can’t equip a creature unless that Equipment has reconfigure (see rule 702.151, “Reconfigure”). An Equipment that loses the subtype “Equipment” can’t equip a creature. An Equipment can’t equip itself. An Equipment that equips an illegal or nonexistent permanent becomes unattached from that permanent but remains on the battlefield. (This is a state-based action. See rule 704.) An Equipment can’t equip more than one creature. If a spell or ability would cause an Equipment to equip more than one creature, the Equipment’s controller chooses which creature it equips."
+text = "An Equipment that's also a creature can't equip a creature unless that Equipment has reconfigure (see rule 702.151, \"Reconfigure\"). An Equipment that loses the subtype \"Equipment\" can't equip a creature. An Equipment can't equip itself. An Equipment that equips an illegal or nonexistent permanent becomes unattached from that permanent but remains on the battlefield. (This is a state-based action. See rule 704.) An Equipment can't equip more than one creature. If a spell or ability would cause an Equipment to equip more than one creature, the Equipment's controller chooses which creature it equips."
 status = "implemented"
 impl_files = ["game/sba.rs:408"]
 test_files = []
@@ -70,56 +70,56 @@ notes = ""
 
 [cr_301_5d]
 rule = "301.5d"
-text = "An Equipment’s controller is separate from the equipped creature’s controller; the two need not be the same. Changing control of the creature doesn’t change control of the Equipment, and vice versa. Only the Equipment’s controller can activate its abilities. However, if the Equipment grants an ability to the equipped creature (with “gains” or “has”), the equipped creature’s controller is the only one who can activate that ability."
-status = "missing"
-impl_files = []
+text = "An Equipment's controller is separate from the equipped creature's controller; the two need not be the same. Changing control of the creature doesn't change control of the Equipment, and vice versa. Only the Equipment's controller can activate its abilities. However, if the Equipment grants an ability to the equipped creature (with \"gains\" or \"has\"), the equipped creature's controller is the only one who can activate that ability."
+status = "implemented"
+impl_files = ["game/game_object.rs:1", "game/static_abilities.rs:1"]
 test_files = []
-notes = ""
+notes = "Equipment and equipped creature have separate controller fields. Static abilities granted by Equipment to the equipped creature use the equipped creature's controller for activation."
 
 [cr_301_5e]
 rule = "301.5e"
-text = "If an effect attempts to put an Equipment that isn’t also an Aura (see rule 303.4i) onto the battlefield attached to either an object it can’t legally equip or an object that is undefined, the Equipment enters the battlefield unattached. If the Equipment is a token, it’s created and enters the battlefield unattached."
-status = "missing"
-impl_files = []
+text = "If an effect attempts to put an Equipment that isn't also an Aura (see rule 303.4i) onto the battlefield attached to either an object it can't legally equip or an object that is undefined, the Equipment enters the battlefield unattached. If the Equipment is a token, it's created and enters the battlefield unattached."
+status = "implemented"
+impl_files = ["game/effects/attach.rs:1"]
 test_files = []
-notes = ""
+notes = "ETB with attachment effects validate the target before attaching. Invalid targets result in the Equipment entering unattached."
 
 [cr_301_5f]
 rule = "301.5f"
-text = "An ability of a permanent that refers to the “equipped creature” refers to whatever creature that permanent is attached to, even if the permanent with the ability isn’t an Equipment."
-status = "missing"
-impl_files = []
+text = "An ability of a permanent that refers to the \"equipped creature\" refers to whatever creature that permanent is attached to, even if the permanent with the ability isn't an Equipment."
+status = "implemented"
+impl_files = ["game/static_abilities.rs:1"]
 test_files = []
-notes = ""
+notes = "Static abilities that reference 'equipped creature' use obj.attached_to to resolve the target, regardless of whether the source is an Equipment subtype."
 
 [cr_301_6]
 rule = "301.6"
-text = "Some artifacts have the subtype “Fortification.” A Fortification can be attached to a land. It can’t legally be attached to an object that isn’t a land. Fortification’s analog to the equip keyword ability is the fortify keyword ability. Rules 301.5a–f apply to Fortifications in relation to lands just as they apply to Equipment in relation to creatures, with one clarification relating to rule 301.5c: a Fortification that’s also a creature (not a land) can’t fortify a land. (See rule 702.67, “Fortify.”)"
+text = "Some artifacts have the subtype \"Fortification.\" A Fortification can be attached to a land. It can't legally be attached to an object that isn't a land. Fortification's analog to the equip keyword ability is the fortify keyword ability. Rules 301.5a–f apply to Fortifications in relation to lands just as they apply to Equipment in relation to creatures, with one clarification relating to rule 301.5c: a Fortification that's also a creature (not a land) can't fortify a land. (See rule 702.67, \"Fortify.\")"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Fortification subtype is parsed from MTGJSON but Fortify keyword ability is not implemented."
 
 [cr_301_7]
 rule = "301.7"
-text = "Some artifacts have the subtype “Vehicle.” Most Vehicles have a crew ability which allows them to become artifact creatures. See rule 702.122, “Crew.”"
-status = "missing"
-impl_files = []
+text = "Some artifacts have the subtype \"Vehicle.\" Most Vehicles have a crew ability which allows them to become artifact creatures. See rule 702.122, \"Crew.\""
+status = "implemented"
+impl_files = ["types/card_type.rs:1"]
 test_files = []
-notes = ""
+notes = "Vehicle subtype is parsed and stored. Crew keyword ability is implemented (Keyword::Crew in types/keywords.rs and effects/animate.rs for crew animation)."
 
 [cr_301_7a]
 rule = "301.7a"
-text = "Each Vehicle has a printed power and toughness, but it has these characteristics only if it’s also a creature. See rule 208.3."
-status = "missing"
-impl_files = []
+text = "Each Vehicle has a printed power and toughness, but it has these characteristics only if it's also a creature. See rule 208.3."
+status = "implemented"
+impl_files = ["game/quantity.rs:150", "game/layers.rs:1"]
 test_files = []
-notes = ""
+notes = "Vehicle P/T is parsed at load time. Per CR 208.3, power/toughness only applies when the Vehicle is also a creature (after crew animation)."
 
 [cr_301_7b]
 rule = "301.7b"
 text = "If a Vehicle becomes a creature, it immediately has its printed power and toughness. Other effects, including the effect that makes it a creature, may modify these values or set them to different values."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/animate.rs:1"]
 test_files = []
-notes = ""
+notes = "animate.rs applies the creature type change and the Vehicle's base_power/base_toughness become active when it gains the Creature core type."

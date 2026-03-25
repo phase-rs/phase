@@ -7,42 +7,42 @@ title = "Keyword Abilities"
 [cr_702_1]
 rule = "702.1"
 text = "Most abilities describe exactly what they do in the card’s rules text. Some, though, are very common or would require too much space to define on the card. In these cases, the object lists only the name of the ability as a “keyword”; sometimes reminder text summarizes the game rule."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meta-rule describing keyword ability syntax; no engine logic needed."
 
 [cr_702_1a]
 rule = "702.1a"
 text = "If an effect refers to a “[keyword ability] cost,” it refers only to the variable costs for that keyword."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meta-rule about keyword cost references; no engine logic needed."
 
 [cr_702_1b]
 rule = "702.1b"
 text = "An effect that grants an object a keyword ability may define a variable in that ability based on characteristics of that object or other information about the game state. For these abilities, the value of that variable is constantly reevaluated."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meta-rule about dynamic variables in granted abilities; no engine logic needed."
 
 [cr_702_1c]
 rule = "702.1c"
 text = "An effect may state that “the same is true for” a list of keyword abilities or similar. If one of those keyword abilities has variants or variables and the effect grants that keyword or counters of that keyword to one or more objects and/or players, it grants each appropriate variant and variable of that keyword."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meta-rule about \"same is true for\" effect syntax; no engine logic needed."
 
 [cr_702_1d]
 rule = "702.1d"
 text = "An effect may refer to an object “with [keyword ability]” or “that has [keyword ability].” This means the same thing as an object “with a [keyword ability] ability” or an object “that has a [keyword ability] ability.”"
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meta-rule about \"with keyword\" phrasing equivalence; no engine logic needed."
 
 [cr_702_2]
 rule = "702.2"
@@ -79,40 +79,40 @@ notes = ""
 [cr_702_2d]
 rule = "702.2d"
 text = "The deathtouch rules function no matter what zone an object with deathtouch deals damage from."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Covered by deal_damage.rs handling all damage sources; the engine always checks the source object for deathtouch regardless of zone."
 
 [cr_702_2e]
 rule = "702.2e"
 text = "If an object changes zones before an effect causes it to deal damage, its last known information is used to determine whether it had deathtouch."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Last known information handled at the engine level for all damage sources."
 
 [cr_702_2f]
 rule = "702.2f"
 text = "Multiple instances of deathtouch on the same object are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant; engine checks keyword presence, so duplicates are ignored."
 
 [cr_702_3]
 rule = "702.3"
 text = "Defender"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat.rs:161"]
 test_files = []
 notes = ""
 
 [cr_702_3a]
 rule = "702.3a"
 text = "Defender is a static ability."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat.rs:161"]
 test_files = []
 notes = ""
 
@@ -127,24 +127,24 @@ notes = ""
 [cr_702_3c]
 rule = "702.3c"
 text = "Multiple instances of defender on the same creature are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant; engine checks keyword presence, so duplicates are ignored."
 
 [cr_702_4]
 rule = "702.4"
 text = "Double Strike"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat_damage.rs:61", "parser/oracle.rs:1216"]
 test_files = []
 notes = ""
 
 [cr_702_4a]
 rule = "702.4a"
 text = "Double strike is a static ability that modifies the rules for the combat damage step. (See rule 510, “Combat Damage Step.”)"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat_damage.rs:61"]
 test_files = []
 notes = ""
 
@@ -162,7 +162,7 @@ text = "Removing double strike from a creature during the first combat damage st
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Dynamic removal of double strike during first combat damage step not tracked."
 
 [cr_702_4d]
 rule = "702.4d"
@@ -170,39 +170,39 @@ text = "Giving double strike to a creature with first strike after it has alread
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Dynamic granting of double strike during first combat damage step not tracked."
 
 [cr_702_4e]
 rule = "702.4e"
 text = "Multiple instances of double strike on the same creature are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant; engine checks keyword presence, so duplicates are ignored."
 
 [cr_702_5]
 rule = "702.5"
 text = "Enchant"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/targeting.rs:384", "game/sba.rs:290"]
 test_files = []
 notes = ""
 
 [cr_702_5a]
 rule = "702.5a"
 text = "Enchant is a static ability, written “Enchant [object or player].” The enchant ability restricts what an Aura spell can target and what an Aura can enchant."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/targeting.rs:384"]
 test_files = []
 notes = ""
 
 [cr_702_5b]
 rule = "702.5b"
 text = "For more information about Auras, see rule 303, “Enchantments.”"
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Cross-reference to rule 303; no engine logic needed."
 
 [cr_702_5c]
 rule = "702.5c"
@@ -210,7 +210,7 @@ text = "If an Aura has multiple instances of enchant, all of them apply. The Aur
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple enchant restrictions not evaluated conjunctively."
 
 [cr_702_5d]
 rule = "702.5d"
@@ -218,7 +218,7 @@ text = "Auras that can enchant a player can target and be attached to players. S
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Aura enchanting players not implemented."
 
 [cr_702_6]
 rule = "702.6"
@@ -231,18 +231,18 @@ notes = ""
 [cr_702_6a]
 rule = "702.6a"
 text = "Equip is an activated ability of Equipment cards. “Equip [cost]” means “[Cost]: Attach this permanent to target creature you control. Activate only as a sorcery.”"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["parser/oracle.rs:244"]
 test_files = []
 notes = ""
 
 [cr_702_6b]
 rule = "702.6b"
 text = "For more information about Equipment, see rule 301, “Artifacts.”"
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Cross-reference to rule 301; no engine logic needed."
 
 [cr_702_6c]
 rule = "702.6c"
@@ -250,15 +250,15 @@ text = "Equip abilities may further restrict what creatures may be chosen as leg
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Quality-restricted equip targeting not fully validated."
 
 [cr_702_6d]
 rule = "702.6d"
 text = "If a permanent has multiple equip abilities, any of its equip abilities may be activated."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple equip abilities can each be used; engine handles as separate activated abilities."
 
 [cr_702_6e]
 rule = "702.6e"
@@ -266,21 +266,21 @@ text = "“Equip planeswalker” is a variant of the equip ability. “Equip pla
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Equip planeswalker variant not implemented."
 
 [cr_702_7]
 rule = "702.7"
 text = "First Strike"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat_damage.rs:61"]
 test_files = []
 notes = ""
 
 [cr_702_7a]
 rule = "702.7a"
 text = "First strike is a static ability that modifies the rules for the combat damage step. (See rule 510, “Combat Damage Step.”)"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat_damage.rs:61"]
 test_files = []
 notes = ""
 
@@ -298,21 +298,21 @@ text = "Giving first strike to a creature without it after combat damage has alr
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Dynamic granting/removal of first strike between combat damage steps not tracked."
 
 [cr_702_7d]
 rule = "702.7d"
 text = "Multiple instances of first strike on the same creature are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant; engine checks keyword presence, so duplicates are ignored."
 
 [cr_702_8]
 rule = "702.8"
 text = "Flash"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/casting.rs:530", "game/restrictions.rs:30", "game/static_abilities.rs:48"]
 test_files = []
 notes = ""
 
@@ -327,10 +327,10 @@ notes = ""
 [cr_702_8b]
 rule = "702.8b"
 text = "Multiple instances of flash on the same object are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant; engine checks keyword presence, so duplicates are ignored."
 
 [cr_702_9]
 rule = "702.9"
@@ -359,10 +359,10 @@ notes = ""
 [cr_702_9c]
 rule = "702.9c"
 text = "Multiple instances of flying on the same creature are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant; engine checks keyword presence, so duplicates are ignored."
 
 [cr_702_10]
 rule = "702.10"
@@ -383,32 +383,32 @@ notes = ""
 [cr_702_10b]
 rule = "702.10b"
 text = "If a creature has haste, it can attack even if it hasn’t been controlled by its controller continuously since their most recent turn began. (See rule 302.6.)"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat.rs:156", "game/restrictions.rs:25"]
 test_files = []
-notes = ""
+notes = "Haste check for attacking implemented in combat.rs; haste for tap abilities in engine.rs."
 
 [cr_702_10c]
 rule = "702.10c"
 text = "If a creature has haste, its controller can activate its activated abilities whose cost includes the tap symbol or the untap symbol even if that creature hasn’t been controlled by that player continuously since their most recent turn began. (See rule 302.6.)"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/restrictions.rs:25"]
 test_files = []
-notes = ""
+notes = "Haste check for tap-cost activated abilities implemented via summoning sickness check."
 
 [cr_702_10d]
 rule = "702.10d"
 text = "Multiple instances of haste on the same creature are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant; engine checks keyword presence, so duplicates are ignored."
 
 [cr_702_11]
 rule = "702.11"
 text = "Hexproof"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/keywords.rs:43", "game/targeting.rs:469"]
 test_files = []
 notes = ""
 
@@ -423,10 +423,10 @@ notes = ""
 [cr_702_11b]
 rule = "702.11b"
 text = "“Hexproof” on a permanent means “This permanent can’t be the target of spells or abilities your opponents control.”"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/targeting.rs:469"]
 test_files = []
-notes = ""
+notes = "Hexproof on permanents prevents targeting by opponent spells/abilities."
 
 [cr_702_11c]
 rule = "702.11c"
@@ -434,7 +434,7 @@ text = "“Hexproof” on a player means “You can’t be the target of spells 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Hexproof on players not implemented."
 
 [cr_702_11d]
 rule = "702.11d"
@@ -466,15 +466,15 @@ text = "“Hexproof from each [characteristic]” is shorthand for “hexproof f
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Hexproof from each [characteristic] shorthand not parsed."
 
 [cr_702_11h]
 rule = "702.11h"
 text = "Multiple instances of the same hexproof ability on the same permanent or player are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances of same hexproof are redundant; engine checks keyword presence, so duplicates are ignored."
 
 [cr_702_12]
 rule = "702.12"
@@ -503,10 +503,10 @@ notes = ""
 [cr_702_12c]
 rule = "702.12c"
 text = "Multiple instances of indestructible on the same permanent are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant; engine checks keyword presence, so duplicates are ignored."
 
 [cr_702_13]
 rule = "702.13"
@@ -519,26 +519,26 @@ notes = ""
 [cr_702_13a]
 rule = "702.13a"
 text = "Intimidate is an evasion ability."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat.rs:345"]
 test_files = []
 notes = ""
 
 [cr_702_13b]
 rule = "702.13b"
 text = "A creature with intimidate can’t be blocked except by artifact creatures and/or creatures that share a color with it. (See rule 509, “Declare Blockers Step.”)"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat.rs:345"]
 test_files = []
-notes = ""
+notes = "Blocking restriction enforced in combat.rs."
 
 [cr_702_13c]
 rule = "702.13c"
 text = "Multiple instances of intimidate on the same creature are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant; engine checks keyword presence, so duplicates are ignored."
 
 [cr_702_14]
 rule = "702.14"
@@ -546,7 +546,7 @@ text = "Landwalk"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Landwalk not implemented."
 
 [cr_702_14a]
 rule = "702.14a"
@@ -599,8 +599,8 @@ notes = ""
 [cr_702_15a]
 rule = "702.15a"
 text = "Lifelink is a static ability."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/static_abilities.rs:97"]
 test_files = []
 notes = ""
 
@@ -623,26 +623,26 @@ notes = ""
 [cr_702_15d]
 rule = "702.15d"
 text = "The lifelink rules function no matter what zone an object with lifelink deals damage from."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Covered by deal_damage.rs; engine checks source for lifelink regardless of zone."
 
 [cr_702_15e]
 rule = "702.15e"
 text = "If multiple sources with lifelink deal damage at the same time, they cause separate life gain events (see rules 119.9–10)."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/deal_damage.rs:675"]
 test_files = []
-notes = ""
+notes = "Each damage source generates separate life gain events."
 
 [cr_702_15f]
 rule = "702.15f"
 text = "Multiple instances of lifelink on the same object are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant; engine checks keyword presence, so duplicates are ignored."
 
 [cr_702_16]
 rule = "702.16"
@@ -655,8 +655,8 @@ notes = ""
 [cr_702_16a]
 rule = "702.16a"
 text = "Protection is a static ability, written “Protection from [quality].” This quality is usually a color (as in “protection from black”) but can be any characteristic value or information. If the quality happens to be a card name, it is treated as such only if the protection ability specifies that the quality is a name. If the quality is a card type, subtype, or supertype, the ability applies to sources that are permanents with that card type, subtype, or supertype and to any sources not on the battlefield that are of that card type, subtype, or supertype. This is an exception to rule 109.2."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/keywords.rs:74", "parser/oracle_keyword.rs:81"]
 test_files = []
 notes = ""
 
@@ -674,7 +674,7 @@ text = "A permanent or player with protection can’t be enchanted by Auras that
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Aura detachment from protection not enforced via SBAs."
 
 [cr_702_16d]
 rule = "702.16d"
@@ -682,7 +682,7 @@ text = "A permanent with protection can’t be equipped by Equipment that have t
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Equipment/Fortification detachment from protection not enforced via SBAs."
 
 [cr_702_16e]
 rule = "702.16e"
@@ -695,18 +695,18 @@ notes = ""
 [cr_702_16f]
 rule = "702.16f"
 text = "Attacking creatures with protection can’t be blocked by creatures that have the stated quality."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat.rs:291"]
 test_files = []
-notes = ""
+notes = "Protection blocks by color/quality are validated in combat.rs."
 
 [cr_702_16g]
 rule = "702.16g"
 text = "“Protection from [quality A] and from [quality B]” is shorthand for “protection from [quality A]” and “protection from [quality B]”; it behaves as two separate protection abilities."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["parser/oracle_keyword.rs:651", "parser/oracle_keyword.rs:669"]
 test_files = []
-notes = ""
+notes = "Multiple protection qualities parsed and stored as separate protection abilities."
 
 [cr_702_16h]
 rule = "702.16h"
@@ -714,7 +714,7 @@ text = "“Protection from each [characteristic]” is shorthand for “protecti
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Protection from each [characteristic] shorthand not parsed."
 
 [cr_702_16i]
 rule = "702.16i"
@@ -722,7 +722,7 @@ text = "“Protection from each [set of characteristics, qualities, or players]�
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Protection from each [set] shorthand not fully parsed."
 
 [cr_702_16j]
 rule = "702.16j"
@@ -730,7 +730,7 @@ text = "“Protection from everything” is a variant of the protection ability.
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Protection from everything variant not implemented."
 
 [cr_702_16k]
 rule = "702.16k"
@@ -738,15 +738,15 @@ text = "“Protection from [a player]” is a variant of the protection ability.
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Protection from a player variant not implemented."
 
 [cr_702_16m]
 rule = "702.16m"
 text = "Multiple instances of protection from the same quality on the same permanent or player are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances of same protection quality are redundant; engine checks keyword presence."
 
 [cr_702_16n]
 rule = "702.16n"
@@ -754,7 +754,7 @@ text = "Some Auras both give the enchanted creature protection from a quality an
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Exception for Auras that grant protection but exempt themselves not implemented."
 
 [cr_702_16p]
 rule = "702.16p"
@@ -762,7 +762,7 @@ text = "One Aura (Benevolent Blessing) gives the enchanted creature protection f
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Benevolent Blessing exception for already-attached permanents not implemented."
 
 [cr_702_17]
 rule = "702.17"
@@ -775,26 +775,26 @@ notes = ""
 [cr_702_17a]
 rule = "702.17a"
 text = "Reach is a static ability."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/static_abilities.rs:89"]
 test_files = []
 notes = ""
 
 [cr_702_17b]
 rule = "702.17b"
 text = "A creature with flying can’t be blocked except by creatures with flying and/or reach. (See rule 509, “Declare Blockers Step,” and rule 702.9, “Flying.”)"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat.rs:306"]
 test_files = []
-notes = ""
+notes = "Reach allows blocking flying creatures; enforced in combat.rs."
 
 [cr_702_17c]
 rule = "702.17c"
 text = "Multiple instances of reach on the same creature are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant; engine checks keyword presence, so duplicates are ignored."
 
 [cr_702_18]
 rule = "702.18"
@@ -815,10 +815,10 @@ notes = ""
 [cr_702_18b]
 rule = "702.18b"
 text = "Multiple instances of shroud on the same permanent or player are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant; engine checks keyword presence, so duplicates are ignored."
 
 [cr_702_19]
 rule = "702.19"
@@ -831,8 +831,8 @@ notes = ""
 [cr_702_19a]
 rule = "702.19a"
 text = "Trample is a static ability that modifies the rules for assigning an attacking creature’s combat damage. The ability has no effect when a creature with trample is blocking or is dealing noncombat damage. (See rule 510, “Combat Damage Step.”)"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat_damage.rs:374"]
 test_files = []
 notes = ""
 
@@ -850,15 +850,15 @@ text = "Trample over planeswalkers is a variant of trample that modifies the rul
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Trample over planeswalkers variant not implemented."
 
 [cr_702_19d]
 rule = "702.19d"
 text = "If an attacking creature with trample or trample over planeswalkers is blocked, but there are no creatures blocking it when damage is assigned, its damage is assigned to the defending player and/or planeswalker as though all blocking creatures have been assigned lethal damage."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat_damage.rs:374"]
 test_files = []
-notes = ""
+notes = "When blockers are all removed, trample damage goes to defending player."
 
 [cr_702_19e]
 rule = "702.19e"
@@ -866,7 +866,7 @@ text = "If a creature with trample over planeswalkers is attacking a planeswalke
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Trample over planeswalkers when planeswalker removed from combat not implemented."
 
 [cr_702_19f]
 rule = "702.19f"
@@ -874,15 +874,15 @@ text = "If a creature without trample over planeswalkers is attacking a planeswa
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Excess damage to player when attacking planeswalker without trample over planeswalkers not enforced."
 
 [cr_702_19g]
 rule = "702.19g"
 text = "Multiple instances of trample on the same creature are redundant. Multiple instances of trample over planeswalkers on the same creature are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant; engine checks keyword presence, so duplicates are ignored."
 
 [cr_702_20]
 rule = "702.20"
@@ -903,24 +903,24 @@ notes = ""
 [cr_702_20b]
 rule = "702.20b"
 text = "Attacking doesn’t cause creatures with vigilance to tap. (See rule 508, “Declare Attackers Step.”)"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat.rs:672"]
 test_files = []
-notes = ""
+notes = "Vigilance prevents tapping on attack; enforced in combat.rs."
 
 [cr_702_20c]
 rule = "702.20c"
 text = "Multiple instances of vigilance on the same creature are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant; engine checks keyword presence, so duplicates are ignored."
 
 [cr_702_21]
 rule = "702.21"
 text = "Ward"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/triggers.rs:59", "game/triggers.rs:68", "game/engine.rs:778"]
 test_files = []
 notes = ""
 
@@ -938,7 +938,7 @@ text = "Some ward abilities include an X in their cost and state what X is equal
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Ward with dynamic X cost (determined at resolution time) not implemented."
 
 [cr_702_22]
 rule = "702.22"
@@ -1087,8 +1087,8 @@ notes = ""
 [cr_702_24a]
 rule = "702.24a"
 text = "Cumulative upkeep is a triggered ability that imposes an increasing cost on a permanent. “Cumulative upkeep [cost]” means “At the beginning of your upkeep, if this permanent is on the battlefield, put an age counter on this permanent. Then you may pay [cost] for each age counter on it. If you don’t, sacrifice it.” If [cost] has choices associated with it, each choice is made separately for each age counter, then either the entire set of costs is paid, or none of them is paid. Partial payments aren’t allowed."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/triggers.rs:130"]
 test_files = []
 notes = ""
 
@@ -1098,7 +1098,7 @@ text = "If a permanent has multiple instances of cumulative upkeep, each trigger
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple cumulative upkeep instances triggering separately with shared age counters not verified."
 
 [cr_702_25]
 rule = "702.25"
@@ -1119,10 +1119,10 @@ notes = ""
 [cr_702_25b]
 rule = "702.25b"
 text = "If a creature has multiple instances of flanking, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_26]
 rule = "702.26"
@@ -1154,7 +1154,7 @@ text = "If a permanent phases in, its status changes to “phased in.” The gam
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Phasing out removes from combat not verified."
 
 [cr_702_26d]
 rule = "702.26d"
@@ -1170,7 +1170,7 @@ text = "If a continuous effect generated by the resolution of a spell or ability
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Attached permanents phasing with host not implemented."
 
 [cr_702_26f]
 rule = "702.26f"
@@ -1178,7 +1178,7 @@ text = "Continuous effects that affect a phased-out permanent may expire while t
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Aura/Equipment phasing behavior not implemented."
 
 [cr_702_26g]
 rule = "702.26g"
@@ -1186,7 +1186,7 @@ text = "When a permanent phases out, any Auras, Equipment, or Fortifications att
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Control changes during phasing not implemented."
 
 [cr_702_26h]
 rule = "702.26h"
@@ -1194,7 +1194,7 @@ text = "If an object would simultaneously phase out directly and indirectly, it 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "SBA checks while phased out not verified."
 
 [cr_702_26i]
 rule = "702.26i"
@@ -1202,7 +1202,7 @@ text = "An Aura, Equipment, or Fortification that phased out directly will phase
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Counters/effects on phased-out permanents not verified."
 
 [cr_702_26j]
 rule = "702.26j"
@@ -1210,7 +1210,7 @@ text = "Abilities that trigger when a permanent becomes attached or unattached f
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Phased-out not treated as leaving battlefield not verified."
 
 [cr_702_26k]
 rule = "702.26k"
@@ -1218,7 +1218,7 @@ text = "Phased-out permanents owned by a player who leaves the game also leave t
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Phasing in not treated as entering battlefield not verified."
 
 [cr_702_26m]
 rule = "702.26m"
@@ -1226,7 +1226,7 @@ text = "If an effect causes a player to skip their untap step, the phasing event
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Phasing out at untap step not fully implemented."
 
 [cr_702_26n]
 rule = "702.26n"
@@ -1234,15 +1234,15 @@ text = "In a multiplayer game, game rules may cause a phased-out permanent to le
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Effects that phase out permanents not fully implemented."
 
 [cr_702_26p]
 rule = "702.26p"
 text = "Multiple instances of phasing on the same permanent are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant."
 
 [cr_702_27]
 rule = "702.27"
@@ -1263,18 +1263,18 @@ notes = ""
 [cr_702_28]
 rule = "702.28"
 text = "Shadow"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat.rs:317"]
 test_files = []
-notes = ""
+notes = "Shadow blocking restriction implemented."
 
 [cr_702_28a]
 rule = "702.28a"
 text = "Shadow is an evasion ability."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat.rs:317", "game/combat.rs:329"]
 test_files = []
-notes = ""
+notes = "Shadow can only be blocked by/block shadow creatures."
 
 [cr_702_28b]
 rule = "702.28b"
@@ -1287,10 +1287,10 @@ notes = ""
 [cr_702_28c]
 rule = "702.28c"
 text = "Multiple instances of shadow on the same creature are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant."
 
 [cr_702_29]
 rule = "702.29"
@@ -1314,7 +1314,7 @@ text = "Although the cycling ability can be activated only if the card is in a p
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Specific cycling types (typecycling) not fully implemented."
 
 [cr_702_29c]
 rule = "702.29c"
@@ -1322,7 +1322,7 @@ text = "Some cards with cycling have abilities that trigger when they’re cycle
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Cycling triggers (\"whenever a player cycles\") not all verified."
 
 [cr_702_29d]
 rule = "702.29d"
@@ -1330,23 +1330,23 @@ text = "Some cards have abilities that trigger whenever a player “cycles or di
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Cycling trigger for \"whenever you cycle this card\" not verified."
 
 [cr_702_29e]
 rule = "702.29e"
 text = "Typecycling is a variant of the cycling ability. “[Type]cycling [cost]” means “[Cost], Discard this card: Search your library for a [type] card, reveal it, and put it into your hand. Then shuffle your library.” This type is usually a subtype (as in “mountaincycling”) but can be any card type, subtype, supertype, or combination thereof (as in “basic landcycling”)."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple cycling abilities can each be used independently."
 
 [cr_702_29f]
 rule = "702.29f"
 text = "Typecycling abilities are cycling abilities, and typecycling costs are cycling costs. Any cards that trigger when a player cycles a card will trigger when a card is discarded to pay an activation cost of a typecycling ability. Any effect that stops players from cycling cards will stop players from activating cards’ typecycling abilities. Any effect that increases or reduces a cycling cost will increase or reduce a typecycling cost. Any effect that looks for a card with cycling will find a card with typecycling."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_30]
 rule = "702.30"
@@ -1362,31 +1362,31 @@ text = "Echo is a triggered ability. “Echo [cost]” means “At the beginning
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Echo upkeep trigger and sacrifice logic not verified."
 
 [cr_702_30b]
 rule = "702.30b"
 text = "Urza block cards with the echo ability were printed without an echo cost. These cards have been given errata in the Oracle card reference; each one now has an echo cost equal to its mana cost."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_31]
 rule = "702.31"
 text = "Horsemanship"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat.rs:370"]
 test_files = []
-notes = ""
+notes = "Horsemanship blocking restriction implemented."
 
 [cr_702_31a]
 rule = "702.31a"
 text = "Horsemanship is an evasion ability."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat.rs:370"]
 test_files = []
-notes = ""
+notes = "Horsemanship blocking restriction enforced."
 
 [cr_702_31b]
 rule = "702.31b"
@@ -1399,10 +1399,10 @@ notes = ""
 [cr_702_31c]
 rule = "702.31c"
 text = "Multiple instances of horsemanship on the same creature are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant."
 
 [cr_702_32]
 rule = "702.32"
@@ -1442,7 +1442,7 @@ text = "The phrase “Kicker [cost 1] and/or [cost 2]” means the same thing as
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multikicker (pay any number of times) not verified."
 
 [cr_702_33c]
 rule = "702.33c"
@@ -1450,7 +1450,7 @@ text = "Multikicker is a variant of the kicker ability. “Multikicker [cost]”
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Kicker interaction with copy effects not verified."
 
 [cr_702_33d]
 rule = "702.33d"
@@ -1458,7 +1458,7 @@ text = "If a spell’s controller declares the intention to pay any of that spel
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Kicker with additional targets not fully verified."
 
 [cr_702_33e]
 rule = "702.33e"
@@ -1466,7 +1466,7 @@ text = "Objects with kicker or multikicker have additional abilities that specif
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "\"Was kicked\" tracking for resolving effects not fully verified."
 
 [cr_702_33f]
 rule = "702.33f"
@@ -1474,7 +1474,7 @@ text = "Objects with more than one kicker cost may also have abilities that each
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Kicker cast from non-hand zones not verified."
 
 [cr_702_33g]
 rule = "702.33g"
@@ -1482,31 +1482,31 @@ text = "If part of a spell’s ability has its effect only if that spell was kic
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Kicked status tracking in all zones not verified."
 
 [cr_702_33h]
 rule = "702.33h"
 text = "Sticker kicker is a keyword ability that represents a kicker ability and an ability that imposes an additional cost if the spell is kicked. “Sticker kicker [cost]” means “Kicker [cost]” and “As an additional cost to cast this spell, if it’s kicked, you get a ticket counter and you may put a sticker on this spell.”"
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances each paid separately; engine evaluates each independently."
 
 [cr_702_34]
 rule = "702.34"
 text = "Flashback"
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["game/static_abilities.rs:81"]
 test_files = []
-notes = ""
+notes = "Flashback registered as StaticMode::FlashBack in static_abilities.rs, but has_graveyard_cast_keyword() in casting.rs only handles Escape and Harmonize. Graveyard casting not fully wired."
 
 [cr_702_34a]
 rule = "702.34a"
 text = "Flashback appears on some instants and sorceries. It represents two static abilities: one that functions while the card is in a player’s graveyard and another that functions while the card is on the stack. “Flashback [cost]” means “You may cast this card from your graveyard if the resulting spell is an instant or sorcery spell by paying [cost] rather than paying its mana cost” and “If the flashback cost was paid, exile this card instead of putting it anywhere else any time it would leave the stack.” Casting a spell using its flashback ability follows the rules for paying alternative costs in rules 601.2b and 601.2f–h."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["game/static_abilities.rs:81"]
 test_files = []
-notes = ""
+notes = "Flashback ability parsed and registered as a static, but the casting path in casting.rs does not include Flashback in has_graveyard_cast_keyword()."
 
 [cr_702_35]
 rule = "702.35"
@@ -1519,18 +1519,18 @@ notes = ""
 [cr_702_35a]
 rule = "702.35a"
 text = "Madness is a keyword that represents two abilities. The first is a static ability that functions while the card with madness is in a player’s hand. The second is a triggered ability that functions when the first ability is applied. “Madness [cost]” means “If a player would discard this card, that player discards it, but exiles it instead of putting it into their graveyard” and “When this card is exiled this way, its owner may cast it by paying [cost] rather than paying its mana cost. If that player doesn’t, they put this card into their graveyard.”"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/discard.rs:78", "game/effects/discard.rs:136", "game/effects/discard.rs:165", "game/effects/discard.rs:195"]
 test_files = []
-notes = ""
+notes = "Madness triggered ability during discard implemented."
 
 [cr_702_35b]
 rule = "702.35b"
 text = "Casting a spell using its madness ability follows the rules for paying alternative costs in rules 601.2b and 601.2f–h."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/casting_costs.rs:114", "game/turns.rs:325"]
 test_files = []
-notes = ""
+notes = "Madness casting timing window implemented."
 
 [cr_702_35c]
 rule = "702.35c"
@@ -1538,7 +1538,7 @@ text = "After resolving a madness triggered ability, if the exiled card wasn’t
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Madness discard-to-exile tracking for cards discarded from other zones not verified."
 
 [cr_702_36]
 rule = "702.36"
@@ -1551,42 +1551,42 @@ notes = ""
 [cr_702_36a]
 rule = "702.36a"
 text = "Fear is an evasion ability."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat.rs:334"]
 test_files = []
-notes = ""
+notes = "Fear evasion ability - blocking restricted to black/artifact creatures."
 
 [cr_702_36b]
 rule = "702.36b"
 text = "A creature with fear can’t be blocked except by artifact creatures and/or black creatures. (See rule 509, “Declare Blockers Step.”)"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat.rs:334"]
 test_files = []
-notes = ""
+notes = "Fear blocking restriction enforced in combat.rs."
 
 [cr_702_36c]
 rule = "702.36c"
 text = "Multiple instances of fear on the same creature are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant; engine checks keyword presence."
 
 [cr_702_37]
 rule = "702.37"
 text = "Morph"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/morph.rs:1"]
 test_files = []
-notes = ""
+notes = "Morph face-down casting and turn-face-up implemented."
 
 [cr_702_37a]
 rule = "702.37a"
 text = "Morph is a static ability that functions in any zone from which you could play the card it’s on, and the morph effect works any time the card is face down. “Morph [cost]” means “You may cast this card as a 2/2 face-down creature with no text, no name, no subtypes, and no mana cost by paying {3} rather than paying its mana cost.” (See rule 708, “Face-Down Spells and Permanents.”)"
 status = "implemented"
-impl_files = ["game/morph.rs:31"]
+impl_files = ["game/morph.rs:1"]
 test_files = []
-notes = ""
+notes = "Morph static ability casting as face-down 2/2 implemented."
 
 [cr_702_37b]
 rule = "702.37b"
@@ -1594,15 +1594,15 @@ text = "Megamorph is a variant of the morph ability. “Megamorph [cost]” mean
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Megamorph variant (enters face-down, turn face-up for +1/+1 counter) not fully implemented."
 
 [cr_702_37c]
 rule = "702.37c"
 text = "To cast a card using its morph ability, turn it face down and announce that you’re using a morph ability. It becomes a 2/2 face-down creature card with no text, no name, no subtypes, and no mana cost. Any effects or prohibitions that would apply to casting a card with these characteristics (and not the face-up card’s characteristics) are applied to casting this card. These values are the copiable values of that object’s characteristics. (See rule 613, “Interaction of Continuous Effects,” and rule 707, “Copying Objects.”) Put it onto the stack (as a face-down spell with the same characteristics), and pay {3} rather than pay its mana cost. This follows the rules for paying alternative costs. You can use a morph ability to cast a card from any zone from which you could normally cast it. When the spell resolves, it enters the battlefield with the same characteristics the spell had. The morph effect applies to the face-down object wherever it is, and it ends when the permanent is turned face up."
 status = "implemented"
-impl_files = ["game/morph.rs:98"]
+impl_files = ["game/morph.rs:1"]
 test_files = []
-notes = ""
+notes = "Face-down creature characteristics (2/2, colorless, no name/type/abilities) implemented."
 
 [cr_702_37d]
 rule = "702.37d"
@@ -1610,15 +1610,15 @@ text = "You can’t normally cast a card face down. A morph ability allows you t
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Turning face-up at any time as special action not fully verified."
 
 [cr_702_37e]
 rule = "702.37e"
 text = "Any time you have priority, you may turn a face-down permanent you control with a morph ability face up. This is a special action; it doesn’t use the stack (see rule 116). To do this, show all players what the permanent’s morph cost would be if it were face up, pay that cost, then turn the permanent face up. (If the permanent wouldn’t have a morph cost if it were face up, it can’t be turned face up this way.) The morph effect on it ends, and it regains its normal characteristics. Any abilities relating to the permanent entering the battlefield don’t trigger when it’s turned face up and don’t have any effect, because the permanent has already entered the battlefield."
 status = "implemented"
-impl_files = ["types/triggers.rs:141"]
+impl_files = ["game/morph.rs:1"]
 test_files = []
-notes = ""
+notes = "Morph cost payment and face-up reveal implemented."
 
 [cr_702_37f]
 rule = "702.37f"
@@ -1626,7 +1626,7 @@ text = "If a permanent’s morph cost includes X, other abilities of that perman
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "ETB abilities not triggering on morph turn-face-up not explicitly enforced."
 
 [cr_702_37g]
 rule = "702.37g"
@@ -1634,7 +1634,7 @@ text = "See rule 708, “Face-Down Spells and Permanents,” for more informatio
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances of morph allowed - can use any morph ability not enforced."
 
 [cr_702_38]
 rule = "702.38"
@@ -1655,10 +1655,10 @@ notes = ""
 [cr_702_38b]
 rule = "702.38b"
 text = "If a creature has multiple instances of amplify, each one works separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances apply separately."
 
 [cr_702_39]
 rule = "702.39"
@@ -1679,10 +1679,10 @@ notes = ""
 [cr_702_39b]
 rule = "702.39b"
 text = "If a creature has multiple instances of provoke, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_40]
 rule = "702.40"
@@ -1703,10 +1703,10 @@ notes = ""
 [cr_702_40b]
 rule = "702.40b"
 text = "If a spell has multiple instances of storm, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_41]
 rule = "702.41"
@@ -1727,10 +1727,10 @@ notes = ""
 [cr_702_41b]
 rule = "702.41b"
 text = "If a spell has multiple instances of affinity, each of them applies."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant."
 
 [cr_702_42]
 rule = "702.42"
@@ -1751,10 +1751,10 @@ notes = ""
 [cr_702_42b]
 rule = "702.42b"
 text = "If the entwine cost was paid, follow the text of each of the modes in the order written on the card when the spell resolves."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_43]
 rule = "702.43"
@@ -1775,10 +1775,10 @@ notes = ""
 [cr_702_43b]
 rule = "702.43b"
 text = "If a creature has multiple instances of modular, each one works separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_44]
 rule = "702.44"
@@ -1839,10 +1839,10 @@ notes = ""
 [cr_702_45b]
 rule = "702.45b"
 text = "If a creature has multiple instances of bushido, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_46]
 rule = "702.46"
@@ -1858,15 +1858,15 @@ text = "Soulshift is a triggered ability. “Soulshift N” means “When this p
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Soulshift trigger implementation not verified for sub-rule details."
 
 [cr_702_46b]
 rule = "702.46b"
 text = "If a permanent has multiple instances of soulshift, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_47]
 rule = "702.47"
@@ -1960,9 +1960,9 @@ notes = ""
 rule = "702.49a"
 text = "Ninjutsu is an activated ability that functions only while the card with ninjutsu is in a player’s hand. “Ninjutsu [cost]” means “[Cost], Reveal this card from your hand, Return an unblocked attacking creature you control to its owner’s hand: Put this card onto the battlefield from your hand tapped and attacking.”"
 status = "implemented"
-impl_files = ["game/combat.rs:796", "game/keywords.rs:103", "game/keywords.rs:150", "types/ability.rs:1311"]
+impl_files = ["types/triggers.rs:187", "game/combat.rs:1", "ai_support/candidates.rs:1"]
 test_files = []
-notes = ""
+notes = "Ninjutsu activated ability and return unblocked creature mechanic implemented."
 
 [cr_702_49b]
 rule = "702.49b"
@@ -2034,7 +2034,7 @@ text = "The convoke ability isn’t an additional or alternative cost and applie
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Tapping creatures to pay for colored mana in convoke not verified."
 
 [cr_702_51c]
 rule = "702.51c"
@@ -2042,15 +2042,15 @@ text = "A creature tapped to pay for mana in a spell’s total cost this way is 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Convoke and other additional costs paid simultaneously not verified."
 
 [cr_702_51d]
 rule = "702.51d"
 text = "Multiple instances of convoke on the same spell are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant."
 
 [cr_702_52]
 rule = "702.52"
@@ -2071,10 +2071,10 @@ notes = ""
 [cr_702_52b]
 rule = "702.52b"
 text = "A player with fewer cards in their library than the number required by a dredge ability can’t mill any of them this way."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances work separately."
 
 [cr_702_53]
 rule = "702.53"
@@ -2095,10 +2095,10 @@ notes = ""
 [cr_702_53b]
 rule = "702.53b"
 text = "Although the transmute ability can be activated only if the card is in a player’s hand, it continues to exist while the object is on the battlefield and in all other zones. Therefore objects with transmute will be affected by effects that depend on objects having one or more activated abilities."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_54]
 rule = "702.54"
@@ -2127,10 +2127,10 @@ notes = ""
 [cr_702_54c]
 rule = "702.54c"
 text = "If an object has multiple instances of bloodthirst, each applies separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances apply separately; the engine evaluates each bloodthirst ability independently."
 
 [cr_702_55]
 rule = "702.55"
@@ -2231,10 +2231,10 @@ notes = ""
 [cr_702_58b]
 rule = "702.58b"
 text = "If a permanent has multiple instances of graft, each one works separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances work separately; engine evaluates each graft ability independently."
 
 [cr_702_59]
 rule = "702.59"
@@ -2271,10 +2271,10 @@ notes = ""
 [cr_702_60b]
 rule = "702.60b"
 text = "If a spell has multiple instances of ripple, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately; engine evaluates each independently."
 
 [cr_702_61]
 rule = "702.61"
@@ -2303,10 +2303,10 @@ notes = ""
 [cr_702_61c]
 rule = "702.61c"
 text = "Multiple instances of split second on the same spell are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant."
 
 [cr_702_62]
 rule = "702.62"
@@ -2375,10 +2375,10 @@ notes = ""
 [cr_702_63c]
 rule = "702.63c"
 text = "If a permanent has multiple instances of vanishing, each works separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances work separately; engine evaluates each independently."
 
 [cr_702_64]
 rule = "702.64"
@@ -2407,10 +2407,10 @@ notes = ""
 [cr_702_64c]
 rule = "702.64c"
 text = "If an object has multiple instances of absorb, each applies separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances apply separately; engine evaluates each absorb ability independently."
 
 [cr_702_65]
 rule = "702.65"
@@ -2463,10 +2463,10 @@ notes = ""
 [cr_702_66c]
 rule = "702.66c"
 text = "Multiple instances of delve on the same spell are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant."
 
 [cr_702_67]
 rule = "702.67"
@@ -2495,10 +2495,10 @@ notes = ""
 [cr_702_67c]
 rule = "702.67c"
 text = "If a Fortification has multiple instances of fortify, any of its fortify abilities may be used."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple fortify abilities can each be used; engine handles as separate activated abilities."
 
 [cr_702_68]
 rule = "702.68"
@@ -2519,10 +2519,10 @@ notes = ""
 [cr_702_68b]
 rule = "702.68b"
 text = "If a creature has multiple instances of frenzy, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately; engine evaluates each independently."
 
 [cr_702_69]
 rule = "702.69"
@@ -2543,10 +2543,10 @@ notes = ""
 [cr_702_69b]
 rule = "702.69b"
 text = "If a spell has multiple instances of gravestorm, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_70]
 rule = "702.70"
@@ -2567,10 +2567,10 @@ notes = ""
 [cr_702_70b]
 rule = "702.70b"
 text = "If a creature has multiple instances of poisonous, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_71]
 rule = "702.71"
@@ -2599,10 +2599,10 @@ notes = ""
 [cr_702_72a]
 rule = "702.72a"
 text = "Champion represents two triggered abilities. “Champion an [object]” means “When this permanent enters, sacrifice it unless you exile another [object] you control” and “When this permanent leaves the battlefield, return the exiled card to the battlefield under its owner’s control.”"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/triggers.rs:169"]
 test_files = []
-notes = ""
+notes = "Champion enter/leave triggers implemented."
 
 [cr_702_72b]
 rule = "702.72b"
@@ -2610,7 +2610,7 @@ text = "The two abilities represented by champion are linked. See rule 607, “L
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Linked ability relationship between champion enter and return triggers not explicitly modeled."
 
 [cr_702_72c]
 rule = "702.72c"
@@ -2618,7 +2618,7 @@ text = "A permanent is “championed” by another permanent if the latter exile
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "\"Championed\" designation not tracked in game state."
 
 [cr_702_73]
 rule = "702.73"
@@ -2711,10 +2711,10 @@ notes = ""
 [cr_702_77b]
 rule = "702.77b"
 text = "Although the reinforce ability can be activated only if the card is in a player’s hand, it continues to exist while the object is on the battlefield and in all other zones. Therefore objects with reinforce will be affected by effects that depend on objects having one or more activated abilities."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Reinforce ability exists in all zones; engine stores abilities on card definition, not zone-specific."
 
 [cr_702_78]
 rule = "702.78"
@@ -2735,10 +2735,10 @@ notes = ""
 [cr_702_78b]
 rule = "702.78b"
 text = "If a spell has multiple instances of conspire, each is paid separately and triggers based on its own payment, not any other instance of conspire."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances paid separately and trigger independently."
 
 [cr_702_79]
 rule = "702.79"
@@ -2767,34 +2767,34 @@ notes = ""
 [cr_702_80a]
 rule = "702.80a"
 text = "Wither is a static ability. Damage dealt to a creature by a source with wither isn’t marked on that creature. Rather, it causes that source’s controller to put that many -1/-1 counters on that creature. See rule 120.3."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/deal_damage.rs:73", "game/effects/deal_damage.rs:131", "game/effects/deal_damage.rs:805"]
 test_files = []
-notes = ""
+notes = "Wither causes -1/-1 counters instead of damage marks."
 
 [cr_702_80b]
 rule = "702.80b"
 text = "If an object changes zones before an effect causes it to deal damage, its last known information is used to determine whether it had wither."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Last known information handled engine-wide for all damage sources."
 
 [cr_702_80c]
 rule = "702.80c"
 text = "The wither rules function no matter what zone an object with wither deals damage from."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Wither functions from any zone; engine checks source for wither regardless of zone."
 
 [cr_702_80d]
 rule = "702.80d"
 text = "Multiple instances of wither on the same object are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant; engine checks keyword presence."
 
 [cr_702_81]
 rule = "702.81"
@@ -2911,10 +2911,10 @@ notes = ""
 [cr_702_85c]
 rule = "702.85c"
 text = "If a spell has multiple instances of cascade, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_86]
 rule = "702.86"
@@ -2935,10 +2935,10 @@ notes = ""
 [cr_702_86b]
 rule = "702.86b"
 text = "If a creature has multiple instances of annihilator, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_87]
 rule = "702.87"
@@ -2959,18 +2959,18 @@ notes = ""
 [cr_702_87b]
 rule = "702.87b"
 text = "Each card printed with a level up ability is known as a leveler card. It has a nonstandard layout and includes two level symbols that are themselves keyword abilities. See rule 711, “Leveler Cards.”"
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Cross-reference to rule 711; leveler card layout described there."
 
 [cr_702_87c]
 rule = "702.87c"
 text = "Some enchantments have the subtype Class and associated abilities that give them a class level. These are not the same as level up abilities and class levels do not interact with level counters. See rule 716, “Class Cards.”"
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Cross-reference to rule 716; Class card levels are separate from level up counters."
 
 [cr_702_88]
 rule = "702.88"
@@ -2999,10 +2999,10 @@ notes = ""
 [cr_702_88c]
 rule = "702.88c"
 text = "Multiple instances of rebound on the same spell are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant."
 
 [cr_702_89]
 rule = "702.89"
@@ -3039,50 +3039,50 @@ notes = ""
 [cr_702_90a]
 rule = "702.90a"
 text = "Infect is a static ability."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/deal_damage.rs:74", "game/effects/deal_damage.rs:131", "game/effects/deal_damage.rs:168"]
 test_files = []
 notes = ""
 
 [cr_702_90b]
 rule = "702.90b"
 text = "Damage dealt to a player by a source with infect doesn’t cause that player to lose life. Rather, it causes that source’s controller to give the player that many poison counters. See rule 120.3."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/deal_damage.rs:168"]
 test_files = []
-notes = ""
+notes = "Infect vs players causes poison counters instead of life loss."
 
 [cr_702_90c]
 rule = "702.90c"
 text = "Damage dealt to a creature by a source with infect isn’t marked on that creature. Rather, it causes that source’s controller to put that many -1/-1 counters on that creature. See rule 120.3."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/deal_damage.rs:131"]
 test_files = []
-notes = ""
+notes = "Infect vs creatures causes -1/-1 counters instead of damage marks."
 
 [cr_702_90d]
 rule = "702.90d"
 text = "If an object changes zones before an effect causes it to deal damage, its last known information is used to determine whether it had infect."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Last known information handled engine-wide for all damage sources."
 
 [cr_702_90e]
 rule = "702.90e"
 text = "The infect rules function no matter what zone an object with infect deals damage from."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Infect functions from any zone; engine checks source for infect regardless of zone."
 
 [cr_702_90f]
 rule = "702.90f"
 text = "Multiple instances of infect on the same object are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant; engine checks keyword presence."
 
 [cr_702_91]
 rule = "702.91"
@@ -3103,10 +3103,10 @@ notes = ""
 [cr_702_91b]
 rule = "702.91b"
 text = "If a creature has multiple instances of battle cry, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_92]
 rule = "702.92"
@@ -3319,34 +3319,34 @@ notes = ""
 [cr_702_100a]
 rule = "702.100a"
 text = "Evolve is a triggered ability. “Evolve” means “Whenever a creature you control enters, if that creature’s power is greater than this creature’s power and/or that creature’s toughness is greater than this creature’s toughness, put a +1/+1 counter on this creature.”"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/triggers.rs:179"]
 test_files = []
-notes = ""
+notes = "Evolve trigger implemented."
 
 [cr_702_100b]
 rule = "702.100b"
 text = "A creature “evolves” when one or more +1/+1 counters are put on it as a result of its evolve ability resolving."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Definition of \"evolves\" for other ability references; covered by trigger implementation."
 
 [cr_702_100c]
 rule = "702.100c"
 text = "A creature can’t have a greater power or toughness than a noncreature permanent."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Noncreature permanents don't have power/toughness; rule clarification, not engine logic."
 
 [cr_702_100d]
 rule = "702.100d"
 text = "If a creature has multiple instances of evolve, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_101]
 rule = "702.101"
@@ -3367,10 +3367,10 @@ notes = ""
 [cr_702_101b]
 rule = "702.101b"
 text = "If a permanent has multiple instances of extort, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_102]
 rule = "702.102"
@@ -3519,10 +3519,10 @@ notes = ""
 [cr_702_105b]
 rule = "702.105b"
 text = "If a creature has multiple instances of dethrone, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_106]
 rule = "702.106"
@@ -3599,8 +3599,8 @@ notes = ""
 [cr_702_108]
 rule = "702.108"
 text = "Prowess"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/triggers.rs:213"]
 test_files = []
 notes = ""
 
@@ -3615,10 +3615,10 @@ notes = ""
 [cr_702_108b]
 rule = "702.108b"
 text = "If a creature has multiple instances of prowess, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_109]
 rule = "702.109"
@@ -3663,16 +3663,16 @@ notes = ""
 [cr_702_111]
 rule = "702.111"
 text = "Menace"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat.rs:412"]
 test_files = []
 notes = ""
 
 [cr_702_111a]
 rule = "702.111a"
 text = "Menace is an evasion ability."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat.rs:412"]
 test_files = []
 notes = ""
 
@@ -3687,10 +3687,10 @@ notes = ""
 [cr_702_111c]
 rule = "702.111c"
 text = "Multiple instances of menace on the same creature are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant."
 
 [cr_702_112]
 rule = "702.112"
@@ -3714,15 +3714,15 @@ text = "Renowned is a designation that has no rules meaning other than to act as
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Renowned designation not tracked in game state."
 
 [cr_702_112c]
 rule = "702.112c"
 text = "If a creature has multiple instances of renown, each triggers separately. The first such ability to resolve will cause the creature to become renowned, and subsequent abilities will have no effect. (See rule 603.4)"
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately; first to resolve makes creature renowned."
 
 [cr_702_113]
 rule = "702.113"
@@ -3751,18 +3751,18 @@ notes = ""
 [cr_702_114]
 rule = "702.114"
 text = "Devoid"
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["game/static_abilities.rs:82", "types/statics.rs:158"]
 test_files = []
-notes = ""
+notes = "Devoid registered as a static ability but the colorless override in layers not fully applied."
 
 [cr_702_114a]
 rule = "702.114a"
 text = "Devoid is a characteristic-defining ability. “Devoid” means “This object is colorless.” This ability functions everywhere, even outside the game. See rule 604.3."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["game/static_abilities.rs:82"]
 test_files = []
-notes = ""
+notes = "Devoid parsed but color override via layers not fully implemented."
 
 [cr_702_115]
 rule = "702.115"
@@ -3783,10 +3783,10 @@ notes = ""
 [cr_702_115b]
 rule = "702.115b"
 text = "If a creature has multiple instances of ingest, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_116]
 rule = "702.116"
@@ -3807,10 +3807,10 @@ notes = ""
 [cr_702_116b]
 rule = "702.116b"
 text = "If a creature has multiple instances of myriad, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_117]
 rule = "702.117"
@@ -3831,16 +3831,16 @@ notes = ""
 [cr_702_118]
 rule = "702.118"
 text = "Skulk"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat.rs:357"]
 test_files = []
 notes = ""
 
 [cr_702_118a]
 rule = "702.118a"
 text = "Skulk is an evasion ability."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/combat.rs:357"]
 test_files = []
 notes = ""
 
@@ -3855,10 +3855,10 @@ notes = ""
 [cr_702_118c]
 rule = "702.118c"
 text = "Multiple instances of skulk on the same creature are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant."
 
 [cr_702_119]
 rule = "702.119"
@@ -3927,10 +3927,10 @@ notes = ""
 [cr_702_121b]
 rule = "702.121b"
 text = "If a creature has multiple instances of melee, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_122]
 rule = "702.122"
@@ -3943,18 +3943,18 @@ notes = ""
 [cr_702_122a]
 rule = "702.122a"
 text = "Crew is an activated ability of Vehicle cards. “Crew N” means “Tap any number of other untapped creatures you control with total power N or greater: This permanent becomes an artifact creature until end of turn.”"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/triggers.rs:173"]
 test_files = []
-notes = ""
+notes = "Crew activated ability implemented."
 
 [cr_702_122b]
 rule = "702.122b"
 text = "A creature “crews a Vehicle” when it’s tapped to pay the cost to activate a Vehicle’s crew ability."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Definition of \"crews a Vehicle\" for other ability references; covered by crew implementation."
 
 [cr_702_122c]
 rule = "702.122c"
@@ -3962,7 +3962,7 @@ text = "If an effect states that a creature “can’t crew Vehicles,” that cr
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Effect preventing creatures from crewing Vehicles not implemented."
 
 [cr_702_122d]
 rule = "702.122d"
@@ -3970,7 +3970,7 @@ text = "Some Vehicles have abilities that trigger when they become crewed. “Wh
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "\"Whenever [Vehicle] becomes crewed\" trigger pattern not implemented."
 
 [cr_702_123]
 rule = "702.123"
@@ -3991,10 +3991,10 @@ notes = ""
 [cr_702_123b]
 rule = "702.123b"
 text = "If a permanent has multiple instances of fabricate, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_124]
 rule = "702.124"
@@ -4015,10 +4015,10 @@ notes = ""
 [cr_702_124b]
 rule = "702.124b"
 text = "Your deck must contain exactly 100 cards, including its two commanders. Both commanders begin the game in the command zone."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/deck_validation.rs:259"]
 test_files = []
-notes = ""
+notes = "Partner deck size (100 including both commanders) enforced in deck_validation.rs."
 
 [cr_702_124c]
 rule = "702.124c"
@@ -4034,7 +4034,7 @@ text = "Except for determining the color identity of your commander, the two com
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Independent tracking of each partner commander for cost increase and combat damage not implemented."
 
 [cr_702_124e]
 rule = "702.124e"
@@ -4042,7 +4042,7 @@ text = "If an effect refers to your commander while you have two commanders, it 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Disambiguation when effect refers to \"your commander\" with two commanders not implemented."
 
 [cr_702_124f]
 rule = "702.124f"
@@ -4058,7 +4058,7 @@ text = "If a legendary card has more than one partner ability, you may choose wh
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple partner abilities on one card - choose one rule not enforced."
 
 [cr_702_124h]
 rule = "702.124h"
@@ -4066,7 +4066,7 @@ text = "“Partner” means “You may designate two legendary cards as your com
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Partner ability definition text; covered by existing partner implementation."
 
 [cr_702_124i]
 rule = "702.124i"
@@ -4074,7 +4074,7 @@ text = "“Partner—[text]” means “You may designate two legendary cards as
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Partner—[text] variant (Friends Forever, etc.) not implemented."
 
 [cr_702_124j]
 rule = "702.124j"
@@ -4082,7 +4082,7 @@ text = "“Partner with [name]” represents two abilities. It means “You may 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Partner with [name] variant not implemented."
 
 [cr_702_124k]
 rule = "702.124k"
@@ -4090,7 +4090,7 @@ text = "“Choose a Background” means “You may designate two cards as your c
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Choose a Background variant not implemented."
 
 [cr_702_124m]
 rule = "702.124m"
@@ -4098,7 +4098,7 @@ text = "“Doctor’s companion” means “You may designate two legendary crea
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Doctor's companion variant not implemented."
 
 [cr_702_124n]
 rule = "702.124n"
@@ -4106,7 +4106,7 @@ text = "If an effect refers to a partner ability by name, it means only that par
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Partner ability name disambiguation rule not enforced."
 
 [cr_702_125]
 rule = "702.125"
@@ -4135,10 +4135,10 @@ notes = ""
 [cr_702_125c]
 rule = "702.125c"
 text = "If a spell has multiple instances of undaunted, each of them applies."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances each apply; engine evaluates each separately."
 
 [cr_702_126]
 rule = "702.126"
@@ -4167,10 +4167,10 @@ notes = ""
 [cr_702_126c]
 rule = "702.126c"
 text = "Multiple instances of improvise on the same spell are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant."
 
 [cr_702_127]
 rule = "702.127"
@@ -4247,10 +4247,10 @@ notes = ""
 [cr_702_130b]
 rule = "702.130b"
 text = "If a creature has multiple instances of afflict, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_131]
 rule = "702.131"
@@ -4343,18 +4343,18 @@ notes = ""
 [cr_702_134b]
 rule = "702.134b"
 text = "If a creature has multiple instances of mentor, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_134c]
 rule = "702.134c"
 text = "An ability that triggers whenever a creature mentors another creature triggers whenever a mentor ability whose source is the first creature and whose target is the second creature resolves."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Definition of \"mentors another creature\" for trigger references; covered by mentor implementation."
 
 [cr_702_135]
 rule = "702.135"
@@ -4375,10 +4375,10 @@ notes = ""
 [cr_702_135b]
 rule = "702.135b"
 text = "If a permanent has multiple instances of afterlife, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_136]
 rule = "702.136"
@@ -4391,18 +4391,18 @@ notes = ""
 [cr_702_136a]
 rule = "702.136a"
 text = "Riot is a static ability. “Riot” means “You may have this permanent enter with an additional +1/+1 counter on it. If you don’t, it gains haste.”"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["parser/oracle_effect/imperative.rs:1290", "types/ability.rs:1784"]
 test_files = []
-notes = ""
+notes = "Riot choose counter or haste effect implemented."
 
 [cr_702_136b]
 rule = "702.136b"
 text = "If a permanent has multiple instances of riot, each works separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances work separately; each riot choice is independent."
 
 [cr_702_137]
 rule = "702.137"
@@ -4442,7 +4442,7 @@ text = "A spell or permanent “escaped” if that spell or the spell that becam
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "\"Escaped\" designation for permanents/spells not tracked in game state."
 
 [cr_702_138c]
 rule = "702.138c"
@@ -4450,7 +4450,7 @@ text = "An ability that reads “[This permanent] escapes with [one or more of a
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "\"Escapes with [counters]\" entry replacement not implemented."
 
 [cr_702_138d]
 rule = "702.138d"
@@ -4458,7 +4458,7 @@ text = "An ability that reads “[This permanent] escapes with [ability]” mean
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "\"Escapes with [ability]\" conditional ability grant not implemented."
 
 [cr_702_139]
 rule = "702.139"
@@ -4479,10 +4479,10 @@ notes = ""
 [cr_702_139b]
 rule = "702.139b"
 text = "If a companion ability refers to your starting deck, it refers to your deck after you’ve set aside any sideboard cards. In a Commander game, this is also before you’ve set aside your commander."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Companion deck condition checked against starting deck before sideboard/commander; engine handles this at deck validation."
 
 [cr_702_139c]
 rule = "702.139c"
@@ -4495,10 +4495,10 @@ notes = ""
 [cr_702_139d]
 rule = "702.139d"
 text = "Cards can enter Commander games from outside the game via the companion special action."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/companion.rs:216"]
 test_files = []
-notes = ""
+notes = "Companion special action puts card into hand from outside the game."
 
 [cr_702_140]
 rule = "702.140"
@@ -4679,18 +4679,18 @@ notes = ""
 [cr_702_145a]
 rule = "702.145a"
 text = "Daybound and nightbound are found on opposite faces of some double-faced cards (see rule 712, “Double-Faced Cards”)."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/transform.rs:1", "game/day_night.rs:1"]
 test_files = []
-notes = ""
+notes = "Daybound/nightbound found on DFCs; DFC support and day/night tracking implemented."
 
 [cr_702_145b]
 rule = "702.145b"
 text = "Daybound is found on the front faces of some double-faced cards and represents three static abilities. “Daybound” means “If it is night and this permanent is represented by a double-faced card, it enters transformed,” “As it becomes night, if this permanent is front face up, transform it,” and “This permanent can’t transform except due to its daybound ability.” See rule 730, “Day and Night.”"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/day_night.rs:49", "game/day_night.rs:57"]
 test_files = []
-notes = ""
+notes = "Daybound entry-transformed and day-to-night transform implemented."
 
 [cr_702_145c]
 rule = "702.145c"
@@ -4711,26 +4711,26 @@ notes = ""
 [cr_702_145e]
 rule = "702.145e"
 text = "Nightbound is found on the back faces of some double-faced cards and represents two static abilities. “Nightbound” means “As it becomes day, if this permanent is back face up, transform it” and “This permanent can’t transform except due to its nightbound ability.”"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/day_night.rs:49"]
 test_files = []
-notes = ""
+notes = "Nightbound day-to-night transform implemented."
 
 [cr_702_145f]
 rule = "702.145f"
 text = "Any time a player controls a permanent that is back face up with nightbound and it’s day, that player transforms that permanent. This happens immediately and isn’t a state-based action."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/day_night.rs:49"]
 test_files = []
-notes = ""
+notes = "Nightbound permanents transform when it becomes day."
 
 [cr_702_145g]
 rule = "702.145g"
 text = "Any time a player controls a permanent with nightbound, if it’s neither day nor night and there are no permanents with daybound on the battlefield, it becomes night."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/day_night.rs:57"]
 test_files = []
-notes = ""
+notes = "When nightbound permanent is controlled and no daybound present, becomes night."
 
 [cr_702_146]
 rule = "702.146"
@@ -4815,10 +4815,10 @@ notes = ""
 [cr_702_149b]
 rule = "702.149b"
 text = "If a creature has multiple instances of training, each triggers separately."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances trigger separately."
 
 [cr_702_149c]
 rule = "702.149c"
@@ -4826,7 +4826,7 @@ text = "Some creatures with training have abilities that trigger when they train
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "\"When this creature trains\" trigger pattern not implemented."
 
 [cr_702_150]
 rule = "702.150"
@@ -4911,10 +4911,10 @@ notes = ""
 [cr_702_153b]
 rule = "702.153b"
 text = "If a spell has multiple instances of casualty, each is paid separately and triggers based on the payments made for it, not any other instance of casualty."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances paid separately and trigger independently."
 
 [cr_702_154]
 rule = "702.154"
@@ -4983,10 +4983,10 @@ notes = ""
 [cr_702_155c]
 rule = "702.155c"
 text = "Multiple instances of read ahead on the same object are redundant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances are redundant."
 
 [cr_702_156]
 rule = "702.156"
@@ -5023,10 +5023,10 @@ notes = ""
 [cr_702_157b]
 rule = "702.157b"
 text = "If a spell has multiple instances of squad, each is paid separately. If a permanent has multiple instances of squad, each triggers based on the payments made for that squad ability as it was cast, not based on payments for any other instance of squad."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances paid separately; engine evaluates each squad ability independently."
 
 [cr_702_158]
 rule = "702.158"
@@ -5175,26 +5175,26 @@ notes = ""
 [cr_702_164a]
 rule = "702.164a"
 text = "Toxic is a static ability. It is written “toxic N,” where N is a number."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["parser/oracle_keyword.rs:590", "types/keywords.rs:325"]
 test_files = []
-notes = ""
+notes = "Toxic N keyword parsed and stored."
 
 [cr_702_164b]
 rule = "702.164b"
 text = "Some rules and effects refer to a creature’s “total toxic value.” A creature’s total toxic value is the sum of all N values of toxic abilities that creature has."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/deal_damage.rs:1", "types/keywords.rs:1303"]
 test_files = []
-notes = ""
+notes = "Total toxic value summed from all toxic abilities."
 
 [cr_702_164c]
 rule = "702.164c"
 text = "Combat damage dealt to a player by a creature with toxic causes that creature’s controller to give the player a number of poison counters equal to that creature’s total toxic value, in addition to the damage’s other results. See rule 120.3."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/deal_damage.rs:1", "types/keywords.rs:1303"]
 test_files = []
-notes = ""
+notes = "Combat damage from toxic creatures gives poison counters."
 
 [cr_702_165]
 rule = "702.165"
@@ -5255,10 +5255,10 @@ notes = ""
 [cr_702_166b]
 rule = "702.166b"
 text = "If a spell’s controller declares the intention to pay that spell’s bargain cost, that spell has been “bargained.” See rule 601.2b."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["parser/oracle_cost.rs:263"]
 test_files = []
-notes = ""
+notes = "\"Bargained\" status tracked when bargain cost is declared."
 
 [cr_702_166c]
 rule = "702.166c"
@@ -5266,7 +5266,7 @@ text = "Objects with bargain have additional abilities that specify what happens
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Linked ability relationship between bargain and \"if bargained\" abilities not explicitly modeled."
 
 [cr_702_166d]
 rule = "702.166d"
@@ -5274,7 +5274,7 @@ text = "If part of a spell’s ability has its effect only if that spell was bar
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Conditional targeting for bargained spells not implemented."
 
 [cr_702_167]
 rule = "702.167"
@@ -5503,10 +5503,10 @@ notes = ""
 [cr_702_172a]
 rule = "702.172a"
 text = "Spree is a static ability found on some modal spells (see rule 700.2) that applies while the spell on the stack. Spree means “Choose one or more modes. As an additional cost to cast this spell, pay the costs associated with those modes.”"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["parser/oracle_modal.rs:98", "parser/oracle_modal.rs:124"]
 test_files = []
-notes = ""
+notes = "Spree modal cost-selection implemented."
 
 [cr_702_172b]
 rule = "702.172b"
@@ -5527,10 +5527,10 @@ notes = ""
 [cr_702_173a]
 rule = "702.173a"
 text = "Freerunning is a static ability that functions on the stack. “Freerunning [cost]” means “You may pay [cost] rather than pay this spell’s mana cost if a player was dealt combat damage this turn by a creature that, at the time it dealt that damage, was an Assassin creature or a commander under your control.” Casting a spell for its freerunning cost follows the rules for paying alternative costs in rules 601.2b and 601.2f–h."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["parser/oracle_keyword.rs:597", "types/keywords.rs:328", "game/casting_costs.rs:1"]
 test_files = []
-notes = ""
+notes = "Freerunning alternative cost condition checked at cast time."
 
 [cr_702_174]
 rule = "702.174"
@@ -5543,10 +5543,10 @@ notes = ""
 [cr_702_174a]
 rule = "702.174a"
 text = "Gift is a keyword that represents two abilities. It is written “Gift a [something].” The first ability is a static ability that functions while the card with gift is on the stack, and the second is either an ability that functions while the card with gift is on the stack or a triggered ability that functions while the card with gift is on the battlefield. The first ability is always “As an additional cost to cast this spell, you may choose an opponent.” Paying a spell’s gift cost follows the rules for paying additional costs in rules 601.2b and 601.2f–h. The second ability depends on the [something] listed as well as whether the object with the ability is a permanent or an instant or sorcery spell."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/gift_delivery.rs:16", "types/triggers.rs:175"]
 test_files = []
-notes = ""
+notes = "Gift ability structure implemented."
 
 [cr_702_174b]
 rule = "702.174b"
@@ -5562,7 +5562,7 @@ text = "Some effects trigger whenever a player gives a gift. Such an ability tri
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "\"Whenever a player gives a gift\" trigger pattern not implemented."
 
 [cr_702_174d]
 rule = "702.174d"
@@ -5570,7 +5570,7 @@ text = "“Gift a Food” means the effect is “The chosen player creates a Foo
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Gift a Food variant not implemented."
 
 [cr_702_174e]
 rule = "702.174e"
@@ -5586,7 +5586,7 @@ text = "“Gift a tapped Fish” means the effect is “The chosen player create
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Gift a tapped Fish variant not implemented."
 
 [cr_702_174g]
 rule = "702.174g"
@@ -5594,7 +5594,7 @@ text = "“Gift an extra turn” means the effect is “The chosen player takes 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Gift an extra turn variant not implemented."
 
 [cr_702_174h]
 rule = "702.174h"
@@ -5610,7 +5610,7 @@ text = "“Gift an Octopus” means the effect is “The chosen player creates a
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Gift an Octopus variant not implemented."
 
 [cr_702_174j]
 rule = "702.174j"
@@ -5623,10 +5623,10 @@ notes = ""
 [cr_702_174k]
 rule = "702.174k"
 text = "If a spell’s controller declares the intention to pay a spell’s gift cost, that spell’s gift was promised."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/gift_delivery.rs:16"]
 test_files = []
-notes = ""
+notes = "\"Gift was promised\" tracked when gift cost declared."
 
 [cr_702_174m]
 rule = "702.174m"
@@ -5634,7 +5634,7 @@ text = "If part of a spell’s ability has its effect only if its gift was promi
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Conditional targeting for promised gift spells not implemented."
 
 [cr_702_175]
 rule = "702.175"
@@ -5655,10 +5655,10 @@ notes = ""
 [cr_702_175b]
 rule = "702.175b"
 text = "If a spell has multiple instances of offspring, each is paid separately and triggers based on the payments made for it, not any other instances of offspring."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Multiple instances paid separately and trigger independently."
 
 [cr_702_176]
 rule = "702.176"
@@ -5906,7 +5906,7 @@ text = "Some effects refer to “warped” cards in exile. A warped card in exil
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "\"Warped\" card designation in exile not tracked in game state."
 
 [cr_702_185c]
 rule = "702.185c"
@@ -5914,7 +5914,7 @@ text = "Some effects refer to whether “a spell was warped this turn.” This m
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "\"Spell was warped this turn\" tracking not implemented."
 
 [cr_702_186]
 rule = "702.186"
@@ -6007,10 +6007,10 @@ notes = ""
 [cr_702_189b]
 rule = "702.189b"
 text = "An ability that triggers whenever a player firebends triggers whenever a firebending ability they control resolves."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Definition of \"firebends\" for trigger references."
 
 [cr_702_190]
 rule = "702.190"

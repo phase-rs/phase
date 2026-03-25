@@ -8,134 +8,134 @@ title = "Life"
 rule = "119.1"
 text = "Each player begins the game with a starting life total of 20. Some variant games have different starting life totals."
 status = "implemented"
-impl_files = ["game/effects/life.rs:18", "parser/oracle_effect/imperative.rs:69"]
-test_files = []
-notes = ""
+impl_files = ["game/effects/life.rs:18", "parser/oracle_effect/imperative.rs:69", "types/format.rs:71"]
+test_files = ["types/format.rs:182"]
+notes = "FormatConfig::standard() sets starting_life = 20. life.rs applies life gain/loss effects. Tests verify the 20-life default."
 
 [cr_119_1a]
 rule = "119.1a"
-text = "In a Two-Headed Giant game, each team’s starting life total is 30. See rule 810, “Two-Headed Giant Variant.”"
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "In a Two-Headed Giant game, each team's starting life total is 30. See rule 810, \"Two-Headed Giant Variant.\""
+status = "implemented"
+impl_files = ["types/format.rs:163"]
+test_files = ["types/format.rs:219"]
+notes = "FormatConfig::two_headed_giant() sets starting_life = 30. Tests verify this value."
 
 [cr_119_1b]
 rule = "119.1b"
-text = "In a Vanguard game, each player’s starting life total is 20 plus or minus the life modifier of their vanguard card. See rule 902, “Vanguard.”"
-status = "missing"
+text = "In a Vanguard game, each player's starting life total is 20 plus or minus the life modifier of their vanguard card. See rule 902, \"Vanguard.\""
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Vanguard variant not implemented."
 
 [cr_119_1c]
 rule = "119.1c"
-text = "In a Commander game, each player’s starting life total is 40. See rule 903, “Commander.”"
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "In a Commander game, each player's starting life total is 40. See rule 903, \"Commander.\""
+status = "implemented"
+impl_files = ["types/format.rs:86"]
+test_files = ["types/format.rs:195"]
+notes = "FormatConfig::commander() sets starting_life = 40. Tests verify this value."
 
 [cr_119_1d]
 rule = "119.1d"
-text = "In a two-player Brawl game, each player’s starting life total is 25. In a multiplayer Brawl game, each player’s starting life total is 30. See rule 903.12, “Brawl Option.”"
-status = "missing"
-impl_files = []
+text = "In a two-player Brawl game, each player's starting life total is 25. In a multiplayer Brawl game, each player's starting life total is 30. See rule 903.12, \"Brawl Option.\""
+status = "implemented"
+impl_files = ["types/format.rs:125"]
 test_files = []
-notes = ""
+notes = "FormatConfig::brawl() sets starting_life = 25. Multiplayer Brawl (30) is implemented in the free_for_all variant config."
 
 [cr_119_1e]
 rule = "119.1e"
-text = "In an Archenemy game, the archenemy’s starting life total is 40. See rule 904, “Archenemy.”"
-status = "missing"
+text = "In an Archenemy game, the archenemy's starting life total is 40. See rule 904, \"Archenemy.\""
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Archenemy variant not implemented."
 
 [cr_119_2]
 rule = "119.2"
 text = "Damage dealt to a player normally causes that player to lose that much life. See rule 120.3."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/deal_damage.rs:176", "game/effects/life.rs:157"]
 test_files = []
-notes = ""
+notes = "apply_damage_to_target() in deal_damage.rs routes non-infect player damage through apply_damage_life_loss() in life.rs, subtracting life from the player's total."
 
 [cr_119_3]
 rule = "119.3"
-text = "If an effect causes a player to gain life or lose life, that player’s life total is adjusted accordingly."
+text = "If an effect causes a player to gain life or lose life, that player's life total is adjusted accordingly."
 status = "implemented"
 impl_files = ["game/effects/life.rs:203", "game/quantity.rs:211", "parser/oracle_effect/imperative.rs:97", "types/ability.rs:1070", "types/triggers.rs:126"]
 test_files = []
-notes = ""
+notes = "GainLife and LoseLife effects adjust the player's life total. Triggered abilities on life gain/loss are wired through types/triggers.rs."
 
 [cr_119_4]
 rule = "119.4"
 text = "If a cost or effect allows a player to pay an amount of life greater than 0, the player may do so only if their life total is greater than or equal to the amount of the payment. If a player pays life, the payment is subtracted from their life total; in other words, the player loses that much life."
 status = "implemented"
-impl_files = ["types/triggers.rs:124"]
+impl_files = ["game/effects/life.rs:157", "types/triggers.rs:124"]
 test_files = []
-notes = ""
+notes = "PayLife cost subtracts the amount from the player's life total. Validation checks the player can afford the cost before payment."
 
 [cr_119_4a]
 rule = "119.4a"
-text = "If a cost or effect allows a player to pay an amount of life greater than 0 in a Two-Headed Giant game, the player may do so only if their team’s life total is greater than or equal to the total amount of life both team members are paying for that cost or effect. If a player pays life, the payment is subtracted from their team’s life total."
-status = "missing"
+text = "If a cost or effect allows a player to pay an amount of life greater than 0 in a Two-Headed Giant game, the player may do so only if their team's life total is greater than or equal to the total amount of life both team members are paying for that cost or effect. If a player pays life, the payment is subtracted from their team's life total."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Two-Headed Giant shared life pool cost validation is not implemented."
 
 [cr_119_4b]
 rule = "119.4b"
-text = "Players can always pay 0 life, no matter what their (or their team’s) life total is, and even if an effect says players can’t pay life."
+text = "Players can always pay 0 life, no matter what their (or their team's) life total is, and even if an effect says players can't pay life."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "The zero-life-payment exception is not explicitly enforced — a 'can't pay life' restriction could incorrectly block a {0} life payment."
 
 [cr_119_5]
 rule = "119.5"
-text = "If an effect sets a player’s life total to a specific number, the player gains or loses the necessary amount of life to end up with the new total."
+text = "If an effect sets a player's life total to a specific number, the player gains or loses the necessary amount of life to end up with the new total."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "SetLifeTotal is not implemented as a distinct effect. Cards like 'your life total becomes X' are not supported."
 
 [cr_119_6]
 rule = "119.6"
 text = "If a player has 0 or less life, that player loses the game as a state-based action. See rule 704."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["game/sba.rs:131"]
+test_files = ["game/sba.rs:823"]
+notes = "check_life_total() in sba.rs implements CR 704.5a: players at 0 or less life lose the game. Tests verify at exactly 0 and below."
 
 [cr_119_7]
 rule = "119.7"
-text = "If an effect says that a player can’t gain life, that player can’t make an exchange such that the player’s life total would become higher; in that case, the exchange won’t happen. Similarly, if an effect redistributes life totals, a player can’t receive a new life total such that the player’s life total would become higher. In addition, a cost that involves having that player gain life can’t be paid, and a replacement effect that would replace a life gain event affecting that player won’t do anything."
+text = "If an effect says that a player can't gain life, that player can't make an exchange such that the player's life total would become higher; in that case, the exchange won't happen. Similarly, if an effect redistributes life totals, a player can't receive a new life total such that the player's life total would become higher. In addition, a cost that involves having that player gain life can't be paid, and a replacement effect that would replace a life gain event affecting that player won't do anything."
 status = "implemented"
 impl_files = ["parser/oracle.rs:1181", "parser/oracle_effect/mod.rs:6698", "parser/oracle_effect/subject.rs:232", "parser/oracle_effect/subject.rs:615", "parser/oracle_static.rs:652", "parser/oracle_static.rs:4150", "parser/oracle_static.rs:4164", "parser/oracle_static.rs:4178"]
 test_files = []
-notes = ""
+notes = "'Can't gain life' static ability is parsed and applied as a restriction that suppresses life gain events."
 
 [cr_119_8]
 rule = "119.8"
-text = "If an effect says that a player can’t lose life, that player can’t make an exchange such that the player’s life total would become lower; in that case, the exchange won’t happen. Similarly, if an effect redistributes life totals, a player can’t receive a new life total such that the player’s life total would become lower. In addition, a cost that involves having that player pay life can’t be paid."
+text = "If an effect says that a player can't lose life, that player can't make an exchange such that the player's life total would become lower; in that case, the exchange won't happen. Similarly, if an effect redistributes life totals, a player can't receive a new life total such that the player's life total would become lower. In addition, a cost that involves having that player pay life can't be paid."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "'Can't lose life' restriction is not implemented. Cards with this ability (e.g., Platinum Emperion) are not supported."
 
 [cr_119_9]
 rule = "119.9"
-text = "Some triggered abilities are written, “Whenever [a player] gains life, . . . .” Such abilities are treated as though they are written, “Whenever a source causes [a player] to gain life, . . . .” If a player gains 0 life, no life gain event has occurred, and these abilities won’t trigger."
+text = "Some triggered abilities are written, \"Whenever [a player] gains life, . . . .\" Such abilities are treated as though they are written, \"Whenever a source causes [a player] to gain life, . . . .\" If a player gains 0 life, no life gain event has occurred, and these abilities won't trigger."
 status = "implemented"
 impl_files = ["game/effects/life.rs:76"]
 test_files = []
-notes = ""
+notes = "Life gain triggers fire from LifeChanged events emitted in life.rs. Zero-life-gain is suppressed — no event is emitted when the delta is 0."
 
 [cr_119_10]
 rule = "119.10"
-text = "Some replacement effects are written, “If [a player] would gain life, . . . .” Such abilities are treated as though they are written, “If a source would cause [a player] to gain life, . . . .” If a player gains 0 life, no life gain event would occur, and these effects won’t apply."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "Some replacement effects are written, \"If [a player] would gain life, . . . .\" Such abilities are treated as though they are written, \"If a source would cause [a player] to gain life, . . . .\" If a player gains 0 life, no life gain event would occur, and these effects won't apply."
+status = "implemented"
+impl_files = ["parser/oracle_replacement.rs:140", "game/replacement.rs:341"]
+test_files = ["game/replacement.rs:1631"]
+notes = "oracle_replacement.rs parses 'if you would gain life' into a GainLife replacement definition. gain_life_matcher/applier in replacement.rs apply the effect. Zero-life-gain bypasses the replacement (no event to replace)."

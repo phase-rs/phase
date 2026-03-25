@@ -6,75 +6,75 @@ title = "Targets"
 
 [cr_115_1]
 rule = "115.1"
-text = "Some spells and abilities require their controller to choose one or more targets for them. The targets are object(s) and/or player(s) the spell or ability will affect. These targets are declared as part of the process of putting the spell or ability on the stack. The targets can’t be changed except by another spell or ability that explicitly says it can do so."
+text = "Some spells and abilities require their controller to choose one or more targets for them. The targets are object(s) and/or player(s) the spell or ability will affect. These targets are declared as part of the process of putting the spell or ability on the stack. The targets can't be changed except by another spell or ability that explicitly says it can do so."
 status = "implemented"
 impl_files = ["game/ability_utils.rs:184"]
 test_files = []
-notes = ""
+notes = "Targets are declared during casting/activation and stored with the stack object. Only explicit change-target effects can modify them."
 
 [cr_115_1a]
 rule = "115.1a"
-text = "An instant or sorcery spell is targeted if its spell ability identifies something it will affect by using the phrase “target [something],” where the “something” is a phrase that describes an object and/or player. The target(s) are chosen as the spell is cast; see rule 601.2c. (If an activated or triggered ability of an instant or sorcery uses the word target, that ability is targeted, but the spell is not.)"
-status = "missing"
-impl_files = []
+text = "An instant or sorcery spell is targeted if its spell ability identifies something it will affect by using the phrase \"target [something],\" where the \"something\" is a phrase that describes an object and/or player. The target(s) are chosen as the spell is cast; see rule 601.2c. (If an activated or triggered ability of an instant or sorcery uses the word target, that ability is targeted, but the spell is not.)"
+status = "implemented"
+impl_files = ["parser/oracle_target.rs:1", "game/casting_targets.rs:1"]
 test_files = []
-notes = ""
+notes = "oracle_target.rs parses 'target [something]' phrases into TargetFilter. Targets are declared during casting (casting_targets.rs)."
 
 [cr_115_1b]
 rule = "115.1b"
-text = "Aura spells are always targeted. An Aura’s target is specified by its enchant keyword ability (see rule 702.5, “Enchant”). The target is chosen as the spell is cast; see rule 601.2c. An Aura permanent doesn’t target anything; only the spell is targeted. (An activated or triggered ability of an Aura permanent can also be targeted.)"
-status = "missing"
-impl_files = []
+text = "Aura spells are always targeted. An Aura's target is specified by its enchant keyword ability (see rule 702.5, \"Enchant\"). The target is chosen as the spell is cast; see rule 601.2c. An Aura permanent doesn't target anything; only the spell is targeted. (An activated or triggered ability of an Aura permanent can also be targeted.)"
+status = "implemented"
+impl_files = ["game/casting_targets.rs:1"]
 test_files = []
-notes = ""
+notes = "Aura spells require a target during casting. The enchant keyword specifies the valid target types."
 
 [cr_115_1c]
 rule = "115.1c"
-text = "An activated ability is targeted if it identifies something it will affect by using the phrase “target [something],” where the “something” is a phrase that describes an object and/or player. The target(s) are chosen as the ability is activated; see rule 602.2b."
-status = "missing"
-impl_files = []
+text = "An activated ability is targeted if it identifies something it will affect by using the phrase \"target [something],\" where the \"something\" is a phrase that describes an object and/or player. The target(s) are chosen as the ability is activated; see rule 602.2b."
+status = "implemented"
+impl_files = ["game/casting.rs:1"]
 test_files = []
-notes = ""
+notes = "Activated abilities with target slots require target selection during activation, handled in casting.rs."
 
 [cr_115_1d]
 rule = "115.1d"
-text = "A triggered ability is targeted if it identifies something it will affect by using the phrase “target [something],” where the “something” is a phrase that describes an object and/or player. The target(s) are chosen as the ability is put on the stack; see rule 603.3d."
+text = "A triggered ability is targeted if it identifies something it will affect by using the phrase \"target [something],\" where the \"something\" is a phrase that describes an object and/or player. The target(s) are chosen as the ability is put on the stack; see rule 603.3d."
 status = "implemented"
 impl_files = ["parser/oracle_effect/counter.rs:46", "parser/oracle_effect/mod.rs:353", "parser/oracle_effect/mod.rs:853", "parser/oracle_effect/mod.rs:2041", "parser/oracle_effect/mod.rs:3388", "parser/oracle_effect/mod.rs:3410", "parser/oracle_effect/mod.rs:3422", "parser/oracle_effect/mod.rs:3444", "parser/oracle_effect/mod.rs:3608", "parser/oracle_effect/mod.rs:3663", "parser/oracle_effect/types.rs:20", "types/ability.rs:694", "types/ability.rs:698", "types/ability.rs:2782"]
 test_files = []
-notes = ""
+notes = "Triggered abilities with target slots request target selection when put on the stack."
 
 [cr_115_1e]
 rule = "115.1e"
-text = "Some keyword abilities, such as equip and modular, represent targeted activated or triggered abilities, and some keyword abilities, such as mutate, cause spells to have targets. In those cases, the phrase “target [something]” appears in the rule for that keyword ability rather than in the ability itself. (The keyword’s reminder text will often contain the word “target.”) See rule 702, “Keyword Abilities.”"
-status = "missing"
-impl_files = []
+text = "Some keyword abilities, such as equip and modular, represent targeted activated or triggered abilities, and some keyword abilities, such as mutate, cause spells to have targets. In those cases, the phrase \"target [something]\" appears in the rule for that keyword ability rather than in the ability itself. (The keyword's reminder text will often contain the word \"target.\") See rule 702, \"Keyword Abilities.\""
+status = "implemented"
+impl_files = ["game/casting_targets.rs:1"]
 test_files = []
-notes = ""
+notes = "Keywords like Equip, Attach, and similar are implemented with their target requirements in the keyword ability resolution."
 
 [cr_115_2]
 rule = "115.2"
-text = "Only permanents are legal targets for spells and abilities, unless a spell or ability (a) specifies that it can target an object in another zone or a player, or (b) targets an object that can’t exist on the battlefield, such as a spell or ability. See also rule 115.4."
+text = "Only permanents are legal targets for spells and abilities, unless a spell or ability (a) specifies that it can target an object in another zone or a player, or (b) targets an object that can't exist on the battlefield, such as a spell or ability. See also rule 115.4."
 status = "implemented"
 impl_files = ["game/targeting.rs:8"]
 test_files = []
-notes = ""
+notes = "targeting.rs enforces that targets must be permanents by default, with explicit zone overrides when specified."
 
 [cr_115_3]
 rule = "115.3"
-text = "The same target can’t be chosen multiple times for any one instance of the word “target” on a spell or ability. If the spell or ability uses the word “target” in multiple places, the same object or player can be chosen once for each instance of the word “target” (as long as it fits the targeting criteria). This rule applies both when choosing targets for a spell or ability and when changing targets or choosing new targets for a spell or ability (see rule 115.7)."
+text = "The same target can't be chosen multiple times for any one instance of the word \"target\" on a spell or ability. If the spell or ability uses the word \"target\" in multiple places, the same object or player can be chosen once for each instance of the word \"target\" (as long as it fits the targeting criteria). This rule applies both when choosing targets for a spell or ability and when changing targets or choosing new targets for a spell or ability (see rule 115.7)."
 status = "implemented"
 impl_files = ["game/ability_utils.rs:185", "game/ability_utils.rs:657"]
 test_files = []
-notes = ""
+notes = "Duplicate target validation is performed during target selection and change-target effects."
 
 [cr_115_4]
 rule = "115.4"
-text = "Some spells and abilities that refer to damage require “any target,” “another target,” “two targets,” or similar rather than “target [something].” These targets may be creatures, players, planeswalkers, or battles. Other game objects, such as noncreature artifacts or spells, can’t be chosen."
+text = "Some spells and abilities that refer to damage require \"any target,\" \"another target,\" \"two targets,\" or similar rather than \"target [something].\" These targets may be creatures, players, planeswalkers, or battles. Other game objects, such as noncreature artifacts or spells, can't be chosen."
 status = "implemented"
 impl_files = ["parser/oracle_effect/subject.rs:610"]
 test_files = []
-notes = ""
+notes = "'Any target' filter matches creatures, players, planeswalkers, and battles — not other permanent types."
 
 [cr_115_5]
 rule = "115.5"
@@ -82,7 +82,7 @@ text = "A spell or ability on the stack is an illegal target for itself."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Self-targeting prevention is not explicitly enforced. This edge case (targeting one's own ability with another mode) is uncommon."
 
 [cr_115_6]
 rule = "115.6"
@@ -90,7 +90,7 @@ text = "A spell or ability that requires targets may allow zero targets to be ch
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Optional target selection (min_targets=0) is not explicitly represented in the TargetSlot system."
 
 [cr_115_7]
 rule = "115.7"
@@ -98,116 +98,116 @@ text = "Some effects allow a player to change the target(s) of a spell or abilit
 status = "implemented"
 impl_files = ["ai_support/candidates.rs:671", "game/effects/change_targets.rs:8", "game/effects/change_targets.rs:37", "game/effects/change_targets.rs:47", "game/effects/change_targets.rs:64", "game/effects/change_targets.rs:89", "game/engine.rs:2820", "game/filter.rs:367", "game/targeting.rs:300", "game/targeting.rs:490", "parser/oracle_effect/mod.rs:435", "parser/oracle_effect/mod.rs:1551", "parser/oracle_effect/mod.rs:4162", "parser/oracle_effect/mod.rs:4186", "parser/oracle_effect/mod.rs:4195", "parser/oracle_effect/mod.rs:4229", "types/ability.rs:809", "types/ability.rs:2147", "types/actions.rs:159", "types/game_state.rs:629", "types/game_state.rs:671"]
 test_files = []
-notes = ""
+notes = "ChangeTargets effect handler implements both 'change target' and 'choose new targets' interactions."
 
 [cr_115_7a]
 rule = "115.7a"
-text = "If an effect allows a player to “change the target(s)” of a spell or ability, each target can be changed only to another legal target. If a target can’t be changed to another legal target, the original target is unchanged, even if the original target is itself illegal by then. If all the targets aren’t changed to other legal targets, none of them are changed."
+text = "If an effect allows a player to \"change the target(s)\" of a spell or ability, each target can be changed only to another legal target. If a target can't be changed to another legal target, the original target is unchanged, even if the original target is itself illegal by then. If all the targets aren't changed to other legal targets, none of them are changed."
 status = "implemented"
 impl_files = ["game/effects/change_targets.rs:60"]
 test_files = []
-notes = ""
+notes = "All-or-nothing target change validation is enforced in change_targets.rs."
 
 [cr_115_7b]
 rule = "115.7b"
-text = "If an effect allows a player to “change a target” of a spell or ability, the process described in rule 115.7a is followed, except that only one of those targets may be changed (rather than all of them or none of them)."
+text = "If an effect allows a player to \"change a target\" of a spell or ability, the process described in rule 115.7a is followed, except that only one of those targets may be changed (rather than all of them or none of them)."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Single-target change (as opposed to all-or-none) is not separately implemented."
 
 [cr_115_7c]
 rule = "115.7c"
-text = "If an effect allows a player to “change any targets” of a spell or ability, the process described in rule 115.7a is followed, except that any number of those targets may be changed (rather than all of them or none of them)."
+text = "If an effect allows a player to \"change any targets\" of a spell or ability, the process described in rule 115.7a is followed, except that any number of those targets may be changed (rather than all of them or none of them)."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "'Change any targets' (Zada-type redirection) mode is not separately implemented."
 
 [cr_115_7d]
 rule = "115.7d"
-text = "If an effect allows a player to “choose new targets” for a spell or ability, the player may leave any number of the targets unchanged, even if those targets would be illegal. If the player chooses to change some or all of the targets, the new targets must be legal and must not cause any unchanged targets to become illegal."
+text = "If an effect allows a player to \"choose new targets\" for a spell or ability, the player may leave any number of the targets unchanged, even if those targets would be illegal. If the player chooses to change some or all of the targets, the new targets must be legal and must not cause any unchanged targets to become illegal."
 status = "implemented"
 impl_files = ["game/engine.rs:2833"]
 test_files = []
-notes = ""
+notes = "'Choose new targets' (Fork-style) allows keeping illegal targets and partially updating. Implemented in engine.rs."
 
 [cr_115_7e]
 rule = "115.7e"
 text = "When changing targets or choosing new targets for a spell or ability, only the final set of targets is evaluated to determine whether the change is legal."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/change_targets.rs:60"]
 test_files = []
-notes = ""
+notes = "Target legality is checked against the final set of targets, not intermediate states."
 
 [cr_115_7f]
 rule = "115.7f"
-text = "A spell or ability may “divide” or “distribute” an effect (such as damage or counters) among one or more targets. When changing targets or choosing new targets for that spell or ability, the original division can’t be changed."
+text = "A spell or ability may \"divide\" or \"distribute\" an effect (such as damage or counters) among one or more targets. When changing targets or choosing new targets for that spell or ability, the original division can't be changed."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Division preservation during target changes is not explicitly enforced."
 
 [cr_115_8]
 rule = "115.8"
-text = "Modal spells and abilities may have different targeting requirements for each mode. An effect that allows a player to change the target(s) of a modal spell or ability, or to choose new targets for a modal spell or ability, doesn’t allow that player to change its mode. (See rule 700.2.)"
+text = "Modal spells and abilities may have different targeting requirements for each mode. An effect that allows a player to change the target(s) of a modal spell or ability, or to choose new targets for a modal spell or ability, doesn't allow that player to change its mode. (See rule 700.2.)"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mode-specific targeting during target changes is not explicitly handled."
 
 [cr_115_9]
 rule = "115.9"
 text = "Some objects check what another spell or ability is targeting. Depending on the wording, these may check the current state of the targets, the state of the targets at the time they were selected, or both."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["game/filter.rs:367"]
 test_files = []
-notes = ""
+notes = "Target checking for 'spell that targets' filters is implemented. The distinction between 'at time selected' vs 'current state' is partial."
 
 [cr_115_9a]
 rule = "115.9a"
-text = "An object that looks for a “[spell or ability] with [a number of] targets” checks the number of times any object or player was chosen as the target of that spell or ability when it was put on the stack, not the number of its targets that are currently legal. If the same object or player became a target more than once, each of those instances is counted separately."
+text = "An object that looks for a \"[spell or ability] with [a number of] targets\" checks the number of times any object or player was chosen as the target of that spell or ability when it was put on the stack, not the number of its targets that are currently legal. If the same object or player became a target more than once, each of those instances is counted separately."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Counting targets at time of casting vs current legal targets is not explicitly distinguished."
 
 [cr_115_9b]
 rule = "115.9b"
-text = "An object that looks for a “[spell or ability] that targets [something]” checks the current state of that spell or ability’s targets. If an object it targets is still in the zone it’s expected to be in or a player it targets is still in the game, that target’s current information is used, even if it’s not currently legal for that spell or ability. If an object it targets is no longer in the zone it’s expected to be in or a player it targets is no longer in the game, that target is ignored; its last known information is not used."
-status = "missing"
-impl_files = []
+text = "An object that looks for a \"[spell or ability] that targets [something]\" checks the current state of that spell or ability's targets. If an object it targets is still in the zone it's expected to be in or a player it targets is still in the game, that target's current information is used, even if it's not currently legal for that spell or ability. If an object it targets is no longer in the zone it's expected to be in or a player it targets is no longer in the game, that target is ignored; its last known information is not used."
+status = "implemented"
+impl_files = ["game/filter.rs:367"]
 test_files = []
-notes = ""
+notes = "Current-state target checking is the default behavior in filter.rs for 'spell that targets' queries."
 
 [cr_115_9c]
 rule = "115.9c"
-text = "An object that looks for a “[spell or ability] that targets only [something]” checks the number of different objects or players that were chosen as targets of that spell or ability when it was put on the stack (as modified by effects that changed those targets), not the number of those objects or players that are currently legal targets. If that number is one (even if the spell or ability targets that object or player multiple times), the current state of that spell or ability’s target is checked as described in rule 115.9b."
+text = "An object that looks for a \"[spell or ability] that targets only [something]\" checks the number of different objects or players that were chosen as targets of that spell or ability when it was put on the stack (as modified by effects that changed those targets), not the number of those objects or players that are currently legal targets. If that number is one (even if the spell or ability targets that object or player multiple times), the current state of that spell or ability's target is checked as described in rule 115.9b."
 status = "implemented"
 impl_files = ["game/filter.rs:370", "game/filter.rs:484", "game/filter.rs:487", "game/filter.rs:509", "game/targeting.rs:307", "game/trigger_matchers.rs:629", "game/trigger_matchers.rs:1785", "game/trigger_matchers.rs:3210", "parser/oracle_effect/mod.rs:4189", "parser/oracle_target.rs:1224", "parser/oracle_target.rs:1265", "parser/oracle_target.rs:2875", "parser/oracle_trigger.rs:4047", "types/ability.rs:861"]
 test_files = []
-notes = ""
+notes = "'Targets only [something]' filter is implemented. trigger_matchers.rs checks the original target set, not current legal targets."
 
 [cr_115_10]
 rule = "115.10"
-text = "Spells and abilities can affect objects and players they don’t target. In general, those objects and players aren’t chosen until the spell or ability resolves. See rule 608, “Resolving Spells and Abilities.”"
-status = "missing"
-impl_files = []
+text = "Spells and abilities can affect objects and players they don't target. In general, those objects and players aren't chosen until the spell or ability resolves. See rule 608, \"Resolving Spells and Abilities.\""
+status = "implemented"
+impl_files = ["game/stack.rs:1"]
 test_files = []
-notes = ""
+notes = "Non-targeted objects are determined at resolution time. The engine processes non-target effects during spell/ability resolution."
 
 [cr_115_10a]
 rule = "115.10a"
-text = "Just because an object or player is being affected by a spell or ability doesn’t make that object or player a target of that spell or ability. Unless that object or player is identified by the word “target” in the text of that spell or ability, or the rule for that keyword ability, it’s not a target."
+text = "Just because an object or player is being affected by a spell or ability doesn't make that object or player a target of that spell or ability. Unless that object or player is identified by the word \"target\" in the text of that spell or ability, or the rule for that keyword ability, it's not a target."
 status = "implemented"
 impl_files = ["parser/oracle_effect/mod.rs:4983", "parser/oracle_effect/subject.rs:186"]
 test_files = []
-notes = ""
+notes = "Only explicitly parsed 'target' keywords create target slots. Other affected objects are determined at resolution without the targeting rules."
 
 [cr_115_10b]
 rule = "115.10b"
-text = "In particular, the word “you” in an object’s text doesn’t indicate a target."
-status = "missing"
-impl_files = []
+text = "In particular, the word \"you\" in an object's text doesn't indicate a target."
+status = "implemented"
+impl_files = ["parser/oracle_effect/subject.rs:186"]
 test_files = []
-notes = ""
+notes = "'You' references resolve to the controller at resolution time without creating a target slot."

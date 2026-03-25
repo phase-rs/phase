@@ -18,19 +18,19 @@ text = "Saga enchantments that also have the type creature are printed with both
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Saga creatures (e.g. The Eldest Reborn variants) with independent non-chapter abilities not explicitly modeled."
 
 [cr_714_2]
 rule = "714.2"
 text = "A chapter symbol is a keyword ability that represents a triggered ability referred to as a chapter ability."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/trigger_matchers.rs:768", "types/ability.rs:3205"]
 test_files = []
-notes = ""
+notes = "Chapter abilities implemented as triggered abilities in trigger_matchers.rs."
 
 [cr_714_2a]
 rule = "714.2a"
-text = "A chapter symbol includes a Roman numeral, indicated here as “{rN}.” The numeral I represents 1, II represents 2, III represents 3, and so on."
+text = "A chapter symbol includes a Roman numeral, indicated here as \"{rN}.\" The numeral I represents 1, II represents 2, III represents 3, and so on."
 status = "implemented"
 impl_files = ["game/trigger_matchers.rs:768", "types/ability.rs:3205", "types/ability.rs:3243"]
 test_files = []
@@ -38,47 +38,47 @@ notes = ""
 
 [cr_714_2b]
 rule = "714.2b"
-text = "“{rN}—[Effect]” means “When one or more lore counters are put onto this Saga, if the number of lore counters on it was less than N and became at least N, [effect].”"
-status = "missing"
-impl_files = []
+text = "\"{rN}—[Effect]\" means \"When one or more lore counters are put onto this Saga, if the number of lore counters on it was less than N and became at least N, [effect].\""
+status = "implemented"
+impl_files = ["game/trigger_matchers.rs:768"]
 test_files = []
-notes = ""
+notes = "Chapter trigger condition (counter reaches N) implemented in trigger_matchers.rs."
 
 [cr_714_2c]
 rule = "714.2c"
-text = "“{rN1}, {rN2}—[Effect]” means the same as “{rN1}—[Effect]” and “{rN2}—[Effect].”"
-status = "missing"
-impl_files = []
+text = "\"{rN1}, {rN2}—[Effect]\" means the same as \"{rN1}—[Effect]\" and \"{rN2}—[Effect].\""
+status = "implemented"
+impl_files = ["parser/oracle_saga.rs:1"]
 test_files = []
-notes = ""
+notes = "Multi-chapter shared effects parsed in oracle_saga.rs."
 
 [cr_714_2d]
 rule = "714.2d"
-text = "A Saga’s final chapter number is the greatest value among chapter abilities it has. If a Saga somehow has no chapter abilities, its final chapter number is 0."
-status = "missing"
-impl_files = []
+text = "A Saga's final chapter number is the greatest value among chapter abilities it has. If a Saga somehow has no chapter abilities, its final chapter number is 0."
+status = "implemented"
+impl_files = ["game/sba.rs:474", "parser/oracle_saga.rs:1"]
 test_files = []
-notes = ""
+notes = "Final chapter number used in SBA to determine when to sacrifice the Saga."
 
 [cr_714_2e]
 rule = "714.2e"
-text = "A Saga’s final chapter ability is the chapter ability which has its final chapter number in its chapter symbol."
-status = "missing"
-impl_files = []
+text = "A Saga's final chapter ability is the chapter ability which has its final chapter number in its chapter symbol."
+status = "implemented"
+impl_files = ["game/sba.rs:474"]
 test_files = []
-notes = ""
+notes = "Final chapter ability used for Saga sacrifice SBA."
 
 [cr_714_3]
 rule = "714.3"
 text = "Sagas use lore counters to track their progress."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/turns.rs:364", "game/sba.rs:474"]
 test_files = []
-notes = ""
+notes = "Lore counters used for Saga chapter progression."
 
 [cr_714_3a]
 rule = "714.3a"
-text = "As a Saga without the read ahead ability enters the battlefield, its controller puts a lore counter on it. As a Saga with the read ahead ability enters the battlefield, its controller chooses a number from one to that Saga’s final chapter number. That Saga enters the battlefield with the chosen number of lore counters on it. (See rule 702.155, “Read Ahead.”)"
+text = "As a Saga without the read ahead ability enters the battlefield, its controller puts a lore counter on it. As a Saga with the read ahead ability enters the battlefield, its controller chooses a number from one to that Saga's final chapter number. That Saga enters the battlefield with the chosen number of lore counters on it. (See rule 702.155, \"Read Ahead.\")"
 status = "implemented"
 impl_files = ["parser/oracle_saga.rs:99"]
 test_files = []
@@ -86,7 +86,7 @@ notes = ""
 
 [cr_714_3b]
 rule = "714.3b"
-text = "As a player’s precombat main phase begins, that player puts a lore counter on each Saga they control with one or more chapter abilities. This turn-based action doesn’t use the stack."
+text = "As a player's precombat main phase begins, that player puts a lore counter on each Saga they control with one or more chapter abilities. This turn-based action doesn't use the stack."
 status = "implemented"
 impl_files = ["game/turns.rs:364", "game/turns.rs:439"]
 test_files = []
@@ -94,7 +94,7 @@ notes = ""
 
 [cr_714_4]
 rule = "714.4"
-text = "If the number of lore counters on a Saga permanent with one or more chapter abilities is greater than or equal to its final chapter number, and it isn’t the source of a chapter ability that has triggered but not yet left the stack, that Saga’s controller sacrifices it. This state-based action doesn’t use the stack."
+text = "If the number of lore counters on a Saga permanent with one or more chapter abilities is greater than or equal to its final chapter number, and it isn't the source of a chapter ability that has triggered but not yet left the stack, that Saga's controller sacrifices it. This state-based action doesn't use the stack."
 status = "implemented"
 impl_files = ["game/sba.rs:114", "game/sba.rs:474", "game/sba.rs:502", "game/sba.rs:513", "game/sba.rs:1240", "game/sba.rs:1264"]
 test_files = []

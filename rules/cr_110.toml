@@ -6,112 +6,112 @@ title = "Permanents"
 
 [cr_110_1]
 rule = "110.1"
-text = "A permanent is a card or token on the battlefield. A permanent remains on the battlefield indefinitely. A card or token becomes a permanent as it enters the battlefield and it stops being a permanent as it’s moved to another zone by an effect or rule."
-status = "missing"
-impl_files = []
+text = "A permanent is a card or token on the battlefield. A permanent remains on the battlefield indefinitely. A card or token becomes a permanent as it enters the battlefield and it stops being a permanent as it's moved to another zone by an effect or rule."
+status = "implemented"
+impl_files = ["game/zones.rs:1", "types/zones.rs:1"]
 test_files = []
-notes = ""
+notes = "Zone::Battlefield is the permanent zone. Objects become permanents when moved there, and stop being permanents when moved out."
 
 [cr_110_2]
 rule = "110.2"
-text = "A permanent’s owner is the same as the owner of the card that represents it (unless it’s a token; see rule 111.2). A permanent’s controller is, by default, the player under whose control it entered the battlefield. Every permanent has a controller."
+text = "A permanent's owner is the same as the owner of the card that represents it (unless it's a token; see rule 111.2). A permanent's controller is, by default, the player under whose control it entered the battlefield. Every permanent has a controller."
 status = "implemented"
 impl_files = ["parser/oracle_effect/mod.rs:4027", "parser/oracle_effect/types.rs:355", "parser/oracle_target.rs:546", "types/ability.rs:1716"]
 test_files = []
-notes = ""
+notes = "owner and controller are tracked on every GameObject. They are set when the object enters the battlefield."
 
 [cr_110_2a]
 rule = "110.2a"
-text = "If an effect instructs a player to put an object onto the battlefield, that object enters the battlefield under that player’s control unless the effect states otherwise."
+text = "If an effect instructs a player to put an object onto the battlefield, that object enters the battlefield under that player's control unless the effect states otherwise."
 status = "implemented"
 impl_files = ["game/effects/change_zone.rs:75", "game/effects/change_zone.rs:118", "game/effects/change_zone.rs:238", "game/effects/change_zone.rs:897"]
 test_files = []
-notes = ""
+notes = "change_zone effects set the controller to the instructed player when putting objects onto the battlefield."
 
 [cr_110_2b]
 rule = "110.2b"
-text = "If an effect causes a player to gain control of another player’s permanent spell, the first player controls the permanent that spell becomes, but the permanent’s controller by default is the player who put that spell onto the stack. (This distinction is relevant in multiplayer games; see rule 800.4c.)"
+text = "If an effect causes a player to gain control of another player's permanent spell, the first player controls the permanent that spell becomes, but the permanent's controller by default is the player who put that spell onto the stack. (This distinction is relevant in multiplayer games; see rule 800.4c.)"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Control-of-spell effects that persist into the permanent are not explicitly modeled."
 
 [cr_110_3]
 rule = "110.3"
-text = "A nontoken permanent’s characteristics are the same as those printed on its card, as modified by any continuous effects. See rule 613, “Interaction of Continuous Effects.”"
-status = "missing"
-impl_files = []
+text = "A nontoken permanent's characteristics are the same as those printed on its card, as modified by any continuous effects. See rule 613, \"Interaction of Continuous Effects.\""
+status = "implemented"
+impl_files = ["game/layers.rs:1"]
 test_files = []
-notes = ""
+notes = "Layer system in layers.rs applies continuous effects to all permanents. Base characteristics come from printed_cards.rs."
 
 [cr_110_4]
 rule = "110.4"
-text = "There are six permanent types: artifact, battle, creature, enchantment, land, and planeswalker. Instant and sorcery cards can’t enter the battlefield and thus can’t be permanents. Some kindred cards can enter the battlefield and some can’t, depending on their other card types. See section 3, “Card Types.”"
+text = "There are six permanent types: artifact, battle, creature, enchantment, land, and planeswalker. Instant and sorcery cards can't enter the battlefield and thus can't be permanents. Some kindred cards can enter the battlefield and some can't, depending on their other card types. See section 3, \"Card Types.\""
 status = "implemented"
 impl_files = ["game/stack.rs:258"]
 test_files = []
-notes = ""
+notes = "The stack resolver checks card types to determine whether a spell becomes a permanent on resolution. Instants and sorceries resolve without entering the battlefield."
 
 [cr_110_4a]
 rule = "110.4a"
-text = "The term “permanent card” is used to refer to a card that could be put onto the battlefield. Specifically, it means an artifact, battle, creature, enchantment, land, or planeswalker card."
-status = "missing"
-impl_files = []
+text = "The term \"permanent card\" is used to refer to a card that could be put onto the battlefield. Specifically, it means an artifact, battle, creature, enchantment, land, or planeswalker card."
+status = "implemented"
+impl_files = ["game/filter.rs:1"]
 test_files = []
-notes = ""
+notes = "is_permanent_type() or equivalent checks in filter.rs distinguish permanent cards from instant/sorcery."
 
 [cr_110_4b]
 rule = "110.4b"
-text = "The term “permanent spell” is used to refer to a spell that will enter the battlefield as a permanent as part of its resolution. Specifically, it means an artifact, battle, creature, enchantment, or planeswalker spell."
-status = "missing"
-impl_files = []
+text = "The term \"permanent spell\" is used to refer to a spell that will enter the battlefield as a permanent as part of its resolution. Specifically, it means an artifact, battle, creature, enchantment, or planeswalker spell."
+status = "implemented"
+impl_files = ["game/stack.rs:258"]
 test_files = []
-notes = ""
+notes = "Permanent spell detection is used when resolving spells from the stack."
 
 [cr_110_4c]
 rule = "110.4c"
-text = "If a permanent somehow loses all its permanent types, it remains on the battlefield. It’s still a permanent."
-status = "missing"
-impl_files = []
+text = "If a permanent somehow loses all its permanent types, it remains on the battlefield. It's still a permanent."
+status = "implemented"
+impl_files = ["game/layers.rs:1"]
 test_files = []
-notes = ""
+notes = "Objects on the battlefield remain there regardless of type changes. The layer system can remove all types but the object stays until an explicit zone change."
 
 [cr_110_5]
 rule = "110.5"
-text = "A permanent’s status is its physical state. There are four status categories, each of which has two possible values: tapped/untapped, flipped/unflipped, face up/face down, and phased in/phased out. Each permanent always has one of these values for each of these categories."
+text = "A permanent's status is its physical state. There are four status categories, each of which has two possible values: tapped/untapped, flipped/unflipped, face up/face down, and phased in/phased out. Each permanent always has one of these values for each of these categories."
 status = "implemented"
 impl_files = ["game/filter.rs:217", "parser/oracle_target.rs:908", "types/ability.rs:759"]
 test_files = []
-notes = ""
+notes = "is_tapped, is_flipped, is_face_down, and is_phased_out fields on GameObject track the four status categories."
 
 [cr_110_5a]
 rule = "110.5a"
-text = "Status is not a characteristic, though it may affect a permanent’s characteristics."
-status = "missing"
-impl_files = []
+text = "Status is not a characteristic, though it may affect a permanent's characteristics."
+status = "implemented"
+impl_files = ["game/game_object.rs:1"]
 test_files = []
-notes = ""
+notes = "Status fields (is_tapped etc.) are separate from the characteristic fields (power, toughness, color, etc.) on GameObject."
 
 [cr_110_5b]
 rule = "110.5b"
 text = "Permanents enter the battlefield untapped, unflipped, face up, and phased in unless a spell or ability says otherwise."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["types/proposed_event.rs:110", "types/proposed_event.rs:117"]
+test_files = ["game/effects/token.rs:1072"]
+notes = "ProposedZoneChange.enter_tapped defaults to false. Permanents enter in the default state unless enter_tapped (or similar) is set by a replacement effect."
 
 [cr_110_5c]
 rule = "110.5c"
 text = "A permanent retains its status until a spell, ability, or turn-based action changes it, even if that status is not relevant to it."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/turns.rs:1"]
 test_files = []
-notes = ""
+notes = "Status only changes via explicit effects (tap_untap.rs) or the untap step. Status persists across zone-unrelated game events."
 
 [cr_110_5d]
 rule = "110.5d"
 text = "Only permanents have status. Cards not on the battlefield do not. Although an exiled card may be face down, this has no correlation to the face-down status of a permanent. Similarly, cards not on the battlefield are neither tapped nor untapped, regardless of their physical state."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/game_object.rs:1"]
 test_files = []
-notes = ""
+notes = "Status fields are defined on all objects but are only semantically meaningful for objects on the battlefield. The engine does not check tapped status for graveyard/hand objects."

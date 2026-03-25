@@ -7,130 +7,130 @@ title = "Abilities"
 [cr_113_1]
 rule = "113.1"
 text = "An ability can be one of three things:"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/ability.rs:1"]
 test_files = []
-notes = ""
+notes = "AbilityDefinition and related types cover all three categories: characteristics of objects, player abilities, and abilities on the stack."
 
 [cr_113_1a]
 rule = "113.1a"
-text = "An ability can be a characteristic an object has that lets it affect the game. An object’s abilities are defined by its rules text or by the effect that created it. Abilities can also be granted to objects by rules or effects. (Effects that grant abilities usually use the words “has,” “have,” “gains,” or “gain.”) Abilities generate effects. (See rule 609, “Effects.”)"
+text = "An ability can be a characteristic an object has that lets it affect the game. An object's abilities are defined by its rules text or by the effect that created it. Abilities can also be granted to objects by rules or effects. (Effects that grant abilities usually use the words \"has,\" \"have,\" \"gains,\" or \"gain.\") Abilities generate effects. (See rule 609, \"Effects.\")"
 status = "implemented"
 impl_files = ["game/ability_utils.rs:15"]
 test_files = []
-notes = ""
+notes = "abilities field on GameObject stores the object's current abilities. Layer 6 in layers.rs handles ability-granting effects."
 
 [cr_113_1b]
 rule = "113.1b"
 text = "An ability can be something that a player has that changes how the game affects the player. A player normally has no abilities unless granted to that player by effects."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["types/player.rs:1"]
 test_files = []
-notes = ""
+notes = "Player-granted abilities (e.g., hexproof from emblems) are partially tracked. No comprehensive 'player abilities' list is maintained."
 
 [cr_113_1c]
 rule = "113.1c"
-text = "An ability can be an activated or triggered ability on the stack. This kind of ability is an object. (See section 6, “Spells, Abilities, and Effects.”)"
-status = "missing"
-impl_files = []
+text = "An ability can be an activated or triggered ability on the stack. This kind of ability is an object. (See section 6, \"Spells, Abilities, and Effects.\")"
+status = "implemented"
+impl_files = ["game/stack.rs:1", "game/triggers.rs:1"]
 test_files = []
-notes = ""
+notes = "Activated and triggered abilities are placed on the stack as stack objects and resolved like spells."
 
 [cr_113_2]
 rule = "113.2"
-text = "Abilities can affect the objects they’re on. They can also affect other objects and/or players."
-status = "missing"
-impl_files = []
+text = "Abilities can affect the objects they're on. They can also affect other objects and/or players."
+status = "implemented"
+impl_files = ["types/ability.rs:1"]
 test_files = []
-notes = ""
+notes = "Abilities can reference 'this permanent' (self) or specify other targets/objects."
 
 [cr_113_2a]
 rule = "113.2a"
 text = "Abilities can be beneficial or detrimental."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Descriptive rule — no discrete implementation artifact."
 
 [cr_113_2b]
 rule = "113.2b"
 text = "An additional cost or alternative cost to cast a card is an ability of the card."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/casting_costs.rs:1", "types/ability.rs:1"]
 test_files = []
-notes = ""
+notes = "Additional and alternative costs are represented as part of the card's ability definitions."
 
 [cr_113_2c]
 rule = "113.2c"
-text = "An object may have multiple abilities. If the object is represented by a card, then aside from certain defined abilities that may be strung together on a single line (see rule 702, “Keyword Abilities”), each paragraph break in a card’s text marks a separate ability. If the object is not represented by a card, the effect that created it may have given it multiple abilities. An object may also be granted additional abilities by a spell or ability. If an object has multiple instances of the same ability, each instance functions independently. This may or may not produce more effects than a single instance; refer to the specific ability for more information."
-status = "missing"
-impl_files = []
+text = "An object may have multiple abilities. If the object is represented by a card, then aside from certain defined abilities that may be strung together on a single line (see rule 702, \"Keyword Abilities\"), each paragraph break in a card's text marks a separate ability. If the object is not represented by a card, the effect that created it may have given it multiple abilities. An object may also be granted additional abilities by a spell or ability. If an object has multiple instances of the same ability, each instance functions independently. This may or may not produce more effects than a single instance; refer to the specific ability for more information."
+status = "implemented"
+impl_files = ["types/ability.rs:1"]
 test_files = []
-notes = ""
+notes = "GameObject stores Vec<AbilityDefinition>, allowing multiple abilities. Each ability functions independently during resolution."
 
 [cr_113_2d]
 rule = "113.2d"
-text = "Abilities can generate one-shot effects or continuous effects. Some continuous effects are replacement effects or prevention effects. See rule 609, “Effects.”"
-status = "missing"
-impl_files = []
+text = "Abilities can generate one-shot effects or continuous effects. Some continuous effects are replacement effects or prevention effects. See rule 609, \"Effects.\""
+status = "implemented"
+impl_files = ["game/static_abilities.rs:1", "game/replacement.rs:1", "game/triggers.rs:1"]
 test_files = []
-notes = ""
+notes = "Continuous effects via static_abilities, one-shot effects via triggered/activated ability resolution, replacements via replacement.rs."
 
 [cr_113_3]
 rule = "113.3"
 text = "There are four general categories of abilities:"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/ability.rs:1"]
 test_files = []
-notes = ""
+notes = "AbilityKind enum distinguishes activated, triggered, static, and spell abilities."
 
 [cr_113_3a]
 rule = "113.3a"
-text = "Spell abilities are abilities that are followed as instructions while an instant or sorcery spell is resolving. Any text on an instant or sorcery spell is a spell ability unless it’s an activated ability, a triggered ability, or a static ability that fits the criteria described in rule 113.6."
-status = "missing"
-impl_files = []
+text = "Spell abilities are abilities that are followed as instructions while an instant or sorcery spell is resolving. Any text on an instant or sorcery spell is a spell ability unless it's an activated ability, a triggered ability, or a static ability that fits the criteria described in rule 113.6."
+status = "implemented"
+impl_files = ["game/stack.rs:1", "types/ability.rs:1"]
 test_files = []
-notes = ""
+notes = "Instant/sorcery abilities are resolved as spell abilities when the spell resolves from the stack."
 
 [cr_113_3b]
 rule = "113.3b"
-text = "Activated abilities have a cost and an effect. They are written as “[Cost]: [Effect.] [Activation instructions (if any).]” A player may activate such an ability whenever they have priority. Doing so puts it on the stack, where it remains until it’s countered, it resolves, or it otherwise leaves the stack. See rule 602, “Activating Activated Abilities.”"
-status = "missing"
-impl_files = []
+text = "Activated abilities have a cost and an effect. They are written as \"[Cost]: [Effect.] [Activation instructions (if any).]\" A player may activate such an ability whenever they have priority. Doing so puts it on the stack, where it remains until it's countered, it resolves, or it otherwise leaves the stack. See rule 602, \"Activating Activated Abilities.\""
+status = "implemented"
+impl_files = ["game/casting.rs:1", "types/ability.rs:1"]
 test_files = []
-notes = ""
+notes = "Activated abilities have a cost and effect, are placed on the stack, and resolved via the standard spell resolution path."
 
 [cr_113_3c]
 rule = "113.3c"
-text = "Triggered abilities have a trigger condition and an effect. They are written as “[Trigger condition], [effect],” and include (and usually begin with) the word “when,” “whenever,” or “at.” Whenever the trigger event occurs, the ability is put on the stack the next time a player would receive priority and stays there until it’s countered, it resolves, or it otherwise leaves the stack. See rule 603, “Handling Triggered Abilities.”"
-status = "missing"
-impl_files = []
+text = "Triggered abilities have a trigger condition and an effect. They are written as \"[Trigger condition], [effect],\" and include (and usually begin with) the word \"when,\" \"whenever,\" or \"at.\" Whenever the trigger event occurs, the ability is put on the stack the next time a player would receive priority and stays there until it's countered, it resolves, or it otherwise leaves the stack. See rule 603, \"Handling Triggered Abilities.\""
+status = "implemented"
+impl_files = ["game/triggers.rs:1", "game/trigger_matchers.rs:1"]
 test_files = []
-notes = ""
+notes = "Triggered abilities are fully implemented. trigger_matchers.rs checks conditions and triggers.rs manages the trigger queue."
 
 [cr_113_3d]
 rule = "113.3d"
-text = "Static abilities are written as statements. They’re simply true. Static abilities create continuous effects which are active while the permanent with the ability is on the battlefield and has the ability, or while the object with the ability is in the appropriate zone. See rule 604, “Handling Static Abilities.”"
-status = "missing"
-impl_files = []
+text = "Static abilities are written as statements. They're simply true. Static abilities create continuous effects which are active while the permanent with the ability is on the battlefield and has the ability, or while the object with the ability is in the appropriate zone. See rule 604, \"Handling Static Abilities.\""
+status = "implemented"
+impl_files = ["game/static_abilities.rs:1", "game/layers.rs:1"]
 test_files = []
-notes = ""
+notes = "Static abilities are continuously evaluated. layers.rs applies their effects; static_abilities.rs handles restriction/permission statics."
 
 [cr_113_4]
 rule = "113.4"
-text = "Some activated abilities and some triggered abilities are mana abilities. Mana abilities follow special rules: They don’t use the stack, and, under certain circumstances, a player can activate mana abilities even if they don’t have priority. See rule 605, “Mana Abilities.”"
-status = "missing"
-impl_files = []
+text = "Some activated abilities and some triggered abilities are mana abilities. Mana abilities follow special rules: They don't use the stack, and, under certain circumstances, a player can activate mana abilities even if they don't have priority. See rule 605, \"Mana Abilities.\""
+status = "implemented"
+impl_files = ["game/mana_abilities.rs:1"]
 test_files = []
-notes = ""
+notes = "Mana abilities bypass the stack and resolve immediately. mana_abilities.rs handles their special activation rules."
 
 [cr_113_5]
 rule = "113.5"
-text = "Some activated abilities are loyalty abilities. Loyalty abilities follow special rules: A player may activate a loyalty ability of a permanent they control any time they have priority and the stack is empty during a main phase of their turn, but only if no player has previously activated a loyalty ability of that permanent that turn. See rule 606, “Loyalty Abilities.”"
-status = "missing"
-impl_files = []
+text = "Some activated abilities are loyalty abilities. Loyalty abilities follow special rules: A player may activate a loyalty ability of a permanent they control any time they have priority and the stack is empty during a main phase of their turn, but only if no player has previously activated a loyalty ability of that permanent that turn. See rule 606, \"Loyalty Abilities.\""
+status = "implemented"
+impl_files = ["game/planeswalker.rs:1", "game/casting.rs:1"]
 test_files = []
-notes = ""
+notes = "Loyalty ability activation restrictions are enforced: main phase only, stack empty, one per permanent per turn."
 
 [cr_113_6]
 rule = "113.6"
@@ -138,119 +138,119 @@ text = "Abilities of an instant or sorcery spell usually function only while tha
 status = "implemented"
 impl_files = ["game/quantity.rs:150"]
 test_files = []
-notes = ""
+notes = "Zone-based ability functioning is enforced. Static ability evaluation only considers objects in their appropriate zones."
 
 [cr_113_6a]
 rule = "113.6a"
 text = "Characteristic-defining abilities function everywhere, even outside the game and before the game begins. (See rule 604.3.)"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/layers.rs:1"]
 test_files = []
-notes = ""
+notes = "CDAs are evaluated in layers regardless of zone. Changeling and similar CDAs function in all zones."
 
 [cr_113_6b]
 rule = "113.6b"
 text = "An ability that states which zones it functions in functions only from those zones."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
-
-[cr_113_6c]
-rule = "113.6c"
-text = "An ability that states which zones it doesn’t function in functions everywhere except for the specified zones, even outside the game and before the game begins."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
-
-[cr_113_6d]
-rule = "113.6d"
-text = "An object’s ability that allows a player to pay an alternative cost rather than its mana cost or otherwise modifies what that particular object costs to cast functions on the stack."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
-
-[cr_113_6e]
-rule = "113.6e"
-text = "An object’s ability that restricts or modifies how that particular object can be played or cast functions in any zone from which it could be played or cast and also on the stack. An object’s ability that grants it another ability that restricts or modifies how that particular object can be played or cast functions only on the stack."
-status = "implemented"
-impl_files = ["game/zones.rs:100", "game/zones.rs:245"]
-test_files = []
-notes = ""
-
-[cr_113_6f]
-rule = "113.6f"
-text = "An object’s ability that restricts or modifies what zones that particular object can be played or cast from functions everywhere, even outside the game."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
-
-[cr_113_6g]
-rule = "113.6g"
-text = "An object’s ability that states it can’t be countered or can’t be copied functions on the stack."
-status = "implemented"
-impl_files = ["game/static_abilities.rs:78"]
-test_files = []
-notes = ""
-
-[cr_113_6h]
-rule = "113.6h"
-text = "An object’s ability that modifies how that particular object enters the battlefield functions as that object is entering the battlefield. See rule 614.12."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
-
-[cr_113_6i]
-rule = "113.6i"
-text = "An object’s ability that states counters can’t be put on that object functions as that object is entering the battlefield in addition to functioning while that object is on the battlefield."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
-
-[cr_113_6j]
-rule = "113.6j"
-text = "An object’s activated ability that has a cost that can’t be paid while the object is on the battlefield functions from any zone in which its cost can be paid."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
-
-[cr_113_6k]
-rule = "113.6k"
-text = "A trigger condition that can’t trigger from the battlefield functions in all zones it can trigger from. Other trigger conditions of the same triggered ability may function in different zones."
 status = "implemented"
 impl_files = ["game/triggers.rs:396"]
 test_files = []
-notes = ""
+notes = "Zone-specific ability functioning is checked in trigger evaluation and static ability application."
+
+[cr_113_6c]
+rule = "113.6c"
+text = "An ability that states which zones it doesn't function in functions everywhere except for the specified zones, even outside the game and before the game begins."
+status = "missing"
+impl_files = []
+test_files = []
+notes = "Negative zone restrictions ('except in [zone]') are not explicitly handled."
+
+[cr_113_6d]
+rule = "113.6d"
+text = "An object's ability that allows a player to pay an alternative cost rather than its mana cost or otherwise modifies what that particular object costs to cast functions on the stack."
+status = "implemented"
+impl_files = ["game/casting.rs:515"]
+test_files = []
+notes = "Alternative cost abilities are evaluated when the spell is on the stack (during casting)."
+
+[cr_113_6e]
+rule = "113.6e"
+text = "An object's ability that restricts or modifies how that particular object can be played or cast functions in any zone from which it could be played or cast and also on the stack. An object's ability that grants it another ability that restricts or modifies how that particular object can be played or cast functions only on the stack."
+status = "implemented"
+impl_files = ["game/zones.rs:100", "game/zones.rs:245"]
+test_files = []
+notes = "Cast restrictions (sorcery speed, from-hand only, etc.) are evaluated in zones.rs regardless of current zone."
+
+[cr_113_6f]
+rule = "113.6f"
+text = "An object's ability that restricts or modifies what zones that particular object can be played or cast from functions everywhere, even outside the game."
+status = "partial"
+impl_files = ["game/zones.rs:100"]
+test_files = []
+notes = "Some zone-of-play restrictions are implemented (e.g., suspend, foretell). Comprehensive coverage of all from-zone modifiers is partial."
+
+[cr_113_6g]
+rule = "113.6g"
+text = "An object's ability that states it can't be countered or can't be copied functions on the stack."
+status = "implemented"
+impl_files = ["game/static_abilities.rs:78"]
+test_files = []
+notes = "Uncounterable and uncopiable spell statics are checked when spells are on the stack."
+
+[cr_113_6h]
+rule = "113.6h"
+text = "An object's ability that modifies how that particular object enters the battlefield functions as that object is entering the battlefield. See rule 614.12."
+status = "implemented"
+impl_files = ["game/effects/change_zone.rs:75"]
+test_files = []
+notes = "ETB replacement effects (enters tapped, enters with counters, etc.) are applied during the zone change to the battlefield."
+
+[cr_113_6i]
+rule = "113.6i"
+text = "An object's ability that states counters can't be put on that object functions as that object is entering the battlefield in addition to functioning while that object is on the battlefield."
+status = "missing"
+impl_files = []
+test_files = []
+notes = "Counter-prevention abilities that function during ETB are not explicitly implemented."
+
+[cr_113_6j]
+rule = "113.6j"
+text = "An object's activated ability that has a cost that can't be paid while the object is on the battlefield functions from any zone in which its cost can be paid."
+status = "partial"
+impl_files = ["game/zones.rs:1"]
+test_files = []
+notes = "Escape and other graveyard-activated abilities are implemented. General handling of abilities whose cost can't be paid on the battlefield is partial."
+
+[cr_113_6k]
+rule = "113.6k"
+text = "A trigger condition that can't trigger from the battlefield functions in all zones it can trigger from. Other trigger conditions of the same triggered ability may function in different zones."
+status = "implemented"
+impl_files = ["game/triggers.rs:396"]
+test_files = []
+notes = "Zone-conditional trigger checking implemented. Triggers with non-battlefield conditions fire from the appropriate zones."
 
 [cr_113_6m]
 rule = "113.6m"
-text = "An ability whose cost or effect specifies that it moves the object it’s on out of a particular zone functions only in that zone, unless its trigger condition or a previous part of its cost or effect specifies that the object is put into that zone or, if the object is an Aura, that the object it enchants leaves the battlefield. The same is true if the effect of that ability creates a delayed triggered ability whose effect moves the object out of a particular zone."
-status = "missing"
-impl_files = []
+text = "An ability whose cost or effect specifies that it moves the object it's on out of a particular zone functions only in that zone, unless its trigger condition or a previous part of its cost or effect specifies that the object is put into that zone or, if the object is an Aura, that the object it enchants leaves the battlefield. The same is true if the effect of that ability creates a delayed triggered ability whose effect moves the object out of a particular zone."
+status = "partial"
+impl_files = ["game/zones.rs:1"]
 test_files = []
-notes = ""
+notes = "Abilities that move themselves (sacrifice, exile self) function from the expected zone. Edge cases for delayed triggered abilities are partial."
 
 [cr_113_6n]
 rule = "113.6n"
-text = "An ability that modifies the rules for deck construction functions before the game begins. Such an ability modifies not just the Comprehensive Rules, but also the Magic: The Gathering Tournament Rules and any other documents that set the deck construction rules for a specific format. However, such an ability can’t affect the format legality of a card, including whether it’s banned or restricted. The current Magic: The Gathering Tournament Rules can be found at WPN.Wizards.com/en/rules-documents."
-status = "missing"
-impl_files = []
+text = "An ability that modifies the rules for deck construction functions before the game begins. Such an ability modifies not just the Comprehensive Rules, but also the Magic: The Gathering Tournament Rules and any other documents that set the deck construction rules for a specific format. However, such an ability can't affect the format legality of a card, including whether it's banned or restricted. The current Magic: The Gathering Tournament Rules can be found at WPN.Wizards.com/en/rules-documents."
+status = "implemented"
+impl_files = ["game/deck_validation.rs:259"]
 test_files = []
-notes = ""
+notes = "Companion deck construction constraints are validated during deck validation. The 'Background' commander partner ability modifies deck construction rules."
 
 [cr_113_6p]
 rule = "113.6p"
-text = "Abilities of emblems, plane cards, vanguard cards, scheme cards, and conspiracy cards function in the command zone. See rule 114, “Emblems”; rule 901, “Planechase”; rule 902, “Vanguard”; rule 904, “Archenemy”; and rule 905, “Conspiracy Draft.”"
-status = "missing"
-impl_files = []
+text = "Abilities of emblems, plane cards, vanguard cards, scheme cards, and conspiracy cards function in the command zone. See rule 114, \"Emblems\"; rule 901, \"Planechase\"; rule 902, \"Vanguard\"; rule 904, \"Archenemy\"; and rule 905, \"Conspiracy Draft.\""
+status = "implemented"
+impl_files = ["game/layers.rs:366", "game/static_abilities.rs:127"]
 test_files = []
-notes = ""
+notes = "Emblem abilities are evaluated from the command zone. Plane/vanguard/scheme/conspiracy not implemented."
 
 [cr_113_7]
 rule = "113.7"
@@ -258,76 +258,76 @@ text = "The source of an ability is the object that generated it. The source of 
 status = "implemented"
 impl_files = ["game/mana_payment.rs:96"]
 test_files = []
-notes = ""
+notes = "source_id field on stack objects and damage events tracks the source. Used for damage assignment and mana source tracking."
 
 [cr_113_7a]
 rule = "113.7a"
-text = "Once activated or triggered, an ability exists on the stack independently of its source. Destruction or removal of the source after that time won’t affect the ability. Note that some abilities cause a source to do something (for example, “This creature deals 1 damage to any target”) rather than the ability doing anything directly. In these cases, any activated or triggered ability that references information about the source for use while announcing an activated ability or putting a triggered ability on the stack checks that information when the ability is put onto the stack. Otherwise, it will check that information when it resolves. In both instances, if the source is no longer in the zone it’s expected to be in at that time, its last known information is used. The source can still perform the action even though it no longer exists."
-status = "missing"
-impl_files = []
+text = "Once activated or triggered, an ability exists on the stack independently of its source. Destruction or removal of the source after that time won't affect the ability. Note that some abilities cause a source to do something (for example, \"This creature deals 1 damage to any target\") rather than the ability doing anything directly. In these cases, any activated or triggered ability that references information about the source for use while announcing an activated ability or putting a triggered ability on the stack checks that information when the ability is put onto the stack. Otherwise, it will check that information when it resolves. In both instances, if the source is no longer in the zone it's expected to be in at that time, its last known information is used. The source can still perform the action even though it no longer exists."
+status = "partial"
+impl_files = ["game/stack.rs:1"]
 test_files = []
-notes = ""
+notes = "Abilities on the stack persist independently of their source. Last-known-information for sources is partially implemented."
 
 [cr_113_8]
 rule = "113.8"
-text = "The controller of an activated ability on the stack is the player who activated it. The controller of a triggered ability on the stack (other than a delayed triggered ability) is the player who controlled the ability’s source when it triggered, or, if it had no controller, the player who owned the ability’s source when it triggered. To determine the controller of a delayed triggered ability, see rules 603.7d–f."
-status = "missing"
-impl_files = []
+text = "The controller of an activated ability on the stack is the player who activated it. The controller of a triggered ability on the stack (other than a delayed triggered ability) is the player who controlled the ability's source when it triggered, or, if it had no controller, the player who owned the ability's source when it triggered. To determine the controller of a delayed triggered ability, see rules 603.7d–f."
+status = "implemented"
+impl_files = ["game/triggers.rs:1"]
 test_files = []
-notes = ""
+notes = "Trigger controller is captured at trigger time. Delayed trigger controller tracking is implemented in game/triggers.rs."
 
 [cr_113_9]
 rule = "113.9"
-text = "Activated and triggered abilities on the stack aren’t spells, and therefore can’t be countered by anything that counters only spells. Activated and triggered abilities on the stack can be countered by effects that specifically counter abilities. Static abilities don’t use the stack and thus can’t be countered at all."
-status = "missing"
-impl_files = []
+text = "Activated and triggered abilities on the stack aren't spells, and therefore can't be countered by anything that counters only spells. Activated and triggered abilities on the stack can be countered by effects that specifically counter abilities. Static abilities don't use the stack and thus can't be countered at all."
+status = "partial"
+impl_files = ["game/effects/counter.rs:1"]
 test_files = []
-notes = ""
+notes = "Counter-spell effects check for spell vs ability stack objects. Dedicated counter-ability effects (Stifle-like) are partially implemented."
 
 [cr_113_10]
 rule = "113.10"
-text = "Effects can add or remove abilities of objects. An effect that adds an ability will state that the object “gains” or “has” that ability, or similar. An effect that removes an ability will state that the object “loses” that ability."
-status = "missing"
-impl_files = []
+text = "Effects can add or remove abilities of objects. An effect that adds an ability will state that the object \"gains\" or \"has\" that ability, or similar. An effect that removes an ability will state that the object \"loses\" that ability."
+status = "implemented"
+impl_files = ["game/layers.rs:1"]
 test_files = []
-notes = ""
+notes = "Layer 6 in layers.rs applies ability-granting and ability-removing effects to objects."
 
 [cr_113_10a]
 rule = "113.10a"
-text = "An effect that adds an activated ability may include activation instructions for that ability. These instructions become part of the ability that’s added to the object."
-status = "missing"
-impl_files = []
+text = "An effect that adds an activated ability may include activation instructions for that ability. These instructions become part of the ability that's added to the object."
+status = "implemented"
+impl_files = ["types/ability.rs:1"]
 test_files = []
-notes = ""
+notes = "Granted activated abilities carry their cost/activation instructions as part of the AbilityDefinition."
 
 [cr_113_10b]
 rule = "113.10b"
 text = "Effects that remove an ability remove all instances of it."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/layers.rs:1"]
 test_files = []
-notes = ""
+notes = "Ability-removal effects target the ability type and remove all instances."
 
 [cr_113_10c]
 rule = "113.10c"
 text = "If two or more effects add and remove the same ability, in general the most recent one prevails. See rule 613 for more information about the interaction of continuous effects."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/layers.rs:1"]
 test_files = []
-notes = ""
+notes = "Layer system applies effects in timestamp order; later effects override earlier ones in layer 6."
 
 [cr_113_11]
 rule = "113.11"
-text = "Effects can stop an object from having a specified ability. These effects say that the object “can’t have” that ability. If the object has that ability, it loses it. It’s also impossible for an effect or keyword counter to add that ability to the object. If a resolving spell or ability creates a continuous effect that would add the specified ability to such an object, that part of that continuous effect does not apply; however, other parts of that continuous effect will still apply, and that resolving spell or ability can still create other continuous effects. Continuous effects created by static abilities that would add the specified ability won’t apply to that object."
+text = "Effects can stop an object from having a specified ability. These effects say that the object \"can't have\" that ability. If the object has that ability, it loses it. It's also impossible for an effect or keyword counter to add that ability to the object. If a resolving spell or ability creates a continuous effect that would add the specified ability to such an object, that part of that continuous effect does not apply; however, other parts of that continuous effect will still apply, and that resolving spell or ability can still create other continuous effects. Continuous effects created by static abilities that would add the specified ability won't apply to that object."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "'Can't have [ability]' effects are not implemented. Cards like Yixlid Jailer are not supported."
 
 [cr_113_12]
 rule = "113.12"
-text = "An effect that sets an object’s characteristic, or simply states a quality of that object, is different from an ability granted by an effect. When an object “gains” or “has” an ability, that ability can be removed by another effect. If an effect defines a characteristic of the object (“[permanent] is [characteristic value]”), it’s not granting an ability. (See rule 604.3.) Similarly, if an effect states a quality of that object (“[creature] can’t be blocked,” for example), it’s neither granting an ability nor setting a characteristic."
-status = "missing"
-impl_files = []
+text = "An effect that sets an object's characteristic, or simply states a quality of that object, is different from an ability granted by an effect. When an object \"gains\" or \"has\" an ability, that ability can be removed by another effect. If an effect defines a characteristic of the object (\"[permanent] is [characteristic value]\"), it's not granting an ability. (See rule 604.3.) Similarly, if an effect states a quality of that object (\"[creature] can't be blocked,\" for example), it's neither granting an ability nor setting a characteristic."
+status = "implemented"
+impl_files = ["game/layers.rs:1", "game/static_abilities.rs:1"]
 test_files = []
-notes = ""
+notes = "Characteristic-setting effects (layer 4/5/7) are distinct from ability-granting effects (layer 6). CantBeBlocked is handled as a static quality, not a keyword."

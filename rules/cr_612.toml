@@ -6,88 +6,88 @@ title = "Text-Changing Effects"
 
 [cr_612_1]
 rule = "612.1"
-text = "Some continuous effects change an object’s text. This can apply to any words or symbols printed on that object, but generally affects only that object’s rules text (which appears in its text box) and/or the text that appears in its type line. Such an effect is a text-changing effect."
+text = "Some continuous effects change an object's text. This can apply to any words or symbols printed on that object, but generally affects only that object's rules text (which appears in its text box) and/or the text that appears in its type line. Such an effect is a text-changing effect."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Text-changing effects (Layer 3) exist as a layer variant in types/layers.rs but no ContinuousModification variants implement text changes yet."
 
 [cr_612_2]
 rule = "612.2"
-text = "A text-changing effect changes only those words that are used in the correct way (for example, a Magic color word being used as a color word, a land type word used as a land type, or a creature type word used as a creature type). An effect that changes a color word or a subtype can’t change a card name, even if that name contains a word or a series of letters that is the same as a Magic color word, basic land type, or creature type."
+text = "A text-changing effect changes only those words that are used in the correct way (for example, a Magic color word being used as a color word, a land type word used as a land type, or a creature type word used as a creature type). An effect that changes a color word or a subtype can't change a card name, even if that name contains a word or a series of letters that is the same as a Magic color word, basic land type, or creature type."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Text-changing effects not implemented. Layer 3 (Layer::Text) exists but no modifications use it."
 
 [cr_612_2a]
 rule = "612.2a"
-text = "Most spells and abilities that create creature tokens use creature types to define both the creature types and the names of the tokens. A text-changing effect that affects such a spell or an object with such an ability can change these words because they’re being used as creature types, even though they’re also being used as names."
+text = "Most spells and abilities that create creature tokens use creature types to define both the creature types and the names of the tokens. A text-changing effect that affects such a spell or an object with such an ability can change these words because they're being used as creature types, even though they're also being used as names."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Depends on text-changing effect implementation."
 
 [cr_612_3]
 rule = "612.3"
-text = "Effects that add or remove abilities don’t change the text of the objects they affect, so any abilities that are granted to an object can’t be modified by text-changing effects that affect that object."
-status = "missing"
+text = "Effects that add or remove abilities don't change the text of the objects they affect, so any abilities that are granted to an object can't be modified by text-changing effects that affect that object."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Text-changing effects not implemented. Ability grants are separate from printed text by architecture."
 
 [cr_612_4]
 rule = "612.4"
-text = "A token’s subtypes and rules text are defined by the spell or ability that created the token. A text-changing effect that affects a token can change these characteristics."
+text = "A token's subtypes and rules text are defined by the spell or ability that created the token. A text-changing effect that affects a token can change these characteristics."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Depends on text-changing effect implementation."
 
 [cr_612_5]
 rule = "612.5"
-text = "One card (Exchange of Words) instructs a player to exchange the text boxes of two objects. This replaces all of the rules text of each object with the rules text of the other object. (In games involving certain cards that aren’t covered by these rules, other elements of the text box may also be exchanged. See rule 100.7.)"
+text = "One card (Exchange of Words) instructs a player to exchange the text boxes of two objects. This replaces all of the rules text of each object with the rules text of the other object. (In games involving certain cards that aren't covered by these rules, other elements of the text box may also be exchanged. See rule 100.7.)"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Exchange of Words not implemented."
 
 [cr_612_6]
 rule = "612.6"
-text = "One card (Volrath’s Shapeshifter) states that an object has the “full text” of another object. This changes not just the text that appears in the object’s text box and type line, but also changes the text that represents its name, mana cost, color indicator, power, and toughness."
+text = "One card (Volrath's Shapeshifter) states that an object has the \"full text\" of another object. This changes not just the text that appears in the object's text box and type line, but also changes the text that represents its name, mana cost, color indicator, power, and toughness."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Full-text-copy not implemented."
 
 [cr_612_7]
 rule = "612.7"
-text = "One card (Spy Kit) states that an object has “all names of nonlegendary creature cards.” This changes the text that represents the object’s name. That object has the name of each nonlegendary creature card in the Oracle card reference. (See rule 108.1.)"
+text = "One card (Spy Kit) states that an object has \"all names of nonlegendary creature cards.\" This changes the text that represents the object's name. That object has the name of each nonlegendary creature card in the Oracle card reference. (See rule 108.1.)"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Spy Kit's name-replacement effect not implemented."
 
 [cr_612_8]
 rule = "612.8"
-text = "Some cards create a continuous effect that sets the name of an object. This changes the text that represents the object’s name. That object loses any names it had and has only the specified name."
+text = "Some cards create a continuous effect that sets the name of an object. This changes the text that represents the object's name. That object loses any names it had and has only the specified name."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Name-setting continuous effects not implemented."
 
 [cr_612_9]
 rule = "612.9"
-text = "A name sticker on a permanent or on a card not on the battlefield creates a continuous effect that adds a word to the text that represents the object’s name. (See rule 123.6.)"
-status = "missing"
+text = "A name sticker on a permanent or on a card not on the battlefield creates a continuous effect that adds a word to the text that represents the object's name. (See rule 123.6.)"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Stickers (Unfinity) not implemented."
 
 [cr_612_10]
 rule = "612.10"
-text = "A splice ability changes a spell’s text by adding the rules text of the card with splice to the spell, following that spell’s own rules text. It doesn’t modify or replace any of that spell’s own text. (See rule 702.47, “Splice.”)"
+text = "A splice ability changes a spell's text by adding the rules text of the card with splice to the spell, following that spell's own rules text. It doesn't modify or replace any of that spell's own text. (See rule 702.47, \"Splice.\")"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Splice not implemented."

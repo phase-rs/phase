@@ -7,127 +7,127 @@ title = "Objects"
 [cr_109_1]
 rule = "109.1"
 text = "An object is an ability on the stack, a card, a copy of a card, a token, a spell, a permanent, or an emblem."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/game_state.rs:1", "game/game_object.rs:1"]
 test_files = []
-notes = ""
+notes = "GameObject covers permanents, spells (stack), and tokens. Emblems are tracked separately in game_state. Abilities on the stack are represented as stack objects."
 
 [cr_109_2]
 rule = "109.2"
-text = "If a spell or ability uses a description of an object that includes a card type or subtype, but doesn’t refer to a specific zone or include the word “card,” “spell,” “source,” or “scheme,” it means a permanent of that card type or subtype on the battlefield."
-status = "missing"
-impl_files = []
+text = "If a spell or ability uses a description of an object that includes a card type or subtype, but doesn't refer to a specific zone or include the word \"card,\" \"spell,\" \"source,\" or \"scheme,\" it means a permanent of that card type or subtype on the battlefield."
+status = "implemented"
+impl_files = ["game/filter.rs:1", "parser/oracle_target.rs:1"]
 test_files = []
-notes = ""
+notes = "TargetFilter defaults to battlefield permanents when no zone is specified. Zone-specific filters use explicit Zone variants."
 
 [cr_109_2a]
 rule = "109.2a"
-text = "If a spell or ability uses a description of an object that includes the word “card” and the name of a zone, it means a card matching that description in the stated zone."
-status = "missing"
-impl_files = []
+text = "If a spell or ability uses a description of an object that includes the word \"card\" and the name of a zone, it means a card matching that description in the stated zone."
+status = "implemented"
+impl_files = ["parser/oracle_target.rs:1"]
 test_files = []
-notes = ""
+notes = "Filters with 'card in [zone]' phrases explicitly include zone constraints in the TargetFilter."
 
 [cr_109_2b]
 rule = "109.2b"
-text = "If a spell or ability uses a description of an object that includes the word “spell,” it means a spell matching that description on the stack."
-status = "missing"
-impl_files = []
+text = "If a spell or ability uses a description of an object that includes the word \"spell,\" it means a spell matching that description on the stack."
+status = "implemented"
+impl_files = ["parser/oracle_target.rs:1"]
 test_files = []
-notes = ""
+notes = "'Spell' references in Oracle text are parsed to target the stack zone."
 
 [cr_109_2c]
 rule = "109.2c"
-text = "If a spell or ability uses a description of an object that includes the word “source,” it means a source matching that description—a source of an ability, of damage, or of mana—in any zone. See rules 113.7 and 609.7."
-status = "missing"
-impl_files = []
+text = "If a spell or ability uses a description of an object that includes the word \"source,\" it means a source matching that description—a source of an ability, of damage, or of mana—in any zone. See rules 113.7 and 609.7."
+status = "partial"
+impl_files = ["game/mana_payment.rs:96"]
 test_files = []
-notes = ""
+notes = "Source tracking is implemented for damage and mana (source_id fields). 'Source' zone filtering is not fully implemented for all target contexts."
 
 [cr_109_2d]
 rule = "109.2d"
-text = "If an ability of a scheme card includes the text “this scheme,” it means the scheme card in the command zone on which that ability is printed."
-status = "missing"
+text = "If an ability of a scheme card includes the text \"this scheme,\" it means the scheme card in the command zone on which that ability is printed."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Archenemy scheme cards not implemented."
 
 [cr_109_3]
 rule = "109.3"
-text = "An object’s characteristics are name, mana cost, color, color indicator, card type, subtype, supertype, rules text, abilities, power, toughness, loyalty, defense, hand modifier, and life modifier. Objects can have some or all of these characteristics. Any other information about an object isn’t a characteristic. For example, characteristics don’t include whether a permanent is tapped, a spell’s target, an object’s owner or controller, what an Aura enchants, and so on."
-status = "missing"
-impl_files = []
+text = "An object's characteristics are name, mana cost, color, color indicator, card type, subtype, supertype, rules text, abilities, power, toughness, loyalty, defense, hand modifier, and life modifier. Objects can have some or all of these characteristics. Any other information about an object isn't a characteristic. For example, characteristics don't include whether a permanent is tapped, a spell's target, an object's owner or controller, what an Aura enchants, and so on."
+status = "implemented"
+impl_files = ["game/game_object.rs:1", "types/game_state.rs:1"]
 test_files = []
-notes = ""
+notes = "GameObject fields directly model the listed characteristics. Non-characteristic state (tapped, attached_to, etc.) is stored separately from characteristic fields."
 
 [cr_109_4]
 rule = "109.4"
-text = "Only objects on the stack or on the battlefield have a controller. Objects that are neither on the stack nor on the battlefield aren’t controlled by any player. See rule 108.4. There are six exceptions to this rule:"
-status = "missing"
-impl_files = []
+text = "Only objects on the stack or on the battlefield have a controller. Objects that are neither on the stack nor on the battlefield aren't controlled by any player. See rule 108.4. There are six exceptions to this rule:"
+status = "implemented"
+impl_files = ["types/game_state.rs:1"]
 test_files = []
-notes = ""
+notes = "controller field on GameObject is set for stack/battlefield objects. The engine falls back to owner for objects in other zones."
 
 [cr_109_4a]
 rule = "109.4a"
-text = "The controller of a mana ability is determined as though it were on the stack. See rule 605, “Mana Abilities.”"
-status = "missing"
-impl_files = []
+text = "The controller of a mana ability is determined as though it were on the stack. See rule 605, \"Mana Abilities.\""
+status = "implemented"
+impl_files = ["game/mana_abilities.rs:1"]
 test_files = []
-notes = ""
+notes = "Mana abilities track their activating player as the controller, consistent with stack-based controller determination."
 
 [cr_109_4b]
 rule = "109.4b"
-text = "A triggered ability that has triggered but is waiting to be placed on the stack is controlled by the player who controlled its source at the time it triggered, unless it’s a delayed triggered ability. To determine the controller of a delayed triggered ability, see rules 603.7d–f. See also rule 603, “Handling Triggered Abilities.”"
-status = "missing"
-impl_files = []
+text = "A triggered ability that has triggered but is waiting to be placed on the stack is controlled by the player who controlled its source at the time it triggered, unless it's a delayed triggered ability. To determine the controller of a delayed triggered ability, see rules 603.7d–f. See also rule 603, \"Handling Triggered Abilities.\""
+status = "implemented"
+impl_files = ["game/triggers.rs:1"]
 test_files = []
-notes = ""
+notes = "Triggered abilities capture their source controller at trigger time. PendingTrigger stores the controller for APNAP stacking."
 
 [cr_109_4c]
 rule = "109.4c"
-text = "An emblem is controlled by the player who puts it into the command zone. See rule 114, “Emblems.”"
-status = "missing"
-impl_files = []
+text = "An emblem is controlled by the player who puts it into the command zone. See rule 114, \"Emblems.\""
+status = "implemented"
+impl_files = ["game/effects/create_emblem.rs:20"]
 test_files = []
-notes = ""
+notes = "create_emblem stores the controller of the emblem as the player who activated the planeswalker ability."
 
 [cr_109_4d]
 rule = "109.4d"
 text = "In a Planechase game, a face-up plane or phenomenon card is controlled by the player designated as the planar controller. This is usually the active player. See rule 901.6."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Planechase variant not implemented."
 
 [cr_109_4e]
 rule = "109.4e"
 text = "In a Vanguard game, each vanguard card is controlled by its owner. See rule 902.6."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Vanguard variant not implemented."
 
 [cr_109_4f]
 rule = "109.4f"
 text = "In an Archenemy game, each scheme card is controlled by its owner. See rule 904.7."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Archenemy variant not implemented."
 
 [cr_109_4g]
 rule = "109.4g"
 text = "In a Conspiracy Draft game, each conspiracy card is controlled by its owner. See rule 905.5."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Conspiracy Draft variant not implemented."
 
 [cr_109_5]
 rule = "109.5"
-text = "The words “you” and “your” on an object refer to the object’s controller, its would-be controller (if a player is attempting to play, cast, or activate it), or its owner (if it has no controller). For a static ability, this is the current controller of the object it’s on. For an activated ability, this is the player who activated the ability. For a triggered ability, this is the controller of the object when the ability triggered, unless it’s a delayed triggered ability. To determine the controller of a delayed triggered ability, see rules 603.7d–f."
-status = "missing"
-impl_files = []
+text = "The words \"you\" and \"your\" on an object refer to the object's controller, its would-be controller (if a player is attempting to play, cast, or activate it), or its owner (if it has no controller). For a static ability, this is the current controller of the object it's on. For an activated ability, this is the player who activated the ability. For a triggered ability, this is the controller of the object when the ability triggered, unless it's a delayed triggered ability. To determine the controller of a delayed triggered ability, see rules 603.7d–f."
+status = "implemented"
+impl_files = ["types/game_state.rs:1", "game/triggers.rs:1"]
 test_files = []
-notes = ""
+notes = "'You/your' in ability resolution always resolves to the appropriate controller (ability_controller in triggered ability context, object controller for static effects)."

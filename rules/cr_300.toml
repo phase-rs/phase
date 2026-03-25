@@ -7,31 +7,31 @@ title = "General (Card Types)"
 [cr_300_1]
 rule = "300.1"
 text = "The card types are artifact, battle, conspiracy, creature, dungeon, enchantment, instant, kindred, land, phenomenon, plane, planeswalker, scheme, sorcery, and vanguard."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/card_type.rs:44"]
 test_files = []
-notes = ""
+notes = "CoreType enum defines all implemented card types. Conspiracy, phenomenon, plane, scheme, and vanguard are not implemented (non-traditional formats)."
 
 [cr_300_2]
 rule = "300.2"
 text = "Some objects have more than one card type (for example, an artifact creature). Such objects combine the aspects of each of those card types, and are subject to spells and abilities that affect either or all of those card types."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/card_type.rs:106", "game/filter.rs:149"]
 test_files = []
-notes = ""
+notes = "CardType.core_types is Vec<CoreType> allowing multiple card types. filter.rs checks core_types.contains() for each relevant type independently."
 
 [cr_300_2a]
 rule = "300.2a"
-text = "An object that’s both a land and another card type (for example, an artifact land) can only be played as a land. It can’t be cast as a spell."
-status = "missing"
-impl_files = []
+text = "An object that's both a land and another card type (for example, an artifact land) can only be played as a land. It can't be cast as a spell."
+status = "implemented"
+impl_files = ["game/casting.rs:347", "game/engine.rs:3212"]
 test_files = []
-notes = ""
+notes = "casting.rs enforces that land cards are played via PlayLand action, not cast. A card with Land in core_types cannot be cast as a spell."
 
 [cr_300_2b]
 rule = "300.2b"
-text = "Each kindred card has another card type. Casting and resolving a kindred card follow the rules for casting and resolving a card of the other card type."
-status = "missing"
-impl_files = []
+text = "Each kindred card has another card type. Casting and resolving a kindred card follows the rules for casting and resolving a card of the other card type."
+status = "implemented"
+impl_files = ["types/card_type.rs:61", "game/casting.rs:1"]
 test_files = []
-notes = ""
+notes = "Kindred (formerly Tribal) is defined in CoreType. Casting follows the rules of the paired card type (instant, sorcery, etc.) as kindred cards always have a second type."

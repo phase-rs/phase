@@ -6,7 +6,7 @@ title = "Handling Static Abilities"
 
 [cr_604_1]
 rule = "604.1"
-text = "Static abilities do something all the time rather than being activated or triggered. They are written as statements, and they’re simply true."
+text = "Static abilities do something all the time rather than being activated or triggered. They are written as statements, and they're simply true."
 status = "implemented"
 impl_files = ["game/static_abilities.rs:35", "game/static_abilities.rs:354"]
 test_files = []
@@ -22,7 +22,7 @@ notes = ""
 
 [cr_604_3]
 rule = "604.3"
-text = "Some static abilities are characteristic-defining abilities. A characteristic-defining ability conveys information about an object’s characteristics that would normally be found elsewhere on that object (such as in its mana cost, type line, or power/toughness box). Characteristic-defining abilities can add to or override information found elsewhere on that object. Characteristic-defining abilities function in all zones. They also function outside the game and before the game begins."
+text = "Some static abilities are characteristic-defining abilities. A characteristic-defining ability conveys information about an object's characteristics that would normally be found elsewhere on that object (such as in its mana cost, type line, or power/toughness box). Characteristic-defining abilities can add to or override information found elsewhere on that object. Characteristic-defining abilities function in all zones. They also function outside the game and before the game begins."
 status = "implemented"
 impl_files = ["game/casting.rs:137", "game/casting.rs:228", "game/casting.rs:405", "game/casting.rs:1861", "game/filter.rs:350", "game/layers.rs:460", "game/layers.rs:560", "game/quantity.rs:223", "game/quantity.rs:237", "parser/oracle.rs:1198", "parser/oracle_static.rs:44", "parser/oracle_static.rs:525", "parser/oracle_static.rs:560", "parser/oracle_static.rs:2051", "types/ability.rs:832", "types/ability.rs:1074", "types/ability.rs:1078", "types/ability.rs:1174", "types/layers.rs:107", "types/statics.rs:131", "types/statics.rs:133"]
 test_files = []
@@ -30,31 +30,31 @@ notes = ""
 
 [cr_604_3a]
 rule = "604.3a"
-text = "A static ability is a characteristic-defining ability if it meets the following criteria: (1) It defines an object’s colors, subtypes, power, or toughness; (2) it is printed on the card it affects, it was granted to the token it affects by the effect that created the token, or it was acquired by the object it affects as the result of a copy effect or text-changing effect; (3) it does not directly affect the characteristics of any other objects; (4) it is not an ability that an object grants to itself; and (5) it does not set the values of such characteristics only if certain conditions are met."
-status = "missing"
-impl_files = []
+text = "A static ability is a characteristic-defining ability if it meets the following criteria: (1) It defines an object's colors, subtypes, power, or toughness; (2) it is printed on the card it affects, it was granted to the token it affects by the effect that created the token, or it was acquired by the object it affects as the result of a copy effect or text-changing effect; (3) it does not directly affect the characteristics of any other objects; (4) it is not an ability that an object grants to itself; and (5) it does not set the values of such characteristics only if certain conditions are met."
+status = "implemented"
+impl_files = ["types/layers.rs:17", "game/layers.rs:460", "types/statics.rs:131"]
 test_files = []
-notes = ""
+notes = "CDA criteria are enforced by parser (oracle_static.rs) assigning correct layer. Layer::CharDef (7a) for CDAs, CDA-first ordering in layers.rs:460."
 
 [cr_604_4]
 rule = "604.4"
-text = "Many Auras, Equipment, and Fortifications have static abilities that modify the object they’re attached to, but those abilities don’t target that object. If an Aura, Equipment, or Fortification is moved to a different object, the ability stops applying to the original object and starts modifying the new one."
-status = "missing"
-impl_files = []
+text = "Many Auras, Equipment, and Fortifications have static abilities that modify the object they're attached to, but those abilities don't target that object. If an Aura, Equipment, or Fortification is moved to a different object, the ability stops applying to the original object and starts modifying the new one."
+status = "implemented"
+impl_files = ["game/static_abilities.rs:168", "game/layers.rs:327", "game/layers.rs:339"]
 test_files = []
-notes = ""
+notes = "Static ability evaluation in apply_continuous_effect() uses current attachment state; no explicit target for Aura/Equipment statics."
 
 [cr_604_5]
 rule = "604.5"
-text = "Some static abilities apply while a spell is on the stack. These are often abilities that refer to countering the spell. Also, abilities that say “As an additional cost to cast . . . ,” “You may pay [cost] rather than pay [this object]’s mana cost,” and “You may cast [this object] without paying its mana cost” work while a spell is on the stack."
-status = "missing"
-impl_files = []
+text = "Some static abilities apply while a spell is on the stack. These are often abilities that refer to countering the spell. Also, abilities that say \"As an additional cost to cast . . . ,\" \"You may pay [cost] rather than pay [this object]'s mana cost,\" and \"You may cast [this object] without paying its mana cost\" work while a spell is on the stack."
+status = "implemented"
+impl_files = ["game/casting_costs.rs:113", "game/casting_costs.rs:264", "parser/oracle_cost.rs:366"]
 test_files = []
-notes = ""
+notes = "Additional/alternative cost statics are evaluated during casting pipeline."
 
 [cr_604_6]
 rule = "604.6"
-text = "Some static abilities apply while a card is in any zone that you could cast or play it from (usually your hand). These are limited to those that read, “You may [cast/play] [this card] . . . ,” “You can’t [cast/play] [this card] . . . ,” and “[Cast/Play] [this card] only . . . .”"
+text = "Some static abilities apply while a card is in any zone that you could cast or play it from (usually your hand). These are limited to those that read, \"You may [cast/play] [this card] . . . ,\" \"You can't [cast/play] [this card] . . . ,\" and \"[Cast/Play] [this card] only . . . .\""
 status = "implemented"
 impl_files = ["game/effects/grant_permission.rs:5", "game/effects/grant_permission.rs:8"]
 test_files = []
@@ -62,8 +62,8 @@ notes = ""
 
 [cr_604_7]
 rule = "604.7"
-text = "Unlike spells and other kinds of abilities, static abilities can’t use an object’s last known information for purposes of determining how their effects are applied."
-status = "missing"
-impl_files = []
+text = "Unlike spells and other kinds of abilities, static abilities can't use an object's last known information for purposes of determining how their effects are applied."
+status = "implemented"
+impl_files = ["game/layers.rs:211", "game/static_abilities.rs:168"]
 test_files = []
-notes = ""
+notes = "Static ability evaluation in evaluate_layers() always reads current game state, never last known info."

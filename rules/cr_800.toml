@@ -7,26 +7,26 @@ title = "General (Multiplayer Rules)"
 [cr_800_1]
 rule = "800.1"
 text = "A multiplayer game is a game that begins with more than two players. This section contains additional optional rules that can be used for multiplayer play."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/engine.rs:1", "game/turns.rs:1"]
 test_files = []
-notes = ""
+notes = "The engine supports multiplayer games with more than two players."
 
 [cr_800_2]
 rule = "800.2"
 text = "These rules consist of a series of options that can be added to a multiplayer game and a number of variant styles of multiplayer play. A single game may use multiple options but only one variant."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Rule clarification about the structure of multiplayer rules; no engine logic needed."
 
 [cr_800_3]
 rule = "800.3"
 text = "Many multiplayer Magic tournaments have additional rules not included here, including rules for deck construction. See the most current Magic: The Gathering Tournament Rules for more information. They can be found at WPN.wizards.com/en/rules-documents."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Tournament rules reference; not applicable to engine."
 
 [cr_800_4]
 rule = "800.4"
@@ -38,7 +38,7 @@ notes = ""
 
 [cr_800_4a]
 rule = "800.4a"
-text = "When a player leaves the game, all objects (see rule 109) owned by that player leave the game and any effects which give that player control of any objects or players end. Then, if that player controlled any objects on the stack not represented by cards, those objects cease to exist. Then, if there are any objects still controlled by that player, those objects are exiled. This is not a state-based action. It happens as soon as the player leaves the game. If the player who left the game had priority at the time they left, priority passes to the next player in turn order who’s still in the game."
+text = "When a player leaves the game, all objects (see rule 109) owned by that player leave the game and any effects which give that player control of any objects or players end. Then, if that player controlled any objects on the stack not represented by cards, those objects cease to exist. Then, if there are any objects still controlled by that player, those objects are exiled. This is not a state-based action. It happens as soon as the player leaves the game. If the player who left the game had priority at the time they left, priority passes to the next player in turn order who's still in the game."
 status = "implemented"
 impl_files = ["game/effects/choose.rs:148", "game/elimination.rs:56", "game/elimination.rs:59", "parser/oracle_effect/mod.rs:1675", "types/ability.rs:62", "types/ability.rs:237", "types/ability.rs:307"]
 test_files = []
@@ -46,11 +46,11 @@ notes = ""
 
 [cr_800_4b]
 rule = "800.4b"
-text = "If an object would change to the control of a player who has left the game, it doesn’t. If a token would be created under the control of a player who has left the game, no token is created. If an object would be put onto the battlefield or onto the stack under the control of a player who has left the game, that object remains in its current zone. If a player would be controlled by a player who has left the game, they aren’t."
+text = "If an object would change to the control of a player who has left the game, it doesn't. If a token would be created under the control of a player who has left the game, no token is created. If an object would be put onto the battlefield or onto the stack under the control of a player who has left the game, that object remains in its current zone. If a player would be controlled by a player who has left the game, they aren't."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Edge cases for left-player targeting not explicitly implemented."
 
 [cr_800_4c]
 rule = "800.4c"
@@ -58,23 +58,23 @@ text = "If an effect that gives a player still in the game control of an object 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Control-reverting-to-left-player exile not implemented."
 
 [cr_800_4d]
 rule = "800.4d"
-text = "If an object that would be owned by a player who has left the game would be created in any zone, it isn’t created. If a triggered ability that would be controlled by a player who has left the game would be put onto the stack, it isn’t put on the stack."
+text = "If an object that would be owned by a player who has left the game would be created in any zone, it isn't created. If a triggered ability that would be controlled by a player who has left the game would be put onto the stack, it isn't put on the stack."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Creation suppression for left-player-owned objects not implemented."
 
 [cr_800_4e]
 rule = "800.4e"
-text = "If combat damage would be assigned to a player who has left the game, that damage isn’t assigned."
+text = "If combat damage would be assigned to a player who has left the game, that damage isn't assigned."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Combat damage skipping for left players not explicitly implemented."
 
 [cr_800_4f]
 rule = "800.4f"
@@ -82,7 +82,7 @@ text = "If an object requires a player who has left the game to pay a cost or ch
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Cost non-payment for left players not implemented."
 
 [cr_800_4g]
 rule = "800.4g"
@@ -90,7 +90,7 @@ text = "If an object requires a player who has left the game to make a choice ot
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Choice delegation when required player has left not implemented."
 
 [cr_800_4h]
 rule = "800.4h"
@@ -98,7 +98,7 @@ text = "If a rule requires a player who has left the game to make a choice, the 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Rule-required choice delegation for left players not implemented."
 
 [cr_800_4i]
 rule = "800.4i"
@@ -106,7 +106,7 @@ text = "If an effect requires information about a specific player, the effect us
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Last known information for left players not implemented."
 
 [cr_800_4j]
 rule = "800.4j"
@@ -114,60 +114,60 @@ text = "If a player leaves the game during their turn, that turn continues to it
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Turn continuation without active player after elimination not implemented."
 
 [cr_800_4k]
 rule = "800.4k"
-text = "If a player who has left the game would begin a turn, that turn doesn’t begin."
+text = "If a player who has left the game would begin a turn, that turn doesn't begin."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Turn skipping for eliminated players not explicitly implemented."
 
 [cr_800_4m]
 rule = "800.4m"
-text = "When a player leaves the game, any continuous effects with durations that last until that player’s next turn or until a specific point in that turn will last until that turn would have begun. They neither expire immediately nor last indefinitely."
+text = "When a player leaves the game, any continuous effects with durations that last until that player's next turn or until a specific point in that turn will last until that turn would have begun. They neither expire immediately nor last indefinitely."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Duration tracking for left-player turns not implemented."
 
 [cr_800_4n]
 rule = "800.4n"
-text = "When a player leaves the game, objects that player owns in the ante zone do not leave the game. This is an exception to rule 800.4a. See rule 407, “Ante.”"
-status = "missing"
+text = "When a player leaves the game, objects that player owns in the ante zone do not leave the game. This is an exception to rule 800.4a. See rule 407, \"Ante.\""
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Ante zone not implemented; ante is not a supported game mode."
 
 [cr_800_4p]
 rule = "800.4p"
-text = "In a Planechase game, if the player designated as the planar controller would leave the game, instead the next player in turn order that wouldn’t leave the game becomes the planar controller, then the old planar controller leaves the game. See rule 311.5."
+text = "In a Planechase game, if the player designated as the planar controller would leave the game, instead the next player in turn order that wouldn't leave the game becomes the planar controller, then the old planar controller leaves the game. See rule 311.5."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Planechase variant not implemented."
 
 [cr_800_5]
 rule = "800.5"
 text = "Unless a chosen variant or option prescribes otherwise, seating order is determined by any mutually agreeable method. For example, players could agree to remain where they were before the game began, roll dice to determine seating order, and so on."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Seating order is determined externally (lobby/server); no engine logic needed."
 
 [cr_800_6]
 rule = "800.6"
-text = "In a multiplayer game, the first mulligan a player takes doesn’t count toward the number of cards that player will put on the bottom of their library or the number of mulligans that player may take. Subsequent mulligans are counted toward these numbers as normal."
-status = "missing"
-impl_files = []
+text = "In a multiplayer game, the first mulligan a player takes doesn't count toward the number of cards that player will put on the bottom of their library or the number of mulligans that player may take. Subsequent mulligans are counted toward these numbers as normal."
+status = "implemented"
+impl_files = ["game/mulligan.rs:1"]
 test_files = []
-notes = ""
+notes = "Free first mulligan for multiplayer implemented in mulligan.rs."
 
 [cr_800_7]
 rule = "800.7"
-text = "In a multiplayer game other than a Two-Headed Giant game, the starting player doesn’t skip the draw step of their first turn. In a Two-Headed Giant game, the team who plays first skips the draw step of their first turn. See rule 103.8."
-status = "missing"
-impl_files = []
+text = "In a multiplayer game other than a Two-Headed Giant game, the starting player doesn't skip the draw step of their first turn. In a Two-Headed Giant game, the team who plays first skips the draw step of their first turn. See rule 103.8."
+status = "implemented"
+impl_files = ["game/turns.rs:303"]
 test_files = []
-notes = ""
+notes = "Multiplayer starting player draw-step behavior implemented in turns.rs."

@@ -6,7 +6,7 @@ title = "Instants"
 
 [cr_304_1]
 rule = "304.1"
-text = "A player who has priority may cast an instant card from their hand. Casting an instant as a spell uses the stack. (See rule 601, “Casting Spells.”)"
+text = "A player who has priority may cast an instant card from their hand. Casting an instant as a spell uses the stack. (See rule 601, \"Casting Spells.\")"
 status = "implemented"
 impl_files = ["game/casting.rs:525"]
 test_files = []
@@ -14,23 +14,23 @@ notes = ""
 
 [cr_304_2]
 rule = "304.2"
-text = "When an instant spell resolves, the actions stated in its rules text are followed. Then it’s put into its owner’s graveyard."
-status = "missing"
-impl_files = []
+text = "When an instant spell resolves, the actions stated in its rules text are followed. Then it's put into its owner's graveyard."
+status = "implemented"
+impl_files = ["game/stack.rs:110", "game/stack.rs:259"]
 test_files = []
-notes = ""
+notes = "is_permanent_type() does not include CoreType::Instant; instant spells resolve to Zone::Graveyard (CR 608.2n path in stack.rs:110)."
 
 [cr_304_3]
 rule = "304.3"
-text = "Instant subtypes are always a single word and are listed after a long dash: “Instant — Arcane.” Each word after the dash is a separate subtype. The set of instant subtypes is the same as the set of sorcery subtypes; these subtypes are called spell types. Instants may have multiple subtypes. See rule 205.3k for the complete list of spell types."
-status = "missing"
-impl_files = []
+text = "Instant subtypes are always a single word and are listed after a long dash: \"Instant — Arcane.\" Each word after the dash is a separate subtype. The set of instant subtypes is the same as the set of sorcery subtypes; these subtypes are called spell types. Instants may have multiple subtypes. See rule 205.3k for the complete list of spell types."
+status = "implemented"
+impl_files = ["types/card_type.rs:110"]
 test_files = []
-notes = ""
+notes = "Spell subtypes stored as strings in CardType.subtypes. Adventure subtype is the primary spell subtype used in engine logic."
 
 [cr_304_4]
 rule = "304.4"
-text = "Instants can’t enter the battlefield. If an instant would enter the battlefield, it remains in its previous zone instead."
+text = "Instants can't enter the battlefield. If an instant would enter the battlefield, it remains in its previous zone instead."
 status = "implemented"
 impl_files = ["game/zones.rs:53"]
 test_files = []
@@ -38,8 +38,8 @@ notes = ""
 
 [cr_304_5]
 rule = "304.5"
-text = "If text states that a player may do something “any time they could cast an instant” or “only as an instant,” it means only that the player must have priority. The player doesn’t need to have an instant card they could cast. Effects that would preclude that player from casting an instant spell don’t affect the player’s capability to perform that action (unless the action is actually casting an instant spell)."
-status = "missing"
-impl_files = []
+text = "If text states that a player may do something \"any time they could cast an instant\" or \"only as an instant,\" it means only that the player must have priority. The player doesn't need to have an instant card they could cast. Effects that would preclude that player from casting an instant spell don't affect the player's capability to perform that action (unless the action is actually casting an instant spell)."
+status = "implemented"
+impl_files = ["game/restrictions.rs:1"]
 test_files = []
-notes = ""
+notes = "Priority-based instant-speed window is handled by checking WaitingFor::Priority state. Casting restrictions do not prevent non-cast actions at instant speed."

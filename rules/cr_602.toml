@@ -6,7 +6,7 @@ title = "Activating Activated Abilities"
 
 [cr_602_1]
 rule = "602.1"
-text = "Activated abilities have a cost and an effect. They are written as “[Cost]: [Effect.] [Activation instructions (if any).]”"
+text = "Activated abilities have a cost and an effect. They are written as \"[Cost]: [Effect.] [Activation instructions (if any).]\""
 status = "implemented"
 impl_files = ["ai_support/candidates.rs:804", "game/casting.rs:1414", "game/casting.rs:1548", "game/casting.rs:1632", "game/engine.rs:268", "parser/oracle.rs:314", "types/ability.rs:2763"]
 test_files = []
@@ -14,47 +14,47 @@ notes = ""
 
 [cr_602_1a]
 rule = "602.1a"
-text = "The activation cost is everything before the colon (:). An ability’s activation cost must be paid by the player who is activating it."
-status = "missing"
-impl_files = []
+text = "The activation cost is everything before the colon (:). An ability's activation cost must be paid by the player who is activating it."
+status = "implemented"
+impl_files = ["game/casting.rs:1358", "game/casting_costs.rs:264", "parser/oracle.rs:314"]
 test_files = []
-notes = ""
+notes = "pay_ability_cost() enforces that the activating player pays the cost. Oracle parser splits cost at ':' via oracle.rs."
 
 [cr_602_1b]
 rule = "602.1b"
-text = "Some text after the colon of an activated ability states instructions that must be followed while activating that ability. Such text may state which players can activate that ability, may restrict when a player can activate the ability, or may define some aspect of the activation cost. This text is not part of the ability’s effect. It functions at all times. If an activated ability has any activation instructions, they appear last, after the ability’s effect."
-status = "missing"
-impl_files = []
+text = "Some text after the colon of an activated ability states instructions that must be followed while activating that ability. Such text may state which players can activate that ability, may restrict when a player can activate the ability, or may define some aspect of the activation cost. This text is not part of the ability's effect. It functions at all times. If an activated ability has any activation instructions, they appear last, after the ability's effect."
+status = "implemented"
+impl_files = ["game/restrictions.rs:278", "game/restrictions.rs:290", "types/ability.rs:2763"]
 test_files = []
-notes = ""
+notes = "ActivationRestriction variants encode activation instructions. Evaluated in activation_restriction_applies()."
 
 [cr_602_1c]
 rule = "602.1c"
 text = "An activated ability is the only kind of ability that can be activated. If an object or rule refers to activating an ability without specifying what kind, it must be referring to an activated ability."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Definitional rule. AbilityKind::Activated is the only kind dispatched through handle_activate_ability()."
 
 [cr_602_1d]
 rule = "602.1d"
-text = "Previously, the action of using an activated ability was referred to on cards as “playing” that ability. Cards that were printed with that text have received errata in the Oracle card reference so they now refer to “activating” that ability."
-status = "missing"
+text = "Previously, the action of using an activated ability was referred to on cards as \"playing\" that ability. Cards that were printed with that text have received errata in the Oracle card reference so they now refer to \"activating\" that ability."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Errata/terminology rule only — no engine logic required."
 
 [cr_602_1e]
 rule = "602.1e"
-text = "If a spell or ability that refers to the “activation cost” of an ability modifies how a player may pay that cost, that modification applies to the total cost of that ability, even if that cost is increased and/or decreased by other effects. See rules 602.2b and 601.2f."
-status = "missing"
-impl_files = []
+text = "If a spell or ability that refers to the \"activation cost\" of an ability modifies how a player may pay that cost, that modification applies to the total cost of that ability, even if that cost is increased and/or decreased by other effects. See rules 602.2b and 601.2f."
+status = "implemented"
+impl_files = ["game/casting.rs:1844", "game/casting_costs.rs:264"]
 test_files = []
-notes = ""
+notes = "apply_cost_reduction() and casting_costs.rs apply cost modifications to total ability cost."
 
 [cr_602_2]
 rule = "602.2"
-text = "To activate an ability is to put it onto the stack and pay its costs, so that it will eventually resolve and have its effect. Only an object’s controller (or its owner, if it doesn’t have a controller) can activate its activated ability unless the object specifically says otherwise. Activating an ability follows the steps listed below, in order. If, at any point during the activation of an ability, a player is unable to comply with any of those steps, the activation is illegal; the game returns to the moment before that ability started to be activated (see rule 732, “Handling Illegal Actions”). Announcements and payments can’t be altered after they’ve been made."
+text = "To activate an ability is to put it onto the stack and pay its costs, so that it will eventually resolve and have its effect. Only an object's controller (or its owner, if it doesn't have a controller) can activate its activated ability unless the object specifically says otherwise. Activating an ability follows the steps listed below, in order. If, at any point during the activation of an ability, a player is unable to comply with any of those steps, the activation is illegal; the game returns to the moment before that ability started to be activated (see rule 732, \"Handling Illegal Actions\"). Announcements and payments can't be altered after they've been made."
 status = "implemented"
 impl_files = ["game/casting.rs:1606", "game/casting.rs:1621"]
 test_files = []
@@ -62,7 +62,7 @@ notes = ""
 
 [cr_602_2a]
 rule = "602.2a"
-text = "The player announces that they are activating the ability. If an activated ability is being activated from a hidden zone, the card that has that ability is revealed (see rule 701.20a). That ability is created on the stack as an object that’s not a card. It becomes the topmost object on the stack. It has the text of the ability that created it, and no other characteristics. Its controller is the player who activated the ability. The ability remains on the stack until it’s countered, it resolves, or an effect moves it elsewhere."
+text = "The player announces that they are activating the ability. If an activated ability is being activated from a hidden zone, the card that has that ability is revealed (see rule 701.20a). That ability is created on the stack as an object that's not a card. It becomes the topmost object on the stack. It has the text of the ability that created it, and no other characteristics. Its controller is the player who activated the ability. The ability remains on the stack until it's countered, it resolves, or an effect moves it elsewhere."
 status = "implemented"
 impl_files = ["game/casting.rs:1607", "game/planeswalker.rs:61", "types/game_state.rs:467"]
 test_files = []
@@ -70,7 +70,7 @@ notes = ""
 
 [cr_602_2b]
 rule = "602.2b"
-text = "The remainder of the process for activating an ability is identical to the process for casting a spell listed in rules 601.2b–i. Those rules apply to activating an ability just as they apply to casting a spell. An activated ability’s analog to a spell’s mana cost (as referenced in rule 601.2f) is its activation cost."
+text = "The remainder of the process for activating an ability is identical to the process for casting a spell listed in rules 601.2b–i. Those rules apply to activating an ability just as they apply to casting a spell. An activated ability's analog to a spell's mana cost (as referenced in rule 601.2f) is its activation cost."
 status = "implemented"
 impl_files = ["game/ability_utils.rs:83", "game/casting.rs:1652", "game/casting_costs.rs:264"]
 test_files = []
@@ -78,39 +78,39 @@ notes = ""
 
 [cr_602_3]
 rule = "602.3"
-text = "Some abilities specify that one of their controller’s opponents does something the controller would normally do while it’s being activated, such as choose a mode or choose targets. In these cases, the opponent does so when the ability’s controller normally would do so."
+text = "Some abilities specify that one of their controller's opponents does something the controller would normally do while it's being activated, such as choose a mode or choose targets. In these cases, the opponent does so when the ability's controller normally would do so."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Opponent-makes-choices-during-activation not yet implemented."
 
 [cr_602_3a]
 rule = "602.3a"
-text = "If there is more than one opponent who could make such a choice, the ability’s controller decides which of those opponents will make the choice."
+text = "If there is more than one opponent who could make such a choice, the ability's controller decides which of those opponents will make the choice."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Depends on CR 602.3 implementation."
 
 [cr_602_3b]
 rule = "602.3b"
-text = "If the ability instructs its controller and another player to do something at the same time as the ability is being activated, the ability’s controller goes first, then the other player. This is an exception to rule 101.4."
+text = "If the ability instructs its controller and another player to do something at the same time as the ability is being activated, the ability's controller goes first, then the other player. This is an exception to rule 101.4."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Simultaneous-activation-announcement ordering not modeled."
 
 [cr_602_4]
 rule = "602.4"
-text = "Activating an ability that alters costs won’t affect spells and abilities that are already on the stack."
-status = "missing"
-impl_files = []
+text = "Activating an ability that alters costs won't affect spells and abilities that are already on the stack."
+status = "implemented"
+impl_files = ["game/casting.rs:593", "game/casting_costs.rs:1280"]
 test_files = []
-notes = ""
+notes = "Same as CR 601.7 — cost modifiers are locked-in per activation; existing stack entries unaffected."
 
 [cr_602_5]
 rule = "602.5"
-text = "A player can’t begin to activate an ability that’s prohibited from being activated."
+text = "A player can't begin to activate an ability that's prohibited from being activated."
 status = "implemented"
 impl_files = ["game/restrictions.rs:259", "game/restrictions.rs:401", "game/restrictions.rs:576"]
 test_files = []
@@ -118,7 +118,7 @@ notes = ""
 
 [cr_602_5a]
 rule = "602.5a"
-text = "A creature’s activated ability with the tap symbol ({T}) or the untap symbol ({Q}) in its activation cost can’t be activated unless the creature has been under its controller’s control since the start of their most recent turn. Ignore this rule for creatures with haste (see rule 702.10)."
+text = "A creature's activated ability with the tap symbol ({T}) or the untap symbol ({Q}) in its activation cost can't be activated unless the creature has been under its controller's control since the start of their most recent turn. Ignore this rule for creatures with haste (see rule 702.10)."
 status = "implemented"
 impl_files = ["game/mana_sources.rs:103", "game/mana_sources.rs:128"]
 test_files = []
@@ -126,7 +126,7 @@ notes = ""
 
 [cr_602_5b]
 rule = "602.5b"
-text = "If an activated ability has a restriction on its use (for example, “Activate only once each turn”), the restriction continues to apply to that object even if its controller changes."
+text = "If an activated ability has a restriction on its use (for example, \"Activate only once each turn\"), the restriction continues to apply to that object even if its controller changes."
 status = "implemented"
 impl_files = ["game/restrictions.rs:278", "game/restrictions.rs:311", "game/restrictions.rs:320", "game/restrictions.rs:329"]
 test_files = []
@@ -134,15 +134,15 @@ notes = ""
 
 [cr_602_5c]
 rule = "602.5c"
-text = "If an object acquires an activated ability with a restriction on its use from another object, that restriction applies only to that ability as acquired from that object. It doesn’t apply to other, identically worded abilities."
+text = "If an object acquires an activated ability with a restriction on its use from another object, that restriction applies only to that ability as acquired from that object. It doesn't apply to other, identically worded abilities."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Restriction scoping when ability is granted from another object not explicitly modeled."
 
 [cr_602_5d]
 rule = "602.5d"
-text = "Activated abilities that read “Activate only as a sorcery” mean the player must follow the timing rules for casting a sorcery spell, though the ability isn’t actually a sorcery. The player doesn’t actually need to have a sorcery card that they could cast."
+text = "Activated abilities that read \"Activate only as a sorcery\" mean the player must follow the timing rules for casting a sorcery spell, though the ability isn't actually a sorcery. The player doesn't actually need to have a sorcery card that they could cast."
 status = "implemented"
 impl_files = ["game/restrictions.rs:300"]
 test_files = []
@@ -150,8 +150,8 @@ notes = ""
 
 [cr_602_5e]
 rule = "602.5e"
-text = "Activated abilities that read “Activate only as an instant” mean the player must follow the timing rules for casting an instant spell, though the ability isn’t actually an instant. The player doesn’t actually need to have an instant card that they could cast."
-status = "missing"
-impl_files = []
+text = "Activated abilities that read \"Activate only as an instant\" mean the player must follow the timing rules for casting an instant spell, though the ability isn't actually an instant. The player doesn't actually need to have an instant card that they could cast."
+status = "implemented"
+impl_files = ["game/restrictions.rs:302"]
 test_files = []
-notes = ""
+notes = "ActivationRestriction::AsInstant => true in activation_restriction_applies() allows activation at instant speed (any time player has priority)."

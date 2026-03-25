@@ -7,42 +7,42 @@ title = "Name"
 [cr_201_1]
 rule = "201.1"
 text = "The name of a card is printed on its upper left corner."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/card.rs:19", "game/game_object.rs:288"]
 test_files = []
-notes = ""
+notes = "CardFace.name stores the card's name. GameObject.name mirrors it as a characteristic."
 
 [cr_201_2]
 rule = "201.2"
-text = "A card’s name is always considered to be the English version of its name, regardless of printed language."
-status = "missing"
-impl_files = []
+text = "A card's name is always considered to be the English version of its name, regardless of printed language."
+status = "implemented"
+impl_files = ["database/synthesis.rs:1"]
 test_files = []
-notes = ""
+notes = "Card data is sourced from MTGJSON English Oracle text only. No localization layer exists — all names are canonical English."
 
 [cr_201_2a]
 rule = "201.2a"
-text = "Two or more objects have the same name if they have at least one name in common, even if one or more of those objects have additional names. An object with no name doesn’t have the same name as any other object, including another object with no name."
-status = "missing"
-impl_files = []
+text = "Two or more objects have the same name if they have at least one name in common, even if one or more of those objects have additional names. An object with no name doesn't have the same name as any other object, including another object with no name."
+status = "implemented"
+impl_files = ["game/filter.rs:253", "game/sba.rs:327"]
 test_files = []
-notes = ""
+notes = "FilterProp::SameName checks obj.name against a reference. check_legend_rule groups permanents by name for the legend SBA."
 
 [cr_201_2b]
 rule = "201.2b"
 text = "Some spells and abilities refer to two or more objects with different names. Those objects have different names only if each of them has at least one name and no two objects in that group have a name in common."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/filter.rs:335"]
 test_files = []
-notes = ""
+notes = "filter.rs matches objects whose name differs from all controlled battlefield objects matching the inner filter."
 
 [cr_201_2c]
 rule = "201.2c"
 text = "Some spells or abilities check if one object has a different name than a second object or group of objects. The first object has a different name than those objects if the first object has at least one name and has no names in common with any of the other objects, even if one or more of the other objects have no names. If the first object has no name, it does not have a different name than any of the other objects, even if those other objects themselves have names."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["game/filter.rs:335"]
 test_files = []
-notes = ""
+notes = "DifferentName filter is implemented, but the edge case of objects with no name (tokens with no name) may not be fully handled."
 
 [cr_201_3]
 rule = "201.3"
@@ -50,15 +50,15 @@ text = "Some cards with different English names are treated as though they had t
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Interchangeable names (e.g., Kongming/Zhuge Jin pairs) are not implemented in the engine."
 
 [cr_201_3a]
 rule = "201.3a"
-text = "For the purposes of all rules, abilities, and effects that refer to a card’s name, objects with interchangeable names have the same name. (See rules 201.2a–b.)"
+text = "For the purposes of all rules, abilities, and effects that refer to a card's name, objects with interchangeable names have the same name. (See rules 201.2a–b.)"
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Not implemented; interchangeable name pairs not modeled."
 
 [cr_201_3b]
 rule = "201.3b"
@@ -66,23 +66,23 @@ text = "For the purposes of deck construction and format legality, cards with in
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Deck construction singleton checks do not account for interchangeable names."
 
 [cr_201_3c]
 rule = "201.3c"
-text = "If a card has later printings with interchangeable names, the later printings will have an interchangeable names indicator in the bottom left-hand corner referring to the original printing’s three-letter set code and collector number (see rule 213.1d)."
+text = "If a card has later printings with interchangeable names, the later printings will have an interchangeable names indicator in the bottom left-hand corner referring to the original printing's three-letter set code and collector number (see rule 213.1d)."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Physical card printing metadata not modeled in engine."
 
 [cr_201_4]
 rule = "201.4"
-text = "If an effect instructs a player to choose a card name, the player must choose the name of a card in the Oracle card reference. (See rule 108.1.) A player may not choose the name of a token unless it’s also the name of a card."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "If an effect instructs a player to choose a card name, the player must choose the name of a card in the Oracle card reference. (See rule 108.1.) A player may not choose the name of a token unless it's also the name of a card."
+status = "implemented"
+impl_files = ["game/effects/choose.rs:143", "game/engine.rs:2074"]
+test_files = ["game/effects/choose.rs:304"]
+notes = "ChoiceType::CardName sends empty options list; frontend supplies valid card names from the Oracle card database. The engine validates choices in handle_named_choice."
 
 [cr_201_4a]
 rule = "201.4a"
@@ -90,11 +90,11 @@ text = "If a player is instructed to choose a card name with certain characteris
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Characteristic-constrained card name choices (e.g., 'choose a creature card name') are not validated server-side; relying on frontend filtering."
 
 [cr_201_4b]
 rule = "201.4b"
-text = "If a player wants to choose the name of a split card, the player must choose the name of one of its halves, but not both. (See rule 709.) If a player is instructed to choose a card name with certain characteristics, use only that half’s characteristics to determine if this name can be chosen."
+text = "If a player wants to choose the name of a split card, the player must choose the name of one of its halves, but not both. (See rule 709.) If a player is instructed to choose a card name with certain characteristics, use only that half's characteristics to determine if this name can be chosen."
 status = "implemented"
 impl_files = ["parser/oracle_util.rs:1024"]
 test_files = []
@@ -102,11 +102,11 @@ notes = ""
 
 [cr_201_4c]
 rule = "201.4c"
-text = "If a player wants to choose a flip card’s alternative name, the player may do so. (See rule 710.) If a player is instructed to choose a card name with certain characteristics, use the card’s characteristics as modified by its alternative characteristics to determine if this name can be chosen."
+text = "If a player wants to choose a flip card's alternative name, the player may do so. (See rule 710.) If a player is instructed to choose a card name with certain characteristics, use the card's characteristics as modified by its alternative characteristics to determine if this name can be chosen."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Flip cards are modeled with CardLayout::Flip but card name choice does not explicitly handle the flipped alternative name."
 
 [cr_201_4d]
 rule = "201.4d"
@@ -114,7 +114,7 @@ text = "If a player wants to choose the name of the back face of a double-faced 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "DFC back face names are not explicitly enumerated for card name choices."
 
 [cr_201_4e]
 rule = "201.4e"
@@ -122,15 +122,15 @@ text = "If a player wants to choose the name of the combined back face of a meld
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Meld combined back face names not explicitly handled in card name choices."
 
 [cr_201_4f]
 rule = "201.4f"
-text = "If a player wants to choose an adventurer card’s alternative name, the player may do so. (See rule 715.) If a player is instructed to choose a card name with certain characteristics, use the card’s characteristics as modified by its alternative characteristics to determine if this name can be chosen."
+text = "If a player wants to choose an adventurer card's alternative name, the player may do so. (See rule 715.) If a player is instructed to choose a card name with certain characteristics, use the card's characteristics as modified by its alternative characteristics to determine if this name can be chosen."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Adventure card alternative names not explicitly handled in card name choices."
 
 [cr_201_4g]
 rule = "201.4g"
@@ -138,23 +138,23 @@ text = "Some cards have interchangeable names (see rule 201.3). For all game pur
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Interchangeable names not implemented."
 
 [cr_201_5]
 rule = "201.5"
-text = "Text that refers to the object it’s on by name means just that particular object and not any other objects with that name, regardless of any name changes caused by game effects."
-status = "missing"
-impl_files = []
+text = "Text that refers to the object it's on by name means just that particular object and not any other objects with that name, regardless of any name changes caused by game effects."
+status = "implemented"
+impl_files = ["parser/oracle_util.rs:1024", "game/trigger_matchers.rs:1"]
 test_files = []
-notes = ""
+notes = "Self-referential Oracle text uses oracle_util.rs helpers to detect when a card's own name appears in its text, which is treated as a reference to the specific object."
 
 [cr_201_5a]
 rule = "201.5a"
-text = "If an ability’s effect grants another ability to an object, and that second ability refers to that first ability’s source by name, the name refers only to the specific object which is that first ability’s source. The second ability does not refer to any other object with the same name as the first ability’s source. However, if the second ability also moved the first ability’s source to a different public zone, the name refers to the object the source became in its new zone. This is also true if the second ability is copied onto a new object."
-status = "missing"
-impl_files = []
+text = "If an ability's effect grants another ability to an object, and that second ability refers to that first ability's source by name, the name refers only to the specific object which is that first ability's source. The second ability does not refer to any other object with the same name as the first ability's source. However, if the second ability also moved the first ability's source to a different public zone, the name refers to the object the source became in its new zone. This is also true if the second ability is copied onto a new object."
+status = "partial"
+impl_files = ["game/trigger_matchers.rs:1"]
 test_files = []
-notes = ""
+notes = "Self-referential granted abilities are handled via source_id tracking, but edge cases involving copies onto new objects may not be fully implemented."
 
 [cr_201_5b]
 rule = "201.5b"
@@ -162,20 +162,20 @@ text = "If an ability of an object refers to that object by name, and an object 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Name substitution in granted abilities (e.g., copy-catting effects that grant named abilities) not implemented."
 
 [cr_201_5c]
 rule = "201.5c"
-text = "Text printed on some cards refers to that card by a shortened version of its name. Instances of a card’s shortened name used in this manner are treated as though they used the card’s full name."
-status = "missing"
-impl_files = []
+text = "Text printed on some cards refers to that card by a shortened version of its name. Instances of a card's shortened name used in this manner are treated as though they used the card's full name."
+status = "implemented"
+impl_files = ["parser/oracle_util.rs:1024"]
 test_files = []
-notes = ""
+notes = "oracle_util.rs handles cases where a card's Oracle text uses only a shortened first word of the card name as a self-reference."
 
 [cr_201_6]
 rule = "201.6"
-text = "Promotional or alternate-art versions of some cards feature a secondary title bar below the name line. The card’s name as listed in the Oracle card reference is displayed in the secondary title bar, and an alternate name appears in the upper left corner. For the purposes of deck construction, game rules, and effects, these cards have only the card name specified in the secondary title bar. Rules text may also refer to a card’s alternate name; instances of the alternate name that are present in rules text refer to the name specified in the secondary title bar. The alternate name has no effect on game play."
-status = "missing"
-impl_files = []
+text = "Promotional or alternate-art versions of some cards feature a secondary title bar below the name line. The card's name as listed in the Oracle card reference is displayed in the secondary title bar, and an alternate name appears in the upper left corner. For the purposes of deck construction, game rules, and effects, these cards have only the card name specified in the secondary title bar. Rules text may also refer to a card's alternate name; instances of the alternate name that are present in rules text refer to the name specified in the secondary title bar. The alternate name has no effect on game play."
+status = "implemented"
+impl_files = ["types/card.rs:30"]
 test_files = []
-notes = ""
+notes = "CardFace.flavor_name stores the alternate display name. All rules-relevant name lookups use CardFace.name (the Oracle name)."

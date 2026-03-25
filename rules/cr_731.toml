@@ -1,101 +1,101 @@
-# Comprehensive Rules Section 731: Controlling Another Player
+# Comprehensive Rules Section 731: Taking Shortcuts
 
 [_meta]
 section = 731
-title = "Controlling Another Player"
+title = "Taking Shortcuts"
 
 [cr_731_1]
 rule = "731.1"
 text = "When playing a game, players typically make use of mutually understood shortcuts rather than explicitly identifying each game choice (either taking an action or passing priority) a player makes."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Shortcut rules describe informal gameplay procedures between human players; not applicable to digital engine."
 
 [cr_731_1a]
 rule = "731.1a"
 text = "The rules for taking shortcuts are largely informal. As long as each player in the game understands the intent of each other player, any shortcut system they use is acceptable."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Informal player shortcut rules; not applicable to digital engine."
 
 [cr_731_1b]
 rule = "731.1b"
-text = "Occasionally the game gets into a state in which a set of actions could be repeated indefinitely (thus creating a “loop”). In that case, the shortcut rules can be used to determine how many times those actions are repeated without having to actually perform them, and how the loop is broken."
-status = "missing"
+text = "Occasionally the game gets into a state in which a set of actions could be repeated indefinitely (thus creating a \"loop\"). In that case, the shortcut rules can be used to determine how many times those actions are repeated without having to actually perform them, and how the loop is broken."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Loop shortcut rules for human players; digital engine handles via game state progression."
 
 [cr_731_1c]
 rule = "731.1c"
 text = "Tournaments use a modified version of the rules governing shortcuts and loops. These rules are covered in the Magic: The Gathering Tournament Rules (found at WPN.wizards.com/en/rules-documents). Whenever the Tournament Rules contradict these rules during a tournament, the Tournament Rules take precedence."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Tournament rules guidance; not applicable to digital engine."
 
 [cr_731_2]
 rule = "731.2"
 text = "Taking a shortcut follows the following procedure."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Shortcut procedure for human players; not applicable to digital engine."
 
 [cr_731_2a]
 rule = "731.2a"
-text = "At any point in the game, the player with priority may suggest a shortcut by describing a sequence of game choices, for all players, that may be legally taken based on the current game state and the predictable results of the sequence of choices. This sequence may be a non-repetitive series of choices, a loop that repeats a specified number of times, multiple loops, or nested loops, and may even cross multiple turns. It can’t include conditional actions, where the outcome of a game event determines the next action a player takes. The ending point of this sequence must be a place where a player has priority, though it need not be the player proposing the shortcut."
-status = "missing"
+text = "At any point in the game, the player with priority may suggest a shortcut by describing a sequence of game choices, for all players, that may be legally taken based on the current game state and the predictable results of the sequence of choices. This sequence may be a non-repetitive series of choices, a loop that repeats a specified number of times, multiple loops, or nested loops, and may even cross multiple turns. It can't include conditional actions, where the outcome of a game event determines the next action a player takes. The ending point of this sequence must be a place where a player has priority, though it need not be the player proposing the shortcut."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Shortcut proposal rules for human players; not applicable to digital engine."
 
 [cr_731_2b]
 rule = "731.2b"
-text = "Each other player, in turn order starting after the player who suggested the shortcut, may either accept the proposed sequence, or shorten it by naming a place where they will make a game choice that’s different than what’s been proposed. (The player doesn’t need to specify at this time what the new choice will be.) This place becomes the new ending point of the proposed sequence."
-status = "missing"
+text = "Each other player, in turn order starting after the player who suggested the shortcut, may either accept the proposed sequence, or shorten it by naming a place where they will make a game choice that's different than what's been proposed. (The player doesn't need to specify at this time what the new choice will be.) This place becomes the new ending point of the proposed sequence."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Shortcut negotiation rules for human players; not applicable to digital engine."
 
 [cr_731_2c]
 rule = "731.2c"
 text = "Once the last player has either accepted or shortened the shortcut proposal, the shortcut is taken. The game advances to the last proposed ending point, with all game choices contained in the shortcut proposal having been taken. If the shortcut was shortened from the original proposal, the player who now has priority must make a different game choice than what was originally proposed for that player."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Shortcut execution rules for human players; not applicable to digital engine."
 
 [cr_731_3]
 rule = "731.3"
 text = "Sometimes a loop can be fragmented, meaning that each player involved in the loop performs an independent action that results in the same game state being reached multiple times. If that happens, the active player (or, if the active player is not involved in the loop, the first player in turn order who is involved) must then make a different game choice so the loop does not continue."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Fragmented loop resolution for human players; not applicable to digital engine."
 
 [cr_731_4]
 rule = "731.4"
 text = "If a loop contains only mandatory actions, the game is a draw. (See rules 104.4b and 104.4f.)"
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Mandatory loop draw rule; digital engine does not detect infinite loops automatically."
 
 [cr_731_5]
 rule = "731.5"
 text = "No player can be forced to perform an action that would end a loop other than actions called for by objects involved in the loop."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Loop-breaking constraint for human players; not applicable to digital engine."
 
 [cr_731_6]
 rule = "731.6"
-text = "If a loop contains an effect that says “[A] unless [B],” where [A] and [B] are each actions, no player can be forced to perform [B] to break the loop. If no player chooses to perform [B], the loop will continue as though [A] were mandatory."
-status = "missing"
+text = "If a loop contains an effect that says \"[A] unless [B],\" where [A] and [B] are each actions, no player can be forced to perform [B] to break the loop. If no player chooses to perform [B], the loop will continue as though [A] were mandatory."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Unless-loop constraint for human players; not applicable to digital engine."

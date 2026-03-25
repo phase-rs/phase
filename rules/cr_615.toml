@@ -6,63 +6,63 @@ title = "Prevention Effects"
 
 [cr_615_1]
 rule = "615.1"
-text = "Some continuous effects are prevention effects. Like replacement effects (see rule 614), prevention effects apply continuously as events happen—they aren’t locked in ahead of time. Such effects watch for a damage event that would happen and completely or partially prevent the damage that would be dealt. They act like “shields” around whatever they’re affecting."
-status = "missing"
-impl_files = []
+text = "Some continuous effects are prevention effects. Like replacement effects (see rule 614), prevention effects apply continuously as events happen—they aren't locked in ahead of time. Such effects watch for a damage event that would happen and completely or partially prevent the damage that would be dealt. They act like \"shields\" around whatever they're affecting."
+status = "implemented"
+impl_files = ["game/replacement.rs:164", "game/effects/prevent_damage.rs:1", "types/ability.rs:156", "types/replacements.rs:19"]
 test_files = []
-notes = ""
+notes = "Prevention effects implemented as a special case of replacement effects with ShieldKind::Prevention."
 
 [cr_615_1a]
 rule = "615.1a"
-text = "Effects that use the word “prevent” are prevention effects. Prevention effects use “prevent” to indicate what damage will not be dealt."
-status = "missing"
-impl_files = []
+text = "Effects that use the word \"prevent\" are prevention effects. Prevention effects use \"prevent\" to indicate what damage will not be dealt."
+status = "implemented"
+impl_files = ["game/effects/prevent_damage.rs:1", "parser/oracle_replacement.rs:191"]
 test_files = []
-notes = ""
+notes = "prevent_damage.rs and oracle_replacement.rs parse 'prevent' text."
 
 [cr_615_2]
 rule = "615.2"
 text = "Many prevention effects apply to damage from a source. See rule 609.7."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/replacement.rs:641", "types/ability.rs:156"]
 test_files = []
-notes = ""
+notes = "CombatDamageScope and source filtering implemented in damage prevention."
 
 [cr_615_3]
 rule = "615.3"
-text = "There are no special restrictions on casting a spell or activating an ability that generates a prevention effect. Such effects last until they’re used up or their duration has expired."
-status = "missing"
-impl_files = []
+text = "There are no special restrictions on casting a spell or activating an ability that generates a prevention effect. Such effects last until they're used up or their duration has expired."
+status = "implemented"
+impl_files = ["game/replacement.rs:164"]
 test_files = []
-notes = ""
+notes = "Prevention shields created freely; consumed when damage is prevented."
 
 [cr_615_4]
 rule = "615.4"
-text = "Prevention effects must exist before the appropriate damage event occurs—they can’t “go back in time” and change something that’s already happened. Spells or abilities that generate these effects are often cast or activated in response to whatever would produce the event and thus resolve before that event would occur."
-status = "missing"
-impl_files = []
+text = "Prevention effects must exist before the appropriate damage event occurs—they can't \"go back in time\" and change something that's already happened. Spells or abilities that generate these effects are often cast or activated in response to whatever would produce the event and thus resolve before that event would occur."
+status = "implemented"
+impl_files = ["game/replacement.rs:1364"]
 test_files = []
-notes = ""
+notes = "Prevention effects are checked prospectively via the replacement pipeline."
 
 [cr_615_5]
 rule = "615.5"
 text = "Some prevention effects also include an additional effect, which may refer to the amount of damage that was prevented. The prevention takes place at the time the original event would have happened; the rest of the effect takes place immediately afterward."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/replacement.rs:234", "game/effects/prevent_damage.rs:1"]
 test_files = []
-notes = ""
+notes = "DamagePrevented event emitted after prevention; follow-up effects can reference prevented_amount."
 
 [cr_615_6]
 rule = "615.6"
-text = "If damage that would be dealt is prevented, it never happens. A modified event may occur instead, which may in turn trigger abilities. Note that the modified event may contain instructions that can’t be carried out, in which case the impossible instruction is simply ignored."
-status = "missing"
-impl_files = []
+text = "If damage that would be dealt is prevented, it never happens. A modified event may occur instead, which may in turn trigger abilities. Note that the modified event may contain instructions that can't be carried out, in which case the impossible instruction is simply ignored."
+status = "implemented"
+impl_files = ["game/replacement.rs:194", "game/replacement.rs:213"]
 test_files = []
-notes = ""
+notes = "Prevented damage returns ApplyResult::Prevented, blocking the damage event entirely."
 
 [cr_615_7]
 rule = "615.7"
-text = "Some prevention effects generated by the resolution of a spell or ability refer to a specific amount of damage—for example, “Prevent the next 3 damage that would be dealt to any target this turn.” These work like shields. Each 1 damage that would be dealt to the “shielded” permanent or player is prevented. Preventing 1 damage reduces the remaining shield by 1. If damage would be dealt to the shielded permanent or player by two or more applicable sources at the same time, the player or the controller of the permanent chooses which damage the shield prevents. Once the shield has been reduced to 0, any remaining damage is dealt normally. Such effects count only the amount of damage; the number of events or sources dealing it doesn’t matter."
+text = "Some prevention effects generated by the resolution of a spell or ability refer to a specific amount of damage—for example, \"Prevent the next 3 damage that would be dealt to any target this turn.\" These work like shields. Each 1 damage that would be dealt to the \"shielded\" permanent or player is prevented. Preventing 1 damage reduces the remaining shield by 1. If damage would be dealt to the shielded permanent or player by two or more applicable sources at the same time, the player or the controller of the permanent chooses which damage the shield prevents. Once the shield has been reduced to 0, any remaining damage is dealt normally. Such effects count only the amount of damage; the number of events or sources dealing it doesn't matter."
 status = "implemented"
 impl_files = ["game/replacement.rs:197"]
 test_files = []
@@ -71,55 +71,55 @@ notes = ""
 [cr_615_8]
 rule = "615.8"
 text = "Some prevention effects generated by the resolution of a spell or ability refer to the next time a specific source would deal damage. These effects prevent the next instance of damage from that source, regardless of how much damage that is. Once an instance of damage from that source has been prevented, any subsequent instances of damage that would be dealt by that source are dealt normally."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/replacement.rs:164", "types/ability.rs:182"]
 test_files = []
-notes = ""
+notes = "ShieldKind::Prevention with PreventionAmount::All prevents next instance regardless of amount."
 
 [cr_615_9]
 rule = "615.9"
-text = "Some effects generated by the resolution of a spell or ability prevent damage from a source of a player’s choice with certain properties. When the source would deal damage, the shield rechecks the source’s properties. If the properties no longer match, the damage isn’t prevented or replaced and the shield isn’t used up. See rule 609.7b."
-status = "missing"
-impl_files = []
+text = "Some effects generated by the resolution of a spell or ability prevent damage from a source of a player's choice with certain properties. When the source would deal damage, the shield rechecks the source's properties. If the properties no longer match, the damage isn't prevented or replaced and the shield isn't used up. See rule 609.7b."
+status = "implemented"
+impl_files = ["game/replacement.rs:641", "types/ability.rs:156"]
 test_files = []
-notes = ""
+notes = "Source property rechecking in dealt_damage_matcher() for source-filtered prevention shields."
 
 [cr_615_10]
 rule = "615.10"
-text = "Some prevention effects generated by static abilities refer to a specific amount of damage—for example, “If a source would deal damage to you, prevent 1 of that damage.” Such an effect prevents only the indicated amount of damage in any applicable damage event at any given time. It will apply separately to damage from other applicable events that would happen at the same time, or at a different time."
-status = "missing"
-impl_files = []
+text = "Some prevention effects generated by static abilities refer to a specific amount of damage—for example, \"If a source would deal damage to you, prevent 1 of that damage.\" Such an effect prevents only the indicated amount of damage in any applicable damage event at any given time. It will apply separately to damage from other applicable events that would happen at the same time, or at a different time."
+status = "implemented"
+impl_files = ["game/replacement.rs:164", "game/static_abilities.rs:168"]
 test_files = []
-notes = ""
+notes = "Static prevention effects with fixed amounts handled through the general prevention pipeline."
 
 [cr_615_11]
 rule = "615.11"
 text = "Some prevention effects prevent the next N damage that would be dealt to each of a number of untargeted creatures. Such an effect creates a prevention shield for each applicable creature when the spell or ability that generates that effect resolves."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/effects/prevent_damage.rs:1", "game/replacement.rs:164"]
 test_files = []
-notes = ""
+notes = "Multi-target prevention effects create individual shields per target in prevent_damage.rs."
 
 [cr_615_12]
 rule = "615.12"
-text = "Some effects state that damage “can’t be prevented.” If unpreventable damage would be dealt, any applicable prevention effects are still applied to it. Those effects won’t prevent any damage, but any additional effects they have will take place. Existing damage prevention shields won’t be reduced by damage that can’t be prevented."
-status = "missing"
-impl_files = []
+text = "Some effects state that damage \"can't be prevented.\" If unpreventable damage would be dealt, any applicable prevention effects are still applied to it. Those effects won't prevent any damage, but any additional effects they have will take place. Existing damage prevention shields won't be reduced by damage that can't be prevented."
+status = "implemented"
+impl_files = ["game/effects/deal_damage.rs:184", "types/ability.rs:605"]
 test_files = []
-notes = ""
+notes = "Unpreventable damage tracked via DamageRestriction. Prevention pipeline bypassed for unpreventable damage."
 
 [cr_615_12a]
 rule = "615.12a"
-text = "A prevention effect is applied to any particular unpreventable damage event just once. It won’t invoke itself repeatedly trying to prevent that damage."
-status = "missing"
-impl_files = []
+text = "A prevention effect is applied to any particular unpreventable damage event just once. It won't invoke itself repeatedly trying to prevent that damage."
+status = "implemented"
+impl_files = ["types/replacements.rs:12"]
 test_files = []
-notes = ""
+notes = "CR 614.5 non-recursive rule applies here: replacement effects can't invoke themselves repeatedly."
 
 [cr_615_13]
 rule = "615.13"
 text = "Some triggered abilities trigger when damage that would be dealt is prevented. Such an ability triggers each time a prevention effect is applied to one or more simultaneous damage events and prevents some or all of that damage."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/replacement.rs:234", "types/events.rs:111"]
 test_files = []
-notes = ""
+notes = "DamagePrevented GameEvent emitted when prevention occurs; trigger_matchers.rs can match on it."

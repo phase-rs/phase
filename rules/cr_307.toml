@@ -6,7 +6,7 @@ title = "Sorceries"
 
 [cr_307_1]
 rule = "307.1"
-text = "A player who has priority may cast a sorcery card from their hand during a main phase of their turn when the stack is empty. Casting a sorcery as a spell uses the stack. (See rule 601, “Casting Spells.”)"
+text = "A player who has priority may cast a sorcery card from their hand during a main phase of their turn when the stack is empty. Casting a sorcery as a spell uses the stack. (See rule 601, \"Casting Spells.\")"
 status = "implemented"
 impl_files = ["game/restrictions.rs:35", "game/restrictions.rs:364", "game/restrictions.rs:841"]
 test_files = []
@@ -14,23 +14,23 @@ notes = ""
 
 [cr_307_2]
 rule = "307.2"
-text = "When a sorcery spell resolves, the actions stated in its rules text are followed. Then it’s put into its owner’s graveyard."
-status = "missing"
-impl_files = []
+text = "When a sorcery spell resolves, the actions stated in its rules text are followed. Then it's put into its owner's graveyard."
+status = "implemented"
+impl_files = ["game/stack.rs:110", "game/stack.rs:259"]
 test_files = []
-notes = ""
+notes = "is_permanent_type() does not include CoreType::Sorcery; sorcery spells resolve to Zone::Graveyard (CR 608.2n path in stack.rs:110)."
 
 [cr_307_3]
 rule = "307.3"
-text = "Sorcery subtypes are always a single word and are listed after a long dash: “Sorcery — Arcane.” Each word after the dash is a separate subtype. The set of sorcery subtypes is the same as the set of instant subtypes; these subtypes are called spell types. Sorceries may have multiple subtypes. See rule 205.3k for the complete list of spell types."
-status = "missing"
-impl_files = []
+text = "Sorcery subtypes are always a single word and are listed after a long dash: \"Sorcery — Arcane.\" Each word after the dash is a separate subtype. The set of sorcery subtypes is the same as the set of instant subtypes; these subtypes are called spell types. Sorceries may have multiple subtypes. See rule 205.3k for the complete list of spell types."
+status = "implemented"
+impl_files = ["types/card_type.rs:110"]
 test_files = []
-notes = ""
+notes = "Spell subtypes stored as strings in CardType.subtypes."
 
 [cr_307_4]
 rule = "307.4"
-text = "Sorceries can’t enter the battlefield. If a sorcery would enter the battlefield, it remains in its previous zone instead."
+text = "Sorceries can't enter the battlefield. If a sorcery would enter the battlefield, it remains in its previous zone instead."
 status = "implemented"
 impl_files = ["game/zones.rs:53"]
 test_files = []
@@ -38,16 +38,16 @@ notes = ""
 
 [cr_307_5]
 rule = "307.5"
-text = "If a spell, ability, or effect states that a player can do something only “any time they could cast a sorcery” or “only as a sorcery,” it means only that the player must have priority, it must be during the main phase of their turn, and the stack must be empty. The player doesn’t need to have a sorcery card they could cast. Effects that would preclude that player from casting a sorcery spell don’t affect the player’s capability to perform that action (unless the action is actually casting a sorcery spell)."
-status = "missing"
-impl_files = []
+text = "If a spell, ability, or effect states that a player can do something only \"any time they could cast a sorcery\" or \"only as a sorcery,\" it means only that the player must have priority, it must be during the main phase of their turn, and the stack must be empty. The player doesn't need to have a sorcery card they could cast. Effects that would preclude that player from casting a sorcery spell don't affect the player's capability to perform that action (unless the action is actually casting a sorcery spell)."
+status = "implemented"
+impl_files = ["game/restrictions.rs:841"]
 test_files = []
-notes = ""
+notes = "is_sorcery_speed_window() checks WaitingFor::Priority, active player, main phase, and empty stack — matching the CR 307.5 definition."
 
 [cr_307_5a]
 rule = "307.5a"
-text = "Similarly, if an effect checks to see if a spell was cast “any time a sorcery couldn’t have been cast,” it’s checking only whether the spell’s controller cast it without having priority, during a phase other than their main phase, or while another object was on the stack."
-status = "missing"
-impl_files = []
+text = "Similarly, if an effect checks to see if a spell was cast \"any time a sorcery couldn't have been cast,\" it's checking only whether the spell's controller cast it without having priority, during a phase other than their main phase, or while another object was on the stack."
+status = "implemented"
+impl_files = ["game/restrictions.rs:841"]
 test_files = []
-notes = ""
+notes = "is_sorcery_speed_window() encapsulates the sorcery window conditions; its negation represents 'any time a sorcery couldn't have been cast'."

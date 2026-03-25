@@ -6,71 +6,71 @@ title = "Creatures"
 
 [cr_302_1]
 rule = "302.1"
-text = "A player who has priority may cast a creature card from their hand during a main phase of their turn when the stack is empty. Casting a creature as a spell uses the stack. (See rule 601, “Casting Spells.”)"
-status = "missing"
-impl_files = []
+text = "A player who has priority may cast a creature card from their hand during a main phase of their turn when the stack is empty. Casting a creature as a spell uses the stack. (See rule 601, \"Casting Spells.\")"
+status = "implemented"
+impl_files = ["game/restrictions.rs:35", "game/casting.rs:1"]
 test_files = []
-notes = ""
+notes = "Sorcery-speed restriction enforced by is_sorcery_speed_window() in restrictions.rs. Creature cards use the stack via the CastSpell action path."
 
 [cr_302_2]
 rule = "302.2"
 text = "When a creature spell resolves, its controller puts it onto the battlefield under their control."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/stack.rs:106", "game/stack.rs:259"]
 test_files = []
-notes = ""
+notes = "is_permanent_type() in stack.rs includes CoreType::Creature; creature spells resolve to Zone::Battlefield."
 
 [cr_302_3]
 rule = "302.3"
-text = "Creature subtypes are usually a single word long and are listed after a long dash: “Creature — Human Soldier,” “Artifact Creature — Golem,” and so on. Creature subtypes are also called creature types. Creatures may have multiple subtypes. See rule 205.3m for the complete list of creature types."
-status = "missing"
-impl_files = []
+text = "Creature subtypes are usually a single word long and are listed after a long dash: \"Creature — Human Soldier,\" \"Artifact Creature — Golem,\" and so on. Creature subtypes are also called creature types. Creatures may have multiple subtypes. See rule 205.3m for the complete list of creature types."
+status = "implemented"
+impl_files = ["types/card_type.rs:110"]
 test_files = []
-notes = ""
+notes = "Creature subtypes stored as strings in CardType.subtypes. Parser reads multiple subtypes from the type line."
 
 [cr_302_4]
 rule = "302.4"
 text = "Power and toughness are characteristics only creatures have."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/quantity.rs:150"]
 test_files = []
-notes = ""
+notes = "Power/toughness are only meaningful when the object is a creature. CR 208.3 enforcement in quantity.rs checks creature type before returning P/T values."
 
 [cr_302_4a]
 rule = "302.4a"
-text = "A creature’s power is the amount of damage it deals in combat."
-status = "missing"
-impl_files = []
+text = "A creature's power is the amount of damage it deals in combat."
+status = "implemented"
+impl_files = ["game/combat_damage.rs:1"]
 test_files = []
-notes = ""
+notes = "combat_damage.rs uses obj.power to determine combat damage assigned by each creature."
 
 [cr_302_4b]
 rule = "302.4b"
-text = "A creature’s toughness is the amount of damage needed to destroy it."
-status = "missing"
-impl_files = []
+text = "A creature's toughness is the amount of damage needed to destroy it."
+status = "implemented"
+impl_files = ["game/sba.rs:242"]
 test_files = []
-notes = ""
+notes = "check_lethal_damage() in sba.rs compares marked damage against obj.toughness to determine if a creature has been dealt lethal damage."
 
 [cr_302_4c]
 rule = "302.4c"
-text = "To determine a creature’s power and toughness, start with the numbers printed in its lower right corner, then apply any applicable continuous effects. (See rule 613, “Interaction of Continuous Effects.”)"
-status = "missing"
-impl_files = []
+text = "To determine a creature's power and toughness, start with the numbers printed in its lower right corner, then apply any applicable continuous effects. (See rule 613, \"Interaction of Continuous Effects.\")"
+status = "implemented"
+impl_files = ["game/layers.rs:211", "game/layers.rs:219"]
 test_files = []
-notes = ""
+notes = "evaluate_layers() in layers.rs resets P/T from base_power/base_toughness then applies continuous effects (pump, set-PT, CDA) in layer order."
 
 [cr_302_5]
 rule = "302.5"
-text = "Creatures can attack and block. (See rule 508, “Declare Attackers Step,” and rule 509, “Declare Blockers Step.”)"
-status = "missing"
-impl_files = []
+text = "Creatures can attack and block. (See rule 508, \"Declare Attackers Step,\" and rule 509, \"Declare Blockers Step.\")"
+status = "implemented"
+impl_files = ["game/combat.rs:1"]
 test_files = []
-notes = ""
+notes = "combat.rs handles declare-attackers and declare-blockers phases. Creatures are the only object type that can be selected as attackers or blockers."
 
 [cr_302_6]
 rule = "302.6"
-text = "A creature’s activated ability with the tap symbol or the untap symbol in its activation cost can’t be activated unless the creature has been under its controller’s control continuously since their most recent turn began. A creature can’t attack unless it has been under its controller’s control continuously since their most recent turn began. This rule is informally called the “summoning sickness” rule."
+text = "A creature's activated ability with the tap symbol or the untap symbol in its activation cost can't be activated unless the creature has been under its controller's control continuously since their most recent turn began. A creature can't attack unless it has been under its controller's control continuously since their most recent turn began. This rule is informally called the \"summoning sickness\" rule."
 status = "implemented"
 impl_files = ["ai_support/candidates.rs:1222", "game/casting_costs.rs:682", "game/combat.rs:166", "game/combat.rs:583", "game/combat.rs:813", "game/combat.rs:825", "game/derived.rs:12", "game/engine.rs:1211", "game/engine.rs:1212", "game/engine.rs:1254", "game/filter.rs:217", "game/mana_sources.rs:88", "game/mana_sources.rs:103", "game/mana_sources.rs:128", "game/mana_sources.rs:478", "game/restrictions.rs:619", "game/zones.rs:115", "parser/oracle_effect/mod.rs:6718", "parser/oracle_effect/subject.rs:168", "parser/oracle_effect/subject.rs:619", "parser/oracle_target.rs:901", "parser/oracle_target.rs:908", "types/ability.rs:759", "types/actions.rs:113", "types/game_state.rs:255", "types/game_state.rs:561"]
 test_files = []
@@ -78,8 +78,8 @@ notes = ""
 
 [cr_302_7]
 rule = "302.7"
-text = "Damage dealt to a creature by a source with neither wither nor infect is marked on that creature (see rule 120.3). If the total damage marked on that creature is greater than or equal to its toughness, that creature has been dealt lethal damage and is destroyed as a state-based action (see rule 704). All damage marked on a creature is removed when it regenerates (see rule 701.19, “Regenerate”) and during the cleanup step (see rule 514.2)."
-status = "missing"
-impl_files = []
+text = "Damage dealt to a creature by a source with neither wither nor infect is marked on that creature (see rule 120.3). If the total damage marked on that creature is greater than or equal to its toughness, that creature has been dealt lethal damage and is destroyed as a state-based action (see rule 704). All damage marked on a creature is removed when it regenerates (see rule 701.19, \"Regenerate\") and during the cleanup step (see rule 514.2)."
+status = "implemented"
+impl_files = ["game/sba.rs:242", "game/game_object.rs:1", "game/turns.rs:1"]
 test_files = []
-notes = ""
+notes = "check_lethal_damage() in sba.rs checks damage_marked >= toughness. Damage is cleared during cleanup step in turns.rs. Regeneration clears damage via effects/regenerate.rs."

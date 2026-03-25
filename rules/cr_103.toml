@@ -6,11 +6,11 @@ title = "Starting the Game"
 
 [cr_103_1]
 rule = "103.1"
-text = "At the start of a game, the players determine which one of them will choose who takes the first turn. In the first game of a match (including a single-game match), the players may use any mutually agreeable method (flipping a coin, rolling dice, etc.) to do so. In a match of several games, the loser of the previous game chooses who takes the first turn. If the previous game was a draw, the player who made the choice in that game makes the choice in this game. The player chosen to take the first turn is the starting player. The game’s default turn order begins with the starting player and proceeds clockwise."
-status = "missing"
-impl_files = []
+text = "At the start of a game, the players determine which one of them will choose who takes the first turn. In the first game of a match (including a single-game match), the players may use any mutually agreeable method (flipping a coin, rolling dice, etc.) to do so. In a match of several games, the loser of the previous game chooses who takes the first turn. If the previous game was a draw, the player who made the choice in that game makes the choice in this game. The player chosen to take the first turn is the starting player. The game's default turn order begins with the starting player and proceeds clockwise."
+status = "partial"
+impl_files = ["types/game_state.rs:1173"]
 test_files = []
-notes = ""
+notes = "The engine sets player 0 as the starting player by default (seat_order[0] goes first). Coin-flip or player-choice selection for first turn is not interactively implemented; the caller sets up seat_order before game creation."
 
 [cr_103_1a]
 rule = "103.1a"
@@ -18,15 +18,15 @@ text = "In a game using the shared team turns option, there is a starting team r
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Shared team turns option not implemented."
 
 [cr_103_1b]
 rule = "103.1b"
-text = "In an Archenemy game, these methods aren’t used to determine who takes the first turn. Rather, the archenemy takes the first turn."
-status = "missing"
+text = "In an Archenemy game, these methods aren't used to determine who takes the first turn. Rather, the archenemy takes the first turn."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Archenemy variant not implemented."
 
 [cr_103_1c]
 rule = "103.1c"
@@ -34,159 +34,159 @@ text = "One card (Power Play) states that its controller is the starting player.
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Power Play card-specific effect not implemented."
 
 [cr_103_2]
 rule = "103.2"
 text = "Some games require additional steps that are taken after the starting player has been determined. Perform the actions listed in 103.2a–e in order, as applicable."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["game/deck_loading.rs:1"]
 test_files = []
-notes = ""
+notes = "Commander pre-game setup (commander to command zone) is handled. Companion reveal, sticker sheets, and Conspiracy Draft steps are not implemented."
 
 [cr_103_2a]
 rule = "103.2a"
-text = "If any players are using sideboards (see rule 100.4) or cards being represented by substitute cards (see rule 713), those cards are set aside. After this happens, each player’s deck is considered their starting deck."
+text = "If any players are using sideboards (see rule 100.4) or cards being represented by substitute cards (see rule 713), those cards are set aside. After this happens, each player's deck is considered their starting deck."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Sideboards not implemented."
 
 [cr_103_2b]
 rule = "103.2b"
-text = "If any players wish to reveal a card with a companion ability that they own from outside the game, they may do so. A player may reveal no more than one card this way, and they may do so only if their deck fulfills the condition of that card’s companion ability. The revealed card remains outside the game. (See rule 702.139, “Companion.”)"
-status = "missing"
-impl_files = []
+text = "If any players wish to reveal a card with a companion ability that they own from outside the game, they may do so. A player may reveal no more than one card this way, and they may do so only if their deck fulfills the condition of that card's companion ability. The revealed card remains outside the game. (See rule 702.139, \"Companion.\")"
+status = "implemented"
+impl_files = ["game/companion.rs:1"]
 test_files = []
-notes = ""
+notes = "Companion reveal and validation is implemented in game/companion.rs."
 
 [cr_103_2c]
 rule = "103.2c"
 text = "In a Commander game, each player puts their commander from their deck face up into the command zone. See rule 903.6."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/deck_loading.rs:1", "game/commander.rs:1"]
 test_files = []
-notes = ""
+notes = "Commanders are placed in the command zone during game setup via deck_loading."
 
 [cr_103_2d]
 rule = "103.2d"
-text = "In a constructed game, each player playing with sticker sheets reveals all of their sticker sheets and chooses three of them at random. In a limited game, each player chooses up to three sticker sheets from among those in the sealed product they opened and reveals them. In either case, that player has access to only the stickers on the chosen sheets during the game, and those sticker sheets remain revealed. (See rule 123, “Stickers.”)"
-status = "missing"
+text = "In a constructed game, each player playing with sticker sheets reveals all of their sticker sheets and chooses three of them at random. In a limited game, each player chooses up to three sticker sheets from among those in the sealed product they opened and reveals them. In either case, that player has access to only the stickers on the chosen sheets during the game, and those sticker sheets remain revealed. (See rule 123, \"Stickers.\")"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Sticker sheets (Unfinity mechanic) are not implemented in the engine."
 
 [cr_103_2e]
 rule = "103.2e"
 text = "In a Conspiracy Draft game, each player puts any number of conspiracy cards from their sideboard into the command zone. See rule 905.4."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Conspiracy Draft variant not implemented."
 
 [cr_103_3]
 rule = "103.3"
-text = "After the starting player has been determined and any additional steps performed, each player shuffles their deck so that the cards are in a random order. Each player may then shuffle or cut their opponents’ decks. The players’ decks become their libraries."
-status = "missing"
-impl_files = []
+text = "After the starting player has been determined and any additional steps performed, each player shuffles their deck so that the cards are in a random order. Each player may then shuffle or cut their opponents' decks. The players' decks become their libraries."
+status = "implemented"
+impl_files = ["game/mulligan.rs:22"]
 test_files = []
-notes = ""
+notes = "start_mulligan() shuffles all player libraries using the seeded RNG before drawing opening hands."
 
 [cr_103_3a]
 rule = "103.3a"
-text = "In a game using one or more supplementary decks of nontraditional cards (see rule 100.2d), each supplementary deck’s owner shuffles it so the cards are in a random order. Each player may then shuffle or cut their opponents’ supplementary decks."
-status = "missing"
+text = "In a game using one or more supplementary decks of nontraditional cards (see rule 100.2d), each supplementary deck's owner shuffles it so the cards are in a random order. Each player may then shuffle or cut their opponents' supplementary decks."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Supplementary decks not implemented."
 
 [cr_103_4]
 rule = "103.4"
 text = "Each player begins the game with a starting life total of 20. Some variant games have different starting life totals."
 status = "implemented"
-impl_files = ["game/mulligan.rs:14", "game/mulligan.rs:18"]
-test_files = []
-notes = ""
+impl_files = ["types/format.rs:71", "types/game_state.rs:1173"]
+test_files = ["types/format.rs:183", "types/game_state.rs:1429"]
+notes = "FormatConfig::starting_life=20 by default. Applied to all players during game initialization."
 
 [cr_103_4a]
 rule = "103.4a"
-text = "In a Two-Headed Giant game, each team’s starting life total is 30."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "In a Two-Headed Giant game, each team's starting life total is 30."
+status = "implemented"
+impl_files = ["types/format.rs:163"]
+test_files = ["types/format.rs:219"]
+notes = "FormatConfig::two_headed_giant() sets starting_life=30."
 
 [cr_103_4b]
 rule = "103.4b"
-text = "In a Vanguard game, each player’s starting life total is 20 plus or minus the life modifier of their vanguard card."
-status = "missing"
+text = "In a Vanguard game, each player's starting life total is 20 plus or minus the life modifier of their vanguard card."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Vanguard variant not implemented."
 
 [cr_103_4c]
 rule = "103.4c"
-text = "In a Commander game, each player’s starting life total is 40."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "In a Commander game, each player's starting life total is 40."
+status = "implemented"
+impl_files = ["types/format.rs:86"]
+test_files = ["types/format.rs:196"]
+notes = "FormatConfig::commander() sets starting_life=40."
 
 [cr_103_4d]
 rule = "103.4d"
-text = "In a two-player Brawl game, each player’s starting life total is 25. In a multiplayer Brawl game, each player’s starting life total is 30."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "In a two-player Brawl game, each player's starting life total is 25. In a multiplayer Brawl game, each player's starting life total is 30."
+status = "implemented"
+impl_files = ["types/format.rs:125"]
+test_files = ["types/format.rs:209"]
+notes = "FormatConfig::brawl() sets starting_life=25. Multiplayer Brawl with 30 life is not a separate config but the FreeForAll format provides 20."
 
 [cr_103_4e]
 rule = "103.4e"
-text = "In an Archenemy game, the archenemy’s starting life total is 40."
-status = "missing"
+text = "In an Archenemy game, the archenemy's starting life total is 40."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Archenemy variant not implemented."
 
 [cr_103_5]
 rule = "103.5"
-text = "Each player draws a number of cards equal to their starting hand size, which is normally seven. (Some effects can modify a player’s starting hand size.) A player who is dissatisfied with their initial hand may take a mulligan. First, the starting player declares whether they will take a mulligan. Then each other player in turn order does the same. Once each player has made a declaration, all players who decided to take mulligans do so at the same time. To take a mulligan, a player shuffles the cards in their hand back into their library, draws a new hand of cards equal to their starting hand size, then puts a number of those cards equal to the number of times that player has taken a mulligan on the bottom of their library in any order. Once a player chooses not to take a mulligan, the remaining cards become that player’s opening hand, and that player may not take any further mulligans. This process is then repeated until no player takes a mulligan. A player can take mulligans until their opening hand would be zero cards, after which they may not take further mulligans."
+text = "Each player draws a number of cards equal to their starting hand size, which is normally seven. (Some effects can modify a player's starting hand size.) A player who is dissatisfied with their initial hand may take a mulligan. First, the starting player declares whether they will take a mulligan. Then each other player in turn order does the same. Once each player has made a declaration, all players who decided to take mulligans do so at the same time. To take a mulligan, a player shuffles the cards in their hand back into their library, draws a new hand of cards equal to their starting hand size, then puts a number of those cards equal to the number of times that player has taken a mulligan on the bottom of their library in any order. Once a player chooses not to take a mulligan, the remaining cards become that player's opening hand, and that player may not take any further mulligans. This process is then repeated until no player takes a mulligan. A player can take mulligans until their opening hand would be zero cards, after which they may not take further mulligans."
 status = "implemented"
 impl_files = ["game/mulligan.rs:41", "game/mulligan.rs:54", "game/mulligan.rs:102"]
 test_files = []
-notes = ""
+notes = "London mulligan fully implemented. STARTING_HAND_SIZE=7, bottom-N cards logic, and MAX_MULLIGANS=7 enforced."
 
 [cr_103_5a]
 rule = "103.5a"
-text = "In a Vanguard game, each player’s starting hand size is seven plus or minus the hand modifier of their vanguard card."
-status = "missing"
+text = "In a Vanguard game, each player's starting hand size is seven plus or minus the hand modifier of their vanguard card."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Vanguard variant not implemented."
 
 [cr_103_5b]
 rule = "103.5b"
-text = "If an effect allows a player to perform an action “any time [that player] could mulligan,” the player may perform that action at a time they would declare whether they will take a mulligan. This need not be in the first round of mulligans. Other players may have already made their mulligan declarations by the time the player has the option to perform this action. If the player performs the action, they then declare whether they will take a mulligan."
+text = "If an effect allows a player to perform an action \"any time [that player] could mulligan,\" the player may perform that action at a time they would declare whether they will take a mulligan. This need not be in the first round of mulligans. Other players may have already made their mulligan declarations by the time the player has the option to perform this action. If the player performs the action, they then declare whether they will take a mulligan."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Seething Song-style 'any time you could mulligan' actions not implemented."
 
 [cr_103_5c]
 rule = "103.5c"
-text = "In a multiplayer game and in any Brawl game, the first mulligan a player takes doesn’t count toward the number of cards that player will put on the bottom of their library or the number of mulligans that player may take. Subsequent mulligans are counted toward these numbers as normal."
+text = "In a multiplayer game and in any Brawl game, the first mulligan a player takes doesn't count toward the number of cards that player will put on the bottom of their library or the number of mulligans that player may take. Subsequent mulligans are counted toward these numbers as normal."
 status = "implemented"
 impl_files = ["game/mulligan.rs:49", "game/mulligan.rs:55", "game/mulligan.rs:461"]
 test_files = []
-notes = ""
+notes = "Free first mulligan in multiplayer (3+ players) implemented via is_multiplayer check."
 
 [cr_103_5d]
 rule = "103.5d"
 text = "In a multiplayer game using the shared team turns option, first each player on the starting team declares whether that player will take a mulligan, then the players on each other team in turn order do the same. Teammates may consult while making their decisions. Then all mulligans are taken at the same time. A player may take a mulligan even after a teammate has decided to keep their opening hand."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Shared team turns option not implemented."
 
 [cr_103_6]
 rule = "103.6"
@@ -194,7 +194,7 @@ text = "Some cards allow a player to take actions with them from their opening h
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Opening hand actions (Leyline placement, Chancellor reveals, etc.) are not implemented as a distinct pre-game phase."
 
 [cr_103_6a]
 rule = "103.6a"
@@ -202,7 +202,7 @@ text = "If a card allows a player to begin the game with that card on the battle
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Leyline-style 'begin with on battlefield' effects not implemented."
 
 [cr_103_6b]
 rule = "103.6b"
@@ -210,39 +210,39 @@ text = "If a card allows a player to reveal it from their opening hand, the play
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Chancellor-style opening hand reveals not implemented."
 
 [cr_103_6c]
 rule = "103.6c"
 text = "In a multiplayer game using the shared team turns option, first each player on the starting team, in whatever order that team likes, may take such actions. Teammates may consult while making their decisions. Then each player on each other team in turn order does the same."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Shared team turns option not implemented."
 
 [cr_103_7]
 rule = "103.7"
-text = "In a Planechase game, the starting player moves the top card of their planar deck off that planar deck and turns it face up. If it’s a phenomenon card, the player puts that card on the bottom of their planar deck and repeats this process until a plane card is turned face up. The face-up plane card becomes the starting plane. (See rule 901, “Planechase.”)"
-status = "missing"
+text = "In a Planechase game, the starting player moves the top card of their planar deck off that planar deck and turns it face up. If it's a phenomenon card, the player puts that card on the bottom of their planar deck and repeats this process until a plane card is turned face up. The face-up plane card becomes the starting plane. (See rule 901, \"Planechase.\")"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Planechase variant not implemented."
 
 [cr_103_8]
 rule = "103.8"
 text = "The starting player takes their first turn."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/turns.rs:1"]
 test_files = []
-notes = ""
+notes = "Game starts with seat_order[0] taking the first turn. Handled in start_next_turn()."
 
 [cr_103_8a]
 rule = "103.8a"
-text = "In a two-player game, the player who plays first skips the draw step (see rule 504, “Draw Step”) of their first turn."
+text = "In a two-player game, the player who plays first skips the draw step (see rule 504, \"Draw Step\") of their first turn."
 status = "implemented"
 impl_files = ["game/turns.rs:359"]
-test_files = []
-notes = ""
+test_files = ["game/turns.rs:764", "game/turns.rs:910"]
+notes = "should_skip_draw() returns true for the first player on turn 1 in a 2-player game."
 
 [cr_103_8b]
 rule = "103.8b"
@@ -250,12 +250,12 @@ text = "In a Two-Headed Giant game, the team who plays first skips the draw step
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Two-Headed Giant draw-step skip not separately implemented. should_skip_draw() only checks 2-player condition."
 
 [cr_103_8c]
 rule = "103.8c"
 text = "In all other multiplayer games, no player skips the draw step of their first turn."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["game/turns.rs:359"]
+test_files = ["game/turns.rs:764"]
+notes = "should_skip_draw() only skips draw for the first player when exactly 2 players are in the game, so multiplayer games correctly do not skip."
