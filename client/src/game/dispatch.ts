@@ -224,7 +224,7 @@ export async function dispatchAction(action: GameAction): Promise<void> {
     await processAction(action);
   } finally {
     if (pendingQueue.length > 0) {
-      processQueue().catch(() => setProcessing(false));
+      processQueue().catch(() => { isAnimating = false; });
     } else {
       isAnimating = false;
     }
@@ -328,7 +328,7 @@ export async function processRemoteUpdate(
     await processRemoteUpdateInner(state, events, legalActions);
   } finally {
     if (pendingQueue.length > 0) {
-      processQueue().catch(() => setProcessing(false));
+      processQueue().catch(() => { isAnimating = false; });
     } else {
       isAnimating = false;
     }
