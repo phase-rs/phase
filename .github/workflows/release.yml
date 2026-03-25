@@ -351,12 +351,12 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H ${{ secrets.DEPLOY_HOST_BEEBS }} >> ~/.ssh/known_hosts
+          ssh-keyscan -p 29292 -H ${{ secrets.DEPLOY_HOST_BEEBS }} >> ~/.ssh/known_hosts
 
       - name: Deploy to beebs
         run: |
-          SSH="ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST_BEEBS }}"
-          SCP="scp -i ~/.ssh/deploy_key"
+          SSH="ssh -p 29292 -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST_BEEBS }}"
+          SCP="scp -P 29292 -i ~/.ssh/deploy_key"
 
           # Upload binary and card data
           $SCP staging/phase-server staging/data/card-data.json ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST_BEEBS }}:/tmp/
@@ -375,7 +375,7 @@ jobs:
       - name: Verify deployment
         run: |
           sleep 2
-          SSH="ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST_BEEBS }}"
+          SSH="ssh -p 29292 -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST_BEEBS }}"
           $SSH "sudo systemctl is-active phase-server"
 
   release:
