@@ -1,7 +1,7 @@
 use engine::game::DeckEntry;
 
-use crate::deck_profile::DeckProfile;
 use crate::deck_profile::ArchetypeMultipliers;
+use crate::deck_profile::DeckProfile;
 use crate::eval::EvalWeightSet;
 use crate::synergy::SynergyGraph;
 

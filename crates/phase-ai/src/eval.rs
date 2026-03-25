@@ -130,7 +130,6 @@ impl EvalWeightSet {
     }
 }
 
-
 const WIN_SCORE: f64 = 10000.0;
 const LOSS_SCORE: f64 = -10000.0;
 
