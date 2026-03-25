@@ -16,31 +16,29 @@ export function ChoiceOverlay({
   maxWidthClassName?: string;
 }) {
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto px-3 py-4 sm:px-4 sm:py-6">
+    <div className="fixed inset-0 z-50 flex flex-col px-0 py-0 lg:items-center lg:justify-center lg:px-4 lg:py-6">
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
-      <div className="relative flex min-h-full flex-col items-center justify-center pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
-        <motion.div
-          className={`${widthClassName} overflow-hidden rounded-[28px] border border-white/10 bg-[#0b1020]/94 shadow-[0_32px_90px_rgba(0,0,0,0.48)] backdrop-blur-md ${maxWidthClassName}`}
-          initial={{ opacity: 0, y: 18, scale: 0.98 }}
-          animate={{ opacity: 1, y: 0, scale: 1 }}
-          transition={{ duration: 0.24, ease: "easeOut" }}
-        >
-          <div className="border-b border-white/10 px-5 py-5 sm:px-7 sm:py-6">
-            <div className="text-[0.68rem] uppercase tracking-[0.24em] text-slate-500">
-              Game Choice
-            </div>
-            <h2 className="mt-2 text-2xl font-semibold text-white sm:text-3xl">
-              {title}
-            </h2>
-            <p className="mt-2 max-w-3xl text-sm text-slate-400 sm:text-[0.95rem]">
-              {subtitle}
-            </p>
+      <motion.div
+        className={`card-scale-reset relative flex h-full flex-col overflow-hidden border-white/10 bg-[#0b1020]/94 shadow-[0_32px_90px_rgba(0,0,0,0.48)] backdrop-blur-md lg:h-auto lg:max-h-[calc(100vh_-_3rem)] lg:rounded-[28px] lg:border ${widthClassName} ${maxWidthClassName}`}
+        initial={{ opacity: 0, y: 18, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={{ duration: 0.24, ease: "easeOut" }}
+      >
+        <div className="modal-header-compact shrink-0 border-b border-white/10">
+          <div className="modal-eyebrow uppercase tracking-[0.24em] text-slate-500">
+            Game Choice
           </div>
-          <div className="px-3 py-4 sm:px-5 sm:py-5">
-            {children}
-          </div>
-        </motion.div>
-      </div>
+          <h2 className="font-semibold text-white">
+            {title}
+          </h2>
+          <p className="modal-subtitle max-w-3xl text-slate-400">
+            {subtitle}
+          </p>
+        </div>
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-2 py-2 lg:px-5 lg:py-5">
+          {children}
+        </div>
+      </motion.div>
     </div>
   );
 }
@@ -57,7 +55,7 @@ export function ConfirmButton({
   return (
     <AnimatePresence>
       <motion.div
-        className="mx-auto w-full max-w-xs px-4 sm:px-0"
+        className="mx-auto w-full max-w-xs shrink-0 px-4 py-1 lg:px-0 lg:py-2"
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.5, duration: 0.3 }}

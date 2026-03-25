@@ -4,6 +4,9 @@
   --card-size-scale: 1;
   --card-viewport-scale: 1;
   --art-crop-viewport-scale: 1;
+  --action-btn-bottom: 0.75rem;
+  --action-btn-right: 3.5rem;
+  --game-edge-right: 0.75rem;
   --card-base: clamp(4rem, calc((7vw + 11vh) / 2), 6.75rem);
   --card-w: calc(var(--card-base) * var(--card-size-scale) * var(--card-viewport-scale));
   --card-h: calc(var(--card-w) * 1.4);
@@ -29,6 +32,29 @@ body {
 
 #root {
   min-height: 100vh;
+  /* Game-app behavior: prevent webpage-like interactions */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  overscroll-behavior: none;
+}
+
+/* Prevent native image dragging (cards, backgrounds, etc.) */
+#root img {
+  -webkit-user-drag: none;
+  user-drag: none;
+}
+
+/* Allow text selection in inputs, textareas, and elements that opt in */
+#root input,
+#root textarea,
+#root [contenteditable],
+#root .select-text {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
 }
 
 .menu-display {
@@ -183,10 +209,29 @@ body {
   }
 }
 
+@media (min-height: 700px) and (min-width: 1024px) {
+  :root {
+    --action-btn-bottom: 0.75rem;
+    --game-edge-right: 1rem;
+  }
+}
+
 @media (max-height: 820px) and (min-aspect-ratio: 11/10) {
   :root {
     --card-viewport-scale: 0.95;
     --art-crop-viewport-scale: 0.93;
+  }
+}
+
+/* Landscape phones: very short viewport needs aggressive card shrink
+   and repositioned fixed UI elements */
+@media (max-height: 500px) {
+  :root {
+    --card-viewport-scale: 0.75;
+    --art-crop-viewport-scale: 0.7;
+    --action-btn-bottom: 0.25rem;
+    --action-btn-right: 3rem;
+    --game-edge-right: 0.375rem;
   }
 }
 
@@ -204,6 +249,109 @@ body {
     --card-base: clamp(3.5rem, 6vw, 5.25rem);
     --art-crop-base: clamp(5.25rem, 7.75vw, 7.25rem);
   }
+}
+
+/* Compact modal styles for landscape phones / short viewports.
+   Desktop sizes require BOTH min-height: 500px AND min-width: 768px.
+   This ensures landscape phones (e.g. 833×390) stay compact. */
+.modal-header-compact {
+  padding: 0.5rem 0.75rem;
+}
+.modal-header-compact h2 {
+  font-size: 0.875rem;
+  margin-top: 0.125rem;
+}
+.modal-header-compact .modal-eyebrow {
+  font-size: 0.55rem;
+}
+.modal-header-compact .modal-subtitle {
+  font-size: 0.6875rem;
+  margin-top: 0.125rem;
+}
+@media (min-height: 500px) and (min-width: 1024px) {
+  .modal-header-compact {
+    padding: 1.25rem 1.75rem;
+  }
+  .modal-header-compact h2 {
+    font-size: 1.875rem;
+    margin-top: 0.5rem;
+  }
+  .modal-header-compact .modal-eyebrow {
+    font-size: 0.68rem;
+  }
+  .modal-header-compact .modal-subtitle {
+    font-size: 0.95rem;
+    margin-top: 0.5rem;
+  }
+}
+
+/* On compact viewports, strip the inner card container chrome */
+.modal-card-area {
+  border: none;
+  background: transparent;
+  border-radius: 0;
+  padding: 0;
+}
+@media (min-height: 500px) and (min-width: 1024px) {
+  .modal-card-area {
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(0, 0, 0, 0.18);
+    border-radius: 22px;
+    padding: 0.5rem;
+  }
+}
+
+/* Reset card scale inside modals/overlays so zone viewers etc. aren't tiny.
+   Must redefine --card-w/--card-h since calc() in :root doesn't re-evaluate
+   when a sub-property is overridden on a descendant. */
+.card-scale-reset {
+  --card-viewport-scale: 1;
+  --art-crop-viewport-scale: 1;
+  --card-w: calc(var(--card-base) * var(--card-size-scale) * 1);
+  --card-h: calc(var(--card-w) * 1.4);
+  --art-crop-w: calc(var(--art-crop-base) * var(--card-size-scale) * 1);
+  --art-crop-h: calc(var(--art-crop-w) * 0.75);
+}
+
+/* Horizontal card strip: cards sized by viewport height for Arena-style horizontal scroll.
+   Cards get an explicit height derived from viewport so they're large and readable.
+   Width follows from the 5:7 aspect ratio. */
+.zone-viewer-strip [role="img"],
+.zone-viewer-strip .animate-pulse,
+.card-choice-strip [role="img"],
+.card-choice-strip .animate-pulse {
+  --strip-card-h: clamp(180px, 52vh, 420px);
+  width: auto !important;
+  height: var(--strip-card-h) !important;
+  aspect-ratio: 5 / 7;
+}
+.zone-viewer-strip .inline-block,
+.card-choice-strip .inline-block {
+  display: block;
+  width: fit-content;
+}
+.zone-viewer-strip > *,
+.card-choice-strip > * {
+  flex-shrink: 0;
+}
+/* Thin scrollbar for horizontal card strips on desktop */
+.zone-viewer-strip,
+.card-choice-strip {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+.zone-viewer-strip::-webkit-scrollbar,
+.card-choice-strip::-webkit-scrollbar {
+  height: 4px;
+}
+.zone-viewer-strip::-webkit-scrollbar-thumb,
+.card-choice-strip::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 2px;
+}
+.zone-viewer-strip::-webkit-scrollbar-track,
+.card-choice-strip::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 /* Class level bookmark — notched bottom edge */

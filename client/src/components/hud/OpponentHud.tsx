@@ -85,12 +85,12 @@ export function OpponentHud({ opponentName }: OpponentHudProps) {
         : "bg-black/50";
 
     return (
-      <div data-player-hud={String(opponentId)} className="flex items-center justify-center py-1">
+      <div data-player-hud={String(opponentId)} className="flex items-center justify-center py-0.5 lg:py-1">
         <div
           onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
-          className={`flex items-center gap-2 rounded-full px-3 py-1 transition-all duration-300 ${pillClass}`}
+          className={`flex items-center gap-0.5 rounded-full px-1.5 py-px transition-all duration-300 lg:gap-2 lg:px-3 lg:py-1 ${pillClass}`}
         >
-          <span className="text-xs font-medium text-gray-400">{label}</span>
+          <span className="text-[10px] font-medium text-gray-400 lg:text-xs">{label}</span>
           <LifeTotal playerId={opponentId} size="lg" hideLabel />
           <ManaPoolSummary playerId={opponentId} />
           {opponentCompanion && (

@@ -17,12 +17,12 @@ interface GameButtonOptions {
 }
 
 const BASE_CLASSES =
-  "min-h-11 border border-solid font-semibold backdrop-blur-sm transition-colors duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 inline-flex items-center justify-center";
+  "min-h-6 lg:min-h-8 border border-solid font-semibold backdrop-blur-sm transition-colors duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 inline-flex items-center justify-center";
 
 const SIZE_CLASSES: Record<GameButtonSize, string> = {
   xs: "px-2 py-1 text-xs rounded",
   sm: "px-3 py-1.5 text-sm rounded-md",
-  md: "px-4 py-2 text-sm rounded-lg",
+  md: "px-2 py-0.5 text-[11px] rounded lg:px-3 lg:py-1 lg:text-xs lg:rounded-md",
   lg: "px-6 py-2.5 text-base rounded-lg",
 };
 

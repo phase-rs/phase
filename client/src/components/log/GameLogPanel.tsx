@@ -60,7 +60,7 @@ export function GameLogPanel() {
       {!isOpen && (
         <button
           onClick={() => setIsOpen(true)}
-          className="fixed bottom-4 right-4 z-30 rounded-lg bg-gray-800/90 p-2 text-gray-400 shadow-lg ring-1 ring-gray-700 transition-colors hover:bg-gray-700 hover:text-gray-200"
+          className="self-end rounded-lg bg-gray-800/90 p-1.5 text-gray-400 shadow-lg ring-1 ring-gray-700 transition-colors hover:bg-gray-700 hover:text-gray-200"
           aria-label="Open game log"
         >
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5">
@@ -118,7 +118,7 @@ export function GameLogPanel() {
             </div>
 
             {/* Log entry list */}
-            <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-1">
+            <div ref={scrollRef} className="select-text flex-1 overflow-y-auto px-3 py-1">
               {filteredEntries.length === 0 ? (
                 <p className="py-4 text-center text-xs italic text-gray-600">No events yet</p>
               ) : (

@@ -7,7 +7,7 @@ export function FullControlToggle() {
   return (
     <button
       onClick={toggleFullControl}
-      className={`rounded px-3 py-1 text-xs font-semibold transition-colors ${
+      className={`rounded px-2 py-0.5 text-[10px] font-semibold transition-colors lg:px-3 lg:py-1 lg:text-xs ${
         fullControl
           ? "bg-amber-600 text-white"
           : "bg-gray-700 text-gray-400 hover:bg-gray-600"

@@ -29,7 +29,7 @@ export function ReplacementModal() {
   return (
     <AnimatePresence>
       <motion.div
-        className="fixed inset-0 z-50 flex items-center justify-center px-3 py-4 sm:px-4 sm:py-6"
+        className="fixed inset-0 z-50 flex items-center justify-center px-2 py-2 lg:px-4 lg:py-6"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
@@ -39,24 +39,24 @@ export function ReplacementModal() {
         <div className="absolute inset-0 bg-black/60" />
 
         <motion.div
-          className="relative z-10 max-h-[calc(100vh_-_2rem)] w-full max-w-md overflow-y-auto rounded-[24px] border border-white/10 bg-[#0b1020]/96 shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md"
+          className="relative z-10 max-h-[calc(100vh_-_1rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] w-full max-w-md overflow-y-auto rounded-[16px] lg:rounded-[24px] border border-white/10 bg-[#0b1020]/96 shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md"
           initial={{ scale: 0.95, opacity: 0, y: 10 }}
           animate={{ scale: 1, opacity: 1, y: 0 }}
           exit={{ scale: 0.95, opacity: 0, y: 10 }}
           transition={{ duration: 0.2, ease: "easeOut" }}
         >
-          <div className="border-b border-white/10 px-4 py-4 sm:px-5 sm:py-5">
+          <div className="border-b border-white/10 px-3 py-3 lg:px-5 lg:py-5">
             <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
               Resolution Order
             </div>
-            <h2 className="mt-1 text-lg font-semibold text-white sm:text-xl">
+            <h2 className="mt-1 text-base font-semibold text-white lg:text-xl">
               Replacement Effects
             </h2>
-            <p className="mt-1 text-xs text-slate-400 sm:text-sm">
+            <p className="mt-1 text-xs text-slate-400 lg:text-sm">
               Choose which replacement effect applies first.
             </p>
           </div>
-          <div className="px-4 py-4 sm:px-5 sm:py-5">
+          <div className="px-3 py-3 lg:px-5 lg:py-5">
             <div className="flex flex-col gap-2">
               {candidates.map((index) => {
                 const desc = candidateDescriptions[index];

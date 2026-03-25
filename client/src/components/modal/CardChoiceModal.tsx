@@ -25,11 +25,10 @@ type ExileFromGraveyardForCost = Extract<WaitingFor, { type: "ExileFromGraveyard
 type HarmonizeTapChoice = Extract<WaitingFor, { type: "HarmonizeTapChoice" }>;
 type ChooseLegend = Extract<WaitingFor, { type: "ChooseLegend" }>;
 type ManifestDreadChoice = Extract<WaitingFor, { type: "ManifestDreadChoice" }>;
-const CHOICE_CARD_IMAGE_CLASS = "h-[clamp(136px,24vh,224px)] w-[clamp(97px,17vh,160px)]";
-const SCRY_CARD_IMAGE_CLASS =
-  "!h-[220px] !w-[157px] sm:!h-[280px] sm:!w-[200px] lg:!h-[340px] lg:!w-[243px]";
+const CHOICE_CARD_IMAGE_CLASS = "";
+const SCRY_CARD_IMAGE_CLASS = "";
 const CHOICE_CARD_ROW_CLASS =
-  "mx-auto mb-6 flex w-full max-w-5xl flex-wrap items-start justify-center gap-3 overflow-y-auto px-1 sm:mb-10";
+  "card-choice-strip mx-auto flex min-h-0 flex-1 items-center gap-2 overflow-x-auto px-1 pb-2 lg:gap-3";
 
 /**
  * Generic card choice modal for Scry, Dig, Surveil, Reveal, Search, and NamedChoice.
@@ -149,7 +148,7 @@ function ScryModal({ data }: { data: ScryChoice["data"] }) {
       subtitle={`Look at the top ${data.cards.length} card${data.cards.length > 1 ? "s" : ""} of your library`}
       maxWidthClassName={overlayWidthClassName}
     >
-      <div className="mx-auto mb-6 flex w-full max-w-fit flex-wrap items-start justify-center gap-3 px-1 sm:mb-10 sm:gap-4">
+      <div className={CHOICE_CARD_ROW_CLASS}>
         {data.cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;

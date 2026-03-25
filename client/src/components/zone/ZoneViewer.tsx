@@ -64,13 +64,13 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
       maxWidthClassName="max-w-5xl"
       bodyClassName="flex min-h-0 flex-col"
     >
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 sm:px-6 sm:pb-6">
+      <div className="min-h-0 flex-1 overflow-x-auto overflow-y-hidden px-2 pb-2 lg:px-6 lg:pb-6">
         {cards.length === 0 ? (
           <p className="py-8 text-center text-sm italic text-gray-600">
             No cards in {ZONE_TITLES[zone].toLowerCase()}
           </p>
         ) : (
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(96px,1fr))] gap-3 sm:grid-cols-[repeat(auto-fill,minmax(120px,1fr))]">
+          <div className="zone-viewer-strip flex items-center gap-2 lg:gap-3">
             {cards.map((obj) => {
               const canCastAdventure = zone === "exile" && isMyZone && hasPriority
                 && hasAdventureCreaturePermission(obj);
@@ -79,12 +79,12 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
               return (
                 <div
                   key={obj.id}
-                  className={`cursor-pointer rounded-lg border bg-gray-800/60 p-1 transition-colors ${
+                  className={`shrink-0 cursor-pointer rounded transition-colors ${
                     isValidTarget
-                      ? "border-amber-400 ring-2 ring-amber-400/60 shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]"
+                      ? "ring-2 ring-amber-400/60 shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]"
                       : canCastAdventure
-                        ? "border-amber-500/60 hover:border-amber-400"
-                        : "border-gray-700 hover:border-gray-500"
+                        ? "ring-1 ring-amber-500/60 hover:ring-amber-400"
+                        : "hover:ring-1 hover:ring-white/20"
                   }`}
                   data-card-hover
                   onMouseEnter={() => inspectObject(obj.id)}
