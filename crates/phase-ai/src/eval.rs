@@ -43,19 +43,89 @@ impl Default for EvalWeights {
 }
 
 impl EvalWeights {
-    /// Weights learned from 17Lands Premier Draft replay data via logistic regression.
-    /// Trained fields (life, board_presence, board_power, hand_size) use coefficients
-    /// from 12.9M game-turn samples. Fields that 17Lands cannot measure (board_toughness,
-    /// aggression) retain hand-tuned defaults pending CMA-ES refinement.
+    /// Weights learned from 17Lands Premier Draft replay data (late-game phase).
+    /// Used as a single-phase fallback; prefer `EvalWeightSet::learned()` for
+    /// phase-aware evaluation.
+    pub fn learned() -> Self {
+        EvalWeightSet::learned().late
+    }
+}
+
+/// Turn-phase-aware weight sets: early (T1-3), mid (T4-7), late (T8+).
+/// Learned from 12.9M 17Lands game-turn samples split by turn number.
+/// Each phase has different weight profiles reflecting how the importance
+/// of board state features shifts across a game of Magic.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalWeightSet {
+    pub early: EvalWeights,
+    pub mid: EvalWeights,
+    pub late: EvalWeights,
+}
+
+impl Default for EvalWeightSet {
+    fn default() -> Self {
+        Self::uniform(EvalWeights::default())
+    }
+}
+
+impl EvalWeightSet {
+    /// All three phases use the same weights.
+    pub fn uniform(weights: EvalWeights) -> Self {
+        EvalWeightSet {
+            early: weights.clone(),
+            mid: weights.clone(),
+            late: weights,
+        }
+    }
+
+    /// Select weights for the current turn number.
+    pub fn for_turn(&self, turn: u32) -> &EvalWeights {
+        match turn {
+            0..=3 => &self.early,
+            4..=7 => &self.mid,
+            _ => &self.late,
+        }
+    }
+
+    /// Phase-aware weights learned from 17Lands Premier Draft replay data.
+    /// Trained on 12.9M samples from skilled players (win_rate >= 0.55, games >= 50).
+    /// Five fields per phase are data-driven; four retain hand-tuned defaults.
     /// See scripts/train_eval_weights.py and data/learned-weights.json.
     pub fn learned() -> Self {
-        EvalWeights {
-            life: 0.7769,
-            aggression: 0.5,
-            board_presence: 0.9613,
-            board_power: 0.9585,
-            board_toughness: 1.0,
-            hand_size: 2.5,
+        EvalWeightSet {
+            early: EvalWeights {
+                life: 0.4427,
+                aggression: 0.5,
+                board_presence: 2.4426,
+                board_power: 0.9193,
+                board_toughness: 1.0,
+                hand_size: 1.5159,
+                zone_quality: 0.3,
+                card_advantage: 2.5,
+                synergy: 0.5,
+            },
+            mid: EvalWeights {
+                life: 0.6544,
+                aggression: 0.5,
+                board_presence: 2.5,
+                board_power: 0.8014,
+                board_toughness: 1.0,
+                hand_size: 2.4419,
+                zone_quality: 0.3,
+                card_advantage: 2.3926,
+                synergy: 0.5,
+            },
+            late: EvalWeights {
+                life: 0.575,
+                aggression: 0.5,
+                board_presence: 2.0891,
+                board_power: 0.6705,
+                board_toughness: 1.0,
+                hand_size: 2.5,
+                zone_quality: 0.3,
+                card_advantage: 1.7904,
+                synergy: 0.5,
+            },
         }
     }
 }
@@ -79,6 +149,7 @@ pub struct EvaluationBreakdown {
     pub board_toughness: f64,
     pub hand_size: f64,
     pub aggression: f64,
+    pub card_advantage: f64,
 }
 
 impl EvaluationBreakdown {
@@ -89,6 +160,7 @@ impl EvaluationBreakdown {
             + self.board_toughness
             + self.hand_size
             + self.aggression
+            + self.card_advantage
     }
 }
 
@@ -98,7 +170,7 @@ pub fn strategic_intent(state: &GameState, player: PlayerId) -> StrategicIntent 
         return StrategicIntent::PreserveAdvantage;
     }
 
-    let (_, my_power, _) = board_stats(state, player);
+    let (_, my_power, _, _) = board_stats(state, player);
     let total_opp_power: i32 = opponents.iter().map(|&opp| board_stats(state, opp).1).sum();
     let min_opp_life = opponents
         .iter()
@@ -132,7 +204,7 @@ pub fn threat_level(state: &GameState, evaluator: PlayerId, target: PlayerId) ->
     let starting_life = state.format_config.starting_life.max(1) as f64;
 
     // Board presence: creature count and total power
-    let (creatures, power, _toughness) = board_stats(state, target);
+    let (creatures, power, _toughness, _nc) = board_stats(state, target);
     let board_score = (creatures as f64 * 0.3 + power as f64 * 0.7).min(10.0) / 10.0;
 
     // Life ratio: higher life = more threatening
@@ -233,28 +305,31 @@ pub fn evaluate_state_breakdown(
         let mut weighted_opp_power = 0.0;
         let mut weighted_opp_toughness = 0.0;
         let mut weighted_opp_hand = 0.0;
+        let mut weighted_opp_nc = 0.0;
 
         for &(opp, threat) in &threats {
             let w = threat / total_threat;
             let o = &state.players[opp.0 as usize];
-            let (opp_creatures, opp_power, opp_toughness) = board_stats(state, opp);
+            let (opp_creatures, opp_power, opp_toughness, opp_nc) = board_stats(state, opp);
             weighted_opp_life += o.life as f64 * w;
             weighted_opp_creatures += opp_creatures as f64 * w;
             weighted_opp_power += opp_power as f64 * w;
             weighted_opp_toughness += opp_toughness as f64 * w;
             weighted_opp_hand += o.hand.len() as f64 * w;
+            weighted_opp_nc += opp_nc as f64 * w;
         }
 
         // Life differential (against threat-weighted opponent)
         breakdown.life = (p.life as f64 - weighted_opp_life) * weights.life;
 
-        let (my_creatures, my_power, my_toughness) = board_stats(state, player);
+        let (my_creatures, my_power, my_toughness, my_nc) = board_stats(state, player);
         breakdown.board_presence =
             (my_creatures as f64 - weighted_opp_creatures) * weights.board_presence;
         breakdown.board_power = (my_power as f64 - weighted_opp_power) * weights.board_power;
         breakdown.board_toughness =
             (my_toughness as f64 - weighted_opp_toughness) * weights.board_toughness;
         breakdown.hand_size = (p.hand.len() as f64 - weighted_opp_hand) * weights.hand_size;
+        breakdown.card_advantage = (my_nc as f64 - weighted_opp_nc) * weights.card_advantage;
 
         if p.life as f64 > weighted_opp_life && my_power > 0 {
             breakdown.aggression = my_power as f64 * weights.aggression;
@@ -266,20 +341,22 @@ pub fn evaluate_state_breakdown(
         let mut total_opp_power = 0;
         let mut total_opp_toughness = 0;
         let mut total_opp_hand_size = 0;
+        let mut total_opp_nc = 0;
         for &opp in &opponents {
             let o = &state.players[opp.0 as usize];
             total_opp_life += o.life;
-            let (opp_creatures, opp_power, opp_toughness) = board_stats(state, opp);
+            let (opp_creatures, opp_power, opp_toughness, opp_nc) = board_stats(state, opp);
             total_opp_creatures += opp_creatures;
             total_opp_power += opp_power;
             total_opp_toughness += opp_toughness;
             total_opp_hand_size += o.hand.len();
+            total_opp_nc += opp_nc;
         }
 
         let avg_opp_life = total_opp_life as f64 / opp_count;
         breakdown.life = (p.life as f64 - avg_opp_life) * weights.life;
 
-        let (my_creatures, my_power, my_toughness) = board_stats(state, player);
+        let (my_creatures, my_power, my_toughness, my_nc) = board_stats(state, player);
         breakdown.board_presence =
             (my_creatures - total_opp_creatures) as f64 * weights.board_presence;
         breakdown.board_power = (my_power - total_opp_power) as f64 * weights.board_power;
@@ -288,6 +365,9 @@ pub fn evaluate_state_breakdown(
 
         let avg_opp_hand = total_opp_hand_size as f64 / opp_count;
         breakdown.hand_size = (p.hand.len() as f64 - avg_opp_hand) * weights.hand_size;
+
+        let avg_opp_nc = total_opp_nc as f64 / opp_count;
+        breakdown.card_advantage = (my_nc as f64 - avg_opp_nc) * weights.card_advantage;
 
         if p.life as f64 > avg_opp_life && my_power > 0 {
             breakdown.aggression = my_power as f64 * weights.aggression;
@@ -301,22 +381,29 @@ pub fn evaluate_state_breakdown(
     Ok(breakdown)
 }
 
-fn board_stats(state: &GameState, player: PlayerId) -> (i32, i32, i32) {
+/// Board statistics: (creature_count, total_power, total_toughness, non_creature_permanents).
+fn board_stats(state: &GameState, player: PlayerId) -> (i32, i32, i32, i32) {
     let mut creatures = 0;
     let mut total_power = 0;
     let mut total_toughness = 0;
+    let mut non_creatures = 0;
 
     for &obj_id in &state.battlefield {
         if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player && obj.card_types.core_types.contains(&CoreType::Creature) {
-                creatures += 1;
-                total_power += obj.power.unwrap_or(0);
-                total_toughness += obj.toughness.unwrap_or(0);
+            if obj.controller == player {
+                if obj.card_types.core_types.contains(&CoreType::Creature) {
+                    creatures += 1;
+                    total_power += obj.power.unwrap_or(0);
+                    total_toughness += obj.toughness.unwrap_or(0);
+                } else if !obj.card_types.core_types.contains(&CoreType::Land) {
+                    // Non-creature, non-land permanents (enchantments, artifacts, planeswalkers)
+                    non_creatures += 1;
+                }
             }
         }
     }
 
-    (creatures, total_power, total_toughness)
+    (creatures, total_power, total_toughness, non_creatures)
 }
 
 /// Evaluate a single creature's combat value.

@@ -272,8 +272,8 @@ impl<'a> PlannerServices<'a> {
     /// Tactical eval (evaluate_state) is context-free and uses adjusted weights.
     /// Strategic dimensions (synergy, zone quality, card advantage) use AiContext.
     fn evaluate_with_strategy(&self, state: &GameState) -> f64 {
-        let tactical = evaluate_state(state, self.ai_player, &self.context.adjusted_weights);
-        let weights = &self.context.adjusted_weights;
+        let weights = self.context.adjusted_weights.for_turn(state.turn_number);
+        let tactical = evaluate_state(state, self.ai_player, weights);
 
         let synergy = self
             .context
@@ -294,7 +294,8 @@ impl<'a> PlannerServices<'a> {
     }
 
     pub fn evaluate_for_planner(&self, state: &GameState) -> ValueEstimate {
-        evaluate_for_planner(state, self.ai_player, &self.context.adjusted_weights)
+        let weights = self.context.adjusted_weights.for_turn(state.turn_number);
+        evaluate_for_planner(state, self.ai_player, weights)
     }
 
     pub fn tactical_score(

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::eval::EvalWeights;
+use crate::eval::EvalWeightSet;
 
 /// AI difficulty level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -112,7 +112,7 @@ pub struct AiConfig {
     pub play_lookahead: bool,
     pub combat_lookahead: bool,
     pub search: SearchConfig,
-    pub weights: EvalWeights,
+    pub weights: EvalWeightSet,
     /// Number of players in the game (used for search budget scaling).
     pub player_count: u8,
 }
@@ -259,7 +259,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
         play_lookahead,
         combat_lookahead,
         search,
-        weights: EvalWeights::learned(),
+        weights: EvalWeightSet::learned(),
         player_count: 2,
     };
 

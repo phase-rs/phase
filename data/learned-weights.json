@@ -1,12 +1,10 @@
 {
-  "source": "17lands_PremierDraft",
+  "source": "17lands_PremierDraft_phase_aware",
   "sets": [
     "EOE"
   ],
   "filter": "win_rate >= 0.55, games >= 50",
-  "sample_count": 12949620,
-  "train_accuracy": 0.6384,
-  "test_accuracy": 0.6382,
+  "total_sample_count": 12949620,
   "feature_names": [
     "life_diff",
     "creature_count_diff",
@@ -14,25 +12,88 @@
     "hand_diff",
     "land_diff",
     "non_creature_diff",
-    "mana_spent_diff",
-    "total_permanent_diff"
+    "mana_spent_diff"
   ],
-  "raw_coefficients": {
-    "life_diff": 0.083698,
-    "creature_count_diff": 0.103573,
-    "creature_mv_diff": 0.103269,
-    "hand_diff": 0.269348,
-    "land_diff": 0.02054,
-    "non_creature_diff": 0.085526,
-    "mana_spent_diff": -0.076742,
-    "total_permanent_diff": 0.209639
+  "turn_boundaries": {
+    "early": "turns 1-3",
+    "mid": "turns 4-7",
+    "late": "turns 8+"
   },
-  "weights": {
-    "life": 0.7769,
-    "board_presence": 0.9613,
-    "board_power": 0.9585,
-    "hand_size": 2.5,
-    "board_toughness": 1.0,
-    "aggression": 0.5
+  "phases": {
+    "early": {
+      "sample_count": 1294962,
+      "train_accuracy": 0.6232,
+      "test_accuracy": 0.6232,
+      "raw_coefficients": {
+        "life_diff": 0.057172,
+        "creature_count_diff": 0.315434,
+        "creature_mv_diff": 0.11872,
+        "hand_diff": 0.195763,
+        "land_diff": 0.297078,
+        "non_creature_diff": 0.32285,
+        "mana_spent_diff": -0.117671
+      },
+      "weights": {
+        "life": 0.4427,
+        "board_presence": 2.4426,
+        "board_power": 0.9193,
+        "hand_size": 1.5159,
+        "card_advantage": 2.5,
+        "board_toughness": 1.0,
+        "aggression": 0.5,
+        "zone_quality": 0.3,
+        "synergy": 0.5
+      }
+    },
+    "mid": {
+      "sample_count": 1726616,
+      "train_accuracy": 0.7004,
+      "test_accuracy": 0.7,
+      "raw_coefficients": {
+        "life_diff": 0.08769,
+        "creature_count_diff": 0.335015,
+        "creature_mv_diff": 0.107387,
+        "hand_diff": 0.327229,
+        "land_diff": 0.402687,
+        "non_creature_diff": 0.320617,
+        "mana_spent_diff": -0.106584
+      },
+      "weights": {
+        "life": 0.6544,
+        "board_presence": 2.5,
+        "board_power": 0.8014,
+        "hand_size": 2.4419,
+        "card_advantage": 2.3926,
+        "board_toughness": 1.0,
+        "aggression": 0.5,
+        "zone_quality": 0.3,
+        "synergy": 0.5
+      }
+    },
+    "late": {
+      "sample_count": 9928042,
+      "train_accuracy": 0.6307,
+      "test_accuracy": 0.6307,
+      "raw_coefficients": {
+        "life_diff": 0.085778,
+        "creature_count_diff": 0.31166,
+        "creature_mv_diff": 0.100026,
+        "hand_diff": 0.372967,
+        "land_diff": 0.122826,
+        "non_creature_diff": 0.267109,
+        "mana_spent_diff": -0.05248
+      },
+      "weights": {
+        "life": 0.575,
+        "board_presence": 2.0891,
+        "board_power": 0.6705,
+        "hand_size": 2.5,
+        "card_advantage": 1.7904,
+        "board_toughness": 1.0,
+        "aggression": 0.5,
+        "zone_quality": 0.3,
+        "synergy": 0.5
+      }
+    }
   }
 }
