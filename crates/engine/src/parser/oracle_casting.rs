@@ -1,7 +1,7 @@
 use crate::types::ability::{AbilityCost, AdditionalCost, CastingRestriction, SpellCastingOption};
 
 use super::oracle_cost::parse_oracle_cost;
-use super::oracle_util::parse_mana_symbols;
+use super::oracle_util::{parse_mana_symbols, strip_after, TextPair};
 
 /// Parse "As an additional cost to cast this spell, ..." into an `AdditionalCost`.
 ///
@@ -11,20 +11,19 @@ use super::oracle_util::parse_mana_symbols;
 /// - General "X or Y" → `Choice(X, Y)` using `parse_single_cost` for each fragment
 pub fn parse_additional_cost_line(lower: &str, _raw: &str) -> Option<AdditionalCost> {
     // Pattern: "you may blight N" → Optional
-    if let Some(pos) = lower.find("you may blight ") {
-        let after = &lower[pos + "you may blight ".len()..];
+    if let Some(after) = strip_after(lower, "you may blight ") {
         let count = parse_blight_count(after);
         return Some(AdditionalCost::Optional(AbilityCost::Blight { count }));
     }
 
     // Pattern: "blight N or pay {M}" → Choice (specific pattern with case-sensitive mana)
-    if let Some(pos) = lower.find("blight ") {
-        let after_blight = &lower[pos + "blight ".len()..];
-        let count = parse_blight_count(after_blight);
+    let tp = TextPair::new(_raw, lower);
+    if let Some(pos) = tp.find("blight ") {
+        let after_tp = tp.split_at(pos + "blight ".len()).1;
+        let count = parse_blight_count(after_tp.lower);
 
-        if let Some(or_pos) = after_blight.find(" or pay ") {
-            let or_abs_pos = pos + "blight ".len() + or_pos + " or pay ".len();
-            let mana_part = &_raw[or_abs_pos..];
+        if let Some(or_pos) = after_tp.find(" or pay ") {
+            let mana_part = after_tp.split_at(or_pos + " or pay ".len()).1.original;
             if let Some((mana_cost, _)) = parse_mana_symbols(mana_part.trim_end_matches('.')) {
                 return Some(AdditionalCost::Choice(
                     AbilityCost::Blight { count },
@@ -215,7 +214,8 @@ fn extract_alternative_cost_with_trailing_condition<'a>(
         return None;
     }
 
-    let marker_pos = lower.find(marker)?;
+    let tp = TextPair::new(raw, lower);
+    let marker_pos = tp.find(marker)?;
     let cost_text = raw[prefix.len()..marker_pos].trim();
     let condition = raw[marker_pos + marker.len()..].trim();
     Some((cost_text, condition))

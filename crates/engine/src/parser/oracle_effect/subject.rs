@@ -10,7 +10,7 @@ use crate::types::statics::StaticMode;
 
 use super::super::oracle_static::parse_continuous_modifications;
 use super::super::oracle_target::{parse_target, parse_type_phrase};
-use super::super::oracle_util::{parse_number, SELF_REF_TYPE_PHRASES};
+use super::super::oracle_util::{parse_number, TextPair, SELF_REF_TYPE_PHRASES};
 
 pub(super) fn try_parse_subject_predicate_ast(text: &str, ctx: &ParseContext) -> Option<ClauseAst> {
     if try_parse_targeted_controller_gain_life(text).is_some() {
@@ -140,8 +140,9 @@ fn try_parse_subject_restriction_clause(
     // CR 509.1c: "Target creature must be blocked [this turn] [if able]"
     // Handled separately because "must be blocked" isn't a "can't X" restriction pattern
     // and needs AddStaticMode for transient effect propagation through the layer system.
-    if let Some(pos) = lower.find(" must be blocked") {
-        let subject = text[..pos].trim();
+    let tp = TextPair::new(text, &lower);
+    if let Some((before, _)) = tp.split_around(" must be blocked") {
+        let subject = before.original.trim();
         let application = parse_subject_application(subject, ctx)?;
         return Some(ParsedEffectClause {
             effect: Effect::GenericEffect {
@@ -160,15 +161,19 @@ fn try_parse_subject_restriction_clause(
         });
     }
 
-    let (subject, predicate) = if let Some(pos) = lower.find(" can't ") {
-        (text[..pos].trim(), text[pos + 1..].trim())
-    } else if let Some(pos) = lower.find(" cannot ") {
-        (text[..pos].trim(), text[pos + 1..].trim())
-    } else if let Some(pos) = lower.find(" doesn't untap") {
+    let (subject, predicate) = if let Some(pos) = tp.find(" can't ") {
+        let (before, after) = tp.split_at(pos);
+        (before.original.trim(), after.original[1..].trim())
+    } else if let Some(pos) = tp.find(" cannot ") {
+        let (before, after) = tp.split_at(pos);
+        (before.original.trim(), after.original[1..].trim())
+    } else if let Some(pos) = tp.find(" doesn't untap") {
         // CR 302.6: "doesn't untap during [controller's] untap step"
-        (text[..pos].trim(), text[pos + 1..].trim())
-    } else if let Some(pos) = lower.find(" don't untap") {
-        (text[..pos].trim(), text[pos + 1..].trim())
+        let (before, after) = tp.split_at(pos);
+        (before.original.trim(), after.original[1..].trim())
+    } else if let Some(pos) = tp.find(" don't untap") {
+        let (before, after) = tp.split_at(pos);
+        (before.original.trim(), after.original[1..].trim())
     } else {
         return None;
     };
@@ -197,8 +202,10 @@ fn parse_subject_application(subject: &str, ctx: &ParseContext) -> Option<Subjec
     // "up to N target X" — the quantifier count is handled by strip_any_number_quantifier()
     // in parse_effect_chain; here we just need to route to parse_target for the filter.
     if lower.starts_with("up to ") {
-        if let Some(target_pos) = lower.find("target ") {
-            let (filter, _) = parse_target(&subject[target_pos..]);
+        let tp = TextPair::new(subject, &lower);
+        if let Some(pos) = tp.find("target ") {
+            let (_, from_target) = tp.split_at(pos);
+            let (filter, _) = parse_target(from_target.original);
             return subject_filter_application(filter, true);
         }
     }
@@ -349,9 +356,10 @@ fn try_split_pump_compound(
 ) -> Option<ParsedEffectClause> {
     let lower = normalized.to_lowercase();
     // Find " and " that separates two independent clauses after a pump+duration.
-    let and_pos = lower.find(" and ")?;
-    let pump_part = &normalized[..and_pos];
-    let remainder = normalized[and_pos + " and ".len()..].trim();
+    let tp = TextPair::new(normalized, &lower);
+    let (pump_tp, remainder_tp) = tp.split_around(" and ")?;
+    let pump_part = pump_tp.original;
+    let remainder = remainder_tp.original.trim();
     let (remainder_without_duration, _) = super::strip_trailing_duration(remainder);
 
     if !parse_continuous_modifications(remainder_without_duration).is_empty() {

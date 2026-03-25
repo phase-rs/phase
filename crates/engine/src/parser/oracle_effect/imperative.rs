@@ -15,7 +15,7 @@ use crate::types::zones::Zone;
 use super::super::oracle_target::parse_target;
 use super::super::oracle_util::{
     contains_object_pronoun, contains_possessive, parse_mana_symbols, parse_number, parse_ordinal,
-    starts_with_possessive, strip_after,
+    starts_with_possessive, strip_after, TextPair,
 };
 
 /// Earthbend keyword action default target: "target land you control".
@@ -636,8 +636,12 @@ pub(super) fn parse_utility_imperative_ast(
         }
     }
     if lower.starts_with("attach ") {
-        let to_pos = lower.find(" to ").map(|p| p + 4).unwrap_or(7);
-        let (target, _rem) = parse_target(&text[to_pos..]);
+        let tp = TextPair::new(text, lower);
+        let after_to = tp
+            .strip_after(" to ")
+            .map(|tp| tp.original)
+            .unwrap_or(&text[7..]);
+        let (target, _rem) = parse_target(after_to);
         #[cfg(debug_assertions)]
         super::types::assert_no_compound_remainder(_rem, text);
         return Some(UtilityImperativeAst::Attach { target });
@@ -695,8 +699,9 @@ fn parse_prevent_effect(text: &str) -> Effect {
         TargetFilter::Any
     } else if rest.contains("target creature") || rest.contains("target permanent") {
         // Extract the target from the text
-        if let Some(pos) = lower.find("target ") {
-            let (t, _) = parse_target(&text[pos..]);
+        let tp = TextPair::new(text, &lower);
+        if let Some(from_target) = tp.find("target ").map(|pos| tp.split_at(pos).1) {
+            let (t, _) = parse_target(from_target.original);
             t
         } else {
             TargetFilter::Any

@@ -85,14 +85,14 @@ fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
         return None;
     }
     // Must contain "this turn" to distinguish from regular triggers.
-    // Use rfind: "this turn" terminates the condition — the last occurrence
+    // Use rsplit_around: "this turn" terminates the condition — the last occurrence
     // is the correct split point if the condition itself contains "this turn".
-    let this_turn_pos = tp.lower.rfind(" this turn, ")?;
+    let (before, after) = tp.rsplit_around(" this turn, ")?;
 
     // Condition is between "whenever " and " this turn"
-    let condition_text = &tp.lower[9..this_turn_pos];
+    let condition_text = &before.lower[9..];
     // Effect is after " this turn, "
-    let effect_text = &tp.original[this_turn_pos + " this turn, ".len()..];
+    let effect_text = after.original;
 
     // Parse the condition as a trigger using the trigger parser
     let (_, mut trigger_def) =
@@ -2764,25 +2764,24 @@ fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCondition>, S
     };
 
     // CR 702.49 + CR 608.2e: "if {possessive} sneak/ninjutsu cost was paid [this turn], instead ..."
+    let tp = TextPair::new(text, &lower);
     if body.is_none() && lower.contains("sneak cost was paid") {
-        if let Some(instead_pos) = lower.find("instead ") {
-            let effect_text = &text[instead_pos + "instead ".len()..];
+        if let Some(after) = tp.strip_after("instead ") {
             return (
                 Some(AbilityCondition::NinjutsuVariantPaidInstead {
                     variant: NinjutsuVariant::Sneak,
                 }),
-                effect_text.to_string(),
+                after.original.to_string(),
             );
         }
     }
     if body.is_none() && lower.contains("ninjutsu cost was paid") {
-        if let Some(instead_pos) = lower.find("instead ") {
-            let effect_text = &text[instead_pos + "instead ".len()..];
+        if let Some(after) = tp.strip_after("instead ") {
             return (
                 Some(AbilityCondition::NinjutsuVariantPaidInstead {
                     variant: NinjutsuVariant::Ninjutsu,
                 }),
-                effect_text.to_string(),
+                after.original.to_string(),
             );
         }
     }
@@ -2846,14 +2845,15 @@ fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityCondition>, String)
 /// did NOT enter this turn) and the remaining effect text.
 fn strip_unless_entered_suffix(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
     for pattern in &[
         "unless ~ entered this turn",
         "unless this creature entered this turn",
     ] {
-        if let Some(pos) = lower.find(pattern) {
+        if let Some((before, _)) = tp.split_around(pattern) {
             return (
                 Some(AbilityCondition::SourceDidNotEnterThisTurn),
-                text[..pos].trim_end_matches('.').trim().to_string(),
+                before.original.trim_end_matches('.').trim().to_string(),
             );
         }
     }
@@ -2964,6 +2964,7 @@ fn try_parse_type_setting(text: &str) -> Option<AbilityDefinition> {
 /// - "gain life equal to its toughness if its power is 4 or greater"
 fn strip_property_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
 
     // Look for " if its power is " or " if its toughness is " as a suffix
     for (property, qty_ref) in &[
@@ -2971,13 +2972,11 @@ fn strip_property_conditional(text: &str) -> (Option<AbilityCondition>, String) 
         ("toughness", QuantityRef::EventContextSourceToughness),
     ] {
         let pattern = format!(" if its {property} is ");
-        if let Some(pos) = lower.rfind(&pattern) {
-            let after = &lower[pos + pattern.len()..];
-            let after = after.trim_end_matches('.');
+        if let Some((before, after)) = tp.rsplit_around(&pattern) {
+            let after = after.lower.trim_end_matches('.');
 
             // "N or greater" → GE
             if let Some((comparator, value)) = parse_comparison_suffix(after) {
-                let effect_text = text[..pos].to_string();
                 return (
                     Some(AbilityCondition::QuantityCheck {
                         lhs: QuantityExpr::Ref {
@@ -2986,7 +2985,7 @@ fn strip_property_conditional(text: &str) -> (Option<AbilityCondition>, String) 
                         comparator,
                         rhs: QuantityExpr::Fixed { value },
                     }),
-                    effect_text,
+                    before.original.to_string(),
                 );
             }
         }
@@ -3104,6 +3103,7 @@ fn build_counter_condition(
 ///   - Suffix: "sacrifice it if it has five or more bloodstain counters on it"
 fn strip_counter_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
 
     // Prefix: "if it has [threshold] [type] counters on it, [remainder]"
     if let Some(rest) = lower.strip_prefix("if it has ") {
@@ -3120,15 +3120,14 @@ fn strip_counter_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     }
 
     // Suffix: "[effect] if it has [threshold] [type] counters on it"
-    if let Some(pos) = lower.rfind(" if it has ") {
-        let after_prefix = &lower[pos + " if it has ".len()..];
+    if let Some((before, after)) = tp.rsplit_around(" if it has ") {
         if let Some((comparator, threshold, counter_type, consumed)) =
-            parse_counter_threshold(after_prefix)
+            parse_counter_threshold(after.lower)
         {
             // Verify the counter condition consumes to end of string (suffix position)
-            let remaining = after_prefix[consumed..].trim();
+            let remaining = after.lower[consumed..].trim();
             if remaining.is_empty() || remaining == "." {
-                let effect_text = text[..pos].trim_end_matches('.').trim().to_string();
+                let effect_text = before.original.trim_end_matches('.').trim().to_string();
                 return (
                     Some(build_counter_condition(comparator, threshold, counter_type)),
                     effect_text,
@@ -3656,25 +3655,26 @@ fn strip_numeric_target_prefix(lower: &str) -> Option<(usize, &str)> {
 /// Only applies to verbs where the quantifier modifies target selection.
 fn strip_any_number_quantifier(text: &str) -> (String, Option<MultiTargetSpec>) {
     let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
     let verb = lower.split_whitespace().next().unwrap_or("");
     if !MULTI_TARGET_VERBS.contains(&verb) {
         return (text.to_string(), None);
     }
 
     let verb_end = lower.find(' ').map(|i| i + 1).unwrap_or(0);
-    let after_verb = &lower[verb_end..];
+    let (verb_tp, after_verb_tp) = tp.split_at(verb_end);
 
-    if after_verb.starts_with("any number of ") {
-        let skip = verb_end + "any number of ".len();
-        let rebuilt = format!("{}{}", &text[..verb_end], &text[skip..]);
-        return (rebuilt, Some(MultiTargetSpec { min: 0, max: None }));
+    if after_verb_tp.starts_with("any number of ") {
+        if let Some(rest) = after_verb_tp.strip_prefix("any number of ") {
+            let rebuilt = format!("{}{}", verb_tp.original, rest.original);
+            return (rebuilt, Some(MultiTargetSpec { min: 0, max: None }));
+        }
     }
-    if let Some(rest) = after_verb.strip_prefix("up to ") {
-        if let Some((n, remainder)) = parse_number(rest) {
-            // Compute skip offset: verb + "up to " + (consumed portion of rest)
-            let consumed_len = rest.len() - remainder.len();
-            let skip = verb_end + "up to ".len() + consumed_len;
-            let rebuilt = format!("{}{}", &text[..verb_end], text[skip..].trim_start());
+    if let Some(after_up_to) = after_verb_tp.strip_prefix("up to ") {
+        if let Some((n, remainder)) = parse_number(after_up_to.lower) {
+            let consumed_len = after_up_to.lower.len() - remainder.len();
+            let (_, rest) = after_up_to.split_at(consumed_len);
+            let rebuilt = format!("{}{}", verb_tp.original, rest.original.trim_start());
             return (
                 rebuilt,
                 Some(MultiTargetSpec {
@@ -3774,24 +3774,20 @@ fn strip_return_destination_ext(text: &str) -> (&str, Option<ReturnDestination>)
 /// Also handles "deal N damage divided evenly, rounded down, among [targets]" which uses
 /// the same Effect but signals even-split (the engine treats this as a pre-set distribution).
 fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<ParsedEffectClause> {
-    let pos = lower.find("deals ").or_else(|| lower.find("deal "))?;
+    let tp = TextPair::new(text, lower);
+    let pos = tp.find("deals ").or_else(|| tp.find("deal "))?;
     let verb_len = if lower[pos..].starts_with("deals ") {
         6
     } else {
         5
     };
-    let after_lower = &lower[pos + verb_len..];
-    let after = &text[pos + verb_len..];
+    let (_, after_tp) = tp.split_at(pos + verb_len);
 
-    let (amount, rest_lower, rest) = if let Some((n, rem)) = parse_number(after_lower) {
+    let (amount, rest_tp) = if let Some((n, rem)) = parse_number(after_tp.lower) {
         if rem.starts_with("damage") {
-            let rem_len = rem.len();
-            let skip = after_lower.len() - rem_len + "damage".len();
-            (
-                QuantityExpr::Fixed { value: n as i32 },
-                &after_lower[skip..],
-                &after[skip..],
-            )
+            let skip = after_tp.lower.len() - rem.len() + "damage".len();
+            let (_, rest) = after_tp.split_at(skip);
+            (QuantityExpr::Fixed { value: n as i32 }, rest)
         } else {
             return None;
         }
@@ -3802,32 +3798,25 @@ fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<ParsedEffectCl
     // Detect distribution keywords.
     // CR 601.2d: "divided as you choose among" / "distributed among" → player chooses.
     // "divided evenly, rounded down, among" → auto-computed even split.
-    let distribute_kind = if rest_lower.contains("divided as you choose among")
-        || rest_lower.contains("distributed among")
+    let distribute_kind = if rest_tp.contains("divided as you choose among")
+        || rest_tp.contains("distributed among")
     {
         DistributionUnit::Damage
-    } else if rest_lower.contains("divided evenly") {
+    } else if rest_tp.contains("divided evenly") {
         DistributionUnit::EvenSplitDamage
     } else {
         return None;
     };
 
     // Parse the target after the distribution keyword.
-    let among_pos = rest_lower
-        .find("divided as you choose among ")
-        .map(|p| p + "divided as you choose among ".len())
-        .or_else(|| {
-            rest_lower
-                .find("distributed among ")
-                .map(|p| p + "distributed among ".len())
-        })
+    let target_tp = rest_tp
+        .strip_after("divided as you choose among ")
+        .or_else(|| rest_tp.strip_after("distributed among "))
         .or_else(|| {
             // CR 601.2d: "divided evenly, rounded down, among " variant.
-            rest_lower
-                .find("divided evenly, rounded down, among ")
-                .map(|p| p + "divided evenly, rounded down, among ".len())
+            rest_tp.strip_after("divided evenly, rounded down, among ")
         })?;
-    let target_text = rest[among_pos..].trim();
+    let target_text = target_tp.original.trim();
 
     // CR 115.1d: Detect "any number of" quantifier before the target phrase.
     let target_lower = target_text.to_lowercase();
@@ -4128,13 +4117,15 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &str) -> Option<(Ef
 
 fn try_parse_pump(lower: &str, text: &str) -> Option<Effect> {
     // Match "+N/+M", "+X/+0", "-X/-X", etc.
-    let re_pos = lower.find("gets ").or_else(|| lower.find("get "))?;
+    let tp = TextPair::new(text, lower);
+    let re_pos = tp.find("gets ").or_else(|| tp.find("get "))?;
     let offset = if lower[re_pos..].starts_with("gets ") {
         5
     } else {
         4
     };
-    let after = text[re_pos + offset..].trim();
+    let (_, after_tp) = tp.split_at(re_pos + offset);
+    let after = after_tp.original.trim();
     let token_end = after
         .find(|c: char| c.is_whitespace() || c == ',' || c == '.')
         .unwrap_or(after.len());
@@ -4147,8 +4138,10 @@ fn try_parse_pump(lower: &str, text: &str) -> Option<Effect> {
 }
 
 fn parse_pump_clause(predicate: &str) -> Option<(PtValue, PtValue, Option<Duration>)> {
-    let (without_where, where_x_expression) = strip_trailing_where_x(predicate);
-    let (without_duration, duration) = strip_trailing_duration(without_where);
+    let predicate_lower = predicate.to_lowercase();
+    let predicate_tp = TextPair::new(predicate, &predicate_lower);
+    let (without_where, where_x_expression) = strip_trailing_where_x(predicate_tp);
+    let (without_duration, duration) = strip_trailing_duration(without_where.original);
     let lower = without_duration.to_lowercase();
 
     let after = if lower.starts_with("gets ") {
@@ -4178,25 +4171,22 @@ fn parse_pump_clause(predicate: &str) -> Option<(PtValue, PtValue, Option<Durati
     Some((power, toughness, duration))
 }
 
-pub(crate) fn strip_trailing_where_x(text: &str) -> (&str, Option<String>) {
-    let lower = text.to_lowercase();
+pub(crate) fn strip_trailing_where_x<'a>(tp: TextPair<'a>) -> (TextPair<'a>, Option<String>) {
     for needle in [", where x is ", " where x is "] {
-        if let Some(pos) = lower.find(needle) {
-            let expression = text[pos + needle.len()..]
+        if let Some((before, after)) = tp.split_around(needle) {
+            let expression = after
+                .original
                 .trim()
                 .trim_end_matches('.')
                 .trim()
                 .to_string();
             if expression.is_empty() {
-                return (text, None);
+                return (tp, None);
             }
-            return (
-                text[..pos].trim_end_matches(',').trim_end(),
-                Some(expression),
-            );
+            return (before.trim_end_matches(',').trim_end(), Some(expression));
         }
     }
-    (text, None)
+    (tp, None)
 }
 
 fn strip_leading_sequence_connector(text: &str) -> &str {
@@ -4272,8 +4262,8 @@ fn parse_signed_pt_component(text: &str) -> Option<PtValue> {
 }
 
 fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
-    let after_put = &text[4..];
-    let after_put_lower = &lower[4..];
+    let tp = TextPair::new(text, lower);
+    let (_, after_put_tp) = tp.split_at(4);
 
     for (needle, destination) in [
         (" onto the battlefield", Zone::Battlefield),
@@ -4287,16 +4277,16 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
         (" on the bottom of", Zone::Library),
         (" on top of", Zone::Library),
     ] {
-        if let Some(pos) = after_put_lower.find(needle) {
-            let target_text = after_put[..pos].trim();
+        if let Some((before, _)) = after_put_tp.split_around(needle) {
+            let target_text = before.original.trim();
             if target_text.is_empty() {
                 return None;
             }
             let (target, _) = parse_target(target_text);
             // CR 110.2: "under your control" overrides the entering object's controller.
-            let under_your_control = after_put_lower.contains("under your control");
+            let under_your_control = after_put_tp.contains("under your control");
             return Some(Effect::ChangeZone {
-                origin: infer_origin_zone(after_put_lower),
+                origin: infer_origin_zone(after_put_tp.lower),
                 destination,
                 target,
                 owner_library: false,

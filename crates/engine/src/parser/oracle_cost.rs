@@ -1,6 +1,7 @@
 use super::oracle_target::{parse_target, parse_type_phrase};
 use super::oracle_util::parse_mana_symbols;
 use super::oracle_util::parse_number;
+use super::oracle_util::TextPair;
 use crate::types::ability::{
     AbilityCost, CostReduction, FilterProp, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
 };
@@ -327,11 +328,12 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
 
     // Vehicle tier costs: "12+ | {3}{W}" — skip the tier prefix and parse the actual cost
     if lower.contains(" | ") {
-        if let Some(pipe_pos) = lower.find(" | ") {
-            let prefix = lower[..pipe_pos].trim();
+        let tp = TextPair::new(text, &lower);
+        if let Some((before, after)) = tp.split_around(" | ") {
+            let prefix = before.lower.trim();
             if let Some(num_part) = prefix.strip_suffix('+') {
                 if !num_part.is_empty() && num_part.chars().all(|c| c.is_ascii_digit()) {
-                    let actual_cost = text[pipe_pos + 3..].trim();
+                    let actual_cost = after.original.trim();
                     if !actual_cost.is_empty() {
                         let cost = parse_single_cost(actual_cost);
                         if !matches!(cost, AbilityCost::Unimplemented { .. }) {

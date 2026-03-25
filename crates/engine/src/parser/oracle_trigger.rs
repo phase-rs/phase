@@ -4,7 +4,7 @@ use super::oracle_effect::{parse_effect_chain_with_context, ParseContext};
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{
     canonicalize_subtype_name, merge_or_filters, normalize_card_name_refs, parse_number,
-    parse_ordinal, parse_subtype, strip_reminder_text,
+    parse_ordinal, parse_subtype, strip_after, strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
     AbilityKind, ControllerRef, DamageKindFilter, FilterProp, NinjutsuVariant, QuantityExpr,
@@ -25,9 +25,10 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     // Replace self-references: "this creature", "this enchantment", card name → ~
     let normalized = normalize_self_refs(&text, card_name);
     let lower = normalized.to_lowercase();
+    let tp = TextPair::new(&normalized, &lower);
 
     // Split condition from effect at first ", " after the trigger phrase
-    let (condition_text, effect_text) = split_trigger(&lower, &normalized);
+    let (condition_text, effect_text) = split_trigger(tp);
 
     let effect_lower = effect_text.to_lowercase();
     // CR 609.3: "You may" at the start of the effect text makes the triggered
@@ -143,7 +144,8 @@ fn strip_constraint_sentences(text: &str) -> String {
 /// - "create a token unless that player pays {2}"
 fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>) {
     let lower = text.to_lowercase();
-    let Some(unless_pos) = lower.find(" unless ") else {
+    let tp = TextPair::new(text, &lower);
+    let Some(unless_pos) = tp.find(" unless ") else {
         return (text.to_string(), None);
     };
 
@@ -225,9 +227,10 @@ fn parse_where_x_is_trigger(text: &str) -> Option<QuantityExpr> {
 /// Each predicate is parsed independently, then composed with `And`/`Or` if needed.
 fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
 
     // Compound: "if you gained and lost life this turn"
-    if let Some(pos) = lower.find("if you gained and lost life this turn") {
+    if let Some(pos) = tp.find("if you gained and lost life this turn") {
         let condition = TriggerCondition::And {
             conditions: vec![
                 TriggerCondition::GainedLife { minimum: 1 },
@@ -248,7 +251,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         "if you gained life this turn",
     ];
     for pattern in &gained_patterns {
-        if let Some(pos) = lower.find(pattern) {
+        if let Some(pos) = tp.find(pattern) {
             let after = &lower[pos + pattern.len()..];
 
             if pattern.ends_with("life this turn") {
@@ -277,7 +280,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     }
 
     // "if you descended this turn"
-    if let Some(pos) = lower.find("if you descended this turn") {
+    if let Some(pos) = tp.find("if you descended this turn") {
         return (
             strip_condition_clause(text, pos, "if you descended this turn".len()),
             Some(TriggerCondition::Descended),
@@ -285,7 +288,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     }
 
     // "if you cast it" — zoneless cast check (CR 701.57a: Discover ETBs)
-    if let Some(pos) = lower.find("if you cast it") {
+    if let Some(pos) = tp.find("if you cast it") {
         // Guard: must not be followed by " from" (which is the zone-specific variant)
         let after = &lower[pos + "if you cast it".len()..];
         if !after.starts_with(" from") {
@@ -298,7 +301,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
 
     // "if you control N or more creatures"
     if let Some((condition, end_pos)) = parse_control_count_condition(&lower) {
-        let start = lower.find("if you control ").unwrap();
+        let start = tp.find("if you control ").unwrap();
         return (
             strip_condition_clause(text, start, end_pos - start),
             Some(condition),
@@ -307,7 +310,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
 
     // CR 508.1 / CR 603.4: "if it's attacking" / "if it is attacking"
     for pattern in &["if it's attacking", "if it is attacking"] {
-        if let Some(pos) = lower.find(pattern) {
+        if let Some(pos) = tp.find(pattern) {
             return (
                 strip_condition_clause(text, pos, pattern.len()),
                 Some(TriggerCondition::SourceIsAttacking),
@@ -319,8 +322,8 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     // Guard: "instead" after the condition means this is a conditional override effect
     // (handled by strip_additional_cost_conditional in parse_effect_chain), not an intervening-if.
     if lower.contains("sneak cost was paid") && !lower.contains("instead") {
-        let pos = lower.find("if ").unwrap_or(0);
-        let end = lower
+        let pos = tp.find("if ").unwrap_or(0);
+        let end = tp
             .find("sneak cost was paid")
             .map(|p| {
                 let after = &lower[p + "sneak cost was paid".len()..];
@@ -342,8 +345,8 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
 
     // CR 702.49 + CR 603.4: "if its ninjutsu cost was paid [this turn]"
     if lower.contains("ninjutsu cost was paid") && !lower.contains("instead") {
-        let pos = lower.find("if ").unwrap_or(0);
-        let end = lower
+        let pos = tp.find("if ").unwrap_or(0);
+        let end = tp
             .find("ninjutsu cost was paid")
             .map(|p| {
                 let after = &lower[p + "ninjutsu cost was paid".len()..];
@@ -365,7 +368,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
 
     // CR 400.7 + CR 603.10: "if it was a [type]" / "if it was an [type]"
     for prefix in &["if it was a ", "if it was an "] {
-        if let Some(pos) = lower.find(prefix) {
+        if let Some(pos) = tp.find(prefix) {
             let after = &lower[pos + prefix.len()..];
             let type_word = after.split_whitespace().next().unwrap_or("");
             let trimmed = type_word.trim_end_matches(',').trim_end_matches('.');
@@ -441,13 +444,13 @@ fn normalize_self_refs(text: &str, card_name: &str) -> String {
     normalize_card_name_refs(text, card_name)
 }
 
-fn split_trigger(lower: &str, original: &str) -> (String, String) {
-    if let Some(comma_pos) = find_effect_boundary(lower) {
-        let condition = original[..comma_pos].trim().to_string();
-        let effect = original[comma_pos + 2..].trim().to_string();
+fn split_trigger(tp: TextPair<'_>) -> (String, String) {
+    if let Some(comma_pos) = find_effect_boundary(tp.lower) {
+        let condition = tp.original[..comma_pos].trim().to_string();
+        let effect = tp.original[comma_pos + 2..].trim().to_string();
         (condition, effect)
     } else {
-        (original.to_string(), String::new())
+        (tp.original.to_string(), String::new())
     }
 }
 
@@ -1784,8 +1787,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
 
     // CR 601.2: "Whenever you cast a/an [type] spell" — extract the spell type filter.
     for prefix in ["you cast an ", "you cast a "] {
-        if let Some(pos) = lower.find(prefix) {
-            let after = &lower[pos + prefix.len()..];
+        if let Some(after) = strip_after(lower, prefix) {
             let mut def = make_base();
             def.mode = TriggerMode::SpellCast;
             // "you" = trigger's controller
@@ -1940,8 +1942,7 @@ fn try_parse_nth_spell_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefin
 /// Also handles "during each opponent's turn" variant (CR 601.2).
 fn try_parse_nth_spell_you(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let prefix = "you cast your ";
-    let pos = lower.find(prefix)?;
-    let after = &lower[pos + prefix.len()..];
+    let after = strip_after(lower, prefix)?;
     let (n, rest) = parse_ordinal(after)?;
     let filter = extract_spell_type_filter(rest);
     let after_qualifier = skip_to_word(rest, "spell");
@@ -1972,8 +1973,7 @@ fn try_parse_nth_spell_you(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
 /// "an opponent casts their <ordinal> [qualifier] spell each turn"
 fn try_parse_nth_spell_opponent(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let prefix = "an opponent casts their ";
-    let pos = lower.find(prefix)?;
-    let after = &lower[pos + prefix.len()..];
+    let after = strip_after(lower, prefix)?;
     let (n, rest) = parse_ordinal(after)?;
     let filter = extract_spell_type_filter(rest);
     let after_qualifier = skip_to_word(rest, "spell");
@@ -1997,8 +1997,7 @@ fn try_parse_nth_spell_opponent(lower: &str) -> Option<(TriggerMode, TriggerDefi
 /// and checks per-player counts via spells_cast_this_turn_by_player.
 fn try_parse_nth_spell_any_player(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let prefix = "a player casts their ";
-    let pos = lower.find(prefix)?;
-    let after = &lower[pos + prefix.len()..];
+    let after = strip_after(lower, prefix)?;
     let (n, rest) = parse_ordinal(after)?;
     let filter = extract_spell_type_filter(rest);
     let after_qualifier = skip_to_word(rest, "spell");
@@ -2054,8 +2053,7 @@ fn try_parse_nth_draw_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefini
 /// "you draw your <ordinal> card each turn"
 fn try_parse_nth_draw_you(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let prefix = "you draw your ";
-    let pos = lower.find(prefix)?;
-    let after = &lower[pos + prefix.len()..];
+    let after = strip_after(lower, prefix)?;
     let (n, rest) = parse_ordinal(after)?;
     if rest.starts_with("card each turn") || rest.starts_with("card in a turn") {
         let mut def = make_base();
@@ -2069,8 +2067,7 @@ fn try_parse_nth_draw_you(lower: &str) -> Option<(TriggerMode, TriggerDefinition
 /// "an opponent draws their <ordinal> card each turn"
 fn try_parse_nth_draw_opponent(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let prefix = "an opponent draws their ";
-    let pos = lower.find(prefix)?;
-    let after = &lower[pos + prefix.len()..];
+    let after = strip_after(lower, prefix)?;
     let (n, rest) = parse_ordinal(after)?;
     if rest.starts_with("card each turn") || rest.starts_with("card in a turn") {
         let mut def = make_base();
@@ -2088,8 +2085,7 @@ fn try_parse_nth_draw_opponent(lower: &str) -> Option<(TriggerMode, TriggerDefin
 /// CR 121.2: No valid_target filter — fires for any player's draw.
 fn try_parse_nth_draw_any_player(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let prefix = "a player draws their ";
-    let pos = lower.find(prefix)?;
-    let after = &lower[pos + prefix.len()..];
+    let after = strip_after(lower, prefix)?;
     let (n, rest) = parse_ordinal(after)?;
     if rest.starts_with("card each turn") || rest.starts_with("card in a turn") {
         let mut def = make_base();

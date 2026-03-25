@@ -4,7 +4,7 @@ use crate::types::ability::{
 use crate::types::mana::ManaColor;
 
 use super::super::oracle_quantity::parse_cda_quantity;
-use super::super::oracle_util::{parse_mana_production, parse_number};
+use super::super::oracle_util::{parse_mana_production, parse_number, TextPair};
 
 pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
     let trimmed = text.trim();
@@ -14,8 +14,10 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
     }
 
     let clause = trimmed[4..].trim();
-    let (without_where_x, where_x_expression) = super::strip_trailing_where_x(clause);
-    let clause = without_where_x.trim().trim_end_matches(['.', '"']);
+    let clause_lower = clause.to_lowercase();
+    let clause_tp = TextPair::new(clause, &clause_lower);
+    let (without_where_x, where_x_expression) = super::strip_trailing_where_x(clause_tp);
+    let clause = without_where_x.original.trim().trim_end_matches(['.', '"']);
     // Strip "an additional " modifier — e.g. "add an additional {G}" → "{G}"
     let clause = clause.strip_prefix("an additional ").unwrap_or(clause);
 

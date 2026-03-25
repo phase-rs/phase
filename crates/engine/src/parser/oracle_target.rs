@@ -9,7 +9,7 @@ use crate::types::zones::Zone;
 
 use super::oracle_quantity::capitalize_first;
 use super::oracle_util::{
-    merge_or_filters, parse_subtype, starts_with_possessive, SELF_REF_TYPE_PHRASES,
+    merge_or_filters, parse_subtype, starts_with_possessive, TextPair, SELF_REF_TYPE_PHRASES,
 };
 
 /// Parse an event-context possessive reference from Oracle text.
@@ -1375,11 +1375,12 @@ fn parse_targets_only_type_or_player(text: &str) -> (TargetFilter, usize) {
     // Intercept this pattern: find "or player" in the text, parse only the part before it,
     // then compose with TargetFilter::Player.
     let lower = text.to_lowercase();
-    if let Some(or_pos) = lower.find(" or player") {
+    let tp = TextPair::new(text, &lower);
+    if let Some(or_pos) = tp.find(" or player") {
         let end = or_pos + " or player".len();
         // Only match if "or player" is followed by a delimiter or end of string
         if end == text.len() || text[end..].starts_with([',', '.', ' ']) {
-            let type_part = &text[..or_pos];
+            let type_part = tp.split_at(or_pos).0.original;
             let (type_filter, _) = parse_type_phrase(type_part);
             let combined = TargetFilter::Or {
                 filters: vec![type_filter, TargetFilter::Player],

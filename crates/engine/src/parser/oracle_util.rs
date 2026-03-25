@@ -149,6 +149,40 @@ impl<'a> TextPair<'a> {
             }
         })
     }
+
+    /// Find first `needle` in lowered text, return `(before, after)` excluding needle.
+    pub fn split_around(&self, needle: &str) -> Option<(Self, Self)> {
+        self.lower.find(needle).map(|pos| {
+            let after = pos + needle.len();
+            (
+                Self {
+                    original: &self.original[..pos],
+                    lower: &self.lower[..pos],
+                },
+                Self {
+                    original: &self.original[after..],
+                    lower: &self.lower[after..],
+                },
+            )
+        })
+    }
+
+    /// Find last `needle` in lowered text, return `(before, after)` excluding needle.
+    pub fn rsplit_around(&self, needle: &str) -> Option<(Self, Self)> {
+        self.lower.rfind(needle).map(|pos| {
+            let after = pos + needle.len();
+            (
+                Self {
+                    original: &self.original[..pos],
+                    lower: &self.lower[..pos],
+                },
+                Self {
+                    original: &self.original[after..],
+                    lower: &self.lower[after..],
+                },
+            )
+        })
+    }
 }
 
 /// Find `needle` in `text` and return everything after it, or `None`.
@@ -156,6 +190,12 @@ impl<'a> TextPair<'a> {
 /// Combines `text.find(needle)` + `&text[pos + needle.len()..]` into one call.
 pub fn strip_after<'a>(text: &'a str, needle: &str) -> Option<&'a str> {
     text.find(needle).map(|pos| &text[pos + needle.len()..])
+}
+
+/// Find `needle` in `text` and return `(before, after)` excluding needle, or `None`.
+pub fn split_around<'a>(text: &'a str, needle: &str) -> Option<(&'a str, &'a str)> {
+    text.find(needle)
+        .map(|pos| (&text[..pos], &text[pos + needle.len()..]))
 }
 
 /// Strip reminder text (parenthesized) from a line.
@@ -1651,5 +1691,89 @@ mod tests {
         let lower = original.to_lowercase();
         let tp = TextPair::new(original, &lower);
         assert!(tp.strip_after("lose ").is_none());
+    }
+
+    // --- split_around (free function) tests ---
+
+    #[test]
+    fn split_around_middle() {
+        assert_eq!(
+            split_around("hello world foo", " world "),
+            Some(("hello", "foo"))
+        );
+    }
+
+    #[test]
+    fn split_around_at_start() {
+        assert_eq!(split_around("prefix rest", "prefix "), Some(("", "rest")));
+    }
+
+    #[test]
+    fn split_around_at_end() {
+        assert_eq!(split_around("hello world", "world"), Some(("hello ", "")));
+    }
+
+    #[test]
+    fn split_around_not_found() {
+        assert_eq!(split_around("hello world", "xyz"), None);
+    }
+
+    #[test]
+    fn split_around_first_occurrence() {
+        let (before, after) = split_around("a and b and c", " and ").unwrap();
+        assert_eq!(before, "a");
+        assert_eq!(after, "b and c");
+    }
+
+    // --- TextPair::split_around tests ---
+
+    #[test]
+    fn text_pair_split_around_preserves_case() {
+        let original = "Target Creature Gets +2/+2 And Has Flying";
+        let lower = original.to_lowercase();
+        let tp = TextPair::new(original, &lower);
+        let (before, after) = tp.split_around(" and ").unwrap();
+        assert_eq!(before.original, "Target Creature Gets +2/+2");
+        assert_eq!(after.original, "Has Flying");
+        assert_eq!(before.lower, "target creature gets +2/+2");
+        assert_eq!(after.lower, "has flying");
+    }
+
+    #[test]
+    fn text_pair_split_around_not_found() {
+        let original = "Gain 3 life";
+        let lower = original.to_lowercase();
+        let tp = TextPair::new(original, &lower);
+        assert!(tp.split_around(" and ").is_none());
+    }
+
+    #[test]
+    fn text_pair_split_around_first_occurrence() {
+        let original = "A And B And C";
+        let lower = original.to_lowercase();
+        let tp = TextPair::new(original, &lower);
+        let (before, after) = tp.split_around(" and ").unwrap();
+        assert_eq!(before.original, "A");
+        assert_eq!(after.original, "B And C");
+    }
+
+    #[test]
+    fn text_pair_rsplit_around_last_occurrence() {
+        let original = "A And B And C";
+        let lower = original.to_lowercase();
+        let tp = TextPair::new(original, &lower);
+        let (before, after) = tp.rsplit_around(" and ").unwrap();
+        assert_eq!(before.original, "A And B");
+        assert_eq!(after.original, "C");
+    }
+
+    #[test]
+    fn text_pair_split_around_multibyte() {
+        let original = "Choose one \u{2014} Effect text";
+        let lower = original.to_lowercase();
+        let tp = TextPair::new(original, &lower);
+        let (before, after) = tp.split_around(" \u{2014} ").unwrap();
+        assert_eq!(before.original, "Choose one");
+        assert_eq!(after.original, "Effect text");
     }
 }

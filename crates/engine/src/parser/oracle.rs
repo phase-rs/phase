@@ -26,7 +26,7 @@ use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_static::parse_static_line;
 use super::oracle_trigger::parse_trigger_line;
 use super::oracle_util::{
-    normalize_card_name_refs, parse_mana_symbols, parse_subtype, strip_reminder_text,
+    normalize_card_name_refs, parse_mana_symbols, parse_subtype, strip_reminder_text, TextPair,
 };
 
 /// Collected parsed abilities from Oracle text.
@@ -242,11 +242,12 @@ pub fn parse_oracle_text(
         }
 
         // CR 702.6: Named equip variant — "<Flavor Name> — Equip {cost}"
-        if let Some(idx) = lower
-            .find(" \u{2014} equip")
-            .or_else(|| lower.find(" - equip"))
-        {
-            let equip_part = line[idx..]
+        let tp = TextPair::new(&line, &lower);
+        if let Some(idx) = tp.find(" \u{2014} equip").or_else(|| tp.find(" - equip")) {
+            let equip_part = tp
+                .split_at(idx)
+                .1
+                .original
                 .trim_start_matches(" \u{2014} ")
                 .trim_start_matches(" - ");
             if let Some(ability) = try_parse_equip(equip_part) {
@@ -829,6 +830,7 @@ fn strip_activated_constraints(text: &str) -> (String, ActivatedConstraintAst) {
 
     'parse_constraints: loop {
         let lower = remaining.to_lowercase();
+        let tp = TextPair::new(&remaining, &lower);
 
         for (suffix, parsed) in [
             (
@@ -1039,7 +1041,7 @@ fn strip_activated_constraints(text: &str) -> (String, ActivatedConstraintAst) {
             continue;
         }
 
-        if let Some(idx) = lower.rfind("activate only if ") {
+        if let Some(idx) = tp.rfind("activate only if ") {
             if idx == 0 {
                 let condition_text = remaining["activate only if ".len()..].trim().to_string();
                 remaining.clear();
@@ -1066,7 +1068,7 @@ fn strip_activated_constraints(text: &str) -> (String, ActivatedConstraintAst) {
             }
         }
 
-        if let Some(idx) = lower.rfind("activate only from ") {
+        if let Some(idx) = tp.rfind("activate only from ") {
             if idx == 0 || lower[..idx].ends_with(". ") {
                 let restriction_text = remaining[idx + "activate only from ".len()..]
                     .trim()
@@ -1083,7 +1085,7 @@ fn strip_activated_constraints(text: &str) -> (String, ActivatedConstraintAst) {
             }
         }
 
-        if let Some(idx) = lower.rfind("activate only ") {
+        if let Some(idx) = tp.rfind("activate only ") {
             if idx == 0 || lower[..idx].ends_with(". ") {
                 let restriction_text = remaining[idx + "activate only ".len()..].trim().to_string();
                 remaining = remaining[..idx]
@@ -1098,7 +1100,7 @@ fn strip_activated_constraints(text: &str) -> (String, ActivatedConstraintAst) {
             }
         }
 
-        if let Some(idx) = lower.rfind("activate no more than ") {
+        if let Some(idx) = tp.rfind("activate no more than ") {
             if idx == 0 || lower[..idx].ends_with(". ") {
                 let restriction_text = remaining[idx + "activate no more than ".len()..]
                     .trim()

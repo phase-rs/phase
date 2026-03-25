@@ -6,7 +6,7 @@ use super::oracle_effect::parse_effect_chain;
 use super::oracle_quantity::{capitalize_first, parse_cda_quantity, parse_quantity_ref};
 use super::oracle_target::{parse_combat_status_prefix, parse_counter_suffix, parse_type_phrase};
 use super::oracle_util::{
-    has_unconsumed_conditional, parse_mana_symbols, parse_number, parse_subtype,
+    has_unconsumed_conditional, parse_mana_symbols, parse_number, parse_subtype, strip_after,
     strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
@@ -785,12 +785,14 @@ fn try_parse_compound_subtypes(
 /// `lower` is the lowercased version of `text`.
 /// `is_other` indicates whether this was preceded by "Other ".
 fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<StaticDefinition> {
+    let tp = TextPair::new(text, lower);
     // Try "X creatures you control get/have" first
-    if let Some(creatures_pos) = lower.find(" creatures you control ") {
-        let descriptor = text[..creatures_pos].trim();
+    if let Some(creatures_pos) = tp.find(" creatures you control ") {
+        let (before, after) = tp.split_at(creatures_pos);
+        let descriptor = before.original.trim();
         if !descriptor.is_empty() {
-            let after_prefix = &text[creatures_pos + 23..];
-            let full_subject = text[..creatures_pos + " creatures you control".len()].trim();
+            let after_prefix = &after.original[" creatures you control ".len()..];
+            let full_subject = tp.original[..creatures_pos + " creatures you control".len()].trim();
             // CR 509.1h: Strip combat-status prefixes ("Attacking Ninja" → props=[Attacking], subtype="Ninja")
             let mut extra_props = Vec::new();
             let mut desc_remaining = descriptor;
@@ -865,11 +867,12 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
     }
 
     // Try "Xs you control get/have" (e.g. "Zombies you control get +1/+1")
-    if let Some(yc_pos) = lower.find(" you control ") {
-        let descriptor = text[..yc_pos].trim();
+    if let Some(yc_pos) = tp.find(" you control ") {
+        let (before, after) = tp.split_at(yc_pos);
+        let descriptor = before.original.trim();
         if !descriptor.is_empty() {
-            let after_prefix = &text[yc_pos + 13..];
-            let full_subject = text[..yc_pos + " you control".len()].trim();
+            let after_prefix = &after.original[" you control ".len()..];
+            let full_subject = tp.original[..yc_pos + " you control".len()].trim();
             // CR 509.1h: Strip combat-status prefixes
             let mut extra_props = Vec::new();
             let mut desc_remaining = descriptor;
@@ -1064,8 +1067,7 @@ fn parse_compound_turn_counter_animation(lower: &str, text: &str) -> Option<Stat
 
     // Skip past "counters on [pronoun], " to get the modification text
     let rest = &rest[counters_pos..];
-    let comma_pos = rest.find(", ")?;
-    let modification_text = rest[comma_pos + 2..].trim();
+    let modification_text = strip_after(rest, ", ")?.trim();
 
     let modifications = parse_animation_modifications(modification_text.trim_end_matches('.'));
     if modifications.is_empty() {
@@ -2167,11 +2169,10 @@ fn parse_enchanted_equipped_predicate(
 
     // --- Conditional grants: split "as long as" before passing to continuous parser ---
     // Handles both "gets +1/+1 as long as ..." and "has flying as long as ..."
-    if let Some(cond_pos) = pred_lower.find(" as long as ") {
-        let continuous_text = &predicate[..cond_pos];
-        let condition_text = predicate[cond_pos + " as long as ".len()..]
-            .trim()
-            .trim_end_matches('.');
+    let pred_tp = TextPair::new(predicate, &pred_lower);
+    if let Some((before_cond, after_cond)) = pred_tp.split_around(" as long as ") {
+        let continuous_text = before_cond.original;
+        let condition_text = after_cond.original.trim().trim_end_matches('.');
         if let Some(mut def) =
             parse_continuous_gets_has(continuous_text, affected.clone(), description)
         {
@@ -2196,11 +2197,12 @@ fn parse_continuous_gets_has(
     description: &str,
 ) -> Option<StaticDefinition> {
     let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
 
     // CR 613.4c: Handle "gets +N/+M for each [clause]" — dynamic P/T via ObjectCount.
-    if let Some(for_each_idx) = lower.find("for each ") {
-        let pt_text = text[..for_each_idx].trim();
-        let for_each_clause = lower[for_each_idx + "for each ".len()..].trim_end_matches('.');
+    if let Some((before_for_each, after_for_each)) = tp.split_around("for each ") {
+        let pt_text = before_for_each.original.trim();
+        let for_each_clause = after_for_each.lower.trim_end_matches('.');
 
         let pt_lower = pt_text.to_lowercase();
         let pt_source = pt_lower
@@ -2278,13 +2280,16 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     // Strip "where X is [quantity]" before parsing modifications,
     // but only if the text doesn't contain quoted abilities (which have their
     // own "where X is" handling inside the quote).
-    let (text_stripped, where_x_expression) = if text.contains('"') {
-        (text, None)
+    let text_lower = text.to_lowercase();
+    let text_tp = TextPair::new(text, &text_lower);
+    let (stripped_tp, where_x_expression) = if text.contains('"') {
+        (text_tp, None)
     } else {
-        super::oracle_effect::strip_trailing_where_x(text)
+        super::oracle_effect::strip_trailing_where_x(text_tp)
     };
-    let lower = text_stripped.to_lowercase();
-    let tp = TextPair::new(text_stripped, &lower);
+    let tp = stripped_tp;
+    let text_stripped = tp.original;
+    let lower = tp.lower;
     let mut modifications = Vec::new();
 
     if tp.contains("lose all abilities") {
@@ -2302,7 +2307,7 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
 
     // CR 613.4c: Scan for "get +X/+X" / "gets +X/+X" anywhere in the text
     // for dynamic P/T modification (e.g., Craterhoof Behemoth)
-    if let Some(dynamic_mods) = parse_dynamic_pt_in_text(&lower, where_x_expression.as_deref()) {
+    if let Some(dynamic_mods) = parse_dynamic_pt_in_text(lower, where_x_expression.as_deref()) {
         modifications.extend(dynamic_mods);
     }
 
@@ -2341,7 +2346,7 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     }
 
     // CR 205.1a: "becomes a [Type] in addition to its other creature types"
-    if let Some(subtype) = parse_becomes_type_addition(&lower) {
+    if let Some(subtype) = parse_becomes_type_addition(lower) {
         modifications.push(ContinuousModification::AddSubtype { subtype });
     }
 
@@ -2422,8 +2427,7 @@ fn parse_becomes_type_addition(lower: &str) -> Option<String> {
 fn parse_base_pt_mod(text: &str) -> Option<(i32, i32)> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
-    let pos = tp.find("base power and toughness ")?;
-    let pt_text = tp.original[pos + "base power and toughness ".len()..].trim();
+    let pt_text = tp.strip_after("base power and toughness ")?.original.trim();
     parse_pt_mod(pt_text)
 }
 
@@ -2433,8 +2437,7 @@ fn parse_base_power_mod(text: &str) -> Option<i32> {
     if tp.contains("base power and toughness ") {
         return None;
     }
-    let pos = tp.find("base power ")?;
-    let power_text = tp.original[pos + "base power ".len()..].trim();
+    let power_text = tp.strip_after("base power ")?.original.trim();
     parse_single_pt_value(power_text)
 }
 
@@ -2444,8 +2447,7 @@ fn parse_base_toughness_mod(text: &str) -> Option<i32> {
     if tp.contains("base power and toughness ") {
         return None;
     }
-    let pos = tp.find("base toughness ")?;
-    let toughness_text = tp.original[pos + "base toughness ".len()..].trim();
+    let toughness_text = tp.strip_after("base toughness ")?.original.trim();
     parse_single_pt_value(toughness_text)
 }
 
@@ -2702,8 +2704,7 @@ fn parse_cda_pt_equality(lower: &str, text: &str) -> Option<StaticDefinition> {
     } else if power_only {
         modifications.push(ContinuousModification::SetDynamicPower { value: qty.clone() });
         // Check for split P/T: "and its toughness is equal to that number plus N"
-        if let Some(plus_pos) = lower.find("that number plus ") {
-            let after_plus = &lower[plus_pos + "that number plus ".len()..];
+        if let Some(after_plus) = strip_after(lower, "that number plus ") {
             let n_str = after_plus
                 .split(|c: char| !c.is_ascii_digit())
                 .next()
@@ -2869,10 +2870,10 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
 
     // Detect dynamic "for each" count pattern
     // "for each artifact you control" → QuantityRef::ObjectCount
-    let dynamic_count = if let Some(for_each_idx) = lower.find("for each ") {
-        let count_text = &text[for_each_idx + "for each ".len()..];
+    let cost_tp = TextPair::new(text, lower);
+    let dynamic_count = if let Some((_, after_for_each)) = cost_tp.split_around("for each ") {
         // Strip trailing period/punctuation
-        let count_text = count_text.trim_end_matches('.');
+        let count_text = after_for_each.original.trim_end_matches('.');
         let (count_filter, _) = parse_type_phrase(count_text);
         Some(QuantityRef::ObjectCount {
             filter: count_filter,
@@ -2938,14 +2939,11 @@ fn parse_basic_land_type_plural(name: &str) -> Option<BasicLandType> {
 /// Swamp in addition to its other land types"), and all-basic-types ("Lands you control
 /// are every basic land type in addition to their other types").
 fn parse_land_type_change(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
-    let (subject, rest) = if let Some(pos) = tp.lower.find(" are ") {
-        (&tp.original[..pos], &tp.original[pos + 5..])
-    } else if let Some(pos) = tp.lower.find(" is a ") {
-        (&tp.original[..pos], &tp.original[pos + 6..])
-    } else {
-        return None;
-    };
-    let rest = rest.trim().trim_end_matches('.');
+    let (subject_tp, rest_tp) = tp
+        .split_around(" are ")
+        .or_else(|| tp.split_around(" is a "))?;
+    let subject = subject_tp.original;
+    let rest = rest_tp.original.trim().trim_end_matches('.');
 
     // Only proceed if subject is a land-type-change subject (avoids matching non-land patterns).
     let affected = parse_land_type_change_subject(subject)?;

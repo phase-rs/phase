@@ -1,7 +1,9 @@
 use super::oracle_effect::{parse_effect_chain, try_parse_named_choice};
 use super::oracle_quantity::capitalize_first;
 use super::oracle_target::parse_type_phrase;
-use super::oracle_util::{normalize_card_name_refs, parse_number, strip_reminder_text};
+use super::oracle_util::{
+    normalize_card_name_refs, parse_number, strip_after, strip_reminder_text, TextPair,
+};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChoiceType, CombatDamageScope, ControllerRef,
     DamageModification, DamageTargetFilter, Effect, FilterProp, QuantityExpr, ReplacementCondition,
@@ -372,8 +374,7 @@ fn parse_check_land(norm_lower: &str, original_text: &str) -> Option<Replacement
         return None;
     }
 
-    let unless_idx = norm_lower.find("unless you control ")?;
-    let rest = &norm_lower[unless_idx + "unless you control ".len()..];
+    let rest = strip_after(norm_lower, "unless you control ")?;
     let rest = rest.trim_end_matches('.');
 
     let mut subtypes = Vec::new();
@@ -416,8 +417,7 @@ fn parse_fast_land(norm_lower: &str, original_text: &str) -> Option<ReplacementD
         return None;
     }
 
-    let unless_idx = norm_lower.find("unless you control ")?;
-    let rest = &norm_lower[unless_idx + "unless you control ".len()..];
+    let rest = strip_after(norm_lower, "unless you control ")?;
 
     // Parse "two or fewer other lands." → count=2, remainder="or fewer other lands."
     let (count, after_number) = parse_number(rest)?;
@@ -478,8 +478,7 @@ fn parse_unless_controls_typed(
         return None;
     }
 
-    let unless_idx = norm_lower.find("unless you control ")?;
-    let rest = &norm_lower[unless_idx + "unless you control ".len()..];
+    let rest = strip_after(norm_lower, "unless you control ")?;
     // Strip leading article — parse_type_phrase does NOT handle "a "/"an "
     let rest = rest.trim_start_matches("a ").trim_start_matches("an ");
 
@@ -533,8 +532,7 @@ fn inject_controller_you(filter: TargetFilter) -> TargetFilter {
 
 /// Extract life payment amount from "pay N life" pattern.
 fn extract_life_payment(text: &str) -> Option<i32> {
-    let pay_idx = text.find("pay ")?;
-    let after_pay = &text[pay_idx + 4..];
+    let after_pay = strip_after(text, "pay ")?;
     let end = after_pay.find(' ').unwrap_or(after_pay.len());
     let num_str = &after_pay[..end];
     num_str.parse().ok()
@@ -547,8 +545,7 @@ fn parse_enters_with_counters(
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
     // Find "with [N] [type] counter" to extract count and counter type
-    let with_pos = norm_lower.find("with ")?;
-    let after_with = &norm_lower[with_pos + 5..];
+    let after_with = strip_after(norm_lower, "with ")?;
     // Skip "an additional" if present
     let after_additional = after_with
         .strip_prefix("an additional ")
@@ -719,16 +716,10 @@ fn parse_damage_modification_replacement(
         || norm_lower.contains("deals triple that damage")
     {
         DamageModification::Triple
-    } else if let Some(rest) = norm_lower
-        .find("that much damage plus ")
-        .map(|i| &norm_lower[i + "that much damage plus ".len()..])
-    {
+    } else if let Some(rest) = strip_after(norm_lower, "that much damage plus ") {
         let (value, _) = parse_number(rest)?;
         DamageModification::Plus { value }
-    } else if let Some(rest) = norm_lower
-        .find("that much damage minus ")
-        .map(|i| &norm_lower[i + "that much damage minus ".len()..])
-    {
+    } else if let Some(rest) = strip_after(norm_lower, "that much damage minus ") {
         let (value, _) = parse_number(rest)?;
         DamageModification::Minus { value }
     } else {
@@ -871,8 +862,7 @@ fn is_color_word(word: &str) -> bool {
 
 fn extract_replacement_effect(text: &str) -> Option<String> {
     // Find ", " after "would" or "instead" clause
-    if let Some(pos) = text.find(", ") {
-        let effect = text[pos + 2..].trim();
+    if let Some(effect) = strip_after(text, ", ").map(str::trim) {
         if !effect.is_empty() {
             return Some(effect.to_string());
         }
@@ -1034,8 +1024,7 @@ fn parse_unless_player_life(
     {
         return None;
     }
-    let unless_idx = norm_lower.find("unless a player has ")?;
-    let rest = &norm_lower[unless_idx + "unless a player has ".len()..];
+    let rest = strip_after(norm_lower, "unless a player has ")?;
     // "13 or less life" → extract amount
     let (amount, remainder) = parse_number(rest)?;
     if !remainder.trim().starts_with("or less life")
@@ -1096,8 +1085,10 @@ fn parse_enters_tapped_unless_generic(
     {
         return None;
     }
-    let unless_idx = norm_lower.find(" unless ")?;
-    let condition_text = &original_text[unless_idx + " unless ".len()..];
+    let original_lower = original_text.to_lowercase();
+    let tp = TextPair::new(original_text, &original_lower);
+    let unless_part = tp.strip_after(" unless ")?;
+    let condition_text = unless_part.original;
     Some(
         ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(AbilityDefinition::new(
@@ -2175,5 +2166,16 @@ mod tests {
             def.condition,
             Some(ReplacementCondition::Unrecognized { .. })
         ));
+    }
+
+    #[test]
+    fn enters_tapped_unless_long_card_name() {
+        // Verify condition_text is extracted from original_text, not norm_lower offset.
+        // norm_lower has the card name replaced with `~` (1 char), so using its byte
+        // offset against original_text would point to the wrong position.
+        let norm = "~ enters the battlefield tapped unless you pay {2}.";
+        let original = "Some Very Long Card Name enters the battlefield tapped unless you pay {2}.";
+        let result = parse_enters_tapped_unless_generic(norm, original);
+        assert!(result.is_some(), "Should parse enters-tapped-unless");
     }
 }

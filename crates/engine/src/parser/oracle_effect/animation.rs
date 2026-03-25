@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use super::super::oracle_util::split_around;
 use super::token::{
     map_token_keyword, push_unique_string, split_token_keyword_list, title_case_word,
 };
@@ -211,10 +212,12 @@ fn parse_token_pt_component(text: &str) -> Option<crate::types::ability::PtValue
 }
 
 fn split_animation_base_pt_clause(text: &str) -> Option<(&str, i32, i32)> {
+    const NEEDLE: &str = " with base power and toughness ";
     let lower = text.to_lowercase();
-    let pos = lower.find(" with base power and toughness ")?;
+    let (before, _) = split_around(&lower, NEEDLE)?;
+    let pos = before.len();
     let descriptor = text[..pos].trim_end_matches(',').trim();
-    let pt_text = text[pos + " with base power and toughness ".len()..].trim();
+    let pt_text = text[pos + NEEDLE.len()..].trim();
     let (power, toughness, _) = parse_fixed_become_pt_prefix(pt_text)?;
     Some((descriptor, power, toughness))
 }
@@ -260,13 +263,15 @@ fn parse_animation_types(text: &str, infer_creature: bool) -> Vec<String> {
 }
 
 fn split_animation_keyword_clause(text: &str) -> (&str, Vec<Keyword>) {
+    const NEEDLE: &str = " with ";
     let lower = text.to_lowercase();
-    let Some(pos) = lower.find(" with ") else {
+    let Some((before, _)) = split_around(&lower, NEEDLE) else {
         return (text, Vec::new());
     };
 
+    let pos = before.len();
     let prefix = text[..pos].trim_end_matches(',').trim();
-    let keyword_text = text[pos + 6..]
+    let keyword_text = text[pos + NEEDLE.len()..]
         .split('"')
         .next()
         .unwrap_or("")

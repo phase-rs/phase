@@ -17,7 +17,7 @@ use super::oracle_modal::strip_ability_word;
 use super::oracle_replacement::parse_replacement_line;
 use super::oracle_static::parse_static_line;
 use super::oracle_trigger::parse_trigger_line;
-use super::oracle_util::strip_reminder_text;
+use super::oracle_util::{strip_reminder_text, TextPair};
 
 /// Detect a "{cost}: Level N" line using structural parsing.
 /// Returns `(level_number, cost_text)` if the line matches.
@@ -236,10 +236,10 @@ pub(crate) fn is_class_level_trigger(lower: &str, card_name: &str) -> bool {
 
 /// Parse a "When this Class becomes level N, {effect}" trigger.
 fn parse_class_level_trigger(line: &str, card_name: &str, level: u8) -> Option<TriggerDefinition> {
-    // Find "becomes level N" and extract the effect after the comma
+    // Find "becomes level N" and extract the effect after the comma (case-insensitive)
     let lower = line.to_lowercase();
-    let becomes_pos = lower.find("becomes level ")?;
-    let after_becomes = &line[becomes_pos + "becomes level ".len()..];
+    let tp = TextPair::new(line, &lower);
+    let after_becomes = tp.strip_after("becomes level ")?.original;
 
     // Parse the level number
     let after_lower = after_becomes.to_lowercase();

@@ -6,7 +6,7 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 
 use super::super::oracle_target::parse_target;
-use super::super::oracle_util::{parse_number, strip_reminder_text};
+use super::super::oracle_util::{parse_number, strip_reminder_text, TextPair};
 
 pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
     let text = strip_reminder_text(text);
@@ -14,18 +14,18 @@ pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
 
     // "create a token that's a copy of {target}"
     if lower.contains("token that's a copy of") || lower.contains("token thats a copy of") {
-        let copy_pos = lower.find("copy of ").map(|p| p + 8).unwrap_or(lower.len());
-        let after_copy = &text[copy_pos..];
-        let after_copy_lower = after_copy.to_lowercase();
+        let tp = TextPair::new(&text, &lower);
+        let after_copy_tp = tp.strip_after("copy of ").unwrap_or(tp);
+        let after_copy = after_copy_tp.original;
         // Handle "another target ..." — strip "another" prefix and add FilterProp::Another
-        let (mut target, _) = if let Some(rest) = after_copy_lower.strip_prefix("another ") {
-            let offset = after_copy.len() - rest.len();
-            parse_target(&after_copy[offset..])
+        let (mut target, _) = if after_copy_tp.starts_with("another ") {
+            let rest = &after_copy["another ".len()..];
+            parse_target(rest)
         } else {
             parse_target(after_copy)
         };
         // If "another" was present, add the Another property to the filter.
-        if after_copy_lower.starts_with("another ") {
+        if after_copy_tp.starts_with("another ") {
             if let TargetFilter::Typed(ref mut typed) = target {
                 if !typed.properties.contains(&FilterProp::Another) {
                     typed.properties.push(FilterProp::Another);
@@ -64,10 +64,10 @@ pub(super) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     let lower = text.to_lowercase();
 
     // CR 303.7: Strip "attached to [target]" suffix and capture the attachment target.
-    let (text, attach_to) = if let Some(pos) = lower.find(" attached to ") {
-        let target_text = &text[pos + " attached to ".len()..];
-        let (target, _) = parse_target(target_text);
-        (&text[..pos], Some(target))
+    let tp = TextPair::new(text, &lower);
+    let (text, attach_to) = if let Some((before, after)) = tp.split_around(" attached to ") {
+        let (target, _) = parse_target(after.original);
+        (before.original, Some(target))
     } else {
         (text, None)
     };
@@ -348,7 +348,7 @@ fn split_token_head(text: &str) -> Option<(&str, &str)> {
     let lower = text.to_lowercase();
     let pos = lower.find(" token")?;
     let head = text[..pos].trim();
-    let mut suffix = &text[pos + 6..];
+    let mut suffix = &text[pos + " token".len()..];
     if let Some(stripped) = suffix.strip_prefix('s') {
         suffix = stripped;
     }
@@ -364,10 +364,11 @@ fn parse_token_name_clause(text: &str) -> (Option<String>, &str) {
         return (None, trimmed);
     };
 
-    let lower = after_named.to_lowercase();
+    let after_named_lower = after_named.to_lowercase();
+    let after_named_tp = TextPair::new(after_named, &after_named_lower);
     let mut end = after_named.len();
     for needle in [" with ", " attached ", ",", "."] {
-        if let Some(pos) = lower.find(needle) {
+        if let Some(pos) = after_named_tp.find(needle) {
             end = end.min(pos);
         }
     }
@@ -383,9 +384,10 @@ fn parse_token_name_clause(text: &str) -> (Option<String>, &str) {
 
 fn extract_token_where_x_expression(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
-    let pos = lower.find("where x is ")?;
+    let tp = TextPair::new(text, &lower);
     Some(
-        text[pos + "where x is ".len()..]
+        tp.strip_after("where x is ")?
+            .original
             .trim()
             .trim_end_matches('.')
             .to_string(),
@@ -394,9 +396,10 @@ fn extract_token_where_x_expression(text: &str) -> Option<String> {
 
 fn extract_token_count_expression(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
-    let pos = lower.find("equal to ")?;
+    let tp = TextPair::new(text, &lower);
     Some(
-        text[pos + "equal to ".len()..]
+        tp.strip_after("equal to ")?
+            .original
             .trim()
             .trim_end_matches('.')
             .to_string(),
@@ -405,13 +408,15 @@ fn extract_token_count_expression(text: &str) -> Option<String> {
 
 fn extract_token_pt_expression(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
     for needle in [
         "power and toughness are each equal to ",
         "power and toughness is each equal to ",
     ] {
-        if let Some(pos) = lower.find(needle) {
+        if let Some(after) = tp.strip_after(needle) {
             return Some(
-                text[pos + needle.len()..]
+                after
+                    .original
                     .trim()
                     .trim_matches('"')
                     .trim_end_matches('.')
