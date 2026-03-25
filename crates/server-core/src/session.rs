@@ -13,6 +13,7 @@ use engine::types::match_config::MatchConfig;
 use engine::types::player::PlayerId;
 use phase_ai::config::{AiConfig, AiDifficulty, Platform};
 use rand::{Rng, SeedableRng};
+use tracing::{debug, info, warn};
 
 use crate::filter::filter_state_for_player;
 use crate::persist::{PersistedLobbyMeta, PersistedSession};
@@ -118,6 +119,10 @@ impl GameSession {
 
         let ai_results =
             phase_ai::auto_play::run_ai_actions(&mut self.state, &self.ai_seats, &self.ai_configs);
+
+        if !ai_results.is_empty() {
+            debug!(game = %self.game_code, ai_actions = ai_results.len(), "AI actions computed");
+        }
 
         ai_results
             .into_iter()
@@ -301,6 +306,8 @@ impl SessionManager {
             .insert(player_token.clone(), game_code.clone());
         self.sessions.insert(game_code.clone(), session);
 
+        info!(game = %game_code, player_count, "game session created");
+
         (game_code, player_token)
     }
 
@@ -339,6 +346,8 @@ impl SessionManager {
 
         self.token_to_game
             .insert(player_token.clone(), game_code.to_string());
+
+        info!(game = %game_code, player = ?player_id, seat, "player joined session");
 
         // Start the game when the last human seat is filled
         if session.is_full() {
@@ -383,6 +392,7 @@ impl SessionManager {
     ///
     /// The host occupies seat 0. AI players are placed in the requested seats with
     /// their decks, configs, and display names. The game starts immediately.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_game_with_ai(
         &mut self,
         host_deck: PlayerDeckPayload,
@@ -485,8 +495,14 @@ impl SessionManager {
         // Validate it's this player's turn to act
         let current_actor = acting_player(&session.state.waiting_for);
         match current_actor {
-            None => return Err("Game is over".to_string()),
-            Some(actor) if actor != player => return Err("Not your turn to act".to_string()),
+            None => {
+                warn!(game = %game_code, player = ?player, reason = "game_over", "action rejected");
+                return Err("Game is over".to_string());
+            }
+            Some(actor) if actor != player => {
+                warn!(game = %game_code, player = ?player, reason = "not_your_turn", "action rejected");
+                return Err("Not your turn to act".to_string());
+            }
             _ => {}
         }
 
@@ -498,6 +514,7 @@ impl SessionManager {
         if !skip_legality {
             let legal_actions = engine_legal_actions(&session.state);
             if !legal_actions.contains(&action) {
+                warn!(game = %game_code, player = ?player, reason = "illegal_action", "action rejected");
                 return Err(format!("Illegal action: {:?}", action));
             }
         }
@@ -506,8 +523,19 @@ impl SessionManager {
         session.state.log_player_names = session.display_names.clone();
 
         // Apply action
-        let result =
-            apply(&mut session.state, action).map_err(|e| format!("Engine error: {}", e))?;
+        let action_type = action.variant_name();
+        let result = apply(&mut session.state, action).map_err(|e| {
+            warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
+            format!("Engine error: {}", e)
+        })?;
+
+        info!(
+            game = %game_code,
+            player = ?player,
+            action_type,
+            event_count = result.events.len(),
+            "action applied"
+        );
 
         // Filter state for each player
         let filtered_states: Vec<(PlayerId, GameState)> = (0..session.player_count)
@@ -531,6 +559,7 @@ impl SessionManager {
         if let Some(session) = self.sessions.get_mut(game_code) {
             session.connected[player.0 as usize] = false;
             self.reconnect.record_disconnect(game_code, player);
+            info!(game = %game_code, player = ?player, "player disconnected");
         }
     }
 

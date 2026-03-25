@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{DeckEntry, PlayerDeckPayload};
+use tracing::warn;
 
 use crate::protocol::DeckData;
 
@@ -45,6 +46,10 @@ pub fn resolve_deck(db: &CardDatabase, deck: &DeckData) -> Result<PlayerDeckPayl
 
     if !missing.is_empty() {
         missing.sort();
+        warn!(
+            missing_count = missing.len(),
+            "deck contains unresolvable card names"
+        );
         return Err(format!("Unresolvable card names: {}", missing.join(", ")));
     }
 

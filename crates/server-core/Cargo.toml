@@ -10,6 +10,7 @@ phase-ai = { path = "../phase-ai" }
 serde = { workspace = true }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
+tracing = { workspace = true }
 rand = "0.9"
 rand_chacha = "0.9"
 

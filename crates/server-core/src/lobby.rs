@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tracing::{debug, warn};
+
 use crate::protocol::LobbyGame;
 
 struct LobbyGameMeta {
@@ -37,6 +39,8 @@ impl LobbyManager {
             .unwrap_or_default()
             .as_secs();
 
+        debug!(game = %game_code, host = %host_name, "lobby game registered");
+
         self.games.insert(
             game_code.to_string(),
             LobbyGameMeta {
@@ -52,6 +56,7 @@ impl LobbyManager {
 
     pub fn unregister_game(&mut self, game_code: &str) {
         self.games.remove(game_code);
+        debug!(game = %game_code, "lobby game unregistered");
     }
 
     pub fn verify_password(&self, game_code: &str, password: Option<&str>) -> Result<(), String> {
@@ -67,6 +72,7 @@ impl LobbyManager {
                 if expected == provided {
                     Ok(())
                 } else {
+                    warn!(game = %game_code, "wrong password");
                     Err("Wrong password".to_string())
                 }
             }

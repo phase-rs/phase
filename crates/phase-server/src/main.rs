@@ -23,7 +23,7 @@ use server_core::resolve_deck;
 use server_core::session::SessionManager;
 use tokio::sync::{mpsc, Mutex};
 use tower_http::cors::CorsLayer;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 type SharedState = Arc<Mutex<SessionManager>>;
 type SharedConnections =
@@ -86,6 +86,10 @@ struct Cli {
     /// Allowed CORS origin (use '*' for permissive, or a specific URL)
     #[arg(long, env = "PHASE_CORS_ORIGIN")]
     cors_origin: Option<String>,
+
+    /// Emit logs as JSON (for production log aggregation)
+    #[arg(long, env = "PHASE_LOG_JSON")]
+    log_json: bool,
 }
 
 /// Per-socket state tracking which game/player this connection belongs to.
@@ -94,18 +98,39 @@ struct SocketIdentity {
     player_id: Option<PlayerId>,
     player_token: Option<String>,
     lobby_subscribed: bool,
+    /// Span for field inheritance — all events within this connection inherit game + player fields.
+    session_span: Option<tracing::Span>,
+}
+
+impl SocketIdentity {
+    /// Set identity and create a tracing span for field inheritance.
+    fn set_session(&mut self, game_code: String, player_id: PlayerId, player_token: String) {
+        self.session_span = Some(tracing::info_span!(
+            "game_session",
+            game = %game_code,
+            player = ?player_id,
+        ));
+        self.game_code = Some(game_code);
+        self.player_id = Some(player_id);
+        self.player_token = Some(player_token);
+    }
 }
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "phase_server=info".parse().unwrap()),
-        )
-        .init();
-
     let cli = Cli::parse();
+
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "phase_server=info,server_core=info".parse().unwrap());
+    if cli.log_json {
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(env_filter)
+            .with_target(true)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    }
     let data_path = Path::new(&cli.data_dir);
     let export_path = data_path.join("card-data.json");
     let card_db = if export_path.exists() {
@@ -220,7 +245,7 @@ async fn main() {
                 // Notify connected players and clean up persistence
                 let conns = bg_connections.lock().await;
                 for game_code in &expired {
-                    info!(game = %game_code, "grace period expired, ending game");
+                    info!(game = %game_code, reason = "disconnect_expired", "game over");
                     if let Some(players) = conns.get(game_code) {
                         let msg = ServerMessage::GameOver {
                             winner: None,
@@ -365,7 +390,7 @@ async fn ws_handler(
     let current = player_count.load(Ordering::Relaxed);
     if current >= MAX_CONNECTIONS {
         warn!(
-            current,
+            online_count = current,
             limit = MAX_CONNECTIONS,
             "connection limit reached, rejecting"
         );
@@ -402,7 +427,7 @@ async fn handle_socket(
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
 
     let count = player_count.fetch_add(1, Ordering::Relaxed) + 1;
-    info!(online = count, "client connected");
+    info!(online_count = count, "client connected");
     broadcast_player_count(&lobby_subscribers, count).await;
 
     let mut identity = SocketIdentity {
@@ -410,6 +435,7 @@ async fn handle_socket(
         player_id: None,
         player_token: None,
         lobby_subscribed: false,
+        session_span: None,
     };
     let mut rate_limiter = RateLimiter::new();
 
@@ -451,6 +477,8 @@ async fn handle_socket(
                             }
                         };
 
+                        let span = identity.session_span.clone()
+                            .unwrap_or_else(|| info_span!("ws_message"));
                         handle_client_message(
                             client_msg,
                             &mut socket,
@@ -464,6 +492,7 @@ async fn handle_socket(
                             &tx,
                             &mut identity,
                         )
+                        .instrument(span)
                         .await;
                     }
                     Some(Err(_)) | None => break,
@@ -624,9 +653,7 @@ async fn handle_client_message(
             let (game_code, player_token) = mgr.create_game(resolved);
             info!(game = %game_code, "game created");
 
-            identity.game_code = Some(game_code.clone());
-            identity.player_id = Some(PlayerId(0));
-            identity.player_token = Some(player_token.clone());
+            identity.set_session(game_code.clone(), PlayerId(0), player_token.clone());
 
             let mut conns = connections.lock().await;
             conns
@@ -664,9 +691,7 @@ async fn handle_client_message(
                     let session = mgr.sessions.get(&game_code).unwrap();
                     let joiner = session.player_for_token(&player_token).unwrap();
                     info!(game = %game_code, player = ?joiner, "player joined");
-                    identity.game_code = Some(game_code.clone());
-                    identity.player_id = Some(joiner);
-                    identity.player_token = Some(player_token.clone());
+                    identity.set_session(game_code.clone(), joiner, player_token.clone());
 
                     let mut conns = connections.lock().await;
                     conns
@@ -772,13 +797,16 @@ async fn handle_client_message(
                         let session = mgr.sessions.get(&game_code).unwrap();
                         let actor = server_core::acting_player(&session.state.waiting_for);
                         let eliminated = session.state.eliminated_players.clone();
-                        let is_game_over = matches!(
-                            session.state.waiting_for,
-                            engine::types::game_state::WaitingFor::GameOver { .. }
-                        );
+                        let game_over_winner = match &session.state.waiting_for {
+                            engine::types::game_state::WaitingFor::GameOver { winner } => {
+                                Some(*winner)
+                            }
+                            _ => None,
+                        };
 
                         // Persist or delete based on game-over state
-                        if is_game_over {
+                        if let Some(winner) = game_over_winner {
+                            info!(game = %game_code, winner = ?winner, reason = "game_rules", "game over");
                             delete_session_async(game_db, &game_code);
                         } else {
                             persist_session_async(game_db, &game_code, session);
@@ -797,8 +825,6 @@ async fn handle_client_message(
                     actor,
                     eliminated,
                 )) => {
-                    debug!(game = %game_code, events = events.len(), "action applied");
-
                     // Broadcast human action result
                     {
                         let conns = connections.lock().await;
@@ -851,7 +877,6 @@ async fn handle_client_message(
                     }
                 }
                 Err(e) => {
-                    warn!(game = %game_code, error = %e, "action rejected");
                     let msg = ServerMessage::ActionRejected { reason: e };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
@@ -962,9 +987,7 @@ async fn handle_client_message(
             match outcome {
                 ReconnectOutcome::HostingOk { player, slot_info } => {
                     info!(game = %game_code, player = ?player, "hosting reconnect succeeded");
-                    identity.game_code = Some(game_code.clone());
-                    identity.player_id = Some(player);
-                    identity.player_token = Some(player_token.clone());
+                    identity.set_session(game_code.clone(), player, player_token.clone());
 
                     {
                         let mut conns = connections.lock().await;
@@ -994,9 +1017,7 @@ async fn handle_client_message(
                     ai_results,
                 } => {
                     info!(game = %game_code, player = ?player, "reconnect succeeded");
-                    identity.game_code = Some(game_code.clone());
-                    identity.player_id = Some(player);
-                    identity.player_token = Some(player_token);
+                    identity.set_session(game_code.clone(), player, player_token);
 
                     {
                         let mut conns = connections.lock().await;
@@ -1224,9 +1245,7 @@ async fn handle_client_message(
                     (game_code, player_token, game_started_msg, ai_results)
                 }; // lock dropped
 
-                identity.game_code = Some(game_code.clone());
-                identity.player_id = Some(PlayerId(0));
-                identity.player_token = Some(player_token.clone());
+                identity.set_session(game_code.clone(), PlayerId(0), player_token.clone());
 
                 {
                     let mut conns = connections.lock().await;
@@ -1290,9 +1309,7 @@ async fn handle_client_message(
                 );
                 info!(game = %game_code, host = %display_name, players = pc, "game created via lobby");
 
-                identity.game_code = Some(game_code.clone());
-                identity.player_id = Some(PlayerId(0));
-                identity.player_token = Some(player_token.clone());
+                identity.set_session(game_code.clone(), PlayerId(0), player_token.clone());
 
                 let mut conns = connections.lock().await;
                 conns
@@ -1401,9 +1418,7 @@ async fn handle_client_message(
 
                     // Persist updated session (now has the new player)
                     persist_session_async(game_db, &game_code, session);
-                    identity.game_code = Some(game_code.clone());
-                    identity.player_id = Some(joiner);
-                    identity.player_token = Some(player_token.clone());
+                    identity.set_session(game_code.clone(), joiner, player_token.clone());
 
                     let player_names = session.display_names.clone();
 
@@ -1557,6 +1572,8 @@ async fn handle_client_message(
                 None
             };
             drop(mgr_ref);
+
+            info!(game = %game_code, winner = ?winner, reason = "concession", "game over");
 
             let game_over_msg = ServerMessage::GameOver {
                 winner,

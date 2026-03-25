@@ -6,7 +6,7 @@ use super::identifiers::{CardId, ObjectId};
 use super::match_config::DeckCardCount;
 use crate::game::combat::AttackTarget;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type", content = "data")]
 pub enum GameAction {
     PassPriority,
@@ -163,6 +163,12 @@ pub enum GameAction {
 }
 
 impl GameAction {
+    /// Returns the enum variant name as a static string (e.g., `"CastSpell"`, `"PassPriority"`).
+    /// Useful for structured logging without the full `Debug` representation.
+    pub fn variant_name(&self) -> &'static str {
+        self.into()
+    }
+
     /// CR 605.3a: Whether this action is a mana ability activation.
     ///
     /// Mana abilities are excluded from `legal_actions()` because they do not
