@@ -12,7 +12,8 @@ use std::str::FromStr;
 use super::oracle_quantity::{parse_cda_quantity, parse_for_each_clause};
 use super::oracle_target::{parse_event_context_ref, parse_mana_value_suffix, parse_target};
 use super::oracle_util::{
-    contains_possessive, has_unconsumed_conditional, parse_mana_symbols, parse_number, TextPair,
+    contains_possessive, has_unconsumed_conditional, parse_mana_symbols, parse_number, strip_after,
+    TextPair,
 };
 use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::types::ability::{
@@ -1015,7 +1016,17 @@ fn try_parse_verb_and_target<'a>(
                 },
                 rem,
             )),
-            _ => Some((TargetedImperativeAst::Return { target }, rem)),
+            Some(d) if d.zone == Zone::Hand => {
+                Some((TargetedImperativeAst::Return { target }, rem))
+            }
+            Some(d) => Some((
+                TargetedImperativeAst::ReturnToZone {
+                    target,
+                    destination: d.zone,
+                },
+                rem,
+            )),
+            None => Some((TargetedImperativeAst::Return { target }, rem)),
         };
     }
 
@@ -1455,8 +1466,7 @@ fn lower_subject_predicate_ast(
                 && pred_lower.contains("top")
                 && pred_lower.contains("library")
             {
-                let count = if let Some(pos) = pred_lower.find("top ") {
-                    let after_top = &pred_lower[pos + 4..];
+                let count = if let Some(after_top) = strip_after(&pred_lower, "top ") {
                     super::oracle_util::parse_number(after_top)
                         .map(|(n, _)| n)
                         .unwrap_or(1)
@@ -2319,8 +2329,7 @@ fn parse_search_library_details(lower: &str) -> SearchLibraryDetails {
 
     // Extract count from "up to N" (must be done before filter extraction since
     // "for up to five creature cards" needs to skip the count to find the type).
-    let (count, count_end_in_for) = if let Some(up_to_idx) = lower.find("up to ") {
-        let after_up_to = &lower[up_to_idx + 6..];
+    let (count, count_end_in_for) = if let Some(after_up_to) = strip_after(lower, "up to ") {
         if let Some((n, rest)) = parse_number(after_up_to) {
             // Calculate the byte offset where the type text begins after "up to N "
             let type_start = lower.len() - rest.len();
@@ -2333,11 +2342,9 @@ fn parse_search_library_details(lower: &str) -> SearchLibraryDetails {
     };
 
     // Extract the type filter from after "for a/an" or "for up to N".
-    let filter = if let Some(for_idx) = lower.find("for a ") {
-        let after_for = &lower[for_idx + 6..];
+    let filter = if let Some(after_for) = strip_after(lower, "for a ") {
         parse_search_filter(after_for)
-    } else if let Some(for_idx) = lower.find("for an ") {
-        let after_for = &lower[for_idx + 7..];
+    } else if let Some(after_for) = strip_after(lower, "for an ") {
         parse_search_filter(after_for)
     } else if let Some(type_start) = count_end_in_for {
         // "for up to five creature cards" — type text starts after the number
@@ -3508,8 +3515,7 @@ fn parse_for_as_long_as_condition(condition: &str) -> Option<Duration> {
 
     // "it has a {type} counter on it" / "~ has a {type} counter on it"
     if condition.contains(" has a ") && condition.contains(" counter on it") {
-        if let Some(start) = condition.find(" has a ") {
-            let after_has = &condition[start + " has a ".len()..];
+        if let Some(after_has) = strip_after(condition, " has a ") {
             if let Some(counter_end) = after_has.find(" counter") {
                 let counter_type = after_has[..counter_end].trim().to_string();
                 return Some(Duration::ForAsLongAs {
@@ -3604,14 +3610,7 @@ fn extract_put_counter_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
     let marker = "counter on up to ";
     let alt_marker = "counters on up to ";
-    let after = lower
-        .find(marker)
-        .map(|i| &lower[i + marker.len()..])
-        .or_else(|| {
-            lower
-                .find(alt_marker)
-                .map(|i| &lower[i + alt_marker.len()..])
-        })?;
+    let after = strip_after(&lower, marker).or_else(|| strip_after(&lower, alt_marker))?;
     let (n, _) = super::oracle_util::parse_number(after)?;
     Some(MultiTargetSpec {
         min: 0,
@@ -3741,6 +3740,19 @@ fn strip_return_destination_ext(text: &str) -> (&str, Option<ReturnDestination>)
         (" to the battlefield tapped", Zone::Battlefield, false),
         (" to the battlefield", Zone::Battlefield, false),
         (" onto the battlefield", Zone::Battlefield, false),
+        // Hand destinations
+        (" to its owner's hand", Zone::Hand, false),
+        (" to their owner's hand", Zone::Hand, false),
+        (" to their owners' hands", Zone::Hand, false),
+        (" to your hand", Zone::Hand, false),
+        // Graveyard destinations
+        (" to its owner's graveyard", Zone::Graveyard, false),
+        (" to their owner's graveyard", Zone::Graveyard, false),
+        (" to their owners' graveyards", Zone::Graveyard, false),
+        (" to your graveyard", Zone::Graveyard, false),
+        // NOTE: Library destinations ("to the top/bottom of owner's library") are
+        // intentionally NOT handled here. They require PutAtLibraryPosition (positional
+        // placement without shuffling), not ChangeZone (which auto-shuffles).
     ];
     for (phrase, zone, transformed) in patterns {
         if let Some(pos) = lower.rfind(phrase) {
@@ -4304,11 +4316,9 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
 /// `UnlessCost::DynamicGeneric` for "pays {X}, where X is this creature's power" etc.
 fn parse_unless_payment(lower: &str) -> Option<UnlessCost> {
     // Find "unless" followed by a subject and "pays {cost}"
-    let unless_pos = lower.find("unless ")?;
-    let after_unless = &lower[unless_pos + 7..];
+    let after_unless = strip_after(lower, "unless ")?;
     // Skip the subject ("its controller", "that player", "he or she", etc.)
-    let pays_pos = after_unless.find("pays ")?;
-    let cost_str = &after_unless[pays_pos + 5..];
+    let cost_str = strip_after(after_unless, "pays ")?;
     // Extract the mana cost (brace-delimited symbols)
     let cost_end = cost_str
         .find(|c: char| c != '{' && c != '}' && !c.is_alphanumeric())
@@ -5107,6 +5117,43 @@ mod tests {
     fn effect_bounce() {
         let e = parse_effect("Return target creature to its owner's hand");
         assert!(matches!(e, Effect::Bounce { .. }));
+    }
+
+    #[test]
+    fn strip_return_destination_hand() {
+        let (target, dest) = strip_return_destination_ext("target creature to its owner's hand");
+        assert_eq!(target, "target creature");
+        assert_eq!(dest.unwrap().zone, Zone::Hand);
+    }
+
+    #[test]
+    fn strip_return_destination_your_hand() {
+        let (target, dest) = strip_return_destination_ext("~ to your hand");
+        assert_eq!(target, "~");
+        assert_eq!(dest.unwrap().zone, Zone::Hand);
+    }
+
+    #[test]
+    fn strip_return_destination_graveyard() {
+        let (target, dest) = strip_return_destination_ext("it to its owner's graveyard");
+        assert_eq!(target, "it");
+        assert_eq!(dest.unwrap().zone, Zone::Graveyard);
+    }
+
+    #[test]
+    fn return_to_graveyard_produces_change_zone() {
+        let e = parse_effect("Return the exiled cards to their owner's graveyard");
+        assert!(
+            matches!(
+                e,
+                Effect::ChangeZone {
+                    destination: Zone::Graveyard,
+                    ..
+                }
+            ),
+            "Expected ChangeZone to Graveyard, got {:?}",
+            e
+        );
     }
 
     #[test]

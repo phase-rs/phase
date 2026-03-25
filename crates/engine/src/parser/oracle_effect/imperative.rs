@@ -15,7 +15,7 @@ use crate::types::zones::Zone;
 use super::super::oracle_target::parse_target;
 use super::super::oracle_util::{
     contains_object_pronoun, contains_possessive, parse_mana_symbols, parse_number, parse_ordinal,
-    starts_with_possessive,
+    starts_with_possessive, strip_after,
 };
 
 /// Earthbend keyword action default target: "target land you control".
@@ -67,8 +67,9 @@ pub(super) fn parse_numeric_imperative_ast(
 
     if lower.contains("gain") && lower.contains("life") {
         // CR 119.1: Handle "life equal to {quantity}" — dynamic amount from game state.
-        if let Some(eq_pos) = lower.find("life equal to ") {
-            let qty_text = lower[eq_pos + "life equal to ".len()..].trim_end_matches('.');
+        if let Some(qty_text) =
+            strip_after(lower, "life equal to ").map(|s| s.trim_end_matches('.'))
+        {
             if let Some(qty) =
                 crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
             {
@@ -95,8 +96,9 @@ pub(super) fn parse_numeric_imperative_ast(
             return Some(NumericImperativeAst::LoseLife { amount: expr });
         }
         // CR 119.3: Handle "life equal to {quantity}" — dynamic amount from game state.
-        if let Some(eq_pos) = lower.find("life equal to ") {
-            let qty_text = lower[eq_pos + "life equal to ".len()..].trim_end_matches('.');
+        if let Some(qty_text) =
+            strip_after(lower, "life equal to ").map(|s| s.trim_end_matches('.'))
+        {
             if let Some(qty) =
                 crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
             {
@@ -257,7 +259,12 @@ pub(super) fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<Targe
                     enter_transformed: d.transformed,
                 })
             }
-            _ => Some(TargetedImperativeAst::Return { target }),
+            Some(d) if d.zone == Zone::Hand => Some(TargetedImperativeAst::Return { target }),
+            Some(d) => Some(TargetedImperativeAst::ReturnToZone {
+                target,
+                destination: d.zone,
+            }),
+            None => Some(TargetedImperativeAst::Return { target }),
         };
     }
     if lower.starts_with("fight ") {
@@ -321,6 +328,20 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_transformed,
             under_your_control: false,
             enter_tapped: false, // TODO: parse "tapped" suffix when present
+            enters_attacking: false,
+        },
+        // CR 400.6: Return to a non-hand, non-battlefield zone (graveyard, library).
+        TargetedImperativeAst::ReturnToZone {
+            target,
+            destination,
+        } => Effect::ChangeZone {
+            origin: None,
+            destination,
+            target,
+            owner_library: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enter_tapped: false,
             enters_attacking: false,
         },
         TargetedImperativeAst::Fight { target } => Effect::Fight {

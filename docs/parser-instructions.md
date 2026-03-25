@@ -320,16 +320,27 @@ from targeting.
 
 ---
 
-## Self-Reference Normalization (`~`)
+## Self-Reference Normalization (`~`) and `SELF_REF_TYPE_PHRASES`
 
 Before any condition or effect text is parsed, `normalize_self_refs` replaces the card's own name
 and phrases like "this creature", "this enchantment", "this artifact" with `~` (tilde). This
 normalization happens in the trigger parser (`oracle_trigger.rs`) but the effect parser also
 receives `~`-normalized text when parsing trigger effects.
 
+`parse_target` in `oracle_target.rs` recognizes self-references in two ways:
+- `~` (tilde) → `SelfRef` — for normalized text
+- `SELF_REF_TYPE_PHRASES` ("this creature", "this permanent", etc.) → `SelfRef` — for
+  un-normalized text (e.g. activated ability effects that are parsed before normalization)
+
+The canonical phrase list lives in `oracle_util.rs` as `SELF_REF_TYPE_PHRASES` and is shared by
+three consumers: `parse_target` (prefix matching), `subject.rs` (exact matching), and
+`normalize_card_name_refs` (word-boundary replacement). When adding a new "this \<type\>" phrase,
+update the shared constant — not each consumer individually.
+
 **Rule:** Any parser function that checks for self-references must recognize `~` alongside explicit
-phrases like "this creature" or "it". `parse_target` in `oracle_target.rs` handles `~` → `SelfRef`
-at the root level, so any effect that delegates to `parse_target` automatically gets this behavior.
+phrases like "this creature" or "it". `parse_target` in `oracle_target.rs` handles both `~` and
+`SELF_REF_TYPE_PHRASES` → `SelfRef` at the root level, so any effect that delegates to
+`parse_target` automatically gets this behavior.
 
 ```
 "put a +1/+1 counter on Ajani's Pridemate"

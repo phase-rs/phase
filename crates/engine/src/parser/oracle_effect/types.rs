@@ -263,6 +263,11 @@ pub(super) enum TargetedImperativeAst {
         /// CR 711.8: "return ... transformed"
         enter_transformed: bool,
     },
+    /// CR 400.6: Return to a specific non-hand, non-battlefield zone (zone change).
+    ReturnToZone {
+        target: TargetFilter,
+        destination: Zone,
+    },
     Fight {
         target: TargetFilter,
     },

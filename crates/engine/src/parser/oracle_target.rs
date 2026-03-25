@@ -8,7 +8,9 @@ use crate::types::keywords::Keyword;
 use crate::types::zones::Zone;
 
 use super::oracle_quantity::capitalize_first;
-use super::oracle_util::{merge_or_filters, parse_subtype, starts_with_possessive};
+use super::oracle_util::{
+    merge_or_filters, parse_subtype, starts_with_possessive, SELF_REF_TYPE_PHRASES,
+};
 
 /// Parse an event-context possessive reference from Oracle text.
 /// These resolve from the triggering event, not from player targeting.
@@ -96,8 +98,14 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
             }
         }
 
-        // "t" — "target ...", "those ...", "the exiled ..."
+        // "t" — "this creature" (self-ref), "target ...", "those ...", "the exiled ..."
         Some(b't') => {
+            // "this creature", "this permanent", etc. — self-reference
+            for phrase in SELF_REF_TYPE_PHRASES {
+                if lower.starts_with(phrase) {
+                    return (TargetFilter::SelfRef, &text[phrase.len()..]);
+                }
+            }
             if lower.starts_with("target ") {
                 // Longest-match-first within "target" group
                 if lower.starts_with("target player or planeswalker") {
@@ -1645,6 +1653,34 @@ mod tests {
         let (f, rest) = parse_target("~ to its owner's hand");
         assert_eq!(f, TargetFilter::SelfRef);
         assert!(rest.contains("to its owner"));
+    }
+
+    #[test]
+    fn this_creature_is_self_ref() {
+        let (f, rest) = parse_target("this creature to its owner's hand");
+        assert_eq!(f, TargetFilter::SelfRef);
+        assert_eq!(rest, " to its owner's hand");
+    }
+
+    #[test]
+    fn this_creature_exact_is_self_ref() {
+        let (f, rest) = parse_target("this creature");
+        assert_eq!(f, TargetFilter::SelfRef);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn this_permanent_is_self_ref() {
+        let (f, rest) = parse_target("this permanent");
+        assert_eq!(f, TargetFilter::SelfRef);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn this_enchantment_is_self_ref() {
+        let (f, rest) = parse_target("this enchantment");
+        assert_eq!(f, TargetFilter::SelfRef);
+        assert_eq!(rest, "");
     }
 
     #[test]

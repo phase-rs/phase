@@ -59,7 +59,7 @@ When creating or participating in an agent team (whether triggered by `/batch-me
 
 | Module | What lives here |
 |--------|----------------|
-| `parser/oracle_util.rs` | Number/ordinal parsing, mana symbol parsing, reminder text stripping, possessive/pronoun phrase matching, phrase variant helpers, subtype canonicalization, filter merging |
+| `parser/oracle_util.rs` | Number/ordinal parsing, mana symbol parsing, reminder text stripping, possessive/pronoun phrase matching, phrase variant helpers, subtype canonicalization, filter merging, `SELF_REF_TYPE_PHRASES` (shared "this \<type\>" self-reference constant) |
 | `parser/oracle_quantity.rs` | Semantic quantity interpretation: `parse_cda_quantity`, `parse_quantity_ref`, `parse_event_context_quantity`, `parse_for_each_clause` — maps Oracle text phrases to typed `QuantityExpr`/`QuantityRef` values |
 | `parser/oracle_target.rs` | Target extraction from Oracle text (`"target creature"` → `TargetFilter`), type phrase parsing, event context refs |
 | `parser/oracle_static.rs` | Static ability line parsing, continuous modification extraction (`"gets +N/+M and has flying"` → typed modifications) |

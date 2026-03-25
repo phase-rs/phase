@@ -10,7 +10,7 @@ use crate::types::statics::StaticMode;
 
 use super::super::oracle_static::parse_continuous_modifications;
 use super::super::oracle_target::{parse_target, parse_type_phrase};
-use super::super::oracle_util::parse_number;
+use super::super::oracle_util::{parse_number, SELF_REF_TYPE_PHRASES};
 
 pub(super) fn try_parse_subject_predicate_ast(text: &str, ctx: &ParseContext) -> Option<ClauseAst> {
     if try_parse_targeted_controller_gain_life(text).is_some() {
@@ -283,15 +283,9 @@ fn parse_subject_application(subject: &str, ctx: &ParseContext) -> Option<Subjec
         });
     }
     // Explicit self-reference — always SelfRef
-    if matches!(
-        lower.as_str(),
-        "~" | "this"
-            | "this card"
-            | "this creature"
-            | "this permanent"
-            | "this artifact"
-            | "this land"
-    ) {
+    if matches!(lower.as_str(), "~" | "this" | "this card")
+        || SELF_REF_TYPE_PHRASES.iter().any(|p| lower == *p)
+    {
         return Some(SubjectApplication {
             affected: TargetFilter::SelfRef,
             target: None,

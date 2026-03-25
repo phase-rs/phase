@@ -135,6 +135,27 @@ impl<'a> TextPair<'a> {
             lower: &self.lower[start..end],
         }
     }
+
+    /// Find `needle` in the lowered text and return both slices advanced past it.
+    ///
+    /// Equivalent to `self.find(needle)` + `self.split_at(pos + needle.len()).1`
+    /// but expressed as a single operation.
+    pub fn strip_after(&self, needle: &str) -> Option<Self> {
+        self.lower.find(needle).map(|pos| {
+            let after = pos + needle.len();
+            Self {
+                original: &self.original[after..],
+                lower: &self.lower[after..],
+            }
+        })
+    }
+}
+
+/// Find `needle` in `text` and return everything after it, or `None`.
+///
+/// Combines `text.find(needle)` + `&text[pos + needle.len()..]` into one call.
+pub fn strip_after<'a>(text: &'a str, needle: &str) -> Option<&'a str> {
+    text.find(needle).map(|pos| &text[pos + needle.len()..])
 }
 
 /// Strip reminder text (parenthesized) from a line.
@@ -333,6 +354,29 @@ const POSSESSIVES: &[&str] = &["your", "their", "its owner's", "that player's"];
 /// Object pronouns in MTG Oracle text that refer to previously-mentioned objects.
 /// Used in anaphoric references like "shuffle it into", "put them onto", "exile that card".
 pub const OBJECT_PRONOUNS: &[&str] = &["it", "them", "that card", "those cards"];
+
+/// "this \<card_type\>" self-reference phrases in Oracle text.
+///
+/// Used by: `parse_target` (object recognition), `subject.rs` (subject stripping),
+/// `normalize_card_name_refs` (tilde normalization).
+///
+/// Does NOT include: `"~"` (already handled separately), `"this"` (bare, too ambiguous
+/// for prefix matching), `"this card"` (not safe for normalization — context-dependent),
+/// `"this spell"` (not safe for normalization — breaks `oracle_casting.rs` spell-specific
+/// parsing), `"it"` (context-dependent, needs `ParseContext` resolution).
+/// Those are handled locally in their consuming functions.
+pub const SELF_REF_TYPE_PHRASES: &[&str] = &[
+    "this creature",
+    "this permanent",
+    "this artifact",
+    "this land",
+    "this enchantment",
+    "this equipment",
+    "this aura",
+    "this vehicle",
+    "this planeswalker",
+    "this battle",
+];
 
 /// Test whether `text` matches `"{prefix} {word} {suffix}"` for any word in `variants`,
 /// using the given match strategy.
@@ -1063,16 +1107,7 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
     // Generic self-references (case-insensitive) — run BEFORE first-word fallback
     // so that cards like "Copy Enchantment" whose Oracle text uses "this enchantment"
     // get the `~` guard set, preventing false-positive first-word matches on "Copy".
-    for phrase in &[
-        "this creature",
-        "this enchantment",
-        "this artifact",
-        "this land",
-        "this equipment",
-        "this aura",
-        "this vehicle",
-        "this permanent",
-    ] {
+    for phrase in SELF_REF_TYPE_PHRASES {
         result = replace_all_words(&result, phrase, "~");
     }
 
@@ -1543,5 +1578,78 @@ mod tests {
         assert!(tp.contains("\u{2014}"));
         let rest = tp.strip_prefix("choose one ").unwrap();
         assert_eq!(rest.original, "\u{2014}");
+    }
+
+    // --- strip_after (free function) tests ---
+
+    #[test]
+    fn strip_after_finds_needle() {
+        assert_eq!(strip_after("hello world foo", "world "), Some("foo"));
+    }
+
+    #[test]
+    fn strip_after_returns_none_on_miss() {
+        assert_eq!(strip_after("hello world", "xyz"), None);
+    }
+
+    #[test]
+    fn strip_after_at_start() {
+        assert_eq!(strip_after("prefix rest", "prefix "), Some("rest"));
+    }
+
+    #[test]
+    fn strip_after_at_end() {
+        assert_eq!(strip_after("hello world", "world"), Some(""));
+    }
+
+    #[test]
+    fn strip_after_is_case_sensitive() {
+        // The free function is intentionally case-sensitive.
+        // Cross-string (lower/original) patterns must use find() on lowered + manual slicing.
+        assert_eq!(strip_after("Hello World", "hello"), None);
+        assert_eq!(strip_after("Hello World", "Hello"), Some(" World"));
+    }
+
+    // --- TextPair::strip_after tests ---
+
+    #[test]
+    fn text_pair_strip_after_finds_needle() {
+        let original = "Destroy target creature unless you pay {2}";
+        let lower = original.to_lowercase();
+        let tp = TextPair::new(original, &lower);
+        let rest = tp.strip_after("unless you ").unwrap();
+        assert_eq!(rest.lower, "pay {2}");
+        assert_eq!(rest.original, "pay {2}");
+    }
+
+    #[test]
+    fn text_pair_strip_after_preserves_original_case() {
+        let original = "When This Class becomes level 3, Draw Two Cards";
+        let lower = original.to_lowercase();
+        let tp = TextPair::new(original, &lower);
+        let rest = tp.strip_after("becomes level ").unwrap();
+        // Original case is preserved for the remainder
+        assert_eq!(rest.original, "3, Draw Two Cards");
+        assert_eq!(rest.lower, "3, draw two cards");
+    }
+
+    #[test]
+    fn text_pair_strip_after_is_case_insensitive() {
+        // TextPair::strip_after matches on the lowered text, so mixed-case originals work.
+        let original = "Power And Toughness Are Each Equal To the number of cards";
+        let lower = original.to_lowercase();
+        let tp = TextPair::new(original, &lower);
+        let rest = tp
+            .strip_after("power and toughness are each equal to ")
+            .unwrap();
+        assert_eq!(rest.original, "the number of cards");
+    }
+
+    #[test]
+    fn text_pair_strip_after_returns_none_on_miss() {
+        let original = "Gain 3 life";
+        let lower = original.to_lowercase();
+        let tp = TextPair::new(original, &lower);
+        assert!(tp.strip_after("lose ").is_none());
     }
 }
