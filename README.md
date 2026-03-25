@@ -30,6 +30,10 @@
 
 ---
 
+<p align="center">
+  <img src="docs/screenshot.webp" alt="phase.rs gameplay" width="900" />
+</p>
+
 A Rust-native MTG engine compiling to native and WASM, powering a Tauri desktop app, browser PWA, and WebSocket multiplayer. Implements comprehensive MTG rules using functional architecture — pure reducers, discriminated unions, and immutable state with structural sharing — with an Arena-quality React/TypeScript UI.
 
 ## Features
@@ -150,6 +154,15 @@ crates/
 client/               React frontend
 scripts/              Build and setup scripts
 ```
+
+## Acknowledgments
+
+- [MTGJSON](https://mtgjson.com/) — Card data (MIT licensed)
+- [Scryfall](https://scryfall.com/) — Card images and search API
+- [MTGGoldfish](https://www.mtggoldfish.com/) — Metagame deck data
+- [Wizards of the Coast](https://magic.wizards.com/) — Magic: The Gathering game rules and Comprehensive Rules
+
+Magic: The Gathering is a trademark of Wizards of the Coast. This project is not affiliated with or endorsed by Wizards of the Coast.
 
 ## License
 
