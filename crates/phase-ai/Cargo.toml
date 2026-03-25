@@ -16,4 +16,13 @@ web-time = "1"
 name = "ai-duel"
 path = "src/bin/ai_duel.rs"
 
+rayon = { version = "1", optional = true }
+
+[features]
+tune = ["rayon"]
+
+[[bin]]
+name = "ai-tune"
+path = "src/bin/ai_tune.rs"
+
 [dev-dependencies]
