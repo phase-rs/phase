@@ -17,6 +17,7 @@ pub mod elimination;
 pub mod engine;
 pub mod filter;
 pub mod game_object;
+pub mod gap_analysis;
 pub mod keywords;
 pub mod layers;
 pub mod log;

@@ -249,7 +249,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         }
     }
 
-    // "Collect evidence N" — exile cards with total mana value N or more from graveyard (CR 702.163a)
+    // "Collect evidence N" — exile cards with total mana value N or more from graveyard (CR 701.59a)
     if let Some(rest) = lower.strip_prefix("collect evidence ") {
         if let Some((n, _)) = parse_number(rest.trim()) {
             return AbilityCost::Exile {
@@ -260,7 +260,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         }
     }
 
-    // "Forage" — exile three cards from graveyard or sacrifice a Food (CR 702.166a)
+    // "Forage" — exile three cards from graveyard or sacrifice a Food (CR 701.61)
     if lower == "forage" {
         return AbilityCost::Exile {
             count: 3,
@@ -269,7 +269,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         };
     }
 
-    // "Pay {E}" / "Pay {E}{E}" / "Pay N {E}" — energy costs (CR 107.9)
+    // "Pay {E}" / "Pay {E}{E}" / "Pay N {E}" — energy costs (CR 107.14)
     if let Some(energy) = try_parse_energy_cost(&lower) {
         return AbilityCost::PayEnergy { amount: energy };
     }

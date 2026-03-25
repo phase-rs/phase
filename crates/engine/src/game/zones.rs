@@ -128,6 +128,9 @@ pub fn move_to_zone(
         obj_mut.monstrous = false;
     }
 
+    // CR 122.2: Counters cease to exist when an object changes zones.
+    obj_mut.counters.clear();
+
     // Track descended: a permanent card was put into its owner's graveyard
     if to == Zone::Graveyard {
         let is_permanent_card = obj_mut.card_types.core_types.iter().any(|ct| {
@@ -255,6 +258,14 @@ pub fn move_to_library_at_index(
             )
         });
     }
+
+    // CR 701.37b: Monstrous designation clears when a permanent leaves the battlefield.
+    if from == Zone::Battlefield {
+        obj_mut.monstrous = false;
+    }
+
+    // CR 122.2: Counters cease to exist when an object changes zones.
+    obj_mut.counters.clear();
 
     // Mark layers dirty when objects leave the battlefield
     if from == Zone::Battlefield {
@@ -678,6 +689,78 @@ mod tests {
         // CR 400.4a: Instant should remain in hand
         assert_eq!(state.objects[&id].zone, Zone::Hand);
         assert!(state.players[0].hand.contains(&id));
+    }
+
+    #[test]
+    fn counters_cleared_on_move_to_zone() {
+        // CR 122.2: Counters cease to exist when an object changes zones.
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .counters
+            .insert(super::super::game_object::CounterType::Plus1Plus1, 3);
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+
+        assert!(state.objects[&id].counters.is_empty());
+    }
+
+    #[test]
+    fn counters_cleared_on_move_to_library() {
+        // CR 122.2: Counters cease to exist when an object changes zones.
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .counters
+            .insert(super::super::game_object::CounterType::Plus1Plus1, 2);
+
+        let mut events = Vec::new();
+        move_to_library_at_index(&mut state, id, Some(0), &mut events);
+
+        assert!(state.objects[&id].counters.is_empty());
+    }
+
+    #[test]
+    fn counters_cleared_on_exile_to_hand() {
+        // CR 122.2: Counters cease to exist on ANY zone transition, not just from battlefield.
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .counters
+            .insert(super::super::game_object::CounterType::Plus1Plus1, 1);
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Hand, &mut events);
+
+        assert!(state.objects[&id].counters.is_empty());
     }
 
     #[test]

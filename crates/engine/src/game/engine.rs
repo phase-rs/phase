@@ -102,11 +102,15 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
 
                 // Pass priority internally
                 let mut events = Vec::new();
+                let stack_was_empty = state.stack.is_empty();
                 let wf = priority::handle_priority_pass(state, &mut events);
                 sync_waiting_for(state, &wf);
+                let skip_triggers = stack_was_empty
+                    && !state.stack.is_empty()
+                    && state.phase == Phase::CombatDamage;
 
                 // Run post-action pipeline (SBAs, triggers, layers)
-                match run_post_action_pipeline(state, &mut events, &wf) {
+                match run_post_action_pipeline(state, &mut events, &wf, skip_triggers) {
                     Ok(wf) => {
                         sync_waiting_for(state, &wf);
 
@@ -226,7 +230,16 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             if state.priority_player != *player {
                 return Err(EngineError::NotYourPriority);
             }
-            priority::handle_priority_pass(state, &mut events)
+            // Track stack growth during combat damage: process_combat_damage_triggers
+            // processes non-phase events (LifeChanged, DamageDealt) for triggers inline.
+            // Other phase triggers (Upkeep, End, etc.) only process PhaseChanged events
+            // which the pipeline already filters, so they don't need this guard.
+            let stack_was_empty = state.stack.is_empty();
+            let wf = priority::handle_priority_pass(state, &mut events);
+            if stack_was_empty && !state.stack.is_empty() && state.phase == Phase::CombatDamage {
+                triggers_processed_inline = true;
+            }
+            wf
         }
         (WaitingFor::Priority { player }, GameAction::PlayLand { object_id, card_id }) => {
             if state.priority_player != *player {
@@ -2748,7 +2761,9 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 });
             }
 
-            // All combat damage resolved — return to priority.
+            // All combat damage resolved — triggers were processed inline by
+            // process_combat_damage_triggers. Mark so the pipeline doesn't re-fire.
+            triggers_processed_inline = true;
             super::priority::reset_priority(state);
             WaitingFor::Priority { player: p }
         }
@@ -2871,13 +2886,16 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
         }
     };
 
-    // Run post-action pipeline (SBAs, triggers, layers) and check for terminal states
-    if matches!(waiting_for, WaitingFor::Priority { .. }) && !triggers_processed_inline {
+    // Run post-action pipeline (SBAs, triggers, layers) and check for terminal states.
+    // When triggers were already processed inline (e.g., DeclareAttackers, combat damage),
+    // pass the flag to skip the trigger scan but still run SBAs, delayed triggers, and layers.
+    if matches!(waiting_for, WaitingFor::Priority { .. }) {
         // Sync state.waiting_for before the pipeline so SBA/trigger checks see
         // the action's result, not the pre-action state (fixes stale TargetSelection
         // after CancelCast).
         state.waiting_for = waiting_for.clone();
-        let wf = run_post_action_pipeline(state, &mut events, &waiting_for)?;
+        let wf =
+            run_post_action_pipeline(state, &mut events, &waiting_for, triggers_processed_inline)?;
         state.waiting_for = wf.clone();
         return Ok(ActionResult {
             events,
@@ -2916,10 +2934,15 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
 ///
 /// `default_wf` is the WaitingFor computed by the action handler, used as fallback
 /// when no terminal/trigger/SBA outcome overrides it.
+///
+/// `skip_trigger_scan` — when `true`, skips the `process_triggers` call because
+/// triggers were already processed inline (e.g., combat damage, declare attackers).
+/// SBAs, exile returns, delayed triggers, and layer evaluation still run.
 fn run_post_action_pipeline(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     default_wf: &WaitingFor,
+    skip_trigger_scan: bool,
 ) -> Result<WaitingFor, EngineError> {
     sba::check_state_based_actions(state, events);
 
@@ -2940,17 +2963,24 @@ fn run_post_action_pipeline(
     let delayed_events = triggers::check_delayed_triggers(state, events);
     events.extend(delayed_events);
 
-    // Phase triggers are now processed inline by auto_advance() at each step
-    // (Upkeep, Draw, BeginCombat, End). Exclude all PhaseChanged events here
-    // to prevent double-firing. Non-phase triggers (ETB, spell cast, zone
-    // changes, etc.) still process normally.
-    let filtered_events: Vec<_> = events
-        .iter()
-        .filter(|e| !matches!(e, GameEvent::PhaseChanged { .. }))
-        .cloned()
-        .collect();
     let stack_before = state.stack.len();
-    triggers::process_triggers(state, &filtered_events);
+
+    // Skip trigger scan when triggers were already processed inline (e.g., combat
+    // damage triggers fire before SBAs per CR 603.2). Without this guard, the same
+    // LifeChanged / DamageDealt events would be re-processed, double-firing triggers
+    // like "whenever you gain life".
+    if !skip_trigger_scan {
+        // Phase triggers are now processed inline by auto_advance() at each step
+        // (Upkeep, Draw, BeginCombat, End). Exclude all PhaseChanged events here
+        // to prevent double-firing. Non-phase triggers (ETB, spell cast, zone
+        // changes, etc.) still process normally.
+        let filtered_events: Vec<_> = events
+            .iter()
+            .filter(|e| !matches!(e, GameEvent::PhaseChanged { .. }))
+            .cloned()
+            .collect();
+        triggers::process_triggers(state, &filtered_events);
+    }
 
     if let Some(wf) = begin_pending_trigger_target_selection(state)? {
         state.waiting_for = wf.clone();
@@ -7222,6 +7252,162 @@ mod phase_trigger_regression_tests {
         );
         assert_eq!(state.objects[&ajani].power, Some(3));
         assert_eq!(state.objects[&ajani].toughness, Some(3));
+    }
+
+    /// Regression test: lifelink combat damage with a GainLife replacement effect
+    /// (Leyline of Hope) must not double-fire "whenever you gain life" triggers.
+    ///
+    /// Previously, process_combat_damage_triggers processed the LifeChanged event
+    /// for triggers, then run_post_action_pipeline re-processed the same events,
+    /// causing triggers like Essence Channeler's to fire twice per life-gain event.
+    #[test]
+    fn lifelink_replacement_does_not_double_fire_life_gain_triggers() {
+        use crate::game::game_object::CounterType;
+        use crate::types::ability::ReplacementDefinition;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = new_game(42);
+        state.turn_number = 5;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        // Lifelink attacker (Ruin-Lurker Bat analog): 1/1 flying lifelink
+        let bat = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Ruin-Lurker Bat".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bat).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.keywords.push(crate::types::keywords::Keyword::Lifelink);
+            obj.base_keywords = obj.keywords.clone();
+            obj.entered_battlefield_turn = Some(3);
+        }
+
+        // "Whenever you gain life, put a +1/+1 counter on this creature" (Essence Channeler)
+        let channeler = create_object(
+            &mut state,
+            CardId(501),
+            PlayerId(0),
+            "Essence Channeler".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&channeler).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(1);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(1);
+            obj.entered_battlefield_turn = Some(3);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::LifeGained)
+                    .valid_target(TargetFilter::Controller)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::PutCounter {
+                            counter_type: "P1P1".to_string(),
+                            count: 1,
+                            target: TargetFilter::SelfRef,
+                        },
+                    )),
+            );
+            obj.base_trigger_definitions = obj.trigger_definitions.clone();
+        }
+
+        // Leyline of Hope analog: "If you would gain life, gain that much + 1 instead"
+        let leyline = create_object(
+            &mut state,
+            CardId(502),
+            PlayerId(0),
+            "Leyline of Hope".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&leyline).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::GainLife).execute(
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: GainLifePlayer::Controller,
+                        },
+                    ),
+                ),
+            );
+            obj.base_replacement_definitions = obj.replacement_definitions.clone();
+        }
+
+        // Declare bat as attacker
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![bat],
+            valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        };
+
+        apply(
+            &mut state,
+            GameAction::DeclareAttackers {
+                attacks: vec![(bat, AttackTarget::Player(PlayerId(1)))],
+            },
+        )
+        .unwrap();
+
+        // Skip to combat damage: P0 pass, P1 pass (declare blockers — no blockers),
+        // P0 pass, P1 pass (combat damage resolves).
+        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply(&mut state, GameAction::PassPriority).unwrap();
+        // Now at declare blockers — P1 declares no blockers
+        if matches!(state.waiting_for, WaitingFor::DeclareBlockers { .. }) {
+            apply(
+                &mut state,
+                GameAction::DeclareBlockers {
+                    assignments: vec![],
+                },
+            )
+            .unwrap();
+        }
+        // Pass priority through to combat damage
+        while state.phase != Phase::PostCombatMain
+            && !matches!(state.waiting_for, WaitingFor::GameOver { .. })
+        {
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                apply(&mut state, GameAction::PassPriority).unwrap();
+            } else {
+                break;
+            }
+        }
+
+        // Bat dealt 1 damage → lifelink gain 1 → Leyline replaces to 2.
+        // Player 0 should have gained exactly 2 life (20 → 22).
+        assert_eq!(
+            state.players[0].life, 22,
+            "Lifelink + Leyline should gain exactly 2 life"
+        );
+
+        // Essence Channeler should have exactly 1 +1/+1 counter, not 2.
+        // The bug was that the LifeChanged event was processed for triggers twice,
+        // once in process_combat_damage_triggers and again in run_post_action_pipeline.
+        let counters = state.objects[&channeler]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(
+            counters, 1,
+            "Essence Channeler should trigger exactly once per life-gain event, got {} counters",
+            counters
+        );
     }
 
     #[test]

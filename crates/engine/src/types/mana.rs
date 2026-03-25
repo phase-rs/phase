@@ -308,6 +308,39 @@ impl ManaCostShard {
             ),
         }
     }
+
+    /// CR 202.3f: Returns the mana value contribution of this shard.
+    /// For hybrid symbols, uses the largest component.
+    pub fn mana_value_contribution(&self) -> u32 {
+        match self {
+            // Two-generic hybrid: max(2, 1) = 2 (CR 202.3f)
+            Self::TwoWhite | Self::TwoBlue | Self::TwoBlack
+            | Self::TwoRed | Self::TwoGreen => 2,
+            // X contributes 0 when not on the stack (CR 202.3e)
+            Self::X => 0,
+            // All other shards contribute 1:
+            // Basic colored (CR 202.3a)
+            Self::White | Self::Blue | Self::Black | Self::Red | Self::Green
+            // Colorless, Snow
+            | Self::Colorless | Self::Snow
+            // Two-color hybrid: max(1, 1) = 1 (CR 202.3f)
+            | Self::WhiteBlue | Self::WhiteBlack | Self::BlueBlack | Self::BlueRed
+            | Self::BlackRed | Self::BlackGreen | Self::RedWhite | Self::RedGreen
+            | Self::GreenWhite | Self::GreenBlue
+            // Phyrexian: 1 mana or 2 life = mana value 1 (CR 202.3g)
+            | Self::PhyrexianWhite | Self::PhyrexianBlue | Self::PhyrexianBlack
+            | Self::PhyrexianRed | Self::PhyrexianGreen
+            // Phyrexian hybrid: max(1, 1) = 1 (CR 202.3f + CR 202.3g)
+            | Self::PhyrexianWhiteBlue | Self::PhyrexianWhiteBlack
+            | Self::PhyrexianBlueBlack | Self::PhyrexianBlueRed
+            | Self::PhyrexianBlackRed | Self::PhyrexianBlackGreen
+            | Self::PhyrexianRedWhite | Self::PhyrexianRedGreen
+            | Self::PhyrexianGreenWhite | Self::PhyrexianGreenBlue
+            // Colorless hybrid: max(1, 1) = 1 (CR 202.3f)
+            | Self::ColorlessWhite | Self::ColorlessBlue | Self::ColorlessBlack
+            | Self::ColorlessRed | Self::ColorlessGreen => 1,
+        }
+    }
 }
 
 impl FromStr for ManaCostShard {
@@ -398,15 +431,13 @@ impl ManaCost {
 
     /// CR 202.3: Calculate the mana value (converted mana cost) of this cost.
     /// CR 202.3e: X in a mana cost contributes 0 when not on the stack.
+    /// CR 202.3f: For hybrid symbols, use the largest component.
     pub fn mana_value(&self) -> u32 {
         match self {
             ManaCost::NoCost | ManaCost::SelfManaCost => 0,
             ManaCost::Cost { shards, generic } => {
-                let shard_count = shards
-                    .iter()
-                    .filter(|s| !matches!(s, ManaCostShard::X))
-                    .count() as u32;
-                shard_count + generic
+                let shard_total: u32 = shards.iter().map(|s| s.mana_value_contribution()).sum();
+                shard_total + generic
             }
         }
     }
@@ -792,5 +823,63 @@ mod tests {
         };
         assert!(pool.spend_for(ManaType::Green, &goblin_spell).is_none());
         assert_eq!(pool.total(), 1, "Restricted mana should remain in pool");
+    }
+
+    #[test]
+    fn mana_value_two_generic_hybrid() {
+        // CR 202.3f: {2/W}{2/W}{2/W} → max(2,1) * 3 = 6
+        let cost = ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::TwoWhite,
+                ManaCostShard::TwoWhite,
+                ManaCostShard::TwoWhite,
+            ],
+            generic: 0,
+        };
+        assert_eq!(cost.mana_value(), 6);
+    }
+
+    #[test]
+    fn mana_value_standard_hybrid() {
+        // {1}{W/U}{W/U} → 1 + 1 + 1 = 3
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::WhiteBlue, ManaCostShard::WhiteBlue],
+            generic: 1,
+        };
+        assert_eq!(cost.mana_value(), 3);
+    }
+
+    #[test]
+    fn mana_value_basic_colored() {
+        // {W}{U}{B} → 3
+        let cost = ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::White,
+                ManaCostShard::Blue,
+                ManaCostShard::Black,
+            ],
+            generic: 0,
+        };
+        assert_eq!(cost.mana_value(), 3);
+    }
+
+    #[test]
+    fn mana_value_x_contributes_zero() {
+        // CR 202.3e: {X}{R} → 0 + 1 = 1
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red],
+            generic: 0,
+        };
+        assert_eq!(cost.mana_value(), 1);
+    }
+
+    #[test]
+    fn mana_value_phyrexian() {
+        // CR 202.3g: {W/P}{B/P} → 1 + 1 = 2
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::PhyrexianWhite, ManaCostShard::PhyrexianBlack],
+            generic: 0,
+        };
+        assert_eq!(cost.mana_value(), 2);
     }
 }
