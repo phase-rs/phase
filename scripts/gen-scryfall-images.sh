@@ -17,6 +17,11 @@ if [ ! -f "$ORACLE_FILE" ]; then
   echo "Downloaded $ORACLE_FILE."
 fi
 
+if [ -f "$OUTPUT" ]; then
+  echo "Skipping generation — $OUTPUT already exists (delete to regenerate)."
+  exit 0
+fi
+
 echo "Generating $OUTPUT..."
 mkdir -p "$(dirname "$OUTPUT")"
 

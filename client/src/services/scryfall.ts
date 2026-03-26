@@ -7,13 +7,13 @@ interface ImageMapEntry {
 }
 type ImageMap = Record<string, ImageMapEntry[]>;
 
-let imageMapPromise: Promise<ImageMap> | null = null;
+let imageMapPromise: Promise<ImageMap | null> | null = null;
 
-function loadImageMap(): Promise<ImageMap> {
+function loadImageMap(): Promise<ImageMap | null> {
   if (!imageMapPromise) {
-    imageMapPromise = fetch("/scryfall-images.json").then(
-      (r) => r.json() as Promise<ImageMap>,
-    );
+    imageMapPromise = fetch("/scryfall-images.json")
+      .then((r) => r.json() as Promise<ImageMap>)
+      .catch(() => null);
   }
   return imageMapPromise;
 }

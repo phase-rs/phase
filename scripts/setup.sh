@@ -9,10 +9,13 @@ echo "Step 1/3: Generating card data + building WASM (parallel)..."
 PID_CARDS=$!
 ./scripts/build-wasm.sh &
 PID_WASM=$!
+./scripts/gen-scryfall-images.sh &
+PID_IMAGES=$!
 
 FAIL=0
 wait $PID_CARDS || FAIL=1
 wait $PID_WASM || FAIL=1
+wait $PID_IMAGES || FAIL=1
 if [ $FAIL -ne 0 ]; then
   echo "ERROR: Card data generation or WASM build failed."
   exit 1
