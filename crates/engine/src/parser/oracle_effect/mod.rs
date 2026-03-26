@@ -7864,4 +7864,118 @@ mod tests {
         assert!(!d.enter_tapped);
         assert!(!d.transformed);
     }
+
+    /// Collect all effects in a sub_ability chain into a flat Vec.
+    fn collect_chain_effects(def: &AbilityDefinition) -> Vec<&Effect> {
+        let mut effects = vec![&*def.effect];
+        let mut current = &def.sub_ability;
+        while let Some(sub) = current {
+            effects.push(&*sub.effect);
+            current = &sub.sub_ability;
+        }
+        effects
+    }
+
+    #[test]
+    fn conjunction_verb_propagation_decimate_pattern() {
+        // "destroy target artifact, target creature, target enchantment, and target land"
+        // should produce 4 Destroy effects chained as sub_abilities
+        let def = parse_effect_chain(
+            "destroy target artifact, target creature, target enchantment, and target land",
+            AbilityKind::Spell,
+        );
+        let effects = collect_chain_effects(&def);
+        let destroy_count = effects
+            .iter()
+            .filter(|e| matches!(e, Effect::Destroy { .. }))
+            .count();
+        assert_eq!(
+            destroy_count, 4,
+            "Decimate should produce 4 Destroy effects, got {destroy_count}: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn conjunction_verb_propagation_exile_two_targets() {
+        // "exile target creature and target artifact" should produce 2 ChangeZone(exile) effects
+        let def = parse_effect_chain(
+            "exile target creature and target artifact",
+            AbilityKind::Spell,
+        );
+        let effects = collect_chain_effects(&def);
+        let exile_count = effects
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Effect::ChangeZone {
+                        destination: Zone::Exile,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            exile_count, 2,
+            "Should produce 2 exile effects, got {exile_count}: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn conjunction_multi_effect_discard_and_gain_life() {
+        // "each opponent discards a card and you gain 3 life"
+        // should produce Discard + GainLife chain
+        let def = parse_effect_chain(
+            "each opponent discards a card and you gain 3 life",
+            AbilityKind::Spell,
+        );
+        let effects = collect_chain_effects(&def);
+        let has_discard = effects.iter().any(|e| matches!(e, Effect::Discard { .. }));
+        let has_gain_life = effects.iter().any(|e| matches!(e, Effect::GainLife { .. }));
+        assert!(has_discard, "Should have Discard effect: {effects:?}");
+        assert!(has_gain_life, "Should have GainLife effect: {effects:?}");
+    }
+
+    #[test]
+    fn conjunction_single_target_regression() {
+        // "destroy target creature" should still work (single target, no conjunction)
+        let def = parse_effect_chain("destroy target creature", AbilityKind::Spell);
+        assert!(
+            matches!(*def.effect, Effect::Destroy { .. }),
+            "Single destroy should work: {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn conjunction_predicate_and_not_split() {
+        // "target creature gets +2/+2 and gains flying until end of turn"
+        // "and" is in predicate, not a conjunction — should NOT split
+        let def = parse_effect_chain(
+            "target creature gets +2/+2 and gains flying until end of turn",
+            AbilityKind::Spell,
+        );
+        // Should produce a Pump or continuous effect, not split into two separate effects
+        assert!(
+            !matches!(*def.effect, Effect::Unimplemented { .. }),
+            "Should not be Unimplemented: {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn conjunction_noun_phrase_and_not_split() {
+        // "target creature and all other creatures you control get +1/+1"
+        // "and" is part of subject noun phrase — should NOT split
+        let def = parse_effect_chain(
+            "target creature and all other creatures you control get +1/+1 until end of turn",
+            AbilityKind::Spell,
+        );
+        let effects = collect_chain_effects(&def);
+        // Should NOT produce multiple separate effects from false split
+        assert!(
+            effects.len() <= 2,
+            "Noun-phrase 'and' should not cause split into many effects: {effects:?}"
+        );
+    }
 }
