@@ -11,14 +11,14 @@ import { CommanderDisplay } from "./CommanderDisplay.tsx";
 import { CommanderDamage } from "./CommanderDamage.tsx";
 import { CommandZone } from "../zone/CommandZone.tsx";
 
-/** Scale for land column (left) */
-const LAND_SCALE = 0.9;
+/** Scale for land column — ~45% of creature size, matching Arena's land-to-creature ratio */
+const LAND_SCALE = 0.56;
 
 const LAND_COL_STYLE = {
-  "--art-crop-w": `calc(var(--art-crop-base) * var(--card-size-scale) * ${LAND_SCALE})`,
-  "--art-crop-h": `calc(var(--art-crop-base) * var(--card-size-scale) * ${LAND_SCALE} * 0.75)`,
-  "--card-w": `calc(var(--card-base) * var(--card-size-scale) * ${LAND_SCALE + 0.2})`,
-  "--card-h": `calc(var(--card-base) * var(--card-size-scale) * ${LAND_SCALE + 0.2} * 1.4)`,
+  "--art-crop-w": `calc(var(--art-crop-base) * var(--card-size-scale) * var(--art-crop-viewport-scale) * ${LAND_SCALE})`,
+  "--art-crop-h": `calc(var(--art-crop-base) * var(--card-size-scale) * var(--art-crop-viewport-scale) * ${LAND_SCALE} * 0.85)`,
+  "--card-w": `calc(var(--card-base) * var(--card-size-scale) * var(--card-viewport-scale) * ${LAND_SCALE})`,
+  "--card-h": `calc(var(--card-base) * var(--card-size-scale) * var(--card-viewport-scale) * ${LAND_SCALE} * 1.4)`,
 } as React.CSSProperties;
 
 /** Scale for enchantment/artifact column (right) */
@@ -110,10 +110,14 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
       <CommandZone playerId={playerId} />
     </div>
   ) : null;
+  const landAlignClass = isMirrored
+    ? "flex-wrap items-start justify-start"
+    : "flex-wrap content-end items-end justify-start";
+
   const middleRow = (
-    <div className="flex min-h-0 items-start justify-between gap-4" data-debug-label="Middle Row">
+    <div className="flex h-full min-h-0 items-stretch justify-between gap-4" data-debug-label="Middle Row">
       <div
-        className="z-10 flex min-w-0 basis-0 flex-1 flex-wrap items-start justify-start gap-2 pl-3"
+        className={`z-10 flex min-w-0 basis-0 flex-1 gap-2 pl-2 ${landAlignClass}`}
         style={LAND_COL_STYLE}
         data-debug-label="Lands"
       >
@@ -123,7 +127,7 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
         {landColumnExtra}
       </div>
       <div
-        className="z-10 flex min-w-0 basis-0 flex-1 justify-end"
+        className="z-10 flex min-w-0 basis-0 flex-1 justify-end pr-2"
         style={OTHER_COL_STYLE}
         data-debug-label="Support"
       >
@@ -151,16 +155,16 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
         {isMirrored ? (
           <>
             <BattlefieldRow groups={partitioned?.other ?? []} rowType="other" />
-            <div className="shrink-0 overflow-y-visible">
+            <div className="min-h-0 flex-1 overflow-y-visible">
               {middleRow}
             </div>
-            <div className="flex min-h-0 flex-1 items-end" data-debug-label="Opp Creatures">
+            <div className="flex min-h-0 flex-1 items-end px-2" data-debug-label="Opp Creatures">
               <BattlefieldRow groups={creatures} rowType="creatures" className="w-full" />
             </div>
           </>
         ) : (
           <>
-            <div className="min-h-0 flex-1" data-debug-label="Creatures">
+            <div className="min-h-0 flex-1 px-2" data-debug-label="Creatures">
               <BattlefieldRow groups={creatures} rowType="creatures" />
             </div>
             <div className="shrink-0">

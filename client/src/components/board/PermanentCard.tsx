@@ -249,7 +249,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
       data-object-id={objectId}
       data-card-hover
       layoutId={`permanent-${objectId}`}
-      className="relative inline-flex w-fit cursor-pointer rounded-lg self-start select-none"
+      className="relative inline-flex w-fit cursor-pointer rounded-lg self-end select-none"
       style={{
         filter: sicknessFilter,
         boxShadow: sicknessGlow,
