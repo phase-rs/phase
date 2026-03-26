@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::game::filter::matches_target_filter;
+use crate::game::layers::evaluate_condition;
 use crate::types::ability::{TargetFilter, TypedFilter};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -377,6 +378,13 @@ pub fn check_static_ability(
                 }
             }
 
+            // CR 604.1: Evaluate condition if present (e.g., "as long as you control a Reflection")
+            if let Some(ref condition) = def.condition {
+                if !evaluate_condition(state, condition, obj.controller, id) {
+                    continue;
+                }
+            }
+
             return true;
         }
     }
@@ -474,6 +482,7 @@ mod tests {
     use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
+    use crate::types::ability::StaticCondition;
     use crate::types::statics::StaticMode;
     use crate::types::zones::Zone;
 
@@ -925,5 +934,95 @@ mod tests {
 
         assert_eq!(additional_land_drops(&state, PlayerId(0)), 1);
         assert_eq!(additional_land_drops(&state, PlayerId(1)), 1);
+    }
+
+    #[test]
+    fn test_cant_untap_with_condition_met_blocks() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Alirios".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Add a Reflection creature so the IsPresent condition is met
+        let reflection = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Reflection".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&reflection)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // CantUntap with condition "as long as you control a creature"
+        let condition = StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature()
+                    .controller(ControllerRef::You),
+            )),
+        };
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantUntap)
+                    .affected(TargetFilter::SelfRef)
+                    .condition(condition),
+            );
+
+        let ctx = StaticCheckContext {
+            target_id: Some(source),
+            ..Default::default()
+        };
+        // Condition is met (we control a creature) — CantUntap should apply
+        assert!(check_static_ability(&state, StaticMode::CantUntap, &ctx));
+    }
+
+    #[test]
+    fn test_cant_untap_with_condition_not_met_allows() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Alirios".to_string(),
+            Zone::Battlefield,
+        );
+
+        // CantUntap with condition "as long as you control a creature" — but no creature exists
+        let condition = StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature()
+                    .controller(ControllerRef::You),
+            )),
+        };
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantUntap)
+                    .affected(TargetFilter::SelfRef)
+                    .condition(condition),
+            );
+
+        let ctx = StaticCheckContext {
+            target_id: Some(source),
+            ..Default::default()
+        };
+        // Condition not met (no creature controlled) — CantUntap should NOT apply
+        assert!(!check_static_ability(&state, StaticMode::CantUntap, &ctx));
     }
 }
