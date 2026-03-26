@@ -76,7 +76,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
     const obj = s.gameState?.objects[objectId];
     return s.legalActions.some((a) =>
       a.type === "ActivateAbility" && a.data.source_id === objectId
-      && obj?.abilities?.[a.data.ability_index]?.effect?.type !== "Mana",
+      && (obj?.abilities?.[a.data.ability_index] as { effect?: { type?: string } } | undefined)?.effect?.type !== "Mana",
     );
   });
 
@@ -206,7 +206,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
       // are in legalActions for auto-pass awareness but handled by canTapForMana.
       const abilityActions = useGameStore.getState().legalActions.filter((a) =>
         a.type === "ActivateAbility" && a.data.source_id === objectId
-        && o?.abilities?.[a.data.ability_index]?.effect?.type !== "Mana",
+        && (o?.abilities?.[a.data.ability_index] as { effect?: { type?: string } } | undefined)?.effect?.type !== "Mana",
       );
       if (abilityActions.length === 0 && canTapForMana) {
         // No non-mana abilities — tap for mana directly

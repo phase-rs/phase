@@ -158,7 +158,7 @@ export async function fetchCardImageUrl(
   if (size === "normal" || size === "art_crop") {
     const map = await loadImageMap();
     const name = normalizeCardName(cardName).toLowerCase();
-    const faces = map[name];
+    const faces = map?.[name];
     if (faces) {
       const face = faces[faceIndex] ?? faces[0];
       const url = face[size];
