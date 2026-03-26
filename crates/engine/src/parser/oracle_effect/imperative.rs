@@ -251,8 +251,21 @@ pub(super) fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<Targe
         super::types::assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::Sacrifice { target });
     }
-    if lower.starts_with("discard ") {
-        let count = parse_count_expr(&text[8..])
+    if let Some(after_discard) = lower.strip_prefix("discard ") {
+        // Detect whole-hand discard patterns before falling through to count parsing.
+        // Uses starts_with (not contains) to avoid matching "discard a card from your hand".
+        if after_discard.starts_with("your hand")
+            || after_discard.starts_with("their hand")
+            || after_discard.starts_with("his or her hand")
+        {
+            return Some(TargetedImperativeAst::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize,
+                },
+            });
+        }
+        let original_after = &text[text.len() - after_discard.len()..];
+        let count = parse_count_expr(original_after)
             .map(|(q, _)| q)
             .unwrap_or(QuantityExpr::Fixed { value: 1 });
         return Some(TargetedImperativeAst::Discard { count });
