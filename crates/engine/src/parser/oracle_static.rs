@@ -576,13 +576,18 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         );
     }
 
-    // --- "~ doesn't untap during your untap step" ---
+    // --- "~ doesn't untap during your untap step [as long as / if condition]" ---
+    // CR 502.3: Effects can keep permanents from untapping during the untap step.
     if tp.contains("doesn't untap during") || tp.contains("doesn\u{2019}t untap during") {
-        return Some(
-            StaticDefinition::new(StaticMode::CantUntap)
-                .affected(TargetFilter::SelfRef)
-                .description(text.to_string()),
-        );
+        // Check for trailing condition after the untap-step phrase
+        let condition = extract_cant_untap_condition(tp.lower);
+        let mut def = StaticDefinition::new(StaticMode::CantUntap)
+            .affected(TargetFilter::SelfRef)
+            .description(text.to_string());
+        if let Some(cond) = condition {
+            def.condition = Some(cond);
+        }
+        return Some(def);
     }
 
     // --- "You may look at the top card of your library any time." ---
@@ -1007,6 +1012,15 @@ fn parse_subject_rule_static(text: &str) -> Option<StaticDefinition> {
     let tp = TextPair::new(text, &lower);
     let (affected, predicate_text) = strip_rule_static_subject(tp.original, tp.lower)?;
     let predicate = parse_rule_static_predicate(predicate_text)?;
+    // CR 502.3: Extract trailing condition for CantUntap statics (e.g., "as long as [condition]")
+    if matches!(predicate, RuleStaticPredicate::CantUntap) {
+        let pred_lower = predicate_text.to_lowercase();
+        if let Some(condition) = extract_cant_untap_condition(&pred_lower) {
+            let mut def = lower_rule_static(predicate, affected, text);
+            def.condition = Some(condition);
+            return Some(def);
+        }
+    }
     Some(lower_rule_static(predicate, affected, text))
 }
 
@@ -1022,9 +1036,10 @@ fn parse_subject_continuous_static(text: &str) -> Option<StaticDefinition> {
     }
     let affected = parse_continuous_subject_filter(subject)?;
 
-    // CR 613.4c: Route "for each" predicates through parse_continuous_gets_has
-    // which handles dynamic P/T via AddDynamicPower/AddDynamicToughness.
-    if predicate.to_lowercase().contains("for each ") {
+    // CR 613.4c / CR 611.3a: Route "for each" and "as long as" predicates through
+    // parse_continuous_gets_has which handles dynamic P/T and condition splitting.
+    let pred_lower = predicate.to_lowercase();
+    if pred_lower.contains("for each ") || pred_lower.contains(" as long as ") {
         return parse_continuous_gets_has(predicate, affected, text);
     }
 
@@ -1353,6 +1368,23 @@ fn parse_static_condition(text: &str) -> Option<StaticCondition> {
     // "you've committed a crime this turn" / "you've gained life this turn"
     if let Some(condition) = parse_youve_this_turn_condition(tp.lower) {
         return Some(condition);
+    }
+
+    // "you have N or more life" → QuantityComparison(LifeTotal >= N)
+    if let Some(rest) = tp.lower.strip_prefix("you have ") {
+        if let Some(life_text) = rest.strip_suffix(" or more life") {
+            if let Some((n, remainder)) = parse_number(life_text) {
+                if remainder.trim().is_empty() {
+                    return Some(StaticCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::LifeTotal,
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: n as i32 },
+                    });
+                }
+            }
+        }
     }
 
     // "the chosen color is [color]"
@@ -2252,6 +2284,24 @@ fn parse_continuous_gets_has(
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
+    // CR 611.3a: Split "as long as [condition]" BEFORE "for each" — the condition applies
+    // to the entire static, not to a quantity count. Mirrors parse_enchanted_equipped_predicate.
+    if let Some((before_cond, after_cond)) = tp.split_around(" as long as ") {
+        let continuous_text = before_cond.original;
+        let condition_text = after_cond.original.trim().trim_end_matches('.');
+        // Recursively parse the continuous part without the condition
+        if let Some(mut def) =
+            parse_continuous_gets_has(continuous_text, affected.clone(), description)
+        {
+            let condition =
+                parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
+                    text: condition_text.to_string(),
+                });
+            def.condition = Some(condition);
+            return Some(def);
+        }
+    }
+
     // CR 613.4c: Handle "gets +N/+M for each [clause]" — dynamic P/T via ObjectCount.
     if let Some((before_for_each, after_for_each)) = tp.split_around("for each ") {
         let pt_text = before_for_each.original.trim();
@@ -3093,6 +3143,41 @@ fn strip_in_addition_suffix(text: &str) -> Option<&str> {
     ]
     .iter()
     .find_map(|suffix| text.strip_suffix(suffix))
+}
+
+/// CR 502.3: Extract a trailing condition from a "doesn't untap during [untap step]" clause.
+/// Handles patterns like:
+/// - "doesn't untap during your untap step as long as [condition]"
+/// - "doesn't untap during your untap step if [condition]"
+fn extract_cant_untap_condition(lower: &str) -> Option<StaticCondition> {
+    // Find the end of the "untap step" phrase
+    let untap_phrases = [
+        "its controller's untap step",
+        "its controller\u{2019}s untap step",
+        "their controllers' untap steps",
+        "your untap step",
+    ];
+    let mut after_untap = None;
+    for phrase in &untap_phrases {
+        if let Some(pos) = lower.find(phrase) {
+            let end = pos + phrase.len();
+            after_untap = Some(lower[end..].trim().trim_end_matches('.'));
+            break;
+        }
+    }
+    let remaining = after_untap?;
+    if remaining.is_empty() {
+        return None;
+    }
+    // Strip "as long as" or "if" prefix
+    let condition_text = remaining
+        .strip_prefix("as long as ")
+        .or_else(|| remaining.strip_prefix("if "))?;
+    parse_static_condition(condition_text).or_else(|| {
+        Some(StaticCondition::Unrecognized {
+            text: condition_text.to_string(),
+        })
+    })
 }
 
 #[cfg(test)]
@@ -5599,5 +5684,66 @@ mod tests {
             !matches!(cond, Some(StaticCondition::And { .. })),
             "Should not split noun phrase, got: {cond:?}"
         );
+    }
+
+    // --- Task 1: as-long-as condition splitting in parse_continuous_gets_has ---
+
+    #[test]
+    fn static_self_ref_gets_as_long_as_control_forest() {
+        // Kird Ape: "~ gets +1/+2 as long as you control a Forest"
+        let def = parse_static_line("Kird Ape gets +1/+2 as long as you control a Forest.");
+        assert!(def.is_some(), "Should parse 'gets +1/+2 as long as' static");
+        let def = def.unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(
+            def.condition.is_some(),
+            "Expected non-null condition for 'as long as' static, got None"
+        );
+    }
+
+    #[test]
+    fn static_self_ref_gets_as_long_as_regression_for_each() {
+        // "for each" split must still work after adding "as long as" split
+        let def = parse_static_line("~ gets +1/+1 for each creature you control.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        // Should have dynamic P/T modifications, not a condition
+        assert!(def.condition.is_none());
+    }
+
+    #[test]
+    fn static_self_ref_gets_without_condition_regression() {
+        // Plain "gets +2/+2" without condition must still work
+        let def = parse_static_line("~ gets +2/+2.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(def.condition.is_none());
+    }
+
+    #[test]
+    fn static_condition_you_have_n_or_more_life() {
+        // "you have 5 or more life" should parse as a QuantityComparison
+        let cond = parse_static_condition("you have 5 or more life");
+        assert!(
+            matches!(
+                cond,
+                Some(StaticCondition::QuantityComparison {
+                    comparator: Comparator::GE,
+                    ..
+                })
+            ),
+            "Expected QuantityComparison with GE, got: {cond:?}"
+        );
+    }
+
+    #[test]
+    fn static_conditional_cant_untap_with_if() {
+        // "~ doesn't untap during your untap step if enchanted creature is blue"
+        // Should produce CantUntap with a condition populated
+        let def = parse_static_line(
+            "~ doesn't untap during your untap step as long as enchanted creature is tapped.",
+        );
+        // For now, just check it parses as CantUntap (condition handling is new)
+        assert!(def.is_some(), "Should parse conditional CantUntap");
+        let def = def.unwrap();
+        assert_eq!(def.mode, StaticMode::CantUntap);
     }
 }

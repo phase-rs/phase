@@ -44,15 +44,19 @@ pub fn resolve_mana_ability(
     // Pay the full ability cost (tap, sacrifice, etc.)
     pay_mana_ability_cost(state, source_id, player, &ability_def.cost, events)?;
 
-    // Produce mana — either the override color or the resolved production
-    let produced_mana = match color_override {
-        Some(color) => vec![color],
-        None => match &*ability_def.effect {
-            Effect::Mana { produced, .. } => {
-                resolve_mana_types(produced, &*state, player, source_id)
+    // Produce mana — resolve the full count from the production descriptor,
+    // then apply color_override if present. This ensures dynamic-count producers
+    // (e.g., Priest of Titania: {G} per elf) produce the correct amount even
+    // when auto-tap specifies a color override.
+    let produced_mana = match &*ability_def.effect {
+        Effect::Mana { produced, .. } => {
+            let resolved = resolve_mana_types(produced, &*state, player, source_id);
+            match color_override {
+                Some(color) => vec![color; resolved.len()],
+                None => resolved,
             }
-            _ => Vec::new(),
-        },
+        }
+        _ => Vec::new(),
     };
 
     let tapped = mana_sources::has_tap_component(&ability_def.cost);

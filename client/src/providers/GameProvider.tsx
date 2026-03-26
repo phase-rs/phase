@@ -377,27 +377,28 @@ export function GameProvider({
       };
     }
 
-    // AI or local mode — check for a saved game for this ID
-    const savedState = loadGame(gameId);
-    const adapter = new WasmAdapter();
+    // AI or local mode — async setup (loadGame is async due to IndexedDB)
+    const setupLocal = async () => {
+      if (cancelled) return;
 
-    if (savedState) {
-      // Load card DB before restore so the engine can rehydrate objects
-      // and handle token creation / effects after resume.
-      ensureCardDatabase()
-        .catch(() => {/* card DB is best-effort — resume works without it */})
-        .then(() => {
+      const savedState = await loadGame(gameId);
+      const adapter = new WasmAdapter();
+
+      if (savedState) {
+        try {
+          // Load card DB before restore so the engine can rehydrate objects
+          // and handle token creation / effects after resume.
+          await ensureCardDatabase().catch(() => {/* card DB is best-effort */});
           if (cancelled) return;
-          return resumeGame(gameId, adapter, savedState);
-        })
-        .then(() => {
+          await resumeGame(gameId, adapter, savedState);
           if (cancelled) return;
           controller = createGameLoopController({ mode, difficulty, playerCount });
           controller.start();
           audioManager.setContext("battlefield");
-        }).catch((err) => {
+        } catch (err) {
           // Saved state is incompatible (e.g. engine type changes) — clear it
           // and fall through to start a fresh game.
+          if (cancelled) return;
           console.warn("Failed to resume saved game, starting fresh:", err);
           const wasAutoUpdate = consumeRecentAutoUpdateMarker();
           const reason = wasAutoUpdate
@@ -412,7 +413,8 @@ export function GameProvider({
             return;
           }
           const deckList = buildDeckList(parsedDeck, formatConfig);
-          initGame(gameId, freshAdapter, deckList, formatConfig, playerCount, matchConfig).then(() => {
+          try {
+            await initGame(gameId, freshAdapter, deckList, formatConfig, playerCount, matchConfig);
             if (cancelled) return;
             if (!freshAdapter.cardDbLoaded) {
               onCardDataMissingRef.current?.();
@@ -420,48 +422,42 @@ export function GameProvider({
             controller = createGameLoopController({ mode, difficulty, playerCount });
             controller.start();
             audioManager.setContext("battlefield");
-          }).catch((err) => {
-            console.error("Deck validation failed:", err);
+          } catch (initErr) {
+            console.error("Deck validation failed:", initErr);
             if (!cancelled) onNoDeckRef.current?.();
-          });
-        });
-      return () => {
-        cancelled = true;
-        if (controller) controller.dispose();
-        audioManager.setContext("menu");
-        reset();
-      };
-    }
-
-    // No saved state — start a new game
-    const parsedDeck = loadActiveDeck();
-    if (!parsedDeck) {
-      onNoDeckRef.current?.();
-      return;
-    }
-
-    const deckList = buildDeckList(parsedDeck, formatConfig);
-
-    initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig).then(() => {
-      if (cancelled) return;
-
-      if (!adapter.cardDbLoaded) {
-        onCardDataMissingRef.current?.();
+          }
+        }
+        return;
       }
 
-      controller = createGameLoopController({ mode, difficulty, playerCount });
-      controller.start();
-      audioManager.setContext("battlefield");
-    }).catch((err) => {
-      console.error("Deck validation failed:", err);
-      if (!cancelled) onNoDeckRef.current?.();
-    });
+      // No saved state — start a new game
+      const parsedDeck = loadActiveDeck();
+      if (!parsedDeck) {
+        onNoDeckRef.current?.();
+        return;
+      }
+
+      const deckList = buildDeckList(parsedDeck, formatConfig);
+      try {
+        await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig);
+        if (cancelled) return;
+        if (!adapter.cardDbLoaded) {
+          onCardDataMissingRef.current?.();
+        }
+        controller = createGameLoopController({ mode, difficulty, playerCount });
+        controller.start();
+        audioManager.setContext("battlefield");
+      } catch (err) {
+        console.error("Deck validation failed:", err);
+        if (!cancelled) onNoDeckRef.current?.();
+      }
+    };
+
+    setupLocal();
 
     return () => {
       cancelled = true;
-      if (controller) {
-        controller.dispose();
-      }
+      if (controller) controller.dispose();
       audioManager.setContext("menu");
       reset();
     };

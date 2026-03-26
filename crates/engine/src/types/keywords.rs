@@ -140,7 +140,8 @@ pub enum Keyword {
     // Damage modification
     Wither,
     Infect,
-    Afflict,
+    /// CR 702.130a: "Afflict N" — when blocked, defending player loses N life.
+    Afflict(u32),
 
     // Triggered abilities
     Prowess,
@@ -627,7 +628,7 @@ impl FromStr for Keyword {
                 "firebending" => return Ok(Keyword::Firebending(p.parse().unwrap_or(1))),
                 // CR 702.74a
                 "hideaway" => return Ok(Keyword::Hideaway(p.parse().unwrap_or(4))),
-                "afflict" => return Ok(Keyword::Afflict),
+                "afflict" => return Ok(Keyword::Afflict(p.parse().unwrap_or(1))),
                 "enchant" => return Ok(Keyword::Enchant(parse_enchant_target(p))),
                 "etbcounter" => {
                     let (counter_type, count) = parse_etb_counter(&s[name.len() + 1..]);
@@ -672,7 +673,7 @@ impl FromStr for Keyword {
             "horsemanship" => Ok(Keyword::Horsemanship),
             "wither" => Ok(Keyword::Wither),
             "infect" => Ok(Keyword::Infect),
-            "afflict" => Ok(Keyword::Afflict),
+            "afflict" => Ok(Keyword::Afflict(1)),
             "prowess" => Ok(Keyword::Prowess),
             "undying" => Ok(Keyword::Undying),
             "persist" => Ok(Keyword::Persist),
@@ -852,7 +853,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Horsemanship" => Ok(Keyword::Horsemanship),
         "Wither" => Ok(Keyword::Wither),
         "Infect" => Ok(Keyword::Infect),
-        "Afflict" => Ok(Keyword::Afflict),
+        "Afflict" => Ok(Keyword::Afflict(uint(data).max(1))),
         "Prowess" => Ok(Keyword::Prowess),
         "Undying" => Ok(Keyword::Undying),
         "Persist" => Ok(Keyword::Persist),
@@ -1173,6 +1174,15 @@ mod tests {
     }
 
     #[test]
+    fn parse_keyword_afflict_n() {
+        // CR 702.130a: "Afflict N" — parameterized keyword
+        assert_eq!(Keyword::from_str("Afflict:3").unwrap(), Keyword::Afflict(3));
+        assert_eq!(Keyword::from_str("Afflict:1").unwrap(), Keyword::Afflict(1));
+        // Bare "afflict" without param defaults to 1
+        assert_eq!(Keyword::from_str("afflict").unwrap(), Keyword::Afflict(1));
+    }
+
+    #[test]
     fn parse_protection_variants() {
         assert_eq!(
             Keyword::from_str("Protection:Red").unwrap(),
@@ -1484,7 +1494,6 @@ mod tests {
             "Horsemanship",
             "Wither",
             "Infect",
-            "Afflict",
             "Prowess",
             "Undying",
             "Persist",

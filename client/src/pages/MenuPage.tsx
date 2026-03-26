@@ -51,28 +51,30 @@ export function MenuPage() {
 
     const saved = loadActiveGame();
     if (saved) {
-      let hasState: boolean;
       if (saved.mode === "online") {
+        let hasSession = false;
         const raw = localStorage.getItem("phase-ws-session");
         if (raw) {
           try {
             const session = JSON.parse(raw) as { timestamp?: number };
             const TWO_HOURS = 2 * 60 * 60 * 1000;
-            hasState = Date.now() - (session.timestamp ?? 0) < TWO_HOURS;
-          } catch {
-            hasState = false;
-          }
+            hasSession = Date.now() - (session.timestamp ?? 0) < TWO_HOURS;
+          } catch { /* malformed session */ }
+        }
+        if (hasSession) {
+          setActiveGame(saved);
         } else {
-          hasState = false;
+          clearActiveGame();
         }
       } else {
-        hasState = loadGame(saved.id) !== null;
-      }
-      if (hasState) {
-        setActiveGame(saved);
-      } else {
-        // Metadata exists but game state is gone — clean up stale entry
-        clearActiveGame();
+        // Game state is in IndexedDB — async check
+        loadGame(saved.id).then((state) => {
+          if (state) {
+            setActiveGame(saved);
+          } else {
+            clearActiveGame();
+          }
+        });
       }
     }
   }, []);

@@ -16,11 +16,12 @@ client/src/wasm/
 # Build output
 client/dist/
 
-# Generated data files (built by gen-card-data.sh, served from R2)
+# Generated data files (built by gen-card-data.sh / gen-scryfall-images.sh, served from R2)
 client/public/card-data.json
 client/public/card-data-meta.json
 client/public/coverage-data.json
 client/public/coverage-summary.json
+client/public/scryfall-images.json
 
 # Coverage
 client/coverage/

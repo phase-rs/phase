@@ -245,7 +245,11 @@ fn parse_subject_application(subject: &str, ctx: &ParseContext) -> Option<Subjec
     }
     // Bare plural noun phrase subjects ("creatures you control", "other creatures you control")
     // are implicit "all X" forms — strip any "other " prefix and route through parse_target.
-    let noun_subject = lower.strip_prefix("other ").unwrap_or(&lower);
+    let (had_other, noun_subject) = if let Some(rest) = lower.strip_prefix("other ") {
+        (true, rest)
+    } else {
+        (false, lower.as_str())
+    };
     if !noun_subject.starts_with("target ")
         && !noun_subject.starts_with("all ")
         && !noun_subject.starts_with("each ")
@@ -253,6 +257,11 @@ fn parse_subject_application(subject: &str, ctx: &ParseContext) -> Option<Subjec
         let normalized = format!("all {noun_subject}");
         let (filter, rest) = parse_target(&normalized);
         if rest.trim().is_empty() {
+            let filter = if had_other {
+                add_another_property(filter)
+            } else {
+                filter
+            };
             return subject_filter_application(filter, false);
         }
     }

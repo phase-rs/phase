@@ -67,12 +67,16 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
       : false,
   );
 
-  // Check if this permanent has activatable non-mana abilities from legal actions
+  // Check if this permanent has activatable non-mana abilities from legal actions.
+  // Mana abilities are also in legalActions (for auto-pass awareness) but excluded
+  // here since canTapForMana handles their highlight independently.
   const hasActivatableAbility = useGameStore((s) => {
     const wf = s.waitingFor;
     if (!wf || wf.type !== "Priority" || wf.data.player !== playerId) return false;
+    const obj = s.gameState?.objects[objectId];
     return s.legalActions.some((a) =>
-      a.type === "ActivateAbility" && a.data.source_id === objectId,
+      a.type === "ActivateAbility" && a.data.source_id === objectId
+      && obj?.abilities?.[a.data.ability_index]?.effect?.type !== "Mana",
     );
   });
 
@@ -197,12 +201,15 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
     } else if (isValidTarget) {
       dispatchAction({ type: "ChooseTarget", data: { target: { Object: objectId } } });
     } else if (isActivatable) {
+      const o = useGameStore.getState().gameState?.objects[objectId];
+      // Filter out mana abilities from non-mana ability actions — mana abilities
+      // are in legalActions for auto-pass awareness but handled by canTapForMana.
       const abilityActions = useGameStore.getState().legalActions.filter((a) =>
-        a.type === "ActivateAbility" && a.data.source_id === objectId,
+        a.type === "ActivateAbility" && a.data.source_id === objectId
+        && o?.abilities?.[a.data.ability_index]?.effect?.type !== "Mana",
       );
       if (abilityActions.length === 0 && canTapForMana) {
         // No non-mana abilities — tap for mana directly
-        const o = useGameStore.getState().gameState?.objects[objectId];
         if (o && !o.card_types.core_types.includes("Land") && o.mana_ability_index != null) {
           // Non-land mana source: dispatch ActivateAbility (handles tap + sacrifice etc.)
           dispatchAction({ type: "ActivateAbility", data: { source_id: objectId, ability_index: o.mana_ability_index } });
@@ -215,7 +222,6 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
         // Multiple abilities or both ability + mana — show choice modal
         const allActions = [...abilityActions];
         if (canTapForMana) {
-          const o = useGameStore.getState().gameState?.objects[objectId];
           if (o && !o.card_types.core_types.includes("Land") && o.mana_ability_index != null) {
             allActions.push({ type: "ActivateAbility", data: { source_id: objectId, ability_index: o.mana_ability_index } });
           } else {

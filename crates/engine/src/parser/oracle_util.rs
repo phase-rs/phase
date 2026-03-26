@@ -1,4 +1,4 @@
-use crate::types::ability::{QuantityExpr, QuantityRef, TargetFilter};
+use crate::types::ability::{QuantityExpr, QuantityRef, RoundingMode, TargetFilter};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 
 /// A borrowed pair of `(original, lowercase)` slices kept in lockstep.
@@ -290,10 +290,35 @@ pub fn parse_number(text: &str) -> Option<(u32, &str)> {
 pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
     let text = text.trim_start();
     let lower = text.to_lowercase();
+    // CR 107.1a: "half X" expressions — parse the inner quantity, wrap in HalfRounded.
+    // Default rounding is Down per CR 107.1a unless "rounded up" is specified.
+    if lower.strip_prefix("half ").is_some() {
+        let original_after = &text[5..];
+        let (inner, rest) = parse_count_expr(original_after)?;
+        // Check if remainder contains a rounding override
+        let rest_lower = rest.to_lowercase();
+        let (rounding, final_rest) =
+            if let Some(after_round) = rest_lower.strip_prefix(", rounded up") {
+                (RoundingMode::Up, &rest[rest.len() - after_round.len()..])
+            } else if let Some(after_round) = rest_lower.strip_prefix(", round up") {
+                (RoundingMode::Up, &rest[rest.len() - after_round.len()..])
+            } else {
+                (RoundingMode::Down, rest)
+            };
+        return Some((
+            QuantityExpr::HalfRounded {
+                inner: Box::new(inner),
+                rounding,
+            },
+            final_rest,
+        ));
+    }
     // CR 107.3a: "X" in Oracle text represents a variable determined at cast time.
+    // Accept X followed by whitespace, comma, period, or end-of-string — all valid
+    // Oracle text boundaries (e.g., "X cards", "X, rounded up", "X.").
     if lower.starts_with('x') {
         let rest = &text[1..];
-        if rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace()) {
+        if rest.is_empty() || rest.starts_with(|c: char| !c.is_alphanumeric()) {
             return Some((
                 QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
@@ -1420,6 +1445,59 @@ mod tests {
     #[test]
     fn parse_count_expr_none_for_text() {
         assert!(parse_count_expr("target creature").is_none());
+    }
+
+    #[test]
+    fn parse_count_expr_half_x() {
+        let (qty, rest) = parse_count_expr("half X cards").unwrap();
+        match qty {
+            QuantityExpr::HalfRounded { inner, rounding } => {
+                assert!(matches!(
+                    *inner,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { .. }
+                    }
+                ));
+                assert_eq!(
+                    rounding,
+                    crate::types::ability::RoundingMode::Down,
+                    "Default rounding should be Down per CR 107.1a"
+                );
+            }
+            other => panic!("Expected HalfRounded, got {other:?}"),
+        }
+        assert_eq!(rest, "cards");
+    }
+
+    #[test]
+    fn parse_count_expr_half_x_bare() {
+        let (qty, _rest) = parse_count_expr("half X").unwrap();
+        assert!(matches!(
+            qty,
+            QuantityExpr::HalfRounded {
+                rounding: crate::types::ability::RoundingMode::Down,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_count_expr_half_x_rounded_up() {
+        let (qty, _rest) = parse_count_expr("half X, rounded up").unwrap();
+        match qty {
+            QuantityExpr::HalfRounded { rounding, .. } => {
+                assert_eq!(rounding, crate::types::ability::RoundingMode::Up);
+            }
+            other => panic!("Expected HalfRounded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_count_expr_fixed_regression() {
+        // Ensure "3 cards" still returns Fixed, not HalfRounded
+        let (qty, rest) = parse_count_expr("3 cards").unwrap();
+        assert!(matches!(qty, QuantityExpr::Fixed { value: 3 }));
+        assert_eq!(rest, "cards");
     }
 
     #[test]

@@ -3780,4 +3780,311 @@ mod tests {
         assert!(!is_blocked_by_cant_cast_during(&state, PlayerId(0)));
         assert!(!is_blocked_by_cant_cast_during(&state, PlayerId(1)));
     }
+
+    #[test]
+    fn creature_in_hand_castable_with_untapped_lands() {
+        use crate::ai_support::{candidate_actions, legal_actions};
+        use crate::game::derived::derive_display_state;
+        use crate::types::ability::{AbilityKind, Effect, ManaProduction};
+        use crate::types::actions::GameAction;
+
+        let mut state = setup_game_at_main_phase();
+
+        // Add a Forest to the battlefield (produces {G})
+        let forest = add_basic_land(&mut state, CardId(100), "Forest", "Forest");
+        let obj = state.objects.get_mut(&forest).unwrap();
+        obj.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Green],
+                    },
+                    restrictions: vec![],
+                    expiry: None,
+                },
+            )
+            .cost(crate::types::ability::AbilityCost::Tap),
+        );
+
+        // Add a creature to hand: "Elf" with cost {G}
+        let elf = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Test Elf".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&elf).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            };
+        }
+
+        derive_display_state(&mut state);
+
+        // Verify can_cast_object_now returns true
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), elf),
+            "Creature costing {{G}} should be castable with an untapped Forest"
+        );
+
+        // Verify it appears in candidate_actions
+        let candidates = candidate_actions(&state);
+        assert!(
+            candidates.iter().any(|c| matches!(
+                &c.action,
+                GameAction::CastSpell { object_id, .. } if *object_id == elf
+            )),
+            "CastSpell should appear in candidate_actions"
+        );
+
+        // Verify it survives validated_candidate_actions → legal_actions
+        let actions = legal_actions(&state);
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                GameAction::CastSpell { object_id, .. } if *object_id == elf
+            )),
+            "CastSpell should appear in legal_actions"
+        );
+    }
+
+    #[test]
+    fn creature_castable_via_mana_dork_when_lands_tapped() {
+        use crate::ai_support::legal_actions;
+        use crate::game::derived::derive_display_state;
+        use crate::types::ability::{AbilityKind, Effect, ManaProduction};
+        use crate::types::actions::GameAction;
+
+        let mut state = setup_game_at_main_phase();
+
+        // Add a tapped Forest (no mana available from it)
+        let forest = add_basic_land(&mut state, CardId(100), "Forest", "Forest");
+        state.objects.get_mut(&forest).unwrap().tapped = true;
+
+        // Add untapped Llanowar Elves (mana dork: T: Add {G})
+        let dork = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Llanowar Elves".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&dork).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Elf".to_string());
+            obj.entered_battlefield_turn = Some(1); // entered last turn → no summoning sickness
+            obj.abilities.push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                        },
+                        restrictions: vec![],
+                        expiry: None,
+                    },
+                )
+                .cost(crate::types::ability::AbilityCost::Tap),
+            );
+        }
+
+        // Add creature to hand: cost {G}
+        let elf = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(0),
+            "Test Elf".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&elf).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            };
+        }
+
+        derive_display_state(&mut state);
+
+        // The dork should be identified as a mana source
+        assert!(
+            state.objects[&dork].has_mana_ability,
+            "Llanowar Elves should have has_mana_ability"
+        );
+        assert!(
+            !state.objects[&dork].has_summoning_sickness,
+            "Llanowar Elves should not have summoning sickness"
+        );
+
+        // can_cast_object_now should pass — dork provides {G}
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), elf),
+            "Creature costing {{G}} should be castable via mana dork"
+        );
+
+        // Should appear in legal_actions
+        let actions = legal_actions(&state);
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                GameAction::CastSpell { object_id, .. } if *object_id == elf
+            )),
+            "CastSpell via mana dork should appear in legal_actions"
+        );
+    }
+
+    /// Reproduces the Priest of Titania scenario: a dynamic-count mana dork
+    /// (AnyOneColor with ObjectCount) as the only mana source. Before the
+    /// color_override fix, resolve_mana_ability truncated dynamic counts to 1,
+    /// making expensive spells appear unaffordable.
+    #[test]
+    fn creature_castable_via_dynamic_mana_dork() {
+        use crate::ai_support::legal_actions;
+        use crate::game::derived::derive_display_state;
+        use crate::types::ability::{
+            AbilityKind, Effect, ManaProduction, QuantityExpr, QuantityRef, TargetFilter,
+        };
+        use crate::types::actions::GameAction;
+
+        let mut state = setup_game_at_main_phase();
+
+        // Add several elves to make the dynamic count work
+        for i in 0..5u64 {
+            let elf_id = create_object(
+                &mut state,
+                CardId(200 + i),
+                PlayerId(0),
+                format!("Elf Token {i}"),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&elf_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Elf".to_string());
+            obj.entered_battlefield_turn = Some(1);
+        }
+
+        // Add Priest of Titania: T: Add {G} for each Elf on the battlefield
+        let priest = create_object(
+            &mut state,
+            CardId(210),
+            PlayerId(0),
+            "Priest of Titania".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&priest).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Elf".to_string());
+            obj.entered_battlefield_turn = Some(1);
+            obj.abilities.push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyOneColor {
+                            count: QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCount {
+                                    filter: TargetFilter::Typed(
+                                        crate::types::ability::TypedFilter {
+                                            type_filters: vec![
+                                                crate::types::ability::TypeFilter::Subtype(
+                                                    "Elf".to_string(),
+                                                ),
+                                            ],
+                                            controller: None,
+                                            properties: vec![],
+                                        },
+                                    ),
+                                },
+                            },
+                            color_options: vec![ManaColor::Green],
+                        },
+                        restrictions: vec![],
+                        expiry: None,
+                    },
+                )
+                .cost(crate::types::ability::AbilityCost::Tap),
+            );
+        }
+
+        // Add Craterhoof-like creature to hand: cost {5}{G}{G}{G}
+        let behemoth = create_object(
+            &mut state,
+            CardId(211),
+            PlayerId(0),
+            "Craterhoof Behemoth".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&behemoth).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::Green,
+                    ManaCostShard::Green,
+                    ManaCostShard::Green,
+                ],
+                generic: 5,
+            };
+        }
+
+        derive_display_state(&mut state);
+
+        // Priest sees 6 elves (5 tokens + herself) → produces 6G
+        // Craterhoof costs 8 total (5 generic + 3 green)
+        // 6G is NOT enough for 8 total... but let's test a cheaper spell too.
+
+        // Actually, 6 elves → 6G. Cost is {5}{G}{G}{G} = 8. Fails even with fix.
+        // Let's make it castable by adding one more elf.
+        let extra_elf = create_object(
+            &mut state,
+            CardId(212),
+            PlayerId(0),
+            "Extra Elf".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&extra_elf).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Elf".to_string());
+            obj.entered_battlefield_turn = Some(1);
+        }
+        // Add another elf so Priest sees 8 elves → 8G → exactly enough for {5}{G}{G}{G}
+        let extra_elf2 = create_object(
+            &mut state,
+            CardId(213),
+            PlayerId(0),
+            "Extra Elf 2".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&extra_elf2).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Elf".to_string());
+            obj.entered_battlefield_turn = Some(1);
+        }
+
+        derive_display_state(&mut state);
+
+        // Priest sees 8 elves → produces 8G. Cost {5}{G}{G}{G} = 8 total. Exactly enough.
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), behemoth),
+            "Craterhoof should be castable when Priest of Titania produces 8G"
+        );
+
+        let actions = legal_actions(&state);
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                GameAction::CastSpell { object_id, .. } if *object_id == behemoth
+            )),
+            "CastSpell for Craterhoof should appear in legal_actions"
+        );
+    }
 }

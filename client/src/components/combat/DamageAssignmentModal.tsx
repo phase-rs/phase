@@ -52,6 +52,7 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
     <ChoiceOverlay
       title={`Assign ${data.total_damage} Combat Damage`}
       subtitle={`${getName(data.attacker_id)} — Remaining: ${remaining}`}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!isValid} label="Assign Damage" />}
     >
       <div className="mb-4 space-y-3">
         {data.blockers.map((blocker, i) => {
@@ -121,8 +122,6 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
           </div>
         )}
       </div>
-
-      <ConfirmButton onClick={handleConfirm} disabled={!isValid} label="Assign Damage" />
     </ChoiceOverlay>
   );
 }

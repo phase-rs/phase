@@ -35,7 +35,7 @@ codegen-backend = "llvm"
 
 [profile.wasm-dev]
 inherits = "dev"
-opt-level = 1
+opt-level = 2
 codegen-backend = "llvm"
 
 [profile.release]

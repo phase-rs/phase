@@ -32,26 +32,29 @@ body {
 
 #root {
   min-height: 100vh;
-  /* Game-app behavior: prevent webpage-like interactions */
+  overscroll-behavior: none;
+}
+
+/* Game-only: prevent selection, callout, and tap-highlight during matches */
+.game-no-select {
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
-  overscroll-behavior: none;
 }
 
 /* Prevent native image dragging (cards, backgrounds, etc.) */
-#root img {
+.game-no-select img {
   -webkit-user-drag: none;
   user-drag: none;
 }
 
-/* Allow text selection in inputs, textareas, and elements that opt in */
-#root input,
-#root textarea,
-#root [contenteditable],
-#root .select-text {
+/* Allow text selection in inputs/textareas even within the game */
+.game-no-select input,
+.game-no-select textarea,
+.game-no-select [contenteditable],
+.game-no-select .select-text {
   -webkit-user-select: text;
   user-select: text;
   -webkit-touch-callout: default;
@@ -270,18 +273,18 @@ body {
 }
 @media (min-height: 500px) and (min-width: 1024px) {
   .modal-header-compact {
-    padding: 1.25rem 1.75rem;
+    padding: 0.75rem 1.75rem;
   }
   .modal-header-compact h2 {
-    font-size: 1.875rem;
-    margin-top: 0.5rem;
+    font-size: 1.25rem;
+    margin-top: 0;
   }
   .modal-header-compact .modal-eyebrow {
-    font-size: 0.68rem;
+    font-size: 0.6rem;
   }
   .modal-header-compact .modal-subtitle {
-    font-size: 0.95rem;
-    margin-top: 0.5rem;
+    font-size: 0.875rem;
+    margin-top: 0;
   }
 }
 
@@ -335,23 +338,39 @@ body {
   flex-shrink: 0;
 }
 /* Thin scrollbar for horizontal card strips on desktop */
-.zone-viewer-strip,
-.card-choice-strip {
+.zone-viewer-strip {
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
 }
-.zone-viewer-strip::-webkit-scrollbar,
-.card-choice-strip::-webkit-scrollbar {
+.zone-viewer-strip::-webkit-scrollbar {
   height: 4px;
 }
-.zone-viewer-strip::-webkit-scrollbar-thumb,
-.card-choice-strip::-webkit-scrollbar-thumb {
+.zone-viewer-strip::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.15);
   border-radius: 2px;
 }
-.zone-viewer-strip::-webkit-scrollbar-track,
-.card-choice-strip::-webkit-scrollbar-track {
+.zone-viewer-strip::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* Always-visible scrollbar for card choice strips */
+.card-choice-strip {
+  overflow-x: scroll;
+  scrollbar-color: rgba(255, 255, 255, 0.35) rgba(255, 255, 255, 0.08);
+}
+.card-choice-strip::-webkit-scrollbar {
+  height: 10px;
+}
+.card-choice-strip::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.35);
+  border-radius: 5px;
+}
+.card-choice-strip::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.5);
+}
+.card-choice-strip::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 5px;
 }
 
 /* Class level bookmark — notched bottom edge */

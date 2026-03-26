@@ -334,12 +334,12 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
     if platform == Platform::Wasm {
         config.search.max_depth = config.search.max_depth.min(2);
         config.search.max_nodes = config.search.max_nodes * 2 / 3;
-        config.search.rollout_depth = config.search.rollout_depth.min(1);
+        config.search.rollout_depth = config.search.rollout_depth.min(2);
         if matches!(config.search.planner_mode, PlannerMode::BeamPlusMcts) {
             // Reduce simulations (48 → 20) and add 500ms time cap as safety net
             if let Some(mcts) = &mut config.search.mcts {
                 mcts.simulations = mcts.simulations.min(20);
-                mcts.rollout_depth = mcts.rollout_depth.min(1);
+                mcts.rollout_depth = mcts.rollout_depth.min(2);
             }
             config.search.time_budget_ms = Some(500);
         }
@@ -468,7 +468,7 @@ mod tests {
         assert!(config.search.mcts.is_some());
         let mcts = config.search.mcts.unwrap();
         assert!(mcts.simulations <= 20);
-        assert_eq!(mcts.rollout_depth, 1);
+        assert_eq!(mcts.rollout_depth, 2);
         assert_eq!(config.search.time_budget_ms, Some(500));
     }
 

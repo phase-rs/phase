@@ -56,6 +56,7 @@ export function DistributeAmongModal({ data }: { data: DistributeAmong["data"] }
     <ChoiceOverlay
       title={`Distribute ${data.total} ${label}`}
       subtitle={`Assign at least 1 ${label} to each target. Remaining: ${remaining}`}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!isValid} label="Confirm" />}
     >
       <div className="mb-4 space-y-3">
         {data.targets.map((target, i) => (
@@ -88,8 +89,6 @@ export function DistributeAmongModal({ data }: { data: DistributeAmong["data"] }
           </div>
         ))}
       </div>
-
-      <ConfirmButton onClick={handleConfirm} disabled={!isValid} label="Confirm" />
     </ChoiceOverlay>
   );
 }

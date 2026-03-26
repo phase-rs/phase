@@ -90,11 +90,10 @@ async function processAction(action: GameAction): Promise<void> {
   // 4. Checkpoint: save pre-action state on turn boundaries for debug restore
   const turnEvent = events.find((e) => e.type === "TurnStarted");
   if (turnEvent) {
-    useGameStore.setState((prev) => {
-      const updated = [...prev.turnCheckpoints, gameState].slice(-MAX_UNDO_HISTORY);
-      if (prev.gameId) saveCheckpoints(prev.gameId, updated);
-      return { turnCheckpoints: updated };
-    });
+    const prev = useGameStore.getState();
+    const updated = [...prev.turnCheckpoints, gameState].slice(-MAX_UNDO_HISTORY);
+    useGameStore.setState({ turnCheckpoints: updated });
+    if (prev.gameId) saveCheckpoints(prev.gameId, updated);
   }
 
   // 5. Flash turn banner directly (bypasses animation queue for reliability)

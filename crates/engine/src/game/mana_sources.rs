@@ -193,7 +193,7 @@ fn scan_mana_abilities(
 /// Delegates to the shared restriction checker so that `RequiresCondition`,
 /// once-per-turn limits, sorcery-speed, and all other restriction types
 /// are enforced uniformly for mana source analysis.
-fn activation_condition_satisfied(
+pub(crate) fn activation_condition_satisfied(
     state: &GameState,
     controller: PlayerId,
     object_id: ObjectId,

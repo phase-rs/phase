@@ -979,6 +979,10 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::TwoOrMoreSpellsCastLastTurn => {
             state.spells_cast_last_turn.unwrap_or(0) >= 2
         }
+        // CR 603.4: "if you have N or more life" — compare controller's life total.
+        TriggerCondition::LifeTotalGE { minimum } => {
+            player_field(state, controller, |p| p.life >= *minimum)
+        }
         // CR 603.4: "if it's not your turn"
         TriggerCondition::NotYourTurn => state.active_player != controller,
         TriggerCondition::And { conditions } => conditions

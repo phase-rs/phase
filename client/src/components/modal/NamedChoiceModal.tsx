@@ -111,7 +111,7 @@ function CardNameSearch() {
   const showResults = matches.length > 0 && !selected;
 
   return (
-    <ChoiceOverlay title="Name a Card" subtitle="Type to search all cards">
+    <ChoiceOverlay title="Name a Card" subtitle="Type to search all cards" footer={<ConfirmButton onClick={handleConfirm} disabled={!selected} />}>
       <div className="flex w-full max-w-md flex-col items-center gap-3">
         <div className="relative w-full">
           <input
@@ -179,9 +179,6 @@ function CardNameSearch() {
           </motion.div>
         )}
       </div>
-      <div className="mt-6">
-        <ConfirmButton onClick={handleConfirm} disabled={!selected} />
-      </div>
     </ChoiceOverlay>
   );
 }
@@ -219,6 +216,7 @@ function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: str
       subtitle="Select one option"
       widthClassName="w-fit max-w-full"
       maxWidthClassName="max-w-3xl"
+      footer={<ConfirmButton onClick={handleConfirm} disabled={selected === null} />}
     >
       <div className="mx-auto mb-6 flex w-fit max-w-3xl flex-wrap items-center justify-center gap-3 sm:mb-10">
         {data.options.map((option, index) => {
@@ -226,7 +224,7 @@ function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: str
           return (
             <motion.button
               key={option}
-              className={`min-h-11 rounded-lg border-2 px-4 py-3 text-sm font-semibold transition sm:px-5 sm:text-base ${ 
+              className={`min-h-11 rounded-lg border-2 px-4 py-3 text-sm font-semibold transition sm:px-5 sm:text-base ${
                 isSelected
                   ? "border-emerald-400 bg-emerald-500/30 text-white"
                   : "border-gray-600 bg-gray-800/80 text-gray-300 hover:border-gray-400 hover:text-white"
@@ -242,7 +240,6 @@ function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: str
           );
         })}
       </div>
-      <ConfirmButton onClick={handleConfirm} disabled={selected === null} />
     </ChoiceOverlay>
   );
 }

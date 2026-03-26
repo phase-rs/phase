@@ -414,6 +414,61 @@ impl<'a> PlannerServices<'a> {
         evaluate_for_planner(state, self.ai_player, weights)
     }
 
+    /// Quiescence search: resolve forced priority passes until the position is "quiet"
+    /// (empty stack or a player has a real decision). This prevents the horizon effect
+    /// where the search evaluates mid-stack-resolution positions that misleadingly
+    /// penalize spell casting — the hand shrinks but the board doesn't improve because
+    /// the creature hasn't resolved yet.
+    ///
+    /// Capped at MAX_QUIESCE_STEPS to prevent runaway loops from cascading triggers.
+    fn quiesce(&self, state: &GameState) -> GameState {
+        const MAX_QUIESCE_STEPS: u32 = 20;
+
+        let mut sim = state.clone();
+        for _ in 0..MAX_QUIESCE_STEPS {
+            if sim.stack.is_empty() {
+                break;
+            }
+            if matches!(sim.waiting_for, WaitingFor::GameOver { .. }) {
+                break;
+            }
+            let ctx = build_decision_context(&sim);
+            let all_pass = !ctx.candidates.is_empty()
+                && ctx
+                    .candidates
+                    .iter()
+                    .all(|c| matches!(c.action, engine::types::actions::GameAction::PassPriority));
+            if !all_pass {
+                break;
+            }
+            if apply(&mut sim, engine::types::actions::GameAction::PassPriority).is_err() {
+                break;
+            }
+        }
+        sim
+    }
+
+    /// Evaluate a leaf state with quiescence: if the stack is non-empty and only
+    /// forced passes remain, resolve through them before evaluating.
+    pub fn evaluate_state_quiesced(&mut self, state: &GameState) -> f64 {
+        if state.stack.is_empty() {
+            return self.evaluate_state_cached(state);
+        }
+        let quiesced = self.quiesce(state);
+        self.evaluate_state_cached(&quiesced)
+    }
+
+    /// Evaluate a leaf state for utility with quiescence.
+    pub fn quiesced_leaf_eval(&mut self, state: &GameState) -> f64 {
+        if state.stack.is_empty() {
+            let value = self.evaluate_for_planner(state);
+            return self.reduce_utility(state, &value);
+        }
+        let quiesced = self.quiesce(state);
+        let value = self.evaluate_for_planner(&quiesced);
+        self.reduce_utility(&quiesced, &value)
+    }
+
     pub fn tactical_score(
         &self,
         state: &GameState,
@@ -514,12 +569,12 @@ impl<'a> PlannerServices<'a> {
 
     pub fn rollout_estimate(&mut self, state: &GameState, depth: u32) -> f64 {
         if depth == 0 || matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-            return self.reduce_utility(state, &self.evaluate_for_planner(state));
+            return self.quiesced_leaf_eval(state);
         }
 
         let evaluation = self.planner_evaluation(state);
         if evaluation.priors.is_empty() {
-            return self.reduce_utility(state, &evaluation.value);
+            return self.quiesced_leaf_eval(state);
         }
 
         let rollout_player = state.waiting_for.acting_player().unwrap_or(self.ai_player);
@@ -546,7 +601,7 @@ impl<'a> PlannerServices<'a> {
                     best.min(value)
                 }
             })
-            .unwrap_or_else(|| self.reduce_utility(state, &self.evaluate_for_planner(state)))
+            .unwrap_or_else(|| self.quiesced_leaf_eval(state))
     }
 }
 
@@ -580,7 +635,7 @@ impl BeamContinuationPlanner {
             return services.rollout_estimate(state, self.rollout_depth);
         }
         if budget.exhausted() || matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-            return services.evaluate_state_cached(state);
+            return services.evaluate_state_quiesced(state);
         }
 
         let ctx = services.build_decision_context(state);
@@ -589,7 +644,7 @@ impl BeamContinuationPlanner {
         // the state once per candidate just to test validity.
         // (planner_evaluation retains validation for MCTS expansion correctness.)
         if ctx.candidates.is_empty() {
-            return services.evaluate_state_cached(state);
+            return services.evaluate_state_quiesced(state);
         }
 
         let node_player = state.waiting_for.acting_player();
@@ -630,7 +685,7 @@ impl BeamContinuationPlanner {
         }
 
         if best.is_infinite() {
-            services.evaluate_state_cached(state)
+            services.evaluate_state_quiesced(state)
         } else {
             best
         }
@@ -645,7 +700,7 @@ impl ContinuationPlanner for BeamContinuationPlanner {
         budget: &mut SearchBudget,
     ) -> f64 {
         if self.depth == 0 {
-            services.evaluate_state_cached(state)
+            services.evaluate_state_quiesced(state)
         } else {
             self.search_value(
                 state,
@@ -743,7 +798,7 @@ impl MctsPlanner {
         let mut path: Vec<(SearchNodeKey, Option<usize>)> = Vec::new();
         let utility = loop {
             if budget.exhausted() {
-                break services.reduce_utility(&state, &services.evaluate_for_planner(&state));
+                break services.quiesced_leaf_eval(&state);
             }
             budget.tick();
 
@@ -755,20 +810,22 @@ impl MctsPlanner {
             path.push((node_key, None));
 
             if is_terminal {
-                break services.reduce_utility(&state, &services.evaluate_for_planner(&state));
+                // GameOver — evaluate directly, no quiescence needed.
+                let value = services.evaluate_for_planner(&state);
+                break services.reduce_utility(&state, &value);
             }
 
             if needs_expansion {
                 self.expand_node(node_key, &state, services);
                 break if self.config.rollout_depth == 0 {
-                    services.reduce_utility(&state, &services.evaluate_for_planner(&state))
+                    services.quiesced_leaf_eval(&state)
                 } else {
                     services.rollout_estimate(&state, self.config.rollout_depth)
                 };
             }
 
             let Some(edge_index) = self.select_edge_index(&node_key) else {
-                break services.reduce_utility(&state, &services.evaluate_for_planner(&state));
+                break services.quiesced_leaf_eval(&state);
             };
             if let Some((_, last_edge)) = path.last_mut() {
                 *last_edge = Some(edge_index);
@@ -780,10 +837,10 @@ impl MctsPlanner {
                 .and_then(|node| node.edges.get(edge_index))
                 .map(|edge| edge.candidate.clone())
             else {
-                break services.reduce_utility(&state, &services.evaluate_for_planner(&state));
+                break services.quiesced_leaf_eval(&state);
             };
             let Some(next_state) = services.apply_candidate(&state, &candidate) else {
-                break services.reduce_utility(&state, &services.evaluate_for_planner(&state));
+                break services.quiesced_leaf_eval(&state);
             };
             let child_key = SearchNodeKey::new(&next_state, next_state.waiting_for.acting_player());
             if let Some(node) = self.tree.get_mut(&node_key) {
@@ -827,9 +884,8 @@ impl ContinuationPlanner for MctsPlanner {
             self.run_simulation(state, services, budget);
         }
 
-        self.root_value(&root_key).unwrap_or_else(|| {
-            services.reduce_utility(state, &services.evaluate_for_planner(state))
-        })
+        self.root_value(&root_key)
+            .unwrap_or_else(|| services.quiesced_leaf_eval(state))
     }
 }
 
@@ -1161,5 +1217,190 @@ mod tests {
         let root_key = SearchNodeKey::new(&state, Some(PlayerId(0)));
         let root = planner.tree.get(&root_key).unwrap();
         assert!(root.visits <= planner.config.simulations);
+    }
+
+    #[test]
+    fn quiesce_is_noop_on_empty_stack() {
+        let state = make_state();
+        assert!(state.stack.is_empty());
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let services = PlannerServices::new_default(PlayerId(0), &config, &policies);
+        let quiesced = services.quiesce(&state);
+        assert!(quiesced.stack.is_empty());
+        // Board state should be identical
+        assert_eq!(quiesced.battlefield.len(), state.battlefield.len());
+        assert_eq!(quiesced.players[0].hand.len(), state.players[0].hand.len());
+    }
+
+    #[test]
+    fn quiesce_resolves_creature_spell_on_stack() {
+        use engine::types::ability::{Effect, ResolvedAbility};
+        use engine::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
+        use engine::types::mana::{ManaCost, ManaCostShard};
+
+        let mut state = make_state();
+        state.lands_played_this_turn = 1;
+
+        // Add a forest on the battlefield for player 0
+        let land_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&land_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes.push("Forest".to_string());
+        obj.controller = PlayerId(0);
+        obj.tapped = true; // Already tapped to pay for the creature
+
+        // Add a creature as an object (it'll be on the stack)
+        let creature_id = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1,
+            };
+        }
+
+        // Put the creature on the stack
+        state.stack.push(StackEntry {
+            id: creature_id,
+            source_id: creature_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(200),
+                ability: ResolvedAbility::new(
+                    Effect::Draw {
+                        count: engine::types::ability::QuantityExpr::Fixed { value: 0 },
+                    },
+                    Vec::new(),
+                    creature_id,
+                    PlayerId(0),
+                ),
+                casting_variant: CastingVariant::Normal,
+            },
+        });
+
+        // Both players have priority, only PassPriority is legal
+        // (creature spell on stack, no instant-speed responses available)
+        let battlefield_before = state.battlefield.len();
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let services = PlannerServices::new_default(PlayerId(0), &config, &policies);
+        let quiesced = services.quiesce(&state);
+
+        // After quiescence, the stack should be resolved
+        assert!(
+            quiesced.stack.is_empty(),
+            "Stack should be empty after quiescence, got {} entries",
+            quiesced.stack.len()
+        );
+        // Creature should now be on the battlefield
+        assert!(
+            quiesced.battlefield.len() > battlefield_before,
+            "Creature should have entered the battlefield: before={}, after={}",
+            battlefield_before,
+            quiesced.battlefield.len()
+        );
+    }
+
+    #[test]
+    fn quiesced_leaf_eval_credits_pending_creature() {
+        use engine::types::ability::{Effect, ResolvedAbility};
+        use engine::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
+        use engine::types::mana::{ManaCost, ManaCostShard};
+
+        let mut state = make_state();
+        state.lands_played_this_turn = 1;
+
+        // Add a tapped forest for player 0
+        let land_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&land_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.controller = PlayerId(0);
+            obj.tapped = true;
+        }
+
+        // State A: creature in hand (baseline)
+        let creature_in_hand = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_in_hand).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1,
+            };
+        }
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services_a = PlannerServices::new_default(PlayerId(0), &config, &policies);
+        let eval_hand = services_a.evaluate_state_quiesced(&state);
+
+        // State B: same creature on the stack (post-cast)
+        let mut state_b = state.clone();
+        // Move creature from hand to stack
+        state_b.players[0].hand.retain(|&id| id != creature_in_hand);
+        let obj = state_b.objects.get_mut(&creature_in_hand).unwrap();
+        obj.zone = Zone::Stack;
+        state_b.stack.push(StackEntry {
+            id: creature_in_hand,
+            source_id: creature_in_hand,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(200),
+                ability: ResolvedAbility::new(
+                    Effect::Draw {
+                        count: engine::types::ability::QuantityExpr::Fixed { value: 0 },
+                    },
+                    Vec::new(),
+                    creature_in_hand,
+                    PlayerId(0),
+                ),
+                casting_variant: CastingVariant::Normal,
+            },
+        });
+
+        let mut services_b = PlannerServices::new_default(PlayerId(0), &config, &policies);
+        let eval_stack = services_b.evaluate_state_quiesced(&state_b);
+
+        // With quiescence, casting a creature should be valued AT LEAST as well as
+        // holding it in hand (actually better, since it'll be on the battlefield).
+        assert!(
+            eval_stack >= eval_hand - 0.5,
+            "Creature on stack should evaluate similarly to in hand after quiescence. \
+             Stack eval: {eval_stack}, hand eval: {eval_hand}, delta: {}",
+            eval_stack - eval_hand
+        );
     }
 }

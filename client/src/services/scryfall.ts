@@ -1,6 +1,23 @@
 import { get } from "idb-keyval";
 import { cacheImage } from "./imageCache.ts";
 
+interface ImageMapEntry {
+  normal: string;
+  art_crop: string;
+}
+type ImageMap = Record<string, ImageMapEntry[]>;
+
+let imageMapPromise: Promise<ImageMap | null> | null = null;
+
+function loadImageMap(): Promise<ImageMap | null> {
+  if (!imageMapPromise) {
+    imageMapPromise = fetch("/scryfall-images.json")
+      .then((r) => r.json() as Promise<ImageMap>)
+      .catch(() => null);
+  }
+  return imageMapPromise;
+}
+
 const SCRYFALL_DELAY_MS = 75;
 const NOT_FOUND_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -137,6 +154,18 @@ export async function fetchCardImageUrl(
   faceIndex: number,
   size: ImageSize = "normal",
 ): Promise<string> {
+  // Local image map covers normal and art_crop — skip API round-trip for these.
+  if (size === "normal" || size === "art_crop") {
+    const map = await loadImageMap();
+    const name = normalizeCardName(cardName).toLowerCase();
+    const faces = map[name];
+    if (faces) {
+      const face = faces[faceIndex] ?? faces[0];
+      const url = face[size];
+      if (url) return url;
+    }
+  }
+  // Fall back to Scryfall API for cache misses or other sizes (small, large).
   const card = await fetchCardData(cardName);
   return getImageUrl(card, size, faceIndex);
 }

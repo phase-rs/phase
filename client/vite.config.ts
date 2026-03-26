@@ -8,6 +8,25 @@ import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
 import { VitePWA } from "vite-plugin-pwa";
 import { compression } from "vite-plugin-compression2";
+import type { Plugin } from "vite";
+
+// wasm-bindgen emits `import * as importN from "env"` for WASM host-environment
+// imports (LLVM intrinsics). These are provided at instantiation time by the JS
+// glue code and are never loaded as ES modules. Resolve them to an empty shim
+// so Vite's import analysis doesn't error on the bare "env" specifier.
+function wasmEnvShim(): Plugin {
+  const VIRTUAL_ID = "\0wasm-env-shim";
+  return {
+    name: "wasm-env-shim",
+    enforce: "pre",
+    resolveId(id) {
+      if (id === "env") return VIRTUAL_ID;
+    },
+    load(id) {
+      if (id === VIRTUAL_ID) return "export default {};";
+    },
+  };
+}
 
 function gitHash(): string {
   try {
@@ -34,6 +53,7 @@ export default defineConfig({
     },
   },
   plugins: [
+    wasmEnvShim(),
     react(),
     tailwindcss(),
     wasm(),
@@ -85,6 +105,9 @@ export default defineConfig({
       process.env.AUDIO_BASE_URL || "",
     ),
     __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
+  },
+  worker: {
+    plugins: () => [wasmEnvShim()],
   },
   build: {
     target: "esnext",

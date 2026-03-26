@@ -412,6 +412,23 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         }
     }
 
+    // CR 603.4: "if you have N or more life" — life-total threshold condition.
+    if let Some(pos) = tp.find("if you have ") {
+        let after = &lower[pos + "if you have ".len()..];
+        if let Some(or_more_pos) = after.find(" or more life") {
+            let life_text = &after[..or_more_pos];
+            if let Some((n, remainder)) = parse_number(life_text) {
+                if remainder.trim().is_empty() {
+                    let clause_len = "if you have ".len() + or_more_pos + " or more life".len();
+                    return (
+                        strip_condition_clause(text, pos, clause_len),
+                        Some(TriggerCondition::LifeTotalGE { minimum: n as i32 }),
+                    );
+                }
+            }
+        }
+    }
+
     // CR 400.7 + CR 603.10: "if it was a [type]" / "if it was an [type]"
     for prefix in &["if it was a ", "if it was an "] {
         if let Some(pos) = tp.find(prefix) {
@@ -1871,16 +1888,34 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             ));
         }
 
-        // Parse the spell quality (e.g., "multicolored spell")
+        // Parse the spell quality generically (e.g., "creature spell", "multicolored spell")
+        // using the same parse_type_phrase building block as the "you cast" branch above.
+        // Truncate at ", " to avoid passing the effect clause (e.g., ", you gain 1 life")
+        // into parse_type_phrase where it would cause infinite recursion.
         let after_casts = &lower[casts_pos + " casts a".len()..].trim_start();
         let after_article = after_casts
             .strip_prefix("n ") // "an" → strip the trailing "n "
             .unwrap_or(after_casts)
             .trim_start();
-        if after_article.starts_with("multicolored") {
+        let spell_clause = after_article
+            .split_once(", ")
+            .map(|(before, _)| before)
+            .unwrap_or(after_article);
+        // Handle "multicolored" as a spell property (not a type phrase)
+        if spell_clause.contains("multicolored") {
             def.valid_card = Some(TargetFilter::Typed(
                 TypedFilter::default().properties(vec![FilterProp::Multicolored]),
             ));
+        } else {
+            let (filter, _rest) = parse_type_phrase(spell_clause);
+            let is_meaningful = match &filter {
+                TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
+                TargetFilter::Or { .. } => true,
+                _ => false,
+            };
+            if is_meaningful {
+                def.valid_card = Some(filter);
+            }
         }
 
         return Some((TriggerMode::SpellCast, def));
@@ -4842,5 +4877,35 @@ mod tests {
         } else {
             panic!("expected Typed filter, got {valid_card:?}");
         }
+    }
+
+    #[test]
+    fn extract_if_you_have_n_or_more_life() {
+        let (cleaned, cond) = extract_if_condition("draw a card if you have 40 or more life");
+        assert!(
+            matches!(cond, Some(TriggerCondition::LifeTotalGE { minimum: 40 })),
+            "Expected LifeTotalGE {{ minimum: 40 }}, got: {cond:?}"
+        );
+        assert_eq!(cleaned.trim(), "draw a card");
+    }
+
+    #[test]
+    fn extract_if_you_have_n_or_more_life_win() {
+        let (cleaned, cond) = extract_if_condition("you win the game if you have 40 or more life");
+        assert!(
+            matches!(cond, Some(TriggerCondition::LifeTotalGE { .. })),
+            "Expected LifeTotalGE, got: {cond:?}"
+        );
+        assert_eq!(cleaned.trim(), "you win the game");
+    }
+
+    #[test]
+    fn extract_if_gained_life_regression() {
+        // Existing pattern must still work
+        let (_, cond) = extract_if_condition("draw a card if you've gained life this turn");
+        assert!(
+            matches!(cond, Some(TriggerCondition::GainedLife { minimum: 1 })),
+            "Expected GainedLife, got: {cond:?}"
+        );
     }
 }

@@ -48,6 +48,7 @@ export function RetargetChoiceModal({ data }: { data: RetargetChoice["data"] }) 
     <ChoiceOverlay
       title="Change Target"
       subtitle={`${scopeLabel}. Current: ${currentLabel}`}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={selected.length === 0} label="Confirm" />}
     >
       <div className="mb-4 space-y-2">
         {data.legal_new_targets.map((target) => {
@@ -71,8 +72,6 @@ export function RetargetChoiceModal({ data }: { data: RetargetChoice["data"] }) 
           );
         })}
       </div>
-
-      <ConfirmButton onClick={handleConfirm} disabled={selected.length === 0} label="Confirm" />
     </ChoiceOverlay>
   );
 }

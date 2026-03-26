@@ -838,7 +838,30 @@ fn parse_clause_ast(text: &str, ctx: &ParseContext) -> ClauseAst {
 
 fn lower_clause_ast(ast: ClauseAst, ctx: &ParseContext) -> ParsedEffectClause {
     match ast {
-        ClauseAst::Imperative { text } => lower_imperative_clause(&text, ctx),
+        ClauseAst::Imperative { text } => {
+            let mut clause = lower_imperative_clause(&text, ctx);
+            // "put target [type] on top/bottom of library" — the imperative parser
+            // returns PutAtLibraryPosition { target: Any } because it doesn't extract
+            // the target from between "put" and "on top/bottom". Extract it here.
+            if let Effect::PutAtLibraryPosition { ref mut target, .. } = clause.effect {
+                if *target == TargetFilter::Any {
+                    let lower = text.to_lowercase();
+                    if let Some(after_put) = lower.strip_prefix("put ") {
+                        let boundary = after_put
+                            .find(" on top of")
+                            .or_else(|| after_put.find(" on the bottom of"));
+                        if let Some(end) = boundary {
+                            let target_text = &after_put[..end];
+                            let (filter, _) = parse_target(target_text);
+                            if !matches!(filter, TargetFilter::Any) {
+                                *target = filter;
+                            }
+                        }
+                    }
+                }
+            }
+            clause
+        }
         ClauseAst::SubjectPredicate { subject, predicate } => {
             lower_subject_predicate_ast(*subject, *predicate, ctx)
         }
@@ -1542,6 +1565,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         | Effect::Suspect { target }
         | Effect::Goad { target }
         | Effect::Mill { target, .. }
+        | Effect::PutAtLibraryPosition { target, .. }
             if *target == TargetFilter::Any || *target == TargetFilter::Controller =>
         {
             *target = subject_filter;

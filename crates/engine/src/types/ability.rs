@@ -3175,6 +3175,9 @@ pub enum TriggerCondition {
     /// ("when this dies, if it was a creature, return it").
     WasType { card_type: CoreType },
 
+    /// CR 603.4: "if you have N or more life" — intervening-if condition checking life total.
+    LifeTotalGE { minimum: i32 },
+
     // -- Combinators --
     /// All conditions must be true ("if you gained and lost life this turn")
     And { conditions: Vec<TriggerCondition> },

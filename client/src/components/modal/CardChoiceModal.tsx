@@ -7,7 +7,7 @@ import { useUiStore } from "../../stores/uiStore.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import type { ObjectId, WaitingFor } from "../../adapter/types.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
-import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
+import { ChoiceOverlay, ConfirmButton, ScrollableCardStrip } from "./ChoiceOverlay.tsx";
 import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
 import { DamageAssignmentModal } from "../combat/DamageAssignmentModal.tsx";
 import { DistributeAmongModal } from "./DistributeAmongModal.tsx";
@@ -27,8 +27,6 @@ type ChooseLegend = Extract<WaitingFor, { type: "ChooseLegend" }>;
 type ManifestDreadChoice = Extract<WaitingFor, { type: "ManifestDreadChoice" }>;
 const CHOICE_CARD_IMAGE_CLASS = "";
 const SCRY_CARD_IMAGE_CLASS = "";
-const CHOICE_CARD_ROW_CLASS =
-  "card-choice-strip mx-auto flex min-h-0 flex-1 items-center gap-2 overflow-x-auto px-1 pb-2 lg:gap-3";
 
 /**
  * Generic card choice modal for Scry, Dig, Surveil, Reveal, Search, and NamedChoice.
@@ -150,8 +148,9 @@ function ScryModal({ data }: { data: ScryChoice["data"] }) {
       title="Scry"
       subtitle={`Look at the top ${data.cards.length} card${data.cards.length > 1 ? "s" : ""} of your library`}
       maxWidthClassName={overlayWidthClassName}
+      footer={<ConfirmButton onClick={handleConfirm} />}
     >
-      <div className={CHOICE_CARD_ROW_CLASS}>
+      <ScrollableCardStrip>
         {data.cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
@@ -194,8 +193,7 @@ function ScryModal({ data }: { data: ScryChoice["data"] }) {
             </motion.div>
           );
         })}
-      </div>
-      <ConfirmButton onClick={handleConfirm} />
+      </ScrollableCardStrip>
     </ChoiceOverlay>
   );
 }
@@ -252,8 +250,9 @@ function DigModal({ data }: { data: DigChoice["data"] }) {
     <ChoiceOverlay
       title="Choose Cards"
       subtitle={`Select ${countLabel} card${data.keep_count > 1 ? "s" : ""} to put ${destLabel}`}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Confirm (${selected.size}/${data.keep_count})`} />}
     >
-      <div className={CHOICE_CARD_ROW_CLASS}>
+      <ScrollableCardStrip>
         {data.cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
@@ -296,12 +295,7 @@ function DigModal({ data }: { data: DigChoice["data"] }) {
             </motion.button>
           );
         })}
-      </div>
-      <ConfirmButton
-        onClick={handleConfirm}
-        disabled={!isReady}
-        label={`Confirm (${selected.size}/${data.keep_count})`}
-      />
+      </ScrollableCardStrip>
     </ChoiceOverlay>
   );
 }
@@ -340,8 +334,9 @@ function SurveilModal({ data }: { data: SurveilChoice["data"] }) {
     <ChoiceOverlay
       title="Surveil"
       subtitle={`Look at the top ${data.cards.length} card${data.cards.length > 1 ? "s" : ""} of your library`}
+      footer={<ConfirmButton onClick={handleConfirm} />}
     >
-      <div className={CHOICE_CARD_ROW_CLASS}>
+      <ScrollableCardStrip>
         {data.cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
@@ -384,8 +379,7 @@ function SurveilModal({ data }: { data: SurveilChoice["data"] }) {
             </motion.div>
           );
         })}
-      </div>
-      <ConfirmButton onClick={handleConfirm} />
+      </ScrollableCardStrip>
     </ChoiceOverlay>
   );
 }
@@ -413,8 +407,9 @@ function RevealModal({ data }: { data: RevealChoice["data"] }) {
     <ChoiceOverlay
       title="Opponent's Hand"
       subtitle="Choose a card"
+      footer={<ConfirmButton onClick={handleConfirm} disabled={selected === null} />}
     >
-      <div className={CHOICE_CARD_ROW_CLASS}>
+      <ScrollableCardStrip>
         {data.cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
@@ -450,11 +445,7 @@ function RevealModal({ data }: { data: RevealChoice["data"] }) {
             </motion.button>
           );
         })}
-      </div>
-      <ConfirmButton
-        onClick={handleConfirm}
-        disabled={selected === null}
-      />
+      </ScrollableCardStrip>
     </ChoiceOverlay>
   );
 }
@@ -497,8 +488,9 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
     <ChoiceOverlay
       title="Search Library"
       subtitle={`Choose ${data.count} card${data.count > 1 ? "s" : ""}`}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={selectedSet.size !== data.count} />}
     >
-      <div className={CHOICE_CARD_ROW_CLASS}>
+      <ScrollableCardStrip>
         {data.cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
@@ -534,11 +526,7 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
             </motion.button>
           );
         })}
-      </div>
-      <ConfirmButton
-        onClick={handleConfirm}
-        disabled={selectedSet.size !== data.count}
-      />
+      </ScrollableCardStrip>
     </ChoiceOverlay>
   );
 }
@@ -585,8 +573,9 @@ function ChooseFromZoneModal({
     <ChoiceOverlay
       title="Choose Cards"
       subtitle={`Choose ${data.count} card${data.count > 1 ? "s" : ""}`}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={selectedSet.size !== data.count} />}
     >
-      <div className={CHOICE_CARD_ROW_CLASS}>
+      <ScrollableCardStrip>
         {data.cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
@@ -622,11 +611,7 @@ function ChooseFromZoneModal({
             </motion.button>
           );
         })}
-      </div>
-      <ConfirmButton
-        onClick={handleConfirm}
-        disabled={selectedSet.size !== data.count}
-      />
+      </ScrollableCardStrip>
     </ChoiceOverlay>
   );
 }
@@ -669,8 +654,9 @@ function SacrificeModal({ data }: { data: SacrificeForCost["data"] }) {
     <ChoiceOverlay
       title="Sacrifice"
       subtitle={`Choose ${data.count} permanent${data.count > 1 ? "s" : ""} to sacrifice`}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Sacrifice (${selected.size}/${data.count})`} />}
     >
-      <div className={CHOICE_CARD_ROW_CLASS}>
+      <ScrollableCardStrip>
         {data.permanents.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
@@ -706,12 +692,7 @@ function SacrificeModal({ data }: { data: SacrificeForCost["data"] }) {
             </motion.button>
           );
         })}
-      </div>
-      <ConfirmButton
-        onClick={handleConfirm}
-        disabled={!isReady}
-        label={`Sacrifice (${selected.size}/${data.count})`}
-      />
+      </ScrollableCardStrip>
     </ChoiceOverlay>
   );
 }
@@ -740,8 +721,9 @@ function WardSacrificeModal({ data }: { data: WardSacrificeChoice["data"] }) {
     <ChoiceOverlay
       title="Ward \u2014 Sacrifice a permanent"
       subtitle="Choose a permanent to sacrifice"
+      footer={<ConfirmButton onClick={handleConfirm} disabled={selected == null} label="Sacrifice" />}
     >
-      <div className={CHOICE_CARD_ROW_CLASS}>
+      <ScrollableCardStrip>
         {data.permanents.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
@@ -777,12 +759,7 @@ function WardSacrificeModal({ data }: { data: WardSacrificeChoice["data"] }) {
             </motion.button>
           );
         })}
-      </div>
-      <ConfirmButton
-        onClick={handleConfirm}
-        disabled={selected == null}
-        label="Sacrifice"
-      />
+      </ScrollableCardStrip>
     </ChoiceOverlay>
   );
 }
@@ -825,8 +802,9 @@ function ExileFromGraveyardModal({ data }: { data: ExileFromGraveyardForCost["da
     <ChoiceOverlay
       title="Escape"
       subtitle={`Exile ${data.count} card${data.count > 1 ? "s" : ""} from your graveyard`}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Exile (${selected.size}/${data.count})`} />}
     >
-      <div className={CHOICE_CARD_ROW_CLASS}>
+      <ScrollableCardStrip>
         {data.cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
@@ -862,12 +840,7 @@ function ExileFromGraveyardModal({ data }: { data: ExileFromGraveyardForCost["da
             </motion.button>
           );
         })}
-      </div>
-      <ConfirmButton
-        onClick={handleConfirm}
-        disabled={!isReady}
-        label={`Exile (${selected.size}/${data.count})`}
-      />
+      </ScrollableCardStrip>
     </ChoiceOverlay>
   );
 }
@@ -910,8 +883,9 @@ function DiscardModal({ data, title = "Discard" }: { data: DiscardToHandSize["da
     <ChoiceOverlay
       title={title}
       subtitle={`Choose ${data.count} card${data.count > 1 ? "s" : ""} to discard`}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Discard (${selected.size}/${data.count})`} />}
     >
-      <div className={CHOICE_CARD_ROW_CLASS}>
+      <ScrollableCardStrip>
         {data.cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
@@ -947,12 +921,7 @@ function DiscardModal({ data, title = "Discard" }: { data: DiscardToHandSize["da
             </motion.button>
           );
         })}
-      </div>
-      <ConfirmButton
-        onClick={handleConfirm}
-        disabled={!isReady}
-        label={`Discard (${selected.size}/${data.count})`}
-      />
+      </ScrollableCardStrip>
     </ChoiceOverlay>
   );
 }
@@ -981,8 +950,9 @@ function HarmonizeTapModal({ data }: { data: HarmonizeTapChoice["data"] }) {
     <ChoiceOverlay
       title="Harmonize"
       subtitle="Tap a creature to reduce casting cost by its power, or skip"
+      footer={<ConfirmButton onClick={handleSkip} label="Skip (pay full cost)" />}
     >
-      <div className={CHOICE_CARD_ROW_CLASS}>
+      <ScrollableCardStrip>
         {data.eligible_creatures.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
@@ -1012,8 +982,7 @@ function HarmonizeTapModal({ data }: { data: HarmonizeTapChoice["data"] }) {
             </motion.button>
           );
         })}
-      </div>
-      <ConfirmButton onClick={handleSkip} label="Skip (pay full cost)" />
+      </ScrollableCardStrip>
     </ChoiceOverlay>
   );
 }
@@ -1032,7 +1001,7 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
       title="Legend Rule"
       subtitle={`Choose which "${data.legend_name}" to keep`}
     >
-      <div className={CHOICE_CARD_ROW_CLASS}>
+      <ScrollableCardStrip>
         {data.candidates.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
@@ -1058,7 +1027,7 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
             </motion.button>
           );
         })}
-      </div>
+      </ScrollableCardStrip>
     </ChoiceOverlay>
   );
 }
@@ -1085,8 +1054,9 @@ function ManifestDreadModal({ data }: { data: ManifestDreadChoice["data"] }) {
     <ChoiceOverlay
       title="Manifest Dread"
       subtitle="Choose a card to manifest face-down. The other goes to your graveyard."
+      footer={<ConfirmButton onClick={handleConfirm} disabled={selected === null} label="Confirm Manifest" />}
     >
-      <div className={CHOICE_CARD_ROW_CLASS}>
+      <ScrollableCardStrip>
         {data.cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
@@ -1122,12 +1092,7 @@ function ManifestDreadModal({ data }: { data: ManifestDreadChoice["data"] }) {
             </motion.button>
           );
         })}
-      </div>
-      <ConfirmButton
-        onClick={handleConfirm}
-        disabled={selected === null}
-        label="Confirm Manifest"
-      />
+      </ScrollableCardStrip>
     </ChoiceOverlay>
   );
 }

@@ -318,7 +318,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Horsemanship => "horsemanship".to_string(),
         Keyword::Wither => "wither".to_string(),
         Keyword::Infect => "infect".to_string(),
-        Keyword::Afflict => "afflict".to_string(),
+        Keyword::Afflict(n) => format!("afflict {n}"),
         Keyword::Prowess => "prowess".to_string(),
         Keyword::Undying => "undying".to_string(),
         Keyword::Persist => "persist".to_string(),

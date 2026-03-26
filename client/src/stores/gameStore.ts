@@ -11,13 +11,20 @@ import type {
   WaitingFor,
 } from "../adapter/types";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
-import { ACTIVE_GAME_KEY, GAME_CHECKPOINTS_PREFIX, GAME_KEY_PREFIX } from "../constants/storage";
+import { loadCheckpoints, saveGame } from "../services/gamePersistence";
 
-export interface ActiveGameMeta {
-  id: string;
-  mode: "ai" | "local" | "online";
-  difficulty: string;
-}
+// Re-export persistence API so existing imports keep working
+export type { ActiveGameMeta } from "../services/gamePersistence";
+export {
+  saveGame,
+  loadGame,
+  clearGame,
+  saveCheckpoints,
+  loadCheckpoints,
+  saveActiveGame,
+  loadActiveGame,
+  clearActiveGame,
+} from "../services/gamePersistence";
 
 interface GameStoreState {
   gameId: string | null;
@@ -68,77 +75,6 @@ const initialState: GameStoreState = {
   turnCheckpoints: [],
 };
 
-export function saveGame(gameId: string, state: GameState): void {
-  if (
-    state.match_phase === "Completed"
-    || (!state.match_phase && state.waiting_for.type === "GameOver")
-  ) {
-    clearGame(gameId);
-    return;
-  }
-  try {
-    localStorage.setItem(GAME_KEY_PREFIX + gameId, JSON.stringify(state));
-  } catch {
-    // localStorage full or unavailable — silently skip
-  }
-}
-
-export function clearGame(gameId: string): void {
-  localStorage.removeItem(GAME_KEY_PREFIX + gameId);
-  localStorage.removeItem(GAME_CHECKPOINTS_PREFIX + gameId);
-  // Clear active game if it matches
-  const active = loadActiveGame();
-  if (active?.id === gameId) {
-    localStorage.removeItem(ACTIVE_GAME_KEY);
-  }
-}
-
-export function loadGame(gameId: string): GameState | null {
-  try {
-    const raw = localStorage.getItem(GAME_KEY_PREFIX + gameId);
-    if (!raw) return null;
-    return JSON.parse(raw) as GameState;
-  } catch {
-    return null;
-  }
-}
-
-export function saveCheckpoints(gameId: string, checkpoints: GameState[]): void {
-  try {
-    localStorage.setItem(GAME_CHECKPOINTS_PREFIX + gameId, JSON.stringify(checkpoints));
-  } catch {
-    // localStorage full or unavailable — silently skip
-  }
-}
-
-export function loadCheckpoints(gameId: string): GameState[] {
-  try {
-    const raw = localStorage.getItem(GAME_CHECKPOINTS_PREFIX + gameId);
-    if (!raw) return [];
-    return JSON.parse(raw) as GameState[];
-  } catch {
-    return [];
-  }
-}
-
-export function saveActiveGame(meta: ActiveGameMeta): void {
-  localStorage.setItem(ACTIVE_GAME_KEY, JSON.stringify(meta));
-}
-
-export function loadActiveGame(): ActiveGameMeta | null {
-  try {
-    const raw = localStorage.getItem(ACTIVE_GAME_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw) as ActiveGameMeta;
-  } catch {
-    return null;
-  }
-}
-
-export function clearActiveGame(): void {
-  localStorage.removeItem(ACTIVE_GAME_KEY);
-}
-
 export const useGameStore = create<GameStore>()(
   subscribeWithSelector((set, get) => ({
     ...initialState,
@@ -173,7 +109,7 @@ export const useGameStore = create<GameStore>()(
       adapter.restoreState(savedState);
       const state = await adapter.getState();
       const legalActions = await adapter.getLegalActions();
-      const savedCheckpoints = loadCheckpoints(gameId);
+      const savedCheckpoints = await loadCheckpoints(gameId);
       set({
         gameId,
         adapter,

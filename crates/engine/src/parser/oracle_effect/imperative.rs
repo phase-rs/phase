@@ -251,8 +251,21 @@ pub(super) fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<Targe
         super::types::assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::Sacrifice { target });
     }
-    if lower.starts_with("discard ") {
-        let count = parse_count_expr(&text[8..])
+    if let Some(after_discard) = lower.strip_prefix("discard ") {
+        // Detect whole-hand discard patterns before falling through to count parsing.
+        // Uses starts_with (not contains) to avoid matching "discard a card from your hand".
+        if after_discard.starts_with("your hand")
+            || after_discard.starts_with("their hand")
+            || after_discard.starts_with("his or her hand")
+        {
+            return Some(TargetedImperativeAst::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize,
+                },
+            });
+        }
+        let original_after = &text[text.len() - after_discard.len()..];
+        let count = parse_count_expr(original_after)
             .map(|(q, _)| q)
             .unwrap_or(QuantityExpr::Fixed { value: 1 });
         return Some(TargetedImperativeAst::Discard { count });
@@ -528,10 +541,24 @@ pub(super) fn parse_hand_reveal_ast(text: &str, lower: &str) -> Option<HandRevea
         }
     }
 
+    // Check for "the top [N] card(s) of [their/your] library" BEFORE the catch-all
+    // "hand" check — text like "reveals the top card...then puts it into their hand"
+    // contains "hand" as a destination, not as the reveal source.
+    if lower.contains("the top ") && lower.contains("librar") {
+        let count = if let Some(pos) = lower.find("the top ") {
+            let after_top = &lower[pos + 8..];
+            parse_number(after_top).map(|(n, _)| n).unwrap_or(1)
+        } else {
+            1
+        };
+        return Some(HandRevealImperativeAst::RevealTop { count });
+    }
+
     if lower.contains("hand") {
         return Some(HandRevealImperativeAst::RevealHand);
     }
 
+    // Fallback: reveal from top of library without explicit "library" mention
     let count = if let Some(pos) = lower.find("the top ") {
         let after_top = &lower[pos + 8..];
         parse_number(after_top).map(|(n, _)| n).unwrap_or(1)
@@ -2345,5 +2372,79 @@ mod tests {
         let lower = text.to_lowercase();
         let result = parse_imperative_family_ast(text, &lower, &ParseContext::default());
         assert!(result.is_some(), "Should parse 'after this phase' variant");
+    }
+
+    #[test]
+    fn parse_discard_your_hand() {
+        let text = "discard your hand";
+        let lower = text.to_lowercase();
+        let result = parse_targeted_action_ast(text, &lower);
+        match result {
+            Some(TargetedImperativeAst::Discard { count }) => {
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::HandSize
+                        }
+                    ),
+                    "Expected HandSize ref, got {count:?}"
+                );
+            }
+            other => panic!("Expected Discard with HandSize, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_discard_their_hand() {
+        let text = "discard their hand";
+        let lower = text.to_lowercase();
+        let result = parse_targeted_action_ast(text, &lower);
+        match result {
+            Some(TargetedImperativeAst::Discard { count }) => {
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::HandSize
+                        }
+                    ),
+                    "Expected HandSize ref, got {count:?}"
+                );
+            }
+            other => panic!("Expected Discard with HandSize, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_discard_a_card_regression() {
+        let text = "discard a card";
+        let lower = text.to_lowercase();
+        let result = parse_targeted_action_ast(text, &lower);
+        match result {
+            Some(TargetedImperativeAst::Discard { count }) => {
+                assert!(
+                    matches!(count, QuantityExpr::Fixed { value: 1 }),
+                    "Expected Fixed(1), got {count:?}"
+                );
+            }
+            other => panic!("Expected Discard with Fixed(1), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_discard_two_cards_regression() {
+        let text = "discard two cards";
+        let lower = text.to_lowercase();
+        let result = parse_targeted_action_ast(text, &lower);
+        match result {
+            Some(TargetedImperativeAst::Discard { count }) => {
+                assert!(
+                    matches!(count, QuantityExpr::Fixed { value: 2 }),
+                    "Expected Fixed(2), got {count:?}"
+                );
+            }
+            other => panic!("Expected Discard with Fixed(2), got {other:?}"),
+        }
     }
 }
