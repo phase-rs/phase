@@ -32,26 +32,29 @@ body {
 
 #root {
   min-height: 100vh;
-  /* Game-app behavior: prevent webpage-like interactions */
+  overscroll-behavior: none;
+}
+
+/* Game-only: prevent selection, callout, and tap-highlight during matches */
+.game-no-select {
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
-  overscroll-behavior: none;
 }
 
 /* Prevent native image dragging (cards, backgrounds, etc.) */
-#root img {
+.game-no-select img {
   -webkit-user-drag: none;
   user-drag: none;
 }
 
-/* Allow text selection in inputs, textareas, and elements that opt in */
-#root input,
-#root textarea,
-#root [contenteditable],
-#root .select-text {
+/* Allow text selection in inputs/textareas even within the game */
+.game-no-select input,
+.game-no-select textarea,
+.game-no-select [contenteditable],
+.game-no-select .select-text {
   -webkit-user-select: text;
   user-select: text;
   -webkit-touch-callout: default;

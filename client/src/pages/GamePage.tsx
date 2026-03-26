@@ -571,7 +571,7 @@ function GamePageContent({
   return (
     <div
       ref={containerRef}
-      className={`relative h-[100dvh] w-full overflow-hidden bg-gray-950${showDebugBounds ? " debug-bounds" : ""}`}
+      className={`game-no-select relative h-[100dvh] w-full overflow-hidden bg-gray-950${showDebugBounds ? " debug-bounds" : ""}`}
       style={gamePageStyle}
       onContextMenu={(e) => e.preventDefault()}
     >
