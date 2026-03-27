@@ -105,6 +105,9 @@ jobs:
       - name: Remove large data files from dist (served from R2)
         run: rm -f client/dist/card-data.json client/dist/card-data.json.br client/dist/coverage-data.json client/dist/coverage-data.json.br client/dist/coverage-summary.json client/dist/coverage-summary.json.br
 
+      - name: SPA fallback for GitHub Pages
+        run: cp client/dist/index.html client/dist/404.html
+
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
