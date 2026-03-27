@@ -10,7 +10,9 @@ mod types;
 use std::str::FromStr;
 
 use super::oracle_quantity::{parse_cda_quantity, parse_for_each_clause};
-use super::oracle_target::{parse_event_context_ref, parse_mana_value_suffix, parse_target};
+use super::oracle_target::{
+    parse_event_context_ref, parse_mana_value_suffix, parse_target, parse_type_phrase,
+};
 use super::oracle_util::{
     contains_possessive, has_unconsumed_conditional, parse_mana_symbols, parse_number,
     starts_with_possessive, strip_after, TextPair,
@@ -18,7 +20,7 @@ use super::oracle_util::{
 use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChoiceType,
-    Comparator, DamageSource, DelayedTriggerCondition, Duration, Effect, FilterProp,
+    Comparator, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect, FilterProp,
     GainLifePlayer, MultiTargetSpec, NinjutsuVariant, PlayerFilter, PtValue, QuantityExpr,
     QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
     UnlessCost,
@@ -2087,6 +2089,18 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             continue;
         }
 
+        // CR 608.2e: "if [condition], [effect] instead" — the preceding ability's effect
+        // is replaced when the condition holds. Model as: new def has condition + instead effect,
+        // preceding def becomes else_ability (the fallback when condition is false).
+        if let Some(instead_def) = try_parse_generic_instead_clause(normalized_text, kind) {
+            if let Some(last_def) = defs.pop() {
+                let mut new_def = instead_def;
+                new_def.else_ability = Some(Box::new(last_def));
+                defs.push(new_def);
+                continue;
+            }
+        }
+
         let (condition, text) = strip_additional_cost_conditional(normalized_text);
         let (if_you_do, text) = if condition.is_none() {
             strip_if_you_do_conditional(&text)
@@ -3127,6 +3141,30 @@ fn strip_property_conditional(text: &str) -> (Option<AbilityCondition>, String) 
             }
         }
     }
+
+    // CR 400.7 + CR 608.2c: "if that creature was a [type]" / "if that creature is a [type]"
+    // Past-tense ("was a") checks LKI; present-tense ("is a") checks current state.
+    for (pattern, use_lki) in &[
+        (" if that creature was a ", true),
+        (" if that creature was an ", true),
+        (" if that creature is a ", false),
+        (" if that creature is an ", false),
+    ] {
+        if let Some((before, after)) = tp.rsplit_around(pattern) {
+            let type_text = after.lower.trim_end_matches('.').trim();
+            let (filter, leftover) = parse_type_phrase(type_text);
+            if !matches!(filter, TargetFilter::Any) && leftover.trim().is_empty() {
+                return (
+                    Some(AbilityCondition::TargetMatchesFilter {
+                        filter,
+                        use_lki: *use_lki,
+                    }),
+                    before.original.to_string(),
+                );
+            }
+        }
+    }
+
     (None, text.to_string())
 }
 
@@ -3439,6 +3477,63 @@ fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
         lhs,
         comparator,
         rhs,
+    })
+}
+
+/// CR 608.2e: Parse "if [condition], [effect] instead" — the generic pattern where a
+/// conditional clause replaces the preceding effect entirely (Scute Swarm, etc.).
+///
+/// Returns a new `AbilityDefinition` with the condition and "instead" effect set.
+/// The caller is responsible for setting the preceding def as `else_ability`.
+fn try_parse_generic_instead_clause(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
+    let lower = text.to_lowercase();
+    // Must end with "instead" (with optional trailing period)
+    let stripped = lower.trim_end_matches('.').trim();
+    if !stripped.ends_with("instead") {
+        return None;
+    }
+    // Must start with "if " to be a conditional-instead clause
+    let rest = lower.strip_prefix("if ")?;
+    // Find the comma separating the condition from the effect
+    let comma_pos = rest.find(", ")?;
+    let condition_text = &rest[..comma_pos];
+    let effect_text = &text["if ".len() + comma_pos + ", ".len()..];
+    // Strip trailing " instead" from the effect text
+    let effect_text = effect_text.trim_end_matches('.').trim();
+    let effect_text = effect_text.strip_suffix(" instead")?.trim();
+
+    // Try parsing condition as quantity comparison first, then control-count pattern
+    let condition = parse_condition_text(condition_text)
+        .or_else(|| parse_control_count_as_ability_condition(condition_text))?;
+
+    // Parse the replacement effect
+    let instead_def = parse_effect_chain(effect_text, kind);
+    let mut result = instead_def;
+    result.condition = Some(condition);
+    Some(result)
+}
+
+/// Parse "you control N or more [type]" as an AbilityCondition::QuantityCheck.
+/// Converts the control-count pattern into a quantity comparison for resolution-time evaluation.
+fn parse_control_count_as_ability_condition(text: &str) -> Option<AbilityCondition> {
+    let text = text.trim();
+    let rest = text.strip_prefix("you control ")?;
+    let (n, after_n) = parse_number(rest)?;
+    let or_more = after_n.strip_prefix("or more ")?;
+    let (mut filter, leftover) = parse_type_phrase(or_more);
+    if filter == TargetFilter::Any || !leftover.trim().is_empty() {
+        return None;
+    }
+    // Ensure controller=You is set on the filter for ObjectCount evaluation
+    if let TargetFilter::Typed(ref mut tf) = filter {
+        tf.controller = Some(ControllerRef::You);
+    }
+    Some(AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: n as i32 },
     })
 }
 

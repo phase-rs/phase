@@ -371,15 +371,10 @@ fn draw_applier(
 
 // --- 5. GainLife ---
 
-fn gain_life_matcher(event: &ProposedEvent, source: ObjectId, state: &GameState) -> bool {
-    if let ProposedEvent::LifeGain { player_id, .. } = event {
-        state
-            .objects
-            .get(&source)
-            .is_some_and(|obj| obj.controller == *player_id)
-    } else {
-        false
-    }
+fn gain_life_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    // CR 614.1a: Basic event type match. Player scope is checked by `valid_player`
+    // in `find_applicable_replacements`. Without `valid_player`, defaults to controller-only.
+    matches!(event, ProposedEvent::LifeGain { .. })
 }
 
 // CR 614.1a: Replacement effect modifies life gain amount.
@@ -1271,6 +1266,26 @@ pub fn find_applicable_replacements(
                             if !matches {
                                 continue;
                             }
+                        }
+                    }
+                    // CR 614.1a: valid_player scope — restricts which player's events
+                    // trigger this replacement. For GainLife events, determines whose life
+                    // gain is replaced. Default (None) = controller only.
+                    if let ProposedEvent::LifeGain { player_id, .. } = event {
+                        let player_ok = match &repl_def.valid_player {
+                            Some(crate::types::ability::ControllerRef::Opponent) => {
+                                *player_id != obj.controller
+                            }
+                            Some(crate::types::ability::ControllerRef::You) => {
+                                *player_id == obj.controller
+                            }
+                            None => {
+                                // Default: controller-only (backward compatible)
+                                *player_id == obj.controller
+                            }
+                        };
+                        if !player_ok {
+                            continue;
                         }
                     }
                     candidates.push(rid);

@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use crate::game::filter;
 use crate::types::ability::{
     AbilityCondition, AbilityKind, Effect, EffectError, FilterProp, PlayerFilter, QuantityExpr,
-    QuantityRef, ResolvedAbility, SharedQuality, TargetFilter, TargetRef, UnlessCost,
+    QuantityRef, ResolvedAbility, SharedQuality, TargetFilter, TargetRef, TypeFilter, UnlessCost,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -954,6 +954,55 @@ fn evaluate_condition(
                 _ => None,
             })
             .is_some_and(|obj| obj.has_keyword(keyword)),
+        // CR 400.7 + CR 608.2c: "if that creature was a [type]" — check target or its LKI.
+        AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+            let target_id = ability.targets.iter().find_map(|t| match t {
+                TargetRef::Object(id) => Some(*id),
+                _ => None,
+            });
+            if let Some(id) = target_id {
+                if *use_lki {
+                    // CR 400.7: Check last-known information for past-tense conditions.
+                    // Try LKI cache first, fall back to current state if object still exists.
+                    if let Some(lki) = state.lki_cache.get(&id) {
+                        // LKI snapshot has core types — check type_filters against LKI
+                        match filter {
+                            TargetFilter::Typed(tf) => {
+                                use crate::types::card_type::CoreType;
+                                tf.type_filters.iter().all(|req| {
+                                    let ct = match req {
+                                        TypeFilter::Creature => Some(CoreType::Creature),
+                                        TypeFilter::Land => Some(CoreType::Land),
+                                        TypeFilter::Artifact => Some(CoreType::Artifact),
+                                        TypeFilter::Enchantment => Some(CoreType::Enchantment),
+                                        TypeFilter::Instant => Some(CoreType::Instant),
+                                        TypeFilter::Sorcery => Some(CoreType::Sorcery),
+                                        TypeFilter::Planeswalker => Some(CoreType::Planeswalker),
+                                        TypeFilter::Battle => Some(CoreType::Battle),
+                                        _ => None,
+                                    };
+                                    ct.map(|ct| lki.card_types.contains(&ct)).unwrap_or(true)
+                                })
+                            }
+                            _ => true,
+                        }
+                    } else {
+                        // Object still exists — check current state
+                        crate::game::filter::matches_target_filter(
+                            state,
+                            id,
+                            filter,
+                            ability.source_id,
+                        )
+                    }
+                } else {
+                    // Check current state for present-tense conditions
+                    crate::game::filter::matches_target_filter(state, id, filter, ability.source_id)
+                }
+            } else {
+                false
+            }
+        }
     }
 }
 

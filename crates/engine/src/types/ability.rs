@@ -3122,6 +3122,14 @@ pub enum AbilityCondition {
     /// Checked at resolution time against the first resolved object target's keywords.
     /// Uses "Instead" override semantics: swaps the parent effect when condition is met.
     TargetHasKeywordInstead { keyword: Keyword },
+    /// CR 400.7 + CR 608.2c: "If that creature was a [type]" — gates the sub_ability on
+    /// whether the target (or its last-known information if `use_lki` is true) matches the filter.
+    /// Present-tense ("is a") checks current state; past-tense ("was a") checks LKI per CR 400.7.
+    TargetMatchesFilter {
+        filter: TargetFilter,
+        #[serde(default)]
+        use_lki: bool,
+    },
 }
 
 /// Casting-time facts that flow with a spell from casting through resolution.
@@ -3687,6 +3695,11 @@ pub struct ReplacementDefinition {
     /// "under your control" → Some(You). None = any owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_owner_scope: Option<ControllerRef>,
+    /// CR 614.1a: Restricts which player this replacement applies to.
+    /// "an opponent would gain life" → Some(Opponent). None = applies to controller only.
+    /// Parallel to `token_owner_scope` pattern.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_player: Option<ControllerRef>,
     /// Marks this replacement as consumed (one-shot). Skipped by find_applicable_replacements.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_consumed: bool,
@@ -3716,6 +3729,7 @@ impl ReplacementDefinition {
             shield_kind: ShieldKind::None,
             quantity_modification: None,
             token_owner_scope: None,
+            valid_player: None,
             is_consumed: false,
             redirect_target: None,
         }

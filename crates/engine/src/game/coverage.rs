@@ -2840,6 +2840,7 @@ fn condition_variant_name(cond: &AbilityCondition) -> &'static str {
         AbilityCondition::IfAPlayerDoes => "IfAPlayerDoes",
         AbilityCondition::QuantityCheck { .. } => "QuantityCheck",
         AbilityCondition::TargetHasKeywordInstead { .. } => "TargetHasKeywordInstead",
+        AbilityCondition::TargetMatchesFilter { .. } => "TargetMatchesFilter",
     }
 }
 
