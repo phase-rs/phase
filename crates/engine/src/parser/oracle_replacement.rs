@@ -6,8 +6,9 @@ use super::oracle_util::{
 };
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChoiceType, CombatDamageScope, ControllerRef,
-    DamageModification, DamageTargetFilter, Effect, FilterProp, QuantityExpr, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, TargetFilter, TypeFilter, TypedFilter,
+    DamageModification, DamageTargetFilter, Effect, FilterProp, PreventionAmount, QuantityExpr,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -118,11 +119,25 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
         return Some(def);
     }
 
-    // --- "Prevent all combat damage" / "damage ... can't be prevented" ---
+    // --- "Prevent all [combat] damage [that would be dealt [to X] [this turn]]" ---
+    // CR 615.1: Prevention shields for "prevent all damage" effects.
     if lower.contains("prevent all") && lower.contains("damage") {
-        return Some(
-            ReplacementDefinition::new(ReplacementEvent::DamageDone).description(text.to_string()),
-        );
+        let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .prevention_shield(PreventionAmount::All)
+            .description(text.to_string());
+        // Combat scope: "prevent all combat damage" vs "prevent all noncombat damage"
+        if lower.contains("combat damage") && !lower.contains("noncombat") {
+            def = def.combat_scope(CombatDamageScope::CombatOnly);
+        } else if lower.contains("noncombat damage") {
+            def = def.combat_scope(CombatDamageScope::NoncombatOnly);
+        }
+        // Target filter: "to you", "to target creature", etc.
+        if lower.contains("to you") && !lower.contains("to your") {
+            def.damage_target_filter = Some(DamageTargetFilter::PlayerOnly);
+        } else if lower.contains("to target creature") || lower.contains("to a creature") {
+            def.damage_target_filter = Some(DamageTargetFilter::CreatureOnly);
+        }
+        return Some(def);
     }
     // "damage can't be prevented" is handled by effect parsing (Effect::AddRestriction),
     // not replacement parsing. See oracle_effect.rs damage prevention disabled handler.

@@ -1333,6 +1333,16 @@ fn parse_static_condition(text: &str) -> Option<StaticCondition> {
         });
     }
 
+    // CR 611.2b: "~ is untapped" → Not(SourceIsTapped), "~ is tapped" → SourceIsTapped
+    if tp.lower == "~ is untapped" || tp.lower == "this creature is untapped" {
+        return Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceIsTapped),
+        });
+    }
+    if tp.lower == "~ is tapped" || tp.lower == "this creature is tapped" {
+        return Some(StaticCondition::SourceIsTapped);
+    }
+
     // CR 400.7: "this aura/permanent entered this turn" → SourceEnteredThisTurn
     if let Some(rest) = tp.lower.strip_prefix("this ") {
         if rest.ends_with(" entered this turn") || rest == "entered this turn" {

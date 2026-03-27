@@ -23,6 +23,23 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
     match trimmed {
         "cards in your hand" => Some(QuantityRef::HandSize),
         "your life total" => Some(QuantityRef::LifeTotal),
+        // Duration stripping may remove "this turn" suffix, so handle both forms
+        "the life you've lost this turn"
+        | "the life you lost this turn"
+        | "life you've lost this turn"
+        | "life you lost this turn"
+        | "the life you've lost"
+        | "the life you lost"
+        | "life you've lost"
+        | "life you lost" => Some(QuantityRef::LifeLostThisTurn),
+        "the life you've gained this turn"
+        | "the life you gained this turn"
+        | "life you've gained this turn"
+        | "life you gained this turn"
+        | "the life you've gained"
+        | "the life you gained"
+        | "life you've gained"
+        | "life you gained" => Some(QuantityRef::LifeGainedThisTurn),
         "your starting life total" => Some(QuantityRef::StartingLifeTotal),
         "cards in your graveyard" => Some(QuantityRef::GraveyardSize),
         // CR 208.3: Self-referential P/T lookups.
@@ -348,6 +365,13 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
                 return Some(QuantityExpr::Ref { qty });
             }
         }
+    }
+
+    // Fallback: strip "the " article and try parse_quantity_ref for named quantities
+    // like "the life you've lost this turn" → LifeLostThisTurn
+    let stripped = lower.strip_prefix("the ").unwrap_or(lower);
+    if let Some(qty) = parse_quantity_ref(stripped) {
+        return Some(QuantityExpr::Ref { qty });
     }
 
     None
@@ -789,6 +813,48 @@ mod tests {
         assert!(
             matches!(qty, QuantityRef::ObjectCount { .. }),
             "Expected ObjectCount, got {qty:?}"
+        );
+    }
+
+    #[test]
+    fn parse_event_context_life_lost_this_turn() {
+        // With "this turn" suffix (before duration stripping)
+        assert_eq!(
+            parse_event_context_quantity("the life you've lost this turn"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::LifeLostThisTurn
+            })
+        );
+        // Without "this turn" suffix (after duration stripping)
+        assert_eq!(
+            parse_event_context_quantity("the life you've lost"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::LifeLostThisTurn
+            })
+        );
+    }
+
+    #[test]
+    fn parse_event_context_life_gained_this_turn() {
+        assert_eq!(
+            parse_event_context_quantity("the life you've gained this turn"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::LifeGainedThisTurn
+            })
+        );
+        assert_eq!(
+            parse_event_context_quantity("the life you've gained"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::LifeGainedThisTurn
+            })
+        );
+    }
+
+    #[test]
+    fn parse_quantity_ref_life_lost() {
+        assert_eq!(
+            parse_quantity_ref("life you've lost"),
+            Some(QuantityRef::LifeLostThisTurn)
         );
     }
 }

@@ -190,6 +190,9 @@ pub(crate) fn evaluate_condition(
             .objects
             .get(&source_id)
             .is_some_and(|obj| obj.zone == *zone),
+        StaticCondition::Not { condition: inner } => {
+            !evaluate_condition(state, inner, controller, source_id)
+        }
         StaticCondition::None => true,
     }
 }

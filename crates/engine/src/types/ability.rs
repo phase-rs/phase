@@ -1299,6 +1299,11 @@ pub enum StaticCondition {
     /// CR 611.2b: True when the source object is tapped.
     /// Used for "for as long as ~ remains tapped" duration conditions.
     SourceIsTapped,
+    /// Logical negation of an inner condition.
+    /// Used for "as long as ~ is untapped" → Not(SourceIsTapped).
+    Not {
+        condition: Box<StaticCondition>,
+    },
     /// CR 113.6b: True when the source card is in the specified zone.
     /// Used for "as long as ~ is in your graveyard" / "this card is in your graveyard" conditions.
     SourceInZone {

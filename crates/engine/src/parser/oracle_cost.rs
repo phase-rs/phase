@@ -200,25 +200,27 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
 
     // "Blight N"
     if let Some(rest) = lower.strip_prefix("blight ") {
-        let count = rest
-            .split_whitespace()
-            .next()
-            .and_then(|w| w.parse::<u32>().ok())
+        let count = super::oracle_util::parse_number(rest)
+            .map(|(n, _)| n)
             .unwrap_or(1);
         return AbilityCost::Blight { count };
     }
 
     // "Remove N {type} counter(s) from ~"
-    if lower.starts_with("remove ") && lower.contains("counter") {
-        let words: Vec<&str> = text.split_whitespace().collect();
-        if words.len() >= 4 {
-            let count = words[1].parse::<u32>().unwrap_or(1);
-            let counter_type = words[2].to_string();
-            return AbilityCost::RemoveCounter {
-                count,
-                counter_type,
-                target: None,
-            };
+    if let Some(rest) = lower.strip_prefix("remove ") {
+        if rest.contains("counter") {
+            if let Some((count, remainder)) = super::oracle_util::parse_number(rest) {
+                let counter_type = remainder
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                return AbilityCost::RemoveCounter {
+                    count,
+                    counter_type,
+                    target: None,
+                };
+            }
         }
     }
 
