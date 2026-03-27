@@ -12,8 +12,8 @@ import { CommanderDamage } from "./CommanderDamage.tsx";
 import { CommandZone } from "../zone/CommandZone.tsx";
 
 /** Base scales — used when few cards; shrinks as more are added */
-const LAND_BASE_SCALE = 0.62;
-const OTHER_BASE_SCALE = 0.8;
+const LAND_BASE_SCALE = 0.78;
+const OTHER_BASE_SCALE = 1.0;
 /** Minimum scale floor */
 const MIN_ZONE_SCALE = 0.35;
 
@@ -166,13 +166,13 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
             <div className="shrink-0">
               {middleRow}
             </div>
-            <div className="flex min-h-0 flex-[2] items-end px-2" data-debug-label="Opp Creatures">
+            <div className="flex min-h-0 flex-1 items-end px-2" data-debug-label="Opp Creatures">
               <BattlefieldRow groups={creatures} rowType="creatures" className="w-full" />
             </div>
           </>
         ) : (
           <>
-            <div className="min-h-0 flex-[2] px-2" data-debug-label="Creatures">
+            <div className="min-h-0 flex-1 px-2" data-debug-label="Creatures">
               <BattlefieldRow groups={creatures} rowType="creatures" />
             </div>
             <div className="shrink-0">

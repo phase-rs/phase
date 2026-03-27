@@ -418,7 +418,7 @@ body {
 .debug-bounds [data-debug-label="Middle Row"]         { outline-color: #a855f7; }
 .debug-bounds [data-debug-label="Middle Row"]::after  { background: #a855f7; }
 .debug-bounds [data-debug-label="Lands"]              { outline-color: #14b8a6; }
-.debug-bounds [data-debug-label="Lands"]::after       { background: #14b8a6; }
+.debug-bounds [data-debug-label="Lands"]::after       { background: #14b8a6; left: auto; right: 0; }
 .debug-bounds [data-debug-label="Support"]            { outline-color: #ec4899; }
 .debug-bounds [data-debug-label="Support"]::after     { background: #ec4899; }
 .debug-bounds [data-debug-label="Player HUD"]         { outline-color: #3b82f6; }
