@@ -156,7 +156,7 @@ export function PlayerHand() {
   return (
     <div
       className="relative flex min-h-[calc(var(--card-h)*1.4)] shrink-0 items-end justify-center overflow-visible px-4 py-1"
-      style={{ perspective: "800px" }}
+      style={{ perspective: "800px", zIndex: draggingCardId != null ? 30 : undefined }}
       onClick={handleContainerClick}
       onMouseLeave={() => {
         setExpanded(false);
