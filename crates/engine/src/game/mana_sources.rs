@@ -42,7 +42,8 @@ fn cost_requires_sacrifice(cost: &Option<AbilityCost>) -> bool {
             matches!(
                 c,
                 AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef
+                    target: TargetFilter::SelfRef,
+                    ..
                 }
             )
         }),
@@ -535,6 +536,7 @@ mod tests {
                 AbilityCost::Tap,
                 AbilityCost::Sacrifice {
                     target: TargetFilter::SelfRef,
+                    count: 1,
                 },
             ],
         });

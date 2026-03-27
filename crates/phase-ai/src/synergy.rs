@@ -293,6 +293,7 @@ mod tests {
         );
         ability.cost = Some(AbilityCost::Sacrifice {
             target: TargetFilter::Any,
+            count: 1,
         });
         DeckEntry {
             card: CardFace {

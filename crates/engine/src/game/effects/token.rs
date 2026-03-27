@@ -624,6 +624,7 @@ fn treasure_ability() -> AbilityDefinition {
             AbilityCost::Tap,
             AbilityCost::Sacrifice {
                 target: TargetFilter::SelfRef,
+                count: 1,
             },
         ],
     })
@@ -649,6 +650,7 @@ fn food_ability() -> AbilityDefinition {
             AbilityCost::Tap,
             AbilityCost::Sacrifice {
                 target: TargetFilter::SelfRef,
+                count: 1,
             },
         ],
     })
@@ -672,6 +674,7 @@ fn clue_ability() -> AbilityDefinition {
             },
             AbilityCost::Sacrifice {
                 target: TargetFilter::SelfRef,
+                count: 1,
             },
         ],
     })
@@ -702,6 +705,7 @@ fn blood_ability() -> AbilityDefinition {
             },
             AbilityCost::Sacrifice {
                 target: TargetFilter::SelfRef,
+                count: 1,
             },
         ],
     })

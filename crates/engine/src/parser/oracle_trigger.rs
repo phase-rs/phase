@@ -2003,6 +2003,31 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             .split_once(", ")
             .map(|(before, _)| before)
             .unwrap_or(after_article);
+        // Handle "with mana value equal to the chosen number" (Talion, the Kindly Lord)
+        // CR 202.3: Mana value comparison against a dynamic reference quantity.
+        if let Some(rest) = spell_clause
+            .strip_suffix("with mana value equal to the chosen number")
+            .or_else(|| spell_clause.strip_suffix("with mana value equal to that number"))
+        {
+            let rest = rest.trim();
+            // Parse the base type if present (e.g., "creature spell with mana value...")
+            let mut base_tf = if rest.is_empty() || rest == "spell" {
+                TypedFilter::default()
+            } else {
+                let (filter, _) = parse_type_phrase(rest);
+                match filter {
+                    TargetFilter::Typed(tf) => tf,
+                    _ => TypedFilter::default(),
+                }
+            };
+            base_tf = base_tf.properties(vec![FilterProp::CmcEQ {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ChosenNumber,
+                },
+            }]);
+            def.valid_card = Some(TargetFilter::Typed(base_tf));
+            return Some((TriggerMode::SpellCast, def));
+        }
         // Handle "multicolored" as a spell property (not a type phrase)
         if spell_clause.contains("multicolored") {
             def.valid_card = Some(TargetFilter::Typed(

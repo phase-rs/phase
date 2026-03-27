@@ -89,6 +89,7 @@ fn pay_mana_ability_cost(
                     }
                     AbilityCost::Sacrifice {
                         target: TargetFilter::SelfRef,
+                        ..
                     } => {
                         // CR 605.3b: Sacrifice as part of mana ability cost resolves immediately.
                         // NeedsReplacementChoice is extremely rare during cost payment;
@@ -336,6 +337,7 @@ mod tests {
                 AbilityCost::Tap,
                 AbilityCost::Sacrifice {
                     target: TargetFilter::SelfRef,
+                    count: 1,
                 },
             ],
         });

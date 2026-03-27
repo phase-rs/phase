@@ -389,6 +389,14 @@ impl GameObject {
         })
     }
 
+    /// Look up a stored chosen number (e.g., Talion's "choose a number").
+    pub fn chosen_number(&self) -> Option<u8> {
+        self.chosen_attributes.iter().find_map(|a| match a {
+            ChosenAttribute::Number(n) => Some(*n),
+            _ => None,
+        })
+    }
+
     /// CR 714.1: Returns the final chapter number for a Saga, or None if not a Saga.
     /// Derived at runtime from the maximum threshold in the trigger definitions' counter filters.
     pub fn final_chapter_number(&self) -> Option<u32> {

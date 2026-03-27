@@ -1405,7 +1405,7 @@ pub fn pay_ability_cost(
             }
         }
         // CR 118.3: Sacrifice as a cost — sacrifice the source (SelfRef) or a chosen permanent.
-        AbilityCost::Sacrifice { target } => {
+        AbilityCost::Sacrifice { target, .. } => {
             if matches!(target, TargetFilter::SelfRef) {
                 match super::sacrifice::sacrifice_permanent(state, source_id, player, events)? {
                     super::sacrifice::SacrificeOutcome::Complete => {}
@@ -1497,7 +1497,7 @@ fn find_waterbend_cost(cost: &AbilityCost) -> Option<&ManaCost> {
 /// Walk a cost tree and return the first non-SelfRef sacrifice filter found, if any.
 fn find_non_self_sacrifice(cost: &AbilityCost) -> Option<&TargetFilter> {
     match cost {
-        AbilityCost::Sacrifice { target } if !matches!(target, TargetFilter::SelfRef) => {
+        AbilityCost::Sacrifice { target, .. } if !matches!(target, TargetFilter::SelfRef) => {
             Some(target)
         }
         AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_sacrifice),
@@ -3570,6 +3570,7 @@ mod tests {
 
         let cost = AbilityCost::Sacrifice {
             target: TargetFilter::Typed(TypedFilter::creature()),
+            count: 1,
         };
         assert!(can_pay_ability_cost_now(&state, PlayerId(0), source, &cost));
     }
@@ -3589,6 +3590,7 @@ mod tests {
         // No other creatures on the battlefield
         let cost = AbilityCost::Sacrifice {
             target: TargetFilter::Typed(TypedFilter::creature()),
+            count: 1,
         };
         assert!(!can_pay_ability_cost_now(
             &state,

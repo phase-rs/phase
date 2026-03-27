@@ -235,6 +235,8 @@ pub enum ChosenAttribute {
     CardType(CoreType),
     OddOrEven(Parity),
     CardName(String),
+    /// Stores a chosen number (e.g., "choose a number" for Talion).
+    Number(u8),
     /// Stores the chosen opponent/player ID (CR 800.4a).
     Player(PlayerId),
     /// Stores two chosen colors as a pair.
@@ -251,6 +253,7 @@ impl ChosenAttribute {
             Self::CardType(_) => ChoiceType::CardType,
             Self::OddOrEven(_) => ChoiceType::OddOrEven,
             Self::CardName(_) => ChoiceType::CardName,
+            Self::Number(_) => ChoiceType::NumberRange { min: 0, max: 20 },
             // Player covers both Player and Opponent choice types
             Self::Player(_) => ChoiceType::Player,
             Self::TwoColors(_) => ChoiceType::TwoColors,
@@ -269,7 +272,8 @@ impl ChosenAttribute {
             ChoiceValue::CardName(card_name) => Some(Self::CardName(card_name)),
             ChoiceValue::Player(id) => Some(Self::Player(id)),
             ChoiceValue::TwoColors(colors) => Some(Self::TwoColors(colors)),
-            ChoiceValue::Number(_) | ChoiceValue::Label(_) | ChoiceValue::LandType(_) => None,
+            ChoiceValue::Number(n) => Some(Self::Number(n)),
+            ChoiceValue::Label(_) | ChoiceValue::LandType(_) => None,
         }
     }
 }
@@ -1154,6 +1158,9 @@ pub enum QuantityRef {
     /// CR 400.7: Count of permanents the controller owned that left the battlefield this turn.
     /// Used for Revolt ability word ("if a permanent you controlled left the battlefield this turn").
     PermanentsLeftBattlefieldThisTurn,
+    /// A number chosen as the source entered the battlefield (e.g., Talion, the Kindly Lord).
+    /// Resolved from the source object's `ChosenAttribute::Number`.
+    ChosenNumber,
 }
 
 /// CR 107.2: Rounding direction for "half X" expressions in Magic.
@@ -1386,6 +1393,10 @@ pub enum AbilityCost {
     },
     Sacrifice {
         target: TargetFilter,
+        /// Number of permanents to sacrifice (default 1).
+        /// Used for "sacrifice two creatures" or "sacrifice three lands" costs.
+        #[serde(default = "default_one")]
+        count: u32,
     },
     PayLife {
         amount: u32,
@@ -4331,6 +4342,7 @@ mod tests {
             },
             AbilityCost::Sacrifice {
                 target: TypedFilter::new(TypeFilter::Artifact).into(),
+                count: 1,
             },
         ];
         let json = serde_json::to_string(&costs).unwrap();

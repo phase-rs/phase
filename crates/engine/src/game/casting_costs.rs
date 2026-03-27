@@ -576,7 +576,7 @@ fn pay_additional_cost(
                 events,
             );
         }
-        AbilityCost::Sacrifice { ref target } => {
+        AbilityCost::Sacrifice { ref target, .. } => {
             if matches!(target, crate::types::ability::TargetFilter::SelfRef) {
                 // CR 118.3: Self-sacrifice is atomic — no player choice needed
                 super::sacrifice::sacrifice_permanent(state, pending.object_id, player, events)

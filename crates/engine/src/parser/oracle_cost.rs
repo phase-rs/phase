@@ -95,7 +95,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         }
     }
 
-    // "Sacrifice ~" / "Sacrifice a/an {filter}"
+    // "Sacrifice ~" / "Sacrifice a/an/N {filter}"
     if lower.starts_with("sacrifice ") {
         let rest = &text[10..].trim();
         let rest_lower = rest.to_lowercase();
@@ -105,18 +105,42 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         {
             return AbilityCost::Sacrifice {
                 target: TargetFilter::SelfRef,
+                count: 1,
             };
         }
-        // "Sacrifice a {filter}"
-        let rest_no_article = if rest_lower.starts_with("a ") {
-            &rest[2..]
-        } else if rest_lower.starts_with("an ") {
-            &rest[3..]
-        } else {
-            rest
+        // Try to extract a numeric count: "sacrifice two creatures", "sacrifice three lands"
+        let (use_count, filter_text) =
+            if let Some((count, rest_after_count)) = parse_number(&rest_lower) {
+                if count > 1 {
+                    // Parsed a count > 1 — use it and strip the count from the filter text
+                    (count, rest_after_count.trim().to_string())
+                } else {
+                    // Count was 1 — treat as single sacrifice with article stripping
+                    let stripped = if rest_lower.starts_with("a ") {
+                        &rest[2..]
+                    } else if rest_lower.starts_with("an ") {
+                        &rest[3..]
+                    } else {
+                        rest
+                    };
+                    (1, stripped.to_string())
+                }
+            } else {
+                // No number found — strip article
+                let stripped = if rest_lower.starts_with("a ") {
+                    &rest[2..]
+                } else if rest_lower.starts_with("an ") {
+                    &rest[3..]
+                } else {
+                    rest
+                };
+                (1, stripped.to_string())
+            };
+        let (filter, _) = parse_target(&format!("target {}", filter_text));
+        return AbilityCost::Sacrifice {
+            target: filter,
+            count: use_count,
         };
-        let (filter, _) = parse_target(&format!("target {}", rest_no_article));
-        return AbilityCost::Sacrifice { target: filter };
     }
 
     // "Pay N life" / "N life"
@@ -629,7 +653,8 @@ mod tests {
         assert_eq!(
             parse_oracle_cost("Sacrifice ~"),
             AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef
+                target: TargetFilter::SelfRef,
+                count: 1,
             }
         );
     }
@@ -637,7 +662,7 @@ mod tests {
     #[test]
     fn cost_sacrifice_creature() {
         match parse_oracle_cost("Sacrifice a creature") {
-            AbilityCost::Sacrifice { target } => {
+            AbilityCost::Sacrifice { target, .. } => {
                 assert!(matches!(
                     target,
                     TargetFilter::Typed(ref tf) if matches!(tf.get_primary_type(), Some(TypeFilter::Creature))

@@ -390,6 +390,17 @@ fn resolve_ref(
             .count() as i32,
         // CR 500: Cumulative turns taken by this player.
         QuantityRef::TurnsTaken => player.map_or(0, |p| p.turns_taken as i32),
+        // Chosen number stored on the source object via ChosenAttribute::Number.
+        QuantityRef::ChosenNumber => state
+            .objects
+            .get(&source_id)
+            .and_then(|obj| {
+                obj.chosen_attributes.iter().find_map(|a| match a {
+                    crate::types::ability::ChosenAttribute::Number(n) => Some(*n as i32),
+                    _ => None,
+                })
+            })
+            .unwrap_or(0),
     }
 }
 
