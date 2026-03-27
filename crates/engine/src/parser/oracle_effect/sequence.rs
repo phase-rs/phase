@@ -117,8 +117,13 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
 
     // CR 701.18a: "search [library] for X, put/reveal Y" is a single compound action.
     // The search verb may follow a sequence connector like "Then" from a prior sentence.
-    let search_start =
-        current_lower.starts_with("search ") || current_lower.starts_with("then search ");
+    // CR 701.18a: Enumerated "search" prefixes — do NOT use contains(" search ").
+    let search_start = current_lower.starts_with("search ")
+        || current_lower.starts_with("then search ")
+        || current_lower.starts_with("you may search ")
+        || current_lower.starts_with("you search ")
+        || current_lower.starts_with("then you may search ")
+        || current_lower.starts_with("then you search ");
     if search_start && (trimmed_lower.starts_with("reveal ") || trimmed_lower.starts_with("put ")) {
         return None;
     }
@@ -272,6 +277,9 @@ pub(super) fn starts_bare_and_clause(text: &str) -> bool {
         "you may ",
         "its controller ",
         "their controller ",
+        // Sword trigger patterns: "and you untap all creatures", "and that player mills three"
+        "you untap ",
+        "that player ",
     ];
     if prefixes.iter().any(|prefix| lower.starts_with(prefix)) {
         return true;

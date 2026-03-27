@@ -88,6 +88,13 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     // Preserve the original oracle text for coverage/UI annotation
     def.description = Some(text.to_string());
 
+    // CR 603.6c: Override trigger_zones when the trigger fires from a non-battlefield zone.
+    // "When ~ is put into a graveyard from the battlefield" — the trigger fires while the
+    // card is already in the graveyard, so it needs trigger_zones: [Graveyard].
+    if lower.contains("is put into a graveyard") || lower.contains("is put into your graveyard") {
+        def.trigger_zones = vec![Zone::Graveyard];
+    }
+
     def
 }
 

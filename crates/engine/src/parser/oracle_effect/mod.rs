@@ -10,7 +10,9 @@ mod types;
 use std::str::FromStr;
 
 use super::oracle_quantity::{parse_cda_quantity, parse_for_each_clause};
-use super::oracle_target::{parse_event_context_ref, parse_mana_value_suffix, parse_target};
+use super::oracle_target::{
+    parse_event_context_ref, parse_mana_value_suffix, parse_target, parse_type_phrase,
+};
 use super::oracle_util::{
     contains_possessive, has_unconsumed_conditional, parse_mana_symbols, parse_number,
     starts_with_possessive, strip_after, TextPair,
@@ -2711,7 +2713,30 @@ fn parse_search_filter(text: &str) -> TargetFilter {
                         .properties(properties),
                 );
             }
-            // Fallback: treat as Any
+            // Fallback: delegate to parse_type_phrase for multi-word type phrases
+            // like "red or white instant", "forest or plains", "artifact or enchantment".
+            let (filter, _) = parse_type_phrase(other);
+            if !matches!(filter, TargetFilter::Any) {
+                let mut properties_fb = vec![];
+                if is_basic {
+                    properties_fb.push(FilterProp::HasSupertype {
+                        value: crate::types::card_type::Supertype::Basic,
+                    });
+                }
+                parse_search_filter_suffixes(suffix_text, &mut properties_fb);
+                // Merge properties into the filter if applicable
+                return if properties_fb.is_empty() {
+                    filter
+                } else {
+                    match filter {
+                        TargetFilter::Typed(mut tf) => {
+                            tf.properties.extend(properties_fb);
+                            TargetFilter::Typed(tf)
+                        }
+                        _ => filter,
+                    }
+                };
+            }
             return TargetFilter::Any;
         }
     };

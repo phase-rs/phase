@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{CardPlayMode, QuantityRef, TargetFilter};
+use super::keywords::Keyword;
 use super::mana::ManaCost;
 
 /// CR 101.2: Who is prohibited from casting spells.
@@ -196,6 +197,12 @@ pub enum StaticMode {
     NoMaximumHandSize,
     MayPlayAdditionalLand,
 
+    /// CR 702: Creatures can't have or gain a specific keyword (Archetype cycle).
+    /// Prevents both existing instances and future grants of the keyword.
+    CantHaveKeyword {
+        keyword: Keyword,
+    },
+
     /// Fallback for unrecognized static mode strings.
     Other(String),
 }
@@ -309,6 +316,9 @@ impl fmt::Display for StaticMode {
             StaticMode::BlockRestriction => write!(f, "BlockRestriction"),
             StaticMode::NoMaximumHandSize => write!(f, "NoMaximumHandSize"),
             StaticMode::MayPlayAdditionalLand => write!(f, "MayPlayAdditionalLand"),
+            StaticMode::CantHaveKeyword { keyword } => {
+                write!(f, "CantHaveKeyword({keyword:?})")
+            }
             // Fallback
             StaticMode::Other(s) => write!(f, "{s}"),
         }

@@ -253,6 +253,19 @@ pub(crate) fn parse_cda_quantity(text: &str) -> Option<QuantityExpr> {
         });
     }
 
+    // "the number of cards in your opponents' graveyards" / "cards in opponents' graveyards"
+    if text.contains("cards in your opponents' graveyards")
+        || text.contains("cards in opponents' graveyards")
+    {
+        return Some(QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Graveyard,
+                card_types: vec![],
+                scope: CountScope::Opponents,
+            },
+        });
+    }
+
     // "the number of {type} cards in your graveyard"
     if let Some(rest) = text.strip_prefix("the number of ") {
         if let Some(type_text) = rest.strip_suffix(" cards in your graveyard") {
@@ -287,8 +300,12 @@ pub(crate) fn parse_cda_quantity(text: &str) -> Option<QuantityExpr> {
         if let Some(spell_part) = rest
             .strip_suffix(" they've cast this turn")
             .or_else(|| rest.strip_suffix(" that player has cast this turn"))
+            .or_else(|| rest.strip_suffix(" you've cast this turn"))
+            .or_else(|| rest.strip_suffix(" you cast this turn"))
             .or_else(|| rest.strip_suffix(" they've cast"))
             .or_else(|| rest.strip_suffix(" that player has cast"))
+            .or_else(|| rest.strip_suffix(" you've cast"))
+            .or_else(|| rest.strip_suffix(" you cast"))
         {
             let spell_part = spell_part.trim();
             let filter = if spell_part == "spells" || spell_part == "spell" {
@@ -480,6 +497,37 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
         if let Some(qty) = parse_quantity_ref(&pluralized) {
             return Some(qty);
         }
+    }
+
+    // "spell you've cast this turn" / "spells you've cast this turn"
+    // Direct dispatch before parse_target to handle spell-casting quantity patterns.
+    if let Some(spell_part) = clause
+        .strip_suffix(" you've cast this turn")
+        .or_else(|| clause.strip_suffix(" you cast this turn"))
+        .or_else(|| clause.strip_suffix(" you've cast"))
+        .or_else(|| clause.strip_suffix(" you cast"))
+    {
+        let spell_part = spell_part.trim();
+        let filter = if spell_part == "spells"
+            || spell_part == "spell"
+            || spell_part == "time"
+            || spell_part.is_empty()
+        {
+            None
+        } else {
+            let qualifier = spell_part
+                .strip_suffix(" spells")
+                .or_else(|| spell_part.strip_suffix(" spell"))
+                .unwrap_or(spell_part)
+                .trim();
+            let (f, remainder) = parse_type_phrase(qualifier);
+            if remainder.trim().is_empty() && !matches!(f, TargetFilter::Any) {
+                Some(f)
+            } else {
+                None
+            }
+        };
+        return Some(QuantityRef::SpellsCastThisTurn { filter });
     }
 
     // "creature you control", "artifact you control", etc.

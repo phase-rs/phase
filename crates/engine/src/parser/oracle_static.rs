@@ -2453,7 +2453,34 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         });
     }
 
-    if let Some(keyword_text) = extract_keyword_clause(text_stripped) {
+    // CR 702: Guard "can't have or gain [keyword]" from extract_keyword_clause —
+    // "have" inside "can't have" must NOT produce AddKeyword.
+    if lower.contains("can't have") || lower.contains("can't have or gain") {
+        // Parse the keyword from "can't have or gain [keyword]" / "can't have [keyword]"
+        let cant_text = if let Some(rest) = lower
+            .strip_suffix('.')
+            .unwrap_or(lower)
+            .split("can't have or gain ")
+            .nth(1)
+        {
+            Some(rest)
+        } else {
+            lower
+                .strip_suffix('.')
+                .unwrap_or(lower)
+                .split("can't have ")
+                .nth(1)
+        };
+        if let Some(kw_text) = cant_text {
+            if let Some(kw) = map_keyword(kw_text.trim().trim_end_matches('.')) {
+                modifications.push(ContinuousModification::RemoveKeyword {
+                    keyword: kw.clone(),
+                });
+                // Note: CantHaveKeyword is a StaticMode variant, not a ContinuousModification.
+                // It will be handled at the static definition level.
+            }
+        }
+    } else if let Some(keyword_text) = extract_keyword_clause(text_stripped) {
         for part in split_keyword_list(keyword_text.trim().trim_end_matches('.')) {
             if let Some(kw) = map_keyword(part.trim().trim_end_matches('.')) {
                 modifications.push(ContinuousModification::AddKeyword { keyword: kw });
