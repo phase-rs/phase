@@ -1,6 +1,5 @@
 ---
 source: crates/engine/tests/oracle_parser.rs
-assertion_line: 128
 expression: result
 ---
 {
@@ -34,7 +33,7 @@ expression: result
       "origin": "Battlefield",
       "destination": "Graveyard",
       "trigger_zones": [
-        "Battlefield"
+        "Graveyard"
       ],
       "phase": null,
       "optional": false,
