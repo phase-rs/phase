@@ -2516,54 +2516,34 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 state.priority_pass_count = 0;
                 WaitingFor::Priority { player: p }
             } else {
-                // Preserve trigger_event from the stashed pending_trigger for event-context resolution.
-                let te = state
+                // CR 603.3: Once the player has chosen modes for a triggered ability,
+                // consume the pending trigger and either finish putting it on the stack
+                // now or re-stash it only if further target selection is required.
+                let mut trigger = state
                     .pending_trigger
-                    .as_ref()
-                    .and_then(|pt| pt.trigger_event.clone());
+                    .take()
+                    .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
                 let target_slots = build_target_slots(state, &resolved)?;
                 let target_constraints = super::ability_utils::target_constraints_from_modal(modal);
+                trigger.ability = resolved;
+                trigger.target_constraints = target_constraints.clone();
+                trigger.modal = None;
+                trigger.mode_abilities.clear();
+
                 if !target_slots.is_empty() {
                     if let Some(targets) = auto_select_targets(&target_slots, &target_constraints)?
                     {
-                        let mut resolved = resolved;
-                        assign_targets_in_chain(&mut resolved, &targets)?;
+                        assign_targets_in_chain(&mut trigger.ability, &targets)?;
                         casting::emit_targeting_events(
                             state,
-                            &flatten_targets_in_chain(&resolved),
+                            &flatten_targets_in_chain(&trigger.ability),
                             sid,
                             p,
                             &mut events,
                         );
-                        super::triggers::push_pending_trigger_to_stack(
-                            state,
-                            crate::game::triggers::PendingTrigger {
-                                source_id: sid,
-                                controller: p,
-                                condition: None,
-                                ability: resolved,
-                                timestamp: state.turn_number,
-                                target_constraints,
-                                trigger_event: te,
-                                modal: None,
-                                mode_abilities: vec![],
-                                description: None,
-                            },
-                            &mut events,
-                        );
+                        super::triggers::push_pending_trigger_to_stack(state, trigger, &mut events);
                     } else {
-                        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
-                            source_id: sid,
-                            controller: p,
-                            condition: None,
-                            ability: resolved,
-                            timestamp: state.turn_number,
-                            target_constraints: target_constraints.clone(),
-                            trigger_event: te,
-                            modal: None,
-                            mode_abilities: vec![],
-                            description: None,
-                        });
+                        state.pending_trigger = Some(trigger);
                         let trigger_description = state
                             .pending_trigger
                             .as_ref()
@@ -2583,22 +2563,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                         });
                     }
                 } else {
-                    super::triggers::push_pending_trigger_to_stack(
-                        state,
-                        crate::game::triggers::PendingTrigger {
-                            source_id: sid,
-                            controller: p,
-                            condition: None,
-                            ability: resolved,
-                            timestamp: state.turn_number,
-                            target_constraints,
-                            trigger_event: te,
-                            modal: None,
-                            mode_abilities: vec![],
-                            description: None,
-                        },
-                        &mut events,
-                    );
+                    super::triggers::push_pending_trigger_to_stack(state, trigger, &mut events);
                 }
                 state.priority_passes.clear();
                 state.priority_pass_count = 0;
@@ -6012,7 +5977,7 @@ mod trigger_target_tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, Effect, ModalChoice,
+        AbilityDefinition, AbilityKind, ControllerRef, Effect, GainLifePlayer, ModalChoice,
         ModalSelectionConstraint, QuantityExpr, TargetFilter, TargetRef, TypedFilter,
     };
     use crate::types::card_type::CoreType;
@@ -6222,6 +6187,45 @@ mod trigger_target_tests {
         let mut state = GameState::new_two_player(42);
         state.active_player = PlayerId(0);
         state.priority_player = PlayerId(0);
+        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+            source_id: ObjectId(20),
+            controller: PlayerId(0),
+            condition: None,
+            ability: ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "modal_placeholder".to_string(),
+                    description: None,
+                },
+                vec![],
+                ObjectId(20),
+                PlayerId(0),
+            ),
+            timestamp: 1,
+            target_constraints: Vec::new(),
+            trigger_event: Some(GameEvent::SpellCast {
+                controller: PlayerId(0),
+                object_id: ObjectId(98),
+                card_id: CardId(98),
+            }),
+            modal: Some(ModalChoice {
+                min_choices: 2,
+                max_choices: 2,
+                mode_count: 1,
+                mode_descriptions: vec!["Deal 1 damage to target player.".to_string()],
+                allow_repeat_modes: true,
+                constraints: vec![ModalSelectionConstraint::DifferentTargetPlayers],
+                ..Default::default()
+            }),
+            mode_abilities: vec![AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Player,
+                    damage_source: None,
+                },
+            )],
+            description: Some("Choose two target players".to_string()),
+        });
         state.waiting_for = WaitingFor::AbilityModeChoice {
             player: PlayerId(0),
             modal: ModalChoice {
@@ -6272,6 +6276,113 @@ mod trigger_target_tests {
         }
         assert_eq!(state.stack.len(), 0);
         assert!(state.pending_trigger.is_some());
+    }
+
+    #[test]
+    fn triggered_modal_modes_without_targets_consume_pending_trigger() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let source_id = ObjectId(21);
+        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+            source_id,
+            controller: PlayerId(0),
+            condition: None,
+            ability: ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "modal_placeholder".to_string(),
+                    description: None,
+                },
+                vec![],
+                source_id,
+                PlayerId(0),
+            ),
+            timestamp: 1,
+            target_constraints: Vec::new(),
+            trigger_event: Some(GameEvent::SpellCast {
+                controller: PlayerId(0),
+                object_id: ObjectId(99),
+                card_id: CardId(99),
+            }),
+            modal: Some(ModalChoice {
+                min_choices: 1,
+                max_choices: 1,
+                mode_count: 2,
+                mode_descriptions: vec!["Gain 2 life.".to_string(), "Draw a card.".to_string()],
+                allow_repeat_modes: false,
+                ..Default::default()
+            }),
+            mode_abilities: vec![
+                AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 2 },
+                        player: GainLifePlayer::Controller,
+                    },
+                ),
+                AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                ),
+            ],
+            description: Some("Whenever you cast your second spell each turn".to_string()),
+        });
+        state.waiting_for = WaitingFor::AbilityModeChoice {
+            player: PlayerId(0),
+            modal: ModalChoice {
+                min_choices: 1,
+                max_choices: 1,
+                mode_count: 2,
+                mode_descriptions: vec!["Gain 2 life.".to_string(), "Draw a card.".to_string()],
+                allow_repeat_modes: false,
+                ..Default::default()
+            },
+            source_id,
+            mode_abilities: vec![
+                AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 2 },
+                        player: GainLifePlayer::Controller,
+                    },
+                ),
+                AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                ),
+            ],
+            is_activated: false,
+            ability_index: None,
+            ability_cost: None,
+            unavailable_modes: vec![],
+        };
+
+        let result = apply(&mut state, GameAction::SelectModes { indices: vec![0] }).unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.pending_trigger.is_none());
+        assert_eq!(state.stack.len(), 1);
+        match &state.stack[0].kind {
+            crate::types::game_state::StackEntryKind::TriggeredAbility {
+                ability,
+                trigger_event,
+                description,
+                ..
+            } => {
+                assert!(matches!(ability.effect, Effect::GainLife { .. }));
+                assert!(matches!(trigger_event, Some(GameEvent::SpellCast { .. })));
+                assert_eq!(
+                    description.as_deref(),
+                    Some("Whenever you cast your second spell each turn")
+                );
+            }
+            other => panic!("expected triggered ability on stack, got {other:?}"),
+        }
     }
 
     #[test]
@@ -6476,6 +6587,47 @@ mod trigger_target_tests {
         let mut state = GameState::new_two_player(42);
         state.active_player = PlayerId(0);
         state.priority_player = PlayerId(0);
+        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+            source_id: ObjectId(40),
+            controller: PlayerId(0),
+            condition: None,
+            ability: ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "modal_placeholder".to_string(),
+                    description: None,
+                },
+                vec![],
+                ObjectId(40),
+                PlayerId(0),
+            ),
+            timestamp: 1,
+            target_constraints: Vec::new(),
+            trigger_event: Some(GameEvent::SpellCast {
+                controller: PlayerId(0),
+                object_id: ObjectId(97),
+                card_id: CardId(97),
+            }),
+            modal: Some(ModalChoice {
+                min_choices: 2,
+                max_choices: 2,
+                mode_count: 1,
+                mode_descriptions: vec!["Target opponent reveals their hand.".to_string()],
+                allow_repeat_modes: true,
+                constraints: vec![ModalSelectionConstraint::DifferentTargetPlayers],
+                ..Default::default()
+            }),
+            mode_abilities: vec![AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::Opponent),
+                    ),
+                    damage_source: None,
+                },
+            )],
+            description: Some("Choose different target players".to_string()),
+        });
         state.waiting_for = WaitingFor::AbilityModeChoice {
             player: PlayerId(0),
             modal: ModalChoice {
