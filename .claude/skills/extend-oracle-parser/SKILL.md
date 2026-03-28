@@ -389,6 +389,10 @@ Parses complex type descriptions without the "target" prefix. Handles color pref
 **`parse_zone_suffix(text) → Option<(FilterProp, Option<ControllerRef>, usize)>`**
 Detects zone qualifiers after a type phrase. When `InZone` is present in the filter, `find_legal_targets` searches ONLY that zone exclusively.
 
+### `oracle_keyword.rs` — Keyword Parsing
+
+Parses keyword ability lines and keyword grants. Handles comma-separated keyword lists, parameterized keywords (e.g., "ward {2}", "kicker {R}"), and keyword-granting effects ("has flying"). Used by both top-level keyword line parsing in `oracle.rs` and keyword detection within static/continuous effects.
+
 ### `oracle_util.rs` — Shared Utilities & Phrase Matching
 
 | Function | What it does | Use when |
@@ -531,6 +535,7 @@ rg -q "fn contains_object_pronoun" crates/engine/src/parser/oracle_util.rs && \
 rg -q "fn match_phrase_variants" crates/engine/src/parser/oracle_util.rs && \
 rg -q "fn parse_trigger_line" crates/engine/src/parser/oracle_trigger.rs && \
 rg -q "fn parse_static_line" crates/engine/src/parser/oracle_static.rs && \
+test -f crates/engine/src/parser/oracle_keyword.rs && \
 echo "✓ extend-oracle-parser skill references valid" || \
 echo "✗ STALE — update skill references"
 ```

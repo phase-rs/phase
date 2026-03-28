@@ -56,7 +56,7 @@ A Rust-native MTG engine compiling to native and WASM, powering a Tauri desktop 
 - wasm32 target: `rustup target add wasm32-unknown-unknown`
 - wasm-bindgen-cli: `cargo install wasm-bindgen-cli@0.2.114`
 - wasm-opt (optional): `brew install binaryen` or `apt install binaryen`
-- [Node.js](https://nodejs.org/) 18+ and [pnpm](https://pnpm.io/): `npm i -g pnpm`
+- [Node.js](https://nodejs.org/) 22+ and [pnpm](https://pnpm.io/): `npm i -g pnpm`
 
 ### Setup
 

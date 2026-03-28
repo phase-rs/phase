@@ -273,18 +273,84 @@ For interactive replacements, you need to:
 
 ## Reference: Existing Interactive Effects
 
+### Card Selection Effects (reuse `GameAction::SelectCards`)
+
+| Effect | WaitingFor | Complexity |
+|--------|-----------|------------|
+| **Scry** | `ScryChoice { player, cards }` | Simple — binary per-card (top/bottom) |
+| **Dig** | `DigChoice { player, cards, keep_count }` | Medium — select exactly N cards |
+| **Surveil** | `SurveilChoice { player, cards }` | Simple — binary per-card (library/graveyard) |
+| **RevealHand** | `RevealChoice { player, cards, filter }` | Medium — select from filtered set, clears revealed state after |
+| **SearchLibrary** | `SearchChoice { player, cards, count }` | Complex — filter library, "fail to find" rule, multi-card select |
+| **Discover** | `DiscoverChoice { player, cards, discover_value }` | Medium — exile from top until CMC ≤ discover value, cast or put in hand |
+| **Connive** | `ConniveDiscard { player, cards, count }` | Medium — discard after draw |
+| **ChooseFromZone** | `ChooseFromZoneChoice { player, cards, count, zone }` | Medium — generic zone card selection |
+| **ManifestDread** | `ManifestDreadChoice { player, cards }` | Simple — select card from top to manifest |
+| **DiscardToHandSize** | `DiscardChoice { player, cards, count }` | Simple — select cards to discard down |
+| **Proliferate** | `ProliferateChoice { player, permanents }` | Medium — select permanents to add counters |
+
+### Targeting & Combat
+
+| Effect | WaitingFor | Complexity |
+|--------|-----------|------------|
+| **TargetSelection** | `TargetSelection { player, pending_cast, legal_targets }` | Complex — spell/ability targeting |
+| **MultiTargetSelection** | `MultiTargetSelection { player, slots, ... }` | Complex — multi-slot targeting |
+| **TriggerTargetSelection** | `TriggerTargetSelection { player, trigger_index, ... }` | Complex — trigger target selection |
+| **DeclareAttackers** | `DeclareAttackers { player, legal_attackers }` | Complex — combat phase |
+| **DeclareBlockers** | `DeclareBlockers { player, legal_blockers }` | Complex — combat phase |
+| **AssignCombatDamage** | `AssignCombatDamage { player, assignments }` | Complex — damage assignment order |
+| **EquipTarget** | `EquipTarget { player, equipment_id, legal_targets }` | Simple — target for equip |
+| **CopyRetarget** | `CopyRetarget { player, copy_id, ... }` | Medium — retarget copied spell |
+
+### Named & Modal Choices
+
 | Effect | WaitingFor | GameAction | Complexity |
 |--------|-----------|------------|------------|
-| **Scry** | `ScryChoice { player, cards }` | `SelectCards { cards }` | Simple — binary per-card (top/bottom) |
-| **Dig** | `DigChoice { player, cards, keep_count }` | `SelectCards { cards }` | Medium — select exactly N cards |
-| **Surveil** | `SurveilChoice { player, cards }` | `SelectCards { cards }` | Simple — binary per-card (library/graveyard) |
-| **RevealHand** | `RevealChoice { player, cards, filter }` | `SelectCards { cards }` | Medium — select from filtered set, clears revealed state after |
-| **SearchLibrary** | `SearchChoice { player, cards, count }` | `SelectCards { cards }` | Complex — filter library, "fail to find" rule, multi-card select |
-| **Discover** | `DiscoverChoice { player, cards, discover_value }` | `SelectCards { cards }` | Medium — exile from top until CMC ≤ discover value, cast or put in hand (CR 702.170) |
-| **Replacement** | `ReplacementChoice { player, count, descriptions }` | `ChooseReplacement { index }` | Different pattern — index-based selection |
-| **NamedChoice** | `NamedChoice { player, choice_type, options }` | `ChooseOption { choice }` | Medium — choose from named options (creature type, color, etc.). Stores result in `state.last_named_choice` for continuations. |
+| **NamedChoice** | `NamedChoice { player, choice_type, options }` | `ChooseOption` | Medium — creature type, color, etc. |
+| **ModeChoice** | `ModeChoice { player, modal, pending_cast }` | `SelectModes` | Medium — spell modal selection |
+| **AbilityModeChoice** | `AbilityModeChoice { player, modal, source_id, ... }` | `SelectModes` | Medium — activated/triggered modal |
+| **Replacement** | `ReplacementChoice { player, count, descriptions }` | `ChooseReplacement` | Simple — index-based selection |
+| **TopOrBottom** | `TopOrBottomChoice { player, card }` | `ChooseTopOrBottom` | Simple — binary choice |
+| **ChooseRingBearer** | `ChooseRingBearer { player, legal_targets }` | `SelectTargets` | Simple — ring bearer selection |
+| **ChooseLegend** | `ChooseLegend { player, legends }` | `SelectCards` | Simple — legend rule |
 
-Note how Scry, Dig, Surveil, RevealHand, and SearchLibrary all reuse `GameAction::SelectCards`. `NamedChoice` uses `ChooseOption` because the response is a string name, not a card selection. Only create a new `GameAction` variant if the response shape is genuinely different.
+### Cost & Payment
+
+| Effect | WaitingFor | GameAction | Complexity |
+|--------|-----------|------------|------------|
+| **ManaPayment** | `ManaPayment { player }` | Mana declaration | Medium — X costs |
+| **OptionalCost** | `OptionalCostChoice { player, costs, ... }` | `ChooseOptionalCosts` | Medium — kicker, additional costs |
+| **DefilerPayment** | `DefilerPayment { player, life_per_pip, ... }` | `DefilerDecision` | Medium — pay life instead of mana |
+| **WarpCost** | `WarpCostChoice { player, options, ... }` | `SelectWarpCost` | Medium — alternative cost choice |
+| **UnlessPayment** | `UnlessPayment { player, cost, ... }` | `PayUnlessCost` | Medium — "unless you pay" |
+| **DiscardForCost** | `DiscardForCost { player, cards, ... }` | `SelectCards` | Medium — discard as cost |
+| **SacrificeForCost** | `SacrificeForCost { player, candidates, ... }` | `SelectCards` | Medium — sacrifice as cost |
+| **ExileFromGraveyardForCost** | `ExileFromGraveyardForCost { player, cards, ... }` | `SelectCards` | Medium — exile from yard as cost |
+| **HarmonizeTapChoice** | `HarmonizeTapChoice { player, candidates, ... }` | `SelectCards` | Medium — tap creature for cost |
+| **WardDiscard** | `WardDiscardChoice { player, ... }` | `SelectCards` | Simple — ward discard cost |
+| **WardSacrifice** | `WardSacrificeChoice { player, ... }` | `SelectCards` | Simple — ward sacrifice cost |
+
+### Optional & Opponent Choices
+
+| Effect | WaitingFor | GameAction | Complexity |
+|--------|-----------|------------|------------|
+| **OptionalEffect** | `OptionalEffectChoice { player, description }` | `ChooseOptionalEffect` | Simple — "you may" effects |
+| **OpponentMay** | `OpponentMayChoice { player, description, ... }` | `ChooseOptionalEffect` | Simple — opponent "may" |
+| **AdventureCast** | `AdventureCastChoice { player, card_id }` | `ChooseAdventureCast` | Simple — cast adventure side |
+| **CopyTarget** | `CopyTargetChoice { player, copy_id, legal_targets }` | `SelectTargets` | Medium — what to copy |
+| **CompanionReveal** | `CompanionReveal { player, companion_id }` | `RevealCompanion` | Simple — companion revelation |
+
+### Game Structure
+
+| Effect | WaitingFor | Complexity |
+|--------|-----------|------------|
+| **Mulligan** | `MulliganDecision { player }` | Simple — keep/mulligan |
+| **MulliganBottom** | `MulliganBottomCards { player, count }` | Simple — cards to bottom |
+| **Sideboard** | `BetweenGamesSideboard { player, ... }` | Medium — sideboard swaps |
+| **PlayDraw** | `BetweenGamesChoosePlayDraw { player }` | Simple — play/draw choice |
+| **GameOver** | `GameOver { winners }` | Terminal state |
+
+Note how many effects reuse `GameAction::SelectCards` — only create a new `GameAction` variant if the response shape is genuinely different (e.g., `ChooseOption` for string responses, `SelectModes` for index-based selection).
 
 ---
 

@@ -101,11 +101,14 @@ cargo fmt --all                     # Auto-format
 ```bash
 cargo wasm                          # Build WASM (debug)
 cargo wasm-release                  # Build WASM (release)
-cargo test-all                      # cargo test --all
+cargo test-all                      # Run all tests (nextest, excludes phase-tauri)
 cargo clippy-strict                 # clippy -D warnings
-cargo export-cards -- data/         # Run card-data-export binary
 cargo serve                         # Run phase-server (release)
 cargo coverage                      # Card support coverage report (reads data/card-data.json)
+cargo parser-gaps                   # Parser gap analysis report
+cargo rules-audit                   # MTG Comprehensive Rules audit (requires --features audit)
+cargo scrape-feeds                  # Scrape metagame feeds from MTGGoldfish
+cargo tune-ai                       # Run AI weight tuning (requires --features tune)
 ```
 
 ### WASM Build
@@ -159,16 +162,17 @@ engine-wasm     — WASM bindings (wasm-bindgen + tsify) exposing engine to JS
 phase-ai        — AI opponent: evaluation, legal actions, card hints, search
 server-core     — Server-side game session management (tokio)
 phase-server    — Axum WebSocket server for multiplayer
+feed-scraper    — Metagame deck scraper (MTGGoldfish)
 ```
 
-**Crate dependency flow**: `engine` ← `phase-ai` ← `engine-wasm` / `server-core` ← `phase-server`
+**Crate dependency flow**: `engine` ← `phase-ai` ← `engine-wasm` / `server-core` ← `phase-server` (`feed-scraper` is standalone)
 
 ### Engine Internals (`crates/engine/src/`)
 
 - **`types/`** — Core data types: `GameState`, `GameAction`, `GameEvent`, `GameObject`, `Phase`, `Zone`, `ManaPool`, abilities, triggers. All types use `serde` for serialization across the WASM boundary.
 - **`game/engine.rs`** — Main `apply(state, action) -> ActionResult` function. Pure reducer pattern: takes game state + action, returns events + new waiting_for state.
-- **`game/`** — Game logic modules: `turns`, `priority`, `stack`, `combat`, `combat_damage`, `sba` (state-based actions), `targeting`, `mana_payment`, `mana_abilities`, `mana_sources`, `mulligan`, `layers` (MTG Rule 613), `triggers`, `trigger_matchers`, `replacement`, `static_abilities`, `keywords`, `zones`, `casting`, `casting_costs`, `casting_targets`, `commander`, `companion`, `day_night`, `deck_loading`, `deck_validation`, `derived`, `devotion`, `elimination`, `filter`, `game_object`, `log`, `match_flow`, `morph`, `planeswalker`, `players`, `printed_cards`, `quantity`, `restrictions`, `scenario`, `scenario_db`, `transform`, `coverage`, `ability_utils`, `sacrifice`.
-- **`game/effects/`** — Effect handlers (~73 modules), including: `add_restriction`, `amass`, `animate`, `attach`, `become_copy`, `become_monarch`, `bounce`, `cast_from_zone`, `change_targets`, `change_zone`, `choose`, `choose_card`, `choose_from_zone`, `cleanup`, `connive`, `copy_spell`, `counter`, `counters`, `create_emblem`, `deal_damage`, `delayed_trigger`, `destroy`, `dig`, `discard`, `discover`, `double`, `draw`, `effect`, `energy`, `exchange_control`, `exile_from_top_until`, `exploit`, `explore`, `extra_turn`, `fight`, `flip_coin`, `force_block`, `gain_control`, `gift_delivery`, `goad`, `grant_permission`, `investigate`, `life`, `mana`, `manifest_dread`, `mill`, `monstrosity`, `pay`, `phase_out`, `prevent_damage`, `proliferate`, `pump`, `put_on_top`, `put_on_top_or_bottom`, `regenerate`, `reveal_hand`, `reveal_top`, `ring`, `roll_die`, `sacrifice`, `scry`, `search_library`, `seek`, `set_class_level`, `shuffle`, `solve_case`, `surveil`, `suspect`, `tap_untap`, `token`, `token_copy`, `transform_effect`, `win_lose`. New effects are added as modules here following the existing handler pattern.
+- **`game/`** — Game logic modules: `turns`, `priority`, `stack`, `combat`, `combat_damage`, `sba` (state-based actions), `targeting`, `mana_payment`, `mana_abilities`, `mana_sources`, `mulligan`, `layers` (MTG Rule 613), `triggers`, `trigger_matchers`, `replacement`, `static_abilities`, `keywords`, `zones`, `casting`, `casting_costs`, `casting_targets`, `commander`, `companion`, `day_night`, `deck_loading`, `deck_validation`, `derived`, `devotion`, `elimination`, `filter`, `game_object`, `gap_analysis`, `log`, `match_flow`, `morph`, `planeswalker`, `players`, `printed_cards`, `quantity`, `restrictions`, `scenario`, `scenario_db`, `transform`, `coverage`, `ability_utils`, `sacrifice`.
+- **`game/effects/`** — Effect handlers (75 modules), including: `add_restriction`, `additional_combat`, `amass`, `animate`, `attach`, `become_copy`, `become_monarch`, `bounce`, `cast_from_zone`, `change_targets`, `change_zone`, `choose`, `choose_card`, `choose_from_zone`, `cleanup`, `connive`, `copy_spell`, `counter`, `counters`, `create_emblem`, `deal_damage`, `delayed_trigger`, `destroy`, `dig`, `discard`, `discover`, `double`, `draw`, `effect`, `energy`, `exchange_control`, `exile_from_top_until`, `exploit`, `explore`, `extra_turn`, `fight`, `flip_coin`, `force_block`, `gain_control`, `gift_delivery`, `goad`, `grant_permission`, `investigate`, `life`, `mana`, `manifest_dread`, `mill`, `monstrosity`, `pay`, `phase_out`, `player_counter`, `prevent_damage`, `proliferate`, `pump`, `put_on_top`, `put_on_top_or_bottom`, `regenerate`, `reveal_hand`, `reveal_top`, `ring`, `roll_die`, `sacrifice`, `scry`, `search_library`, `seek`, `set_class_level`, `shuffle`, `solve_case`, `surveil`, `suspect`, `tap_untap`, `token`, `token_copy`, `transform_effect`, `win_lose`. New effects are added as modules here following the existing handler pattern.
 - **`parser/`** — Oracle text parser: converts MTGJSON Oracle text into typed `AbilityDefinition` structs. Main dispatcher in `oracle.rs`, with specialized sub-parsers: `oracle_effect/` (directory with `mod.rs`, `imperative.rs`, `subject.rs`, `token.rs`, `sequence.rs`, `animation.rs`, `counter.rs`, `mana.rs`, `types.rs`), `oracle_trigger.rs`, `oracle_static.rs`, `oracle_replacement.rs`, `oracle_target.rs`, `oracle_quantity.rs`, `oracle_util.rs`, `oracle_cost.rs`, `oracle_keyword.rs`, `oracle_casting.rs`, `oracle_class.rs`, `oracle_level.rs`, `oracle_modal.rs`, `oracle_saga.rs`. See `docs/parser-instructions.md` for architecture and contribution guide.
 - **`ai_support/`** — Engine-side AI support: `legal_actions()` generates validated candidate actions for all `WaitingFor` states, `candidates.rs` implements action generation per state, `context.rs` provides game context for AI evaluation. This module lives in the engine crate so both WASM and server consumers share the same logic.
 - **`database/`** — Card database with three loading paths:
@@ -202,15 +206,16 @@ State is filtered per-player (`filter_state_for_player`) to hide opponent's hand
 
 **The frontend is strictly a display layer.** It receives fully-resolved state from the engine and renders it. It must not compute derived game values, filter game objects by rules logic, or infer anything the engine should provide. If a component needs data the engine doesn't currently expose, the fix is to add it to the engine's output — not to compute it client-side.
 
-- **`adapter/`** — Transport-agnostic `EngineAdapter` interface with three implementations:
+- **`adapter/`** — Transport-agnostic `EngineAdapter` interface with five implementations:
   - `WasmAdapter` — Direct WASM calls (browser/PWA), serialized through async queue
   - `TauriAdapter` — Tauri IPC (desktop), dynamically imported to avoid bundling in web
   - `WebSocketAdapter` — WebSocket to phase-server (multiplayer), with reconnection (3 attempts)
+  - `P2PHostAdapter` / `P2PGuestAdapter` — WebRTC peer-to-peer via PeerJS
   - `createAdapter()` auto-detects platform (Tauri vs browser)
-- **`stores/`** — Zustand stores: `gameStore` (game state + dispatch), `uiStore` (UI state), `animationStore`, `multiplayerStore` (game code, opponent, timer)
+- **`stores/`** — Zustand stores: `gameStore` (game state + dispatch), `uiStore` (UI state), `animationStore`, `multiplayerStore` (game code, opponent, timer), `preferencesStore` (card size, layout, audio, visual preferences)
 - **`components/`** — React components organized by domain: `animation/`, `board/`, `card/`, `chrome/`, `combat/`, `controls/`, `deck-builder/`, `hand/`, `hud/`, `lobby/`, `log/`, `mana/`, `menu/`, `modal/`, `multiplayer/`, `settings/`, `splash/`, `stack/`, `targeting/`, `ui/`, `zone/`
-- **`services/`** — `scryfall.ts` (card image API), `imageCache.ts` (IndexedDB caching via idb-keyval), `deckParser.ts`
-- **`hooks/`** — `useGameDispatch`, `useCardImage`, `useKeyboardShortcuts`, `useLongPress`, `usePhaseInfo`, `usePlayerId`
+- **`services/`** — `scryfall.ts` (card image API), `imageCache.ts` (IndexedDB caching via idb-keyval), `deckParser.ts`, `cardData.ts`, `cardNames.ts`, `deckCompatibility.ts`, `feedService.ts` (metagame feeds), `gamePersistence.ts`, `presets.ts` (deck presets), `serverDetection.ts`, `sidecar.ts` (Tauri sidecar management)
+- **`hooks/`** — `useGameDispatch`, `useCardImage`, `useKeyboardShortcuts`, `useLongPress`, `usePhaseInfo`, `usePlayerId`, `useCardDataMeta`, `useCardHover`, `useDeckCardData`, `useFeedInitialization`, `useHostingSession`, `usePreviewDismiss`, `useRafPositions`
 - **`pages/`** — `MenuPage`, `GamePage`, `GameSetupPage`, `MultiplayerPage`, `DeckBuilderPage`, `MyDecksPage`, `CoveragePage` (React Router)
 
 ### Key Patterns
@@ -226,6 +231,8 @@ State is filtered per-player (`filter_state_for_player`) to hide opponent's hand
 - `PHASE_DATA_DIR` — Card data root for phase-server (default `"data"`)
 - `PHASE_CARDS_PATH` — Override card data directory for binaries (`coverage-report`, `card-data-export`)
 - `PHASE_LOG_DIR` — Log directory for phase-server. When set, logs to files instead of stdout (main log: `<dir>/phase-server.log`, per-game logs: `<dir>/games/<code>.log`)
+- `PHASE_CORS_ORIGIN` — Custom CORS origin for phase-server (default: allows common dev ports)
+- `PHASE_LOG_JSON` — Enable JSON-formatted log output for phase-server
 
 ## Documentation (`docs/`)
 
