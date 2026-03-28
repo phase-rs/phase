@@ -1265,6 +1265,12 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
             if candidate.len() >= 2 {
                 let replaced = replace_all_words_case_sensitive(&result, &candidate, "~");
                 if replaced != result {
+                    // Guard: Don't replace subtype references like "Sliver creatures"
+                    // when "Sliver" is a prefix of the card name "Sliver Hivelord".
+                    // The word before "creatures/creature" is a subtype, not a self-ref.
+                    if replaced.contains("~ creatures") || replaced.contains("~ creature") {
+                        continue;
+                    }
                     result = replaced;
                     break;
                 }
@@ -1371,6 +1377,18 @@ mod tests {
         assert_eq!(
             normalize_card_name_refs("Slivers you control", "Sliver Gravemother"),
             "Slivers you control"
+        );
+    }
+
+    #[test]
+    fn normalize_sliver_hivelord_preserves_subtype() {
+        // B18: "Sliver" before "creatures" is a subtype reference, not a self-ref
+        assert_eq!(
+            normalize_card_name_refs(
+                "Sliver creatures you control have indestructible.",
+                "Sliver Hivelord",
+            ),
+            "Sliver creatures you control have indestructible."
         );
     }
 

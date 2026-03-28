@@ -580,7 +580,15 @@ fn try_parse_set_life_total(
         QuantityExpr::Ref {
             qty: QuantityRef::StartingLifeTotal,
         }
-    } else if let Some((n, _)) = parse_number(&lower) {
+    } else if let Some((n, rest)) = parse_number(&lower) {
+        // Guard: reject if substantial text remains after the number.
+        // "a 3/3 red goblin creature" matches "a" as 1 but the rest
+        // "3/3 red goblin creature" indicates this is an animation, not
+        // a life total. Genuine life total patterns: "10", "1", bare numbers.
+        let rest_trimmed = rest.trim().trim_end_matches('.');
+        if !rest_trimmed.is_empty() {
+            return None;
+        }
         QuantityExpr::Fixed { value: n as i32 }
     } else {
         return None;

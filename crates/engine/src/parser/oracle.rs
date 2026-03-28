@@ -340,6 +340,20 @@ pub fn parse_oracle_text(
         }
 
         if is_granted_static_line(&lower) {
+            // B20: Handle compound "can't win/lose" lines by splitting
+            if lower.contains("can't win the game") && lower.contains("can't lose the game") {
+                for clause in static_line.split(" and ") {
+                    let trimmed = clause.trim().trim_end_matches('.');
+                    if !trimmed.is_empty() {
+                        let clause_dot = format!("{trimmed}.");
+                        if let Some(sd) = parse_static_line(&clause_dot) {
+                            result.statics.push(sd);
+                        }
+                    }
+                }
+                i += 1;
+                continue;
+            }
             if let Some(static_def) = parse_static_line(&static_line) {
                 result.statics.push(static_def);
                 i += 1;
@@ -522,6 +536,22 @@ pub fn parse_oracle_text(
                         || lower.contains("until your next turn")
                         || lower.contains("this turn")));
             if !defer_to_effect_parser {
+                // B20: Handle compound "can't win/lose" lines by splitting
+                // at " and " so both CantWinTheGame and CantLoseTheGame emit.
+                // CR 104.3a / CR 104.3b: Both restrictions must be independent statics.
+                if lower.contains("can't win the game") && lower.contains("can't lose the game") {
+                    for clause in static_line.split(" and ") {
+                        let trimmed = clause.trim().trim_end_matches('.');
+                        if !trimmed.is_empty() {
+                            let clause_dot = format!("{trimmed}.");
+                            if let Some(sd) = parse_static_line(&clause_dot) {
+                                result.statics.push(sd);
+                            }
+                        }
+                    }
+                    i += 1;
+                    continue;
+                }
                 if let Some(static_def) = parse_static_line(&static_line) {
                     result.statics.push(static_def);
                     i += 1;
@@ -4804,6 +4834,34 @@ mod tests {
             1,
             "Ability-word trigger should produce 1 trigger, got: triggers={:?}",
             result.triggers,
+        );
+    }
+
+    #[test]
+    fn b20_platinum_angel_both_statics() {
+        // B20: Compound "can't win/lose" line must emit BOTH statics
+        let result = parse(
+            "You can't lose the game and your opponents can't win the game.",
+            "Platinum Angel",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert!(
+            result
+                .statics
+                .iter()
+                .any(|s| s.mode == StaticMode::CantLoseTheGame),
+            "should emit CantLoseTheGame, got: {:?}",
+            result.statics,
+        );
+        assert!(
+            result
+                .statics
+                .iter()
+                .any(|s| s.mode == StaticMode::CantWinTheGame),
+            "should emit CantWinTheGame, got: {:?}",
+            result.statics,
         );
     }
 }
