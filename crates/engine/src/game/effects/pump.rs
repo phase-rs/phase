@@ -26,6 +26,7 @@ pub fn resolve(
     };
 
     let dur = ability.duration.clone().unwrap_or(Duration::UntilEndOfTurn);
+    let target_filter = crate::game::effects::resolved_object_filter(ability, target_filter);
 
     // SelfRef with no explicit targets means pump the source object itself.
     let ids: Vec<ObjectId> =

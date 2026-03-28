@@ -139,7 +139,7 @@ pub fn resolve_all(
             properties: vec![],
         })
     } else {
-        target_filter
+        crate::game::effects::resolved_object_filter(ability, &target_filter)
     };
 
     // Collect matching object IDs that are on the battlefield and not indestructible

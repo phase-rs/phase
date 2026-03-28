@@ -317,6 +317,8 @@ pub fn resolve_all(
         _ => return Err(EffectError::MissingParam("DamageAll amount".to_string())),
     };
 
+    let target_filter = crate::game::effects::resolved_object_filter(ability, &target_filter);
+
     // Collect matching object IDs
     let matching: Vec<_> = state
         .battlefield

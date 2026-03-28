@@ -52,6 +52,7 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     let trigger_subject = extract_trigger_subject_for_context(&condition_text);
     let effect_ctx = ParseContext {
         subject: Some(trigger_subject),
+        ..Default::default()
     };
 
     // Parse the effect

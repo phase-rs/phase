@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode, Effect, ResolvedAbility,
-    TargetFilter, TargetRef,
+    AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode, Effect, GameRestriction,
+    ResolvedAbility, RestrictionPlayerScope, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -89,6 +89,40 @@ fn default_spell_ability_def() -> AbilityDefinition {
     )
 }
 
+/// CR 101.2 + CR 601.2a: Temporary restrictions can limit which zones affected
+/// players may cast spells from.
+fn is_blocked_by_cast_only_from_zones(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    caster: PlayerId,
+) -> bool {
+    state
+        .restrictions
+        .iter()
+        .any(|restriction| match restriction {
+            GameRestriction::CastOnlyFromZones {
+                source,
+                affected_players,
+                allowed_zones,
+                ..
+            } => {
+                let source_controller = state
+                    .objects
+                    .get(source)
+                    .map(|source_obj| source_obj.controller);
+                let caster_affected = match affected_players {
+                    RestrictionPlayerScope::AllPlayers => true,
+                    RestrictionPlayerScope::SpecificPlayer(player) => *player == caster,
+                    RestrictionPlayerScope::OpponentsOfSourceController => {
+                        source_controller.is_some_and(|controller| controller != caster)
+                    }
+                };
+                caster_affected && !allowed_zones.contains(&obj.zone)
+            }
+            GameRestriction::DamagePreventionDisabled { .. } => false,
+        })
+}
+
 pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
     let player_data = state
         .players
@@ -147,6 +181,14 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
     }
 
     objects
+        .into_iter()
+        .filter(|obj_id| {
+            state
+                .objects
+                .get(obj_id)
+                .is_some_and(|obj| !is_blocked_by_cast_only_from_zones(state, obj, player))
+        })
+        .collect()
 }
 
 /// CR 702.138: Check that the player's graveyard has enough OTHER cards to pay escape's exile cost.
@@ -416,6 +458,12 @@ fn prepare_spell_cast(
     if is_blocked_by_cant_cast_during(state, player) {
         return Err(EngineError::ActionNotAllowed(
             "A static ability prevents casting during this phase/turn".to_string(),
+        ));
+    }
+
+    if is_blocked_by_cast_only_from_zones(state, obj, player) {
+        return Err(EngineError::ActionNotAllowed(
+            "A temporary effect prevents casting from this zone".to_string(),
         ));
     }
 
@@ -1966,8 +2014,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::{
-        BasicLandType, ChosenAttribute, ChosenSubtypeKind, ContinuousModification, QuantityExpr,
-        StaticDefinition,
+        BasicLandType, ChosenAttribute, ChosenSubtypeKind, ContinuousModification, GameRestriction,
+        QuantityExpr, RestrictionExpiry, RestrictionPlayerScope, StaticDefinition,
     };
     use crate::types::card_type::CoreType;
     use crate::types::keywords::Keyword;
@@ -3724,6 +3772,27 @@ mod tests {
         id
     }
 
+    fn add_cast_only_from_hand_restriction(
+        state: &mut GameState,
+        controller: PlayerId,
+        affected_players: RestrictionPlayerScope,
+    ) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            "Restriction Source".to_string(),
+            Zone::Exile,
+        );
+        state.restrictions.push(GameRestriction::CastOnlyFromZones {
+            source,
+            affected_players,
+            allowed_zones: vec![Zone::Hand],
+            expiry: RestrictionExpiry::UntilPlayerNextTurn { player: controller },
+        });
+        source
+    }
+
     #[test]
     fn cant_cast_during_runtime_opponent_blocked_on_controllers_turn() {
         let mut state = setup_game_at_main_phase();
@@ -3786,6 +3855,61 @@ mod tests {
         // No CantCastDuring statics on battlefield — baseline
         assert!(!is_blocked_by_cant_cast_during(&state, PlayerId(0)));
         assert!(!is_blocked_by_cant_cast_during(&state, PlayerId(1)));
+    }
+
+    #[test]
+    fn cast_only_from_zones_blocks_affected_opponent_from_exile() {
+        let mut state = setup_game_at_main_phase();
+        add_cast_only_from_hand_restriction(
+            &mut state,
+            PlayerId(0),
+            RestrictionPlayerScope::OpponentsOfSourceController,
+        );
+        let exiled = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(1),
+            "Exiled Spell".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&exiled)
+            .unwrap()
+            .casting_permissions
+            .push(crate::types::ability::CastingPermission::ExileWithAltCost {
+                cost: ManaCost::generic(2),
+            });
+
+        assert!(is_blocked_by_cast_only_from_zones(
+            &state,
+            state.objects.get(&exiled).unwrap(),
+            PlayerId(1)
+        ));
+        assert!(!spell_objects_available_to_cast(&state, PlayerId(1)).contains(&exiled));
+    }
+
+    #[test]
+    fn cast_only_from_zones_allows_hand_casts_for_affected_player() {
+        let mut state = setup_game_at_main_phase();
+        add_cast_only_from_hand_restriction(
+            &mut state,
+            PlayerId(0),
+            RestrictionPlayerScope::OpponentsOfSourceController,
+        );
+        let hand_spell = create_object(
+            &mut state,
+            CardId(501),
+            PlayerId(1),
+            "Hand Spell".to_string(),
+            Zone::Hand,
+        );
+
+        assert!(!is_blocked_by_cast_only_from_zones(
+            &state,
+            state.objects.get(&hand_spell).unwrap(),
+            PlayerId(1)
+        ));
     }
 
     #[test]

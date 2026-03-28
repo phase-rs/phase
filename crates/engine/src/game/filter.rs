@@ -18,6 +18,59 @@ use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 
+/// CR 608.2c: Resolve contextual parent-target exclusions before a mass-effect scan.
+///
+/// This intentionally supports only `Not(ParentTarget)` inside composite filters.
+/// Positive `ParentTarget` inside `And` / `Or` remains unresolved here.
+pub fn normalize_contextual_filter(
+    filter: &TargetFilter,
+    parent_targets: &[TargetRef],
+) -> TargetFilter {
+    match filter {
+        TargetFilter::Not { filter: inner }
+            if matches!(inner.as_ref(), TargetFilter::ParentTarget) =>
+        {
+            let object_ids: Vec<ObjectId> = parent_targets
+                .iter()
+                .filter_map(|target| match target {
+                    TargetRef::Object(id) => Some(*id),
+                    TargetRef::Player(_) => None,
+                })
+                .collect();
+            match object_ids.as_slice() {
+                [] => TargetFilter::Any,
+                [id] => TargetFilter::Not {
+                    filter: Box::new(TargetFilter::SpecificObject { id: *id }),
+                },
+                _ => TargetFilter::Not {
+                    filter: Box::new(TargetFilter::Or {
+                        filters: object_ids
+                            .into_iter()
+                            .map(|id| TargetFilter::SpecificObject { id })
+                            .collect(),
+                    }),
+                },
+            }
+        }
+        TargetFilter::Not { filter: inner } => TargetFilter::Not {
+            filter: Box::new(normalize_contextual_filter(inner, parent_targets)),
+        },
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .iter()
+                .map(|inner| normalize_contextual_filter(inner, parent_targets))
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .iter()
+                .map(|inner| normalize_contextual_filter(inner, parent_targets))
+                .collect(),
+        },
+        _ => filter.clone(),
+    }
+}
+
 /// Check if an object matches a typed TargetFilter.
 ///
 /// `source_id` is the object that owns the ability (used for SelfRef/Other resolution).
@@ -1295,5 +1348,64 @@ mod tests {
         assert!(matches_target_filter(&state, attacker, &filter, attacker));
         assert!(matches_target_filter(&state, blocker, &filter, attacker));
         assert!(!matches_target_filter(&state, neither, &filter, attacker));
+    }
+
+    #[test]
+    fn normalize_contextual_filter_without_parent_targets_rewrites_not_parent_to_any() {
+        let filter = TargetFilter::Not {
+            filter: Box::new(TargetFilter::ParentTarget),
+        };
+
+        assert_eq!(normalize_contextual_filter(&filter, &[]), TargetFilter::Any);
+    }
+
+    #[test]
+    fn normalize_contextual_filter_with_parent_target_excludes_specific_object() {
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature()),
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::ParentTarget),
+                },
+            ],
+        };
+
+        let normalized = normalize_contextual_filter(&filter, &[TargetRef::Object(ObjectId(7))]);
+        assert_eq!(
+            normalized,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    TargetFilter::Not {
+                        filter: Box::new(TargetFilter::SpecificObject { id: ObjectId(7) }),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_contextual_filter_with_multiple_parent_targets_excludes_all_of_them() {
+        let filter = TargetFilter::Not {
+            filter: Box::new(TargetFilter::ParentTarget),
+        };
+
+        assert_eq!(
+            normalize_contextual_filter(
+                &filter,
+                &[
+                    TargetRef::Object(ObjectId(7)),
+                    TargetRef::Object(ObjectId(8))
+                ]
+            ),
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::SpecificObject { id: ObjectId(7) },
+                        TargetFilter::SpecificObject { id: ObjectId(8) },
+                    ],
+                }),
+            }
+        );
     }
 }

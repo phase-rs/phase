@@ -1,6 +1,9 @@
-use crate::types::ability::{CastingPermission, Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{
+    CastingPermission, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+};
 use crate::types::events::{BendingType, GameEvent};
 use crate::types::game_state::GameState;
+use crate::types::identifiers::TrackedSetId;
 
 /// Grant a CastingPermission to the target object (CR 604.6).
 ///
@@ -13,23 +16,58 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let permission = match &ability.effect {
-        Effect::GrantCastingPermission { permission, .. } => permission.clone(),
+    let (permission, target_filter) = match &ability.effect {
+        Effect::GrantCastingPermission { permission, target } => (permission.clone(), target),
         _ => return Err(EffectError::MissingParam("permission".to_string())),
     };
 
-    if ability.targets.is_empty() {
-        // Untargeted: grant permission to the ability's source object (self-referencing).
-        if let Some(obj) = state.objects.get_mut(&ability.source_id) {
-            obj.casting_permissions.push(permission.clone());
+    let target_ids: Vec<_> = if ability.targets.is_empty() {
+        match target_filter {
+            TargetFilter::SelfRef | TargetFilter::Any | TargetFilter::None => {
+                vec![ability.source_id]
+            }
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            } => state
+                .tracked_object_sets
+                .iter()
+                .max_by_key(|(id, _)| id.0)
+                .map(|(_, objects)| objects.clone())
+                .unwrap_or_default(),
+            TargetFilter::TrackedSet { id } => state
+                .tracked_object_sets
+                .get(id)
+                .cloned()
+                .unwrap_or_default(),
+            other => state
+                .objects
+                .keys()
+                .copied()
+                .filter(|obj_id| {
+                    crate::game::filter::matches_target_filter_controlled(
+                        state,
+                        *obj_id,
+                        other,
+                        ability.source_id,
+                        ability.controller,
+                    )
+                })
+                .collect(),
         }
     } else {
-        for target in &ability.targets {
-            if let crate::types::ability::TargetRef::Object(obj_id) = target {
-                if let Some(obj) = state.objects.get_mut(obj_id) {
-                    obj.casting_permissions.push(permission.clone());
-                }
-            }
+        ability
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(obj_id) => Some(*obj_id),
+                TargetRef::Player(_) => None,
+            })
+            .collect()
+    };
+
+    for obj_id in target_ids {
+        if let Some(obj) = state.objects.get_mut(&obj_id) {
+            obj.casting_permissions.push(permission.clone());
         }
     }
 

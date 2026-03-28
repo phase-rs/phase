@@ -287,8 +287,29 @@ fn next_sub_needs_tracked_set(ability: &ResolvedAbility) -> bool {
                 },
                 ..
             } | Effect::ChooseFromZone { .. }
+                | Effect::GrantCastingPermission {
+                    target: TargetFilter::TrackedSet { .. },
+                    ..
+                }
         )
     })
+}
+
+fn effect_uses_implicit_tracked_set_targets(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::GrantCastingPermission {
+            target: TargetFilter::TrackedSet { .. },
+            ..
+        }
+    )
+}
+
+pub(crate) fn resolved_object_filter(
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> TargetFilter {
+    filter::normalize_contextual_filter(target_filter, &ability.targets)
 }
 
 /// CR 603.7c: Extract an event-context target filter from an effect, if present.
@@ -664,11 +685,9 @@ pub fn resolve_ability_chain(
                 _ => None,
             })
             .collect();
-        if !moved_ids.is_empty() {
-            let set_id = TrackedSetId(state.next_tracked_set_id);
-            state.next_tracked_set_id += 1;
-            state.tracked_object_sets.insert(set_id, moved_ids);
-        }
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state.tracked_object_sets.insert(set_id, moved_ids);
     }
 
     // ExileFromTopUntil handles its own sub_ability chain internally (injecting the
@@ -856,6 +875,10 @@ pub fn resolve_ability_chain(
                 .collect();
             sub_with_targets.context = ability.context.clone();
             resolve_ability_chain(state, &sub_with_targets, events, depth + 1)?;
+        } else if sub.targets.is_empty() && effect_uses_implicit_tracked_set_targets(&sub.effect) {
+            let mut sub_with_context = sub.as_ref().clone();
+            sub_with_context.context = ability.context.clone();
+            resolve_ability_chain(state, &sub_with_context, events, depth + 1)?;
         } else if sub.targets.is_empty() && !ability.targets.is_empty() {
             let mut sub_with_targets = sub.as_ref().clone();
             sub_with_targets.targets = ability.targets.clone();
@@ -1043,6 +1066,7 @@ mod tests {
         SpellContext, TargetFilter, TargetRef,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
+    use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -1309,7 +1333,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_targets_no_tracked_set() {
+    fn empty_targets_record_empty_tracked_set_for_downstream_context() {
         let mut state = GameState::new_two_player(42);
 
         // Chain with uses_tracked_set: true but no targets — nothing to exile
@@ -1357,10 +1381,229 @@ mod tests {
         let mut events = Vec::new();
         resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
 
-        assert!(
-            state.tracked_object_sets.is_empty(),
-            "Should NOT record tracked set when no objects were moved"
+        assert_eq!(state.tracked_object_sets.len(), 1);
+        assert!(state
+            .tracked_object_sets
+            .get(&TrackedSetId(1))
+            .is_some_and(|objects| objects.is_empty()));
+    }
+
+    #[test]
+    fn airbend_chain_exiles_all_creatures_when_no_target_is_chosen() {
+        let mut state = GameState::new_two_player(42);
+        let creature_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature A".to_string(),
+            Zone::Battlefield,
         );
+        let creature_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Creature B".to_string(),
+            Zone::Battlefield,
+        );
+        for creature in [creature_a, creature_b] {
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        )
+        .sub_ability(
+            ResolvedAbility::new(
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Exile,
+                    target: TargetFilter::And {
+                        filters: vec![
+                            TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                            TargetFilter::Not {
+                                filter: Box::new(TargetFilter::ParentTarget),
+                            },
+                        ],
+                    },
+                },
+                vec![],
+                ObjectId(900),
+                PlayerId(0),
+            )
+            .sub_ability(ResolvedAbility::new(
+                Effect::GrantCastingPermission {
+                    permission: crate::types::ability::CastingPermission::ExileWithAltCost {
+                        cost: ManaCost::generic(2),
+                    },
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                },
+                vec![],
+                ObjectId(900),
+                PlayerId(0),
+            )),
+        );
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        for creature in [creature_a, creature_b] {
+            let obj = state.objects.get(&creature).unwrap();
+            assert_eq!(obj.zone, Zone::Exile);
+            assert!(obj.casting_permissions.iter().any(|permission| matches!(
+                permission,
+                crate::types::ability::CastingPermission::ExileWithAltCost { cost }
+                    if *cost == ManaCost::generic(2)
+            )));
+        }
+    }
+
+    #[test]
+    fn airbend_chain_preserves_chosen_target_and_exiles_other_creatures() {
+        let mut state = GameState::new_two_player(42);
+        let chosen = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Chosen".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Other".to_string(),
+            Zone::Battlefield,
+        );
+        for creature in [chosen, other] {
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+            },
+            vec![TargetRef::Object(chosen)],
+            ObjectId(901),
+            PlayerId(0),
+        )
+        .sub_ability(
+            ResolvedAbility::new(
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Exile,
+                    target: TargetFilter::And {
+                        filters: vec![
+                            TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                            TargetFilter::Not {
+                                filter: Box::new(TargetFilter::ParentTarget),
+                            },
+                        ],
+                    },
+                },
+                vec![],
+                ObjectId(901),
+                PlayerId(0),
+            )
+            .sub_ability(ResolvedAbility::new(
+                Effect::GrantCastingPermission {
+                    permission: crate::types::ability::CastingPermission::ExileWithAltCost {
+                        cost: ManaCost::generic(2),
+                    },
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                },
+                vec![],
+                ObjectId(901),
+                PlayerId(0),
+            )),
+        );
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.objects.get(&chosen).unwrap().zone, Zone::Battlefield);
+        let other_obj = state.objects.get(&other).unwrap();
+        assert_eq!(other_obj.zone, Zone::Exile);
+        assert!(other_obj
+            .casting_permissions
+            .iter()
+            .any(|permission| matches!(
+                permission,
+                crate::types::ability::CastingPermission::ExileWithAltCost { cost }
+                    if *cost == ManaCost::generic(2)
+            )));
+    }
+
+    #[test]
+    fn tracked_set_sentinel_does_not_reuse_prior_non_empty_set_when_current_move_is_empty() {
+        let mut state = GameState::new_two_player(42);
+        let stale = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Stale".to_string(),
+            Zone::Exile,
+        );
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![stale]);
+        state.next_tracked_set_id = 2;
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+            },
+            vec![],
+            ObjectId(902),
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::GrantCastingPermission {
+                permission: crate::types::ability::CastingPermission::ExileWithAltCost {
+                    cost: ManaCost::generic(2),
+                },
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+            },
+            vec![],
+            ObjectId(902),
+            PlayerId(0),
+        ));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(state
+            .tracked_object_sets
+            .get(&TrackedSetId(2))
+            .is_some_and(|objects| objects.is_empty()));
+        assert!(state
+            .objects
+            .get(&stale)
+            .is_some_and(|obj| obj.casting_permissions.is_empty()));
     }
 
     #[test]

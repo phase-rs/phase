@@ -162,6 +162,16 @@ pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // CR 514.2: Prune "until your next turn" transient effects for the active player.
     super::layers::prune_until_next_turn_effects(state, active);
+    state.restrictions.retain(|restriction| {
+        use crate::types::ability::{GameRestriction, RestrictionExpiry};
+
+        match restriction {
+            GameRestriction::CastOnlyFromZones { expiry, .. } => {
+                !matches!(expiry, RestrictionExpiry::UntilPlayerNextTurn { player } if *player == active)
+            }
+            GameRestriction::DamagePreventionDisabled { .. } => true,
+        }
+    });
     let to_untap: Vec<_> = state
         .battlefield
         .iter()
@@ -262,6 +272,9 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
         use crate::types::ability::{GameRestriction, RestrictionExpiry};
         match r {
             GameRestriction::DamagePreventionDisabled { expiry, .. } => {
+                !matches!(expiry, RestrictionExpiry::EndOfTurn)
+            }
+            GameRestriction::CastOnlyFromZones { expiry, .. } => {
                 !matches!(expiry, RestrictionExpiry::EndOfTurn)
             }
         }
@@ -1206,6 +1219,49 @@ mod tests {
         assert_eq!(state.restrictions.len(), 1);
         assert!(matches!(
             &state.restrictions[0],
+            GameRestriction::DamagePreventionDisabled {
+                expiry: RestrictionExpiry::EndOfCombat,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn execute_untap_prunes_until_player_next_turn_restrictions() {
+        use crate::types::ability::{GameRestriction, RestrictionExpiry, RestrictionPlayerScope};
+        use crate::types::identifiers::{CardId, ObjectId};
+
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(1);
+        let source = zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Avatar's Wrath".to_string(),
+            Zone::Exile,
+        );
+        state.restrictions.push(GameRestriction::CastOnlyFromZones {
+            source,
+            affected_players: RestrictionPlayerScope::OpponentsOfSourceController,
+            allowed_zones: vec![Zone::Hand],
+            expiry: RestrictionExpiry::UntilPlayerNextTurn {
+                player: PlayerId(1),
+            },
+        });
+        state
+            .restrictions
+            .push(GameRestriction::DamagePreventionDisabled {
+                source: ObjectId(2),
+                expiry: RestrictionExpiry::EndOfCombat,
+                scope: None,
+            });
+
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+
+        assert_eq!(state.restrictions.len(), 1);
+        assert!(matches!(
+            state.restrictions[0],
             GameRestriction::DamagePreventionDisabled {
                 expiry: RestrictionExpiry::EndOfCombat,
                 ..

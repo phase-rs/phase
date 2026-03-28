@@ -146,6 +146,7 @@ pub fn resolve_add_all(
         _ => return Ok(()),
     };
     let ct = parse_counter_type(&counter_type_str);
+    let target_filter = crate::game::effects::resolved_object_filter(ability, &target_filter);
 
     // Collect matching IDs first to avoid borrow conflict during mutation.
     let matching_ids: Vec<crate::types::identifiers::ObjectId> = state

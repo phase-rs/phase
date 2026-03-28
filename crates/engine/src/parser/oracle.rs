@@ -4672,6 +4672,64 @@ mod tests {
     }
 
     #[test]
+    fn avatars_wrath_parses_airbend_chain_cast_restriction_and_self_exile() {
+        let r = parse(
+            "Choose up to one target creature, then airbend all other creatures. (Exile them. While each one is exiled, its owner may cast it for {2} rather than its mana cost.)\nUntil your next turn, your opponents can't cast spells from anywhere other than their hands.\nExile Avatar's Wrath.",
+            "Avatar's Wrath",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+
+        assert_eq!(r.abilities.len(), 3);
+        assert!(matches!(
+            *r.abilities[0].effect,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(_),
+            }
+        ));
+        let airbend = r.abilities[0]
+            .sub_ability
+            .as_ref()
+            .expect("airbend clause should chain from TargetOnly");
+        assert!(matches!(
+            *airbend.effect,
+            Effect::ChangeZoneAll {
+                destination: Zone::Exile,
+                ..
+            }
+        ));
+        let permission = airbend
+            .sub_ability
+            .as_ref()
+            .expect("airbend clause should grant exile-cast permission");
+        assert!(matches!(
+            *permission.effect,
+            Effect::GrantCastingPermission { .. }
+        ));
+
+        assert!(matches!(
+            *r.abilities[1].effect,
+            Effect::AddRestriction {
+                restriction: crate::types::ability::GameRestriction::CastOnlyFromZones { .. }
+            }
+        ));
+        assert_eq!(
+            r.abilities[1].duration,
+            Some(crate::types::ability::Duration::UntilYourNextTurn)
+        );
+
+        assert!(matches!(
+            *r.abilities[2].effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn spell_damage_plus_doesnt_untap() {
         // Chandra's Revolution: "deals 4 damage to target creature. Tap target land.
         //                        That land doesn't untap during its controller's next untap step."

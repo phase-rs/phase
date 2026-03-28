@@ -614,6 +614,14 @@ pub enum GameRestriction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<RestrictionScope>,
     },
+    /// CR 101.2 + CR 601.2a: A temporary effect restricts affected players to casting
+    /// spells only from the listed zones until the restriction expires.
+    CastOnlyFromZones {
+        source: ObjectId,
+        affected_players: RestrictionPlayerScope,
+        allowed_zones: Vec<Zone>,
+        expiry: RestrictionExpiry,
+    },
 }
 
 /// When a game restriction expires.
@@ -622,6 +630,7 @@ pub enum GameRestriction {
 pub enum RestrictionExpiry {
     EndOfTurn,
     EndOfCombat,
+    UntilPlayerNextTurn { player: PlayerId },
 }
 
 /// Limits the scope of a game restriction to specific sources or targets.
@@ -631,6 +640,15 @@ pub enum RestrictionScope {
     SourcesControlledBy(PlayerId),
     SpecificSource(ObjectId),
     DamageToTarget(ObjectId),
+}
+
+/// Identifies which players are affected by a temporary game restriction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", content = "data")]
+pub enum RestrictionPlayerScope {
+    AllPlayers,
+    SpecificPlayer(PlayerId),
+    OpponentsOfSourceController,
 }
 
 // ---------------------------------------------------------------------------

@@ -21,12 +21,13 @@ use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChoiceType,
     Comparator, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect, FilterProp,
-    GainLifePlayer, MultiTargetSpec, NinjutsuVariant, PlayerFilter, PtValue, QuantityExpr,
-    QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
-    UnlessCost,
+    GainLifePlayer, GameRestriction, MultiTargetSpec, NinjutsuVariant, PlayerFilter, PtValue,
+    QuantityExpr, QuantityRef, RestrictionExpiry, RestrictionPlayerScope, StaticCondition,
+    StaticDefinition, TargetFilter, TypeFilter, TypedFilter, UnlessCost,
 };
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{DistributionUnit, RetargetScope};
+use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::statics::StaticMode;
@@ -50,6 +51,8 @@ pub(crate) struct ParseContext {
     /// The trigger subject, if parsing within a trigger effect.
     /// When Some and not SelfRef, bare pronouns ("it") resolve to TriggeringSource.
     pub subject: Option<TargetFilter>,
+    /// The card name for self-name effect parsing (e.g. "Exile Card Name.").
+    pub card_name: Option<String>,
 }
 
 /// CR 608.2k: Resolve bare pronoun ("it"/"itself"/"its") based on parser context.
@@ -258,6 +261,139 @@ fn try_parse_damage_prevention_disabled(tp: TextPair) -> Option<ParsedEffectClau
     })
 }
 
+fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    let (scope_tp, expiry, duration) = if let Some(rest) = tp.strip_prefix("until your next turn, ")
+    {
+        (
+            rest,
+            RestrictionExpiry::EndOfTurn,
+            Some(Duration::UntilYourNextTurn),
+        )
+    } else if let Some(rest) = tp.strip_prefix("this turn, ") {
+        (rest, RestrictionExpiry::EndOfTurn, None)
+    } else {
+        (tp, RestrictionExpiry::EndOfTurn, None)
+    };
+
+    if !scope_tp.contains("can't cast spells from anywhere other than") {
+        return None;
+    }
+
+    if !scope_tp.contains("their hand") && !scope_tp.contains("their hands") {
+        return None;
+    }
+
+    let affected_players =
+        if scope_tp.starts_with("your opponents") || scope_tp.starts_with("opponents") {
+            RestrictionPlayerScope::OpponentsOfSourceController
+        } else {
+            RestrictionPlayerScope::AllPlayers
+        };
+
+    Some(ParsedEffectClause {
+        effect: Effect::AddRestriction {
+            restriction: GameRestriction::CastOnlyFromZones {
+                source: ObjectId(0),
+                affected_players,
+                allowed_zones: vec![Zone::Hand],
+                expiry,
+            },
+        },
+        duration,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+    })
+}
+
+fn try_parse_self_name_exile(tp: TextPair<'_>, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+    let card_name = ctx.card_name.as_deref()?;
+    let rest = tp.strip_prefix("exile ")?;
+    if rest.original.trim().eq_ignore_ascii_case(card_name) {
+        return Some(parsed_clause(Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Exile,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enter_tapped: false,
+            enters_attacking: false,
+        }));
+    }
+    None
+}
+
+fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    let rest = tp.strip_prefix("airbend ")?;
+    let (target, after_target) = parse_target(rest.original);
+    let cost = parse_mana_symbols(after_target.trim_start())
+        .map(|(cost, _)| cost)
+        .unwrap_or(ManaCost::Cost {
+            generic: 2,
+            shards: vec![],
+        });
+    let lower_rest = rest.lower.trim_start();
+    let is_mass = lower_rest.starts_with("all ") || lower_rest.starts_with("each ");
+
+    let effect = if is_mass {
+        let mass_target = match target {
+            TargetFilter::Typed(mut typed) => {
+                let had_other = typed.properties.contains(&FilterProp::Another);
+                typed
+                    .properties
+                    .retain(|property| !matches!(property, FilterProp::Another));
+                let typed_filter = TargetFilter::Typed(typed);
+                if had_other {
+                    TargetFilter::And {
+                        filters: vec![
+                            typed_filter,
+                            TargetFilter::Not {
+                                filter: Box::new(TargetFilter::ParentTarget),
+                            },
+                        ],
+                    }
+                } else {
+                    typed_filter
+                }
+            }
+            other => other,
+        };
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Exile,
+            target: mass_target,
+        }
+    } else {
+        Effect::ChangeZone {
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Exile,
+            target,
+            owner_library: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enter_tapped: false,
+            enters_attacking: false,
+        }
+    };
+
+    Some(ParsedEffectClause {
+        effect,
+        duration: None,
+        sub_ability: Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::ExileWithAltCost { cost },
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+            },
+        ))),
+        distribute: None,
+        multi_target: None,
+    })
+}
+
 /// CR 608.2d: Parse "have it [verb]" / "have you [verb]" causative constructions.
 /// Used by "any opponent may" effects where the opponent causes the source or controller
 /// to perform an action (e.g., "have it deal 4 damage to them").
@@ -346,8 +482,20 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
         return clause;
     }
 
+    if let Some(clause) = try_parse_self_name_exile(tp, ctx) {
+        return clause;
+    }
+
     // CR 614.16: "Damage can't be prevented [this turn]" → Effect::AddRestriction
     if let Some(clause) = try_parse_damage_prevention_disabled(tp) {
+        return clause;
+    }
+
+    if let Some(clause) = try_parse_cast_only_from_zones_restriction(tp) {
+        return clause;
+    }
+
+    if let Some(clause) = try_parse_airbend_clause(tp) {
         return clause;
     }
 
@@ -8043,6 +8191,7 @@ mod tests {
     fn resolve_it_pronoun_self_ref_subject() {
         let ctx = ParseContext {
             subject: Some(TargetFilter::SelfRef),
+            ..Default::default()
         };
         assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::SelfRef);
     }
@@ -8055,6 +8204,7 @@ mod tests {
                 controller: Some(ControllerRef::You),
                 ..Default::default()
             })),
+            ..Default::default()
         };
         assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::TriggeringSource);
     }
@@ -8063,6 +8213,7 @@ mod tests {
     fn resolve_it_pronoun_attached_to_subject() {
         let ctx = ParseContext {
             subject: Some(TargetFilter::AttachedTo),
+            ..Default::default()
         };
         assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::TriggeringSource);
     }
@@ -8071,6 +8222,7 @@ mod tests {
     fn resolve_it_pronoun_any_subject() {
         let ctx = ParseContext {
             subject: Some(TargetFilter::Any),
+            ..Default::default()
         };
         assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::SelfRef);
     }
@@ -8388,5 +8540,54 @@ mod tests {
             effects.len() <= 2,
             "Noun-phrase 'and' should not cause split into many effects: {effects:?}"
         );
+    }
+
+    #[test]
+    fn parse_airbend_all_other_creatures_uses_parent_target_exclusion() {
+        let def = parse_effect_chain(
+            "Choose up to one target creature, then airbend all other creatures",
+            AbilityKind::Spell,
+        );
+        let airbend = def
+            .sub_ability
+            .as_ref()
+            .expect("airbend should chain from targeting clause");
+        assert!(matches!(
+            *airbend.effect,
+            Effect::ChangeZoneAll {
+                target: TargetFilter::And { .. },
+                ..
+            }
+        ));
+        if let Effect::ChangeZoneAll { target, .. } = &*airbend.effect {
+            assert!(matches!(
+                target,
+                TargetFilter::And { filters }
+                    if filters.iter().any(|filter| matches!(
+                        filter,
+                        TargetFilter::Not {
+                            filter
+                        } if matches!(filter.as_ref(), TargetFilter::ParentTarget)
+                    ))
+            ));
+        }
+    }
+
+    #[test]
+    fn parse_cast_only_from_hand_restriction_clause() {
+        let def = parse_effect_chain(
+            "Until your next turn, your opponents can't cast spells from anywhere other than their hands",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            *def.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::CastOnlyFromZones {
+                    allowed_zones,
+                    ..
+                }
+            } if allowed_zones == vec![Zone::Hand]
+        ));
+        assert_eq!(def.duration, Some(Duration::UntilYourNextTurn));
     }
 }
