@@ -16,7 +16,7 @@ use super::oracle_casting::{
 };
 use super::oracle_class::parse_class_oracle_text;
 use super::oracle_cost::parse_oracle_cost;
-use super::oracle_effect::parse_effect_chain;
+use super::oracle_effect::{parse_effect_chain, parse_effect_chain_with_context, ParseContext};
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
     extract_keyword_line, is_keyword_cost_line, parse_keyword_from_oracle,
@@ -149,6 +149,46 @@ fn ability_word_to_condition(word: &str) -> Option<crate::types::ability::Static
                 rhs: QuantityExpr::Fixed { value: 1 },
             })
         }
+        _ => None,
+    }
+}
+
+/// Convert an ability-word `StaticCondition` to an `AbilityCondition` for spell effects.
+fn ability_word_to_ability_condition(
+    cond: &Option<crate::types::ability::StaticCondition>,
+) -> Option<crate::types::ability::AbilityCondition> {
+    use crate::types::ability::{AbilityCondition, StaticCondition};
+    match cond.as_ref()? {
+        StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } => Some(AbilityCondition::QuantityCheck {
+            lhs: lhs.clone(),
+            comparator: *comparator,
+            rhs: rhs.clone(),
+        }),
+        _ => None,
+    }
+}
+
+/// Convert an ability-word condition to a `TriggerCondition`.
+/// All known ability words use `StaticCondition::QuantityComparison`, which maps
+/// directly to `TriggerCondition::QuantityComparison`.
+fn ability_word_to_trigger_condition(
+    word: &str,
+) -> Option<crate::types::ability::TriggerCondition> {
+    use crate::types::ability::{StaticCondition, TriggerCondition};
+    match ability_word_to_condition(word)? {
+        StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } => Some(TriggerCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        }),
         _ => None,
     }
 }
@@ -495,13 +535,18 @@ pub fn parse_oracle_text(
         // "Constellation — Whenever ..."). Must intercept BEFORE is_static_pattern and
         // is_replacement_pattern checks, which would otherwise match on keywords like
         // "prevent" in the effect text and misroute the line.
-        if let Some(effect_text) = strip_ability_word(&line) {
+        if let Some((aw_name, effect_text)) = strip_ability_word_with_name(&line) {
             let effect_lower = effect_text.to_lowercase();
             if effect_lower.starts_with("when ")
                 || effect_lower.starts_with("whenever ")
                 || effect_lower.starts_with("at ")
             {
                 let mut trigger = parse_trigger_line(&effect_text, card_name);
+                // B7: Attach ability-word condition as fallback when extract_if_condition
+                // doesn't recognize the intervening-if pattern.
+                if trigger.condition.is_none() {
+                    trigger.condition = ability_word_to_trigger_condition(&aw_name);
+                }
                 i += 1;
                 if effect_lower.contains("roll a d") {
                     if let Some(ref mut execute) = trigger.execute {
@@ -536,6 +581,23 @@ pub fn parse_oracle_text(
                         || lower.contains("until your next turn")
                         || lower.contains("this turn")));
             if !defer_to_effect_parser {
+                // B7: Ability-word-prefixed static lines — strip prefix and attach condition.
+                // Must happen here (Priority 7) because Priority 9 (spell catch-all) would
+                // otherwise consume the line before Priority 14 for instants/sorceries.
+                if let Some((aw_name, effect_text)) = strip_ability_word_with_name(&line) {
+                    let effect_static = normalize_self_refs_for_static(&effect_text, card_name);
+                    if let Some(mut static_def) = parse_static_line(&effect_static) {
+                        if static_def.condition.is_none() {
+                            if let Some(cond) = ability_word_to_condition(&aw_name) {
+                                static_def.condition = Some(cond);
+                            }
+                        }
+                        static_def.description = Some(line.to_string());
+                        result.statics.push(static_def);
+                        i += 1;
+                        continue;
+                    }
+                }
                 // B20: Handle compound "can't win/lose" lines by splitting
                 // at " and " so both CantWinTheGame and CantLoseTheGame emit.
                 // CR 104.3a / CR 104.3b: Both restrictions must be independent statics.
@@ -680,8 +742,25 @@ pub fn parse_oracle_text(
 
         // Priority 9: Imperative verb for instants/sorceries
         if is_spell {
-            let mut def = parse_effect_chain(&line, AbilityKind::Spell);
+            // B7: Strip ability-word prefix and attach condition for spell effects.
+            let (aw_condition, effect_line) =
+                if let Some((aw_name, effect_text)) = strip_ability_word_with_name(&line) {
+                    (ability_word_to_condition(&aw_name), effect_text)
+                } else {
+                    (None, line.clone())
+                };
+            let mut def = parse_effect_chain_with_context(
+                &effect_line,
+                AbilityKind::Spell,
+                &ParseContext {
+                    subject: None,
+                    card_name: Some(card_name.to_string()),
+                },
+            );
             def.description = Some(line.to_string());
+            if def.condition.is_none() {
+                def.condition = ability_word_to_ability_condition(&aw_condition);
+            }
             i += 1;
             // CR 706: If the parsed chain ends with "roll a dN", consume
             // subsequent d20 table lines and attach them as die result branches.
@@ -792,7 +871,14 @@ pub fn parse_oracle_text(
                 }
             }
             // Try as effect
-            let def = parse_effect_chain(&effect_text, AbilityKind::Spell);
+            let def = parse_effect_chain_with_context(
+                &effect_text,
+                AbilityKind::Spell,
+                &ParseContext {
+                    subject: None,
+                    card_name: Some(card_name.to_string()),
+                },
+            );
             if !has_unimplemented(&def) {
                 result.abilities.push(def);
                 i += 1;
@@ -802,7 +888,14 @@ pub fn parse_oracle_text(
 
         // Priority 14a: "damage can't be prevented" → AddRestriction effect
         if lower.contains("damage") && lower.contains("can't be prevented") {
-            let def = parse_effect_chain(&line, AbilityKind::Spell);
+            let def = parse_effect_chain_with_context(
+                &line,
+                AbilityKind::Spell,
+                &ParseContext {
+                    subject: None,
+                    card_name: Some(card_name.to_string()),
+                },
+            );
             if !has_unimplemented(&def) {
                 result.abilities.push(def);
                 i += 1;
@@ -812,7 +905,14 @@ pub fn parse_oracle_text(
 
         // Priority 14b: Try parsing as effect even for non-spells
         if is_effect_sentence_candidate(&lower) {
-            let def = parse_effect_chain(&line, AbilityKind::Spell);
+            let def = parse_effect_chain_with_context(
+                &line,
+                AbilityKind::Spell,
+                &ParseContext {
+                    subject: None,
+                    card_name: Some(card_name.to_string()),
+                },
+            );
             if !has_unimplemented(&def) {
                 result.abilities.push(def);
                 i += 1;
