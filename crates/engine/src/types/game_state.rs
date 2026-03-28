@@ -466,6 +466,16 @@ pub enum WaitingFor {
         cost: AdditionalCost,
         pending_cast: Box<PendingCast>,
     },
+    /// CR 601.2b: Defiler cycle — player may pay life to reduce mana cost of a colored
+    /// permanent spell. Presented when a controlled Defiler matches the spell's color.
+    DefilerPayment {
+        player: PlayerId,
+        /// Life cost if accepted (e.g. 2)
+        life_cost: u32,
+        /// Mana cost reduction if life is paid (e.g. {G})
+        mana_reduction: ManaCost,
+        pending_cast: Box<PendingCast>,
+    },
     /// CR 715.3a: Player chooses creature face vs Adventure half when casting
     /// an Adventure card from hand (or exile with permission).
     AdventureCastChoice {
@@ -762,6 +772,7 @@ impl WaitingFor {
             | WaitingFor::ModeChoice { player, .. }
             | WaitingFor::DiscardToHandSize { player, .. }
             | WaitingFor::OptionalCostChoice { player, .. }
+            | WaitingFor::DefilerPayment { player, .. }
             | WaitingFor::AbilityModeChoice { player, .. }
             | WaitingFor::MultiTargetSelection { player, .. }
             | WaitingFor::AdventureCastChoice { player, .. }
@@ -800,6 +811,7 @@ impl WaitingFor {
                 | WaitingFor::TargetSelection { .. }
                 | WaitingFor::ModeChoice { .. }
                 | WaitingFor::OptionalCostChoice { .. }
+                | WaitingFor::DefilerPayment { .. }
                 | WaitingFor::DiscardForCost { .. }
                 | WaitingFor::SacrificeForCost { .. }
                 | WaitingFor::ExileFromGraveyardForCost { .. }
@@ -1760,7 +1772,13 @@ mod tests {
             source_id: ObjectId(100),
             effect_kind: crate::types::ability::EffectKind::Discard,
         }));
-        assert_eq!(variants.len(), 23);
+        variants.push(Box::new(WaitingFor::DefilerPayment {
+            player: PlayerId(0),
+            life_cost: 2,
+            mana_reduction: ManaCost::zero(),
+            pending_cast: dummy_pending(),
+        }));
+        assert_eq!(variants.len(), 24);
     }
 
     #[test]

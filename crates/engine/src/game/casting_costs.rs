@@ -485,6 +485,20 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         }
     }
 
+    // CR 601.2b: Check for Defiler cost reduction — optional life payment for colored mana
+    // reduction on matching-color permanent spells.
+    if let Some((life_cost, mana_reduction)) = find_defiler_reduction(state, player, object_id) {
+        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        pending.casting_variant = casting_variant;
+        pending.distribute = distribute;
+        return Ok(WaitingFor::DefilerPayment {
+            player,
+            life_cost,
+            mana_reduction,
+            pending_cast: Box::new(pending),
+        });
+    }
+
     pay_and_push(
         state,
         player,
@@ -494,6 +508,124 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         cost,
         casting_variant,
         distribute,
+        events,
+    )
+}
+
+/// CR 601.2b: Find the first applicable Defiler cost reduction for a spell being cast.
+/// Returns `Some((life_cost, mana_reduction))` if a controlled Defiler permanent has
+/// `DefilerCostReduction` matching one of the spell's colors and the spell is a permanent spell.
+fn find_defiler_reduction(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+) -> Option<(u32, crate::types::mana::ManaCost)> {
+    use crate::types::statics::StaticMode;
+
+    let spell = state.objects.get(&spell_id)?;
+
+    // Defiler only applies to permanent spells (not instants/sorceries)
+    let is_permanent = spell.card_types.core_types.iter().any(|ct| {
+        matches!(
+            ct,
+            crate::types::card_type::CoreType::Creature
+                | crate::types::card_type::CoreType::Artifact
+                | crate::types::card_type::CoreType::Enchantment
+                | crate::types::card_type::CoreType::Planeswalker
+        )
+    });
+    if !is_permanent {
+        return None;
+    }
+
+    let spell_colors = &spell.color;
+    if spell_colors.is_empty() {
+        return None;
+    }
+
+    for &bf_id in &state.battlefield {
+        let bf_obj = state.objects.get(&bf_id)?;
+        if bf_obj.controller != caster {
+            continue;
+        }
+        for def in &bf_obj.static_definitions {
+            if let StaticMode::DefilerCostReduction {
+                color,
+                life_cost,
+                mana_reduction,
+            } = &def.mode
+            {
+                if spell_colors.contains(color) {
+                    return Some((*life_cost, mana_reduction.clone()));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// CR 601.2b: Handle the player's decision on Defiler life payment.
+/// If accepted, pays life and reduces the spell's mana cost, then continues to mana payment.
+/// If declined, continues with the original cost.
+pub(crate) fn handle_defiler_payment(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    life_cost: u32,
+    mana_reduction: &crate::types::mana::ManaCost,
+    pay: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let mut cost = pending.cost.clone();
+
+    if pay {
+        // Pay life
+        let player_state = &mut state.players[player.0 as usize];
+        player_state.life -= life_cost as i32;
+        events.push(GameEvent::LifeChanged {
+            player_id: player,
+            amount: -(life_cost as i32),
+        });
+
+        // Reduce mana cost — remove matching colored shards from the spell cost
+        if let (
+            crate::types::mana::ManaCost::Cost {
+                shards: spell_shards,
+                ..
+            },
+            crate::types::mana::ManaCost::Cost {
+                shards: reduction_shards,
+                generic: reduction_generic,
+            },
+        ) = (&mut cost, mana_reduction)
+        {
+            // Remove colored shards from spell cost that match the reduction
+            for shard in reduction_shards {
+                if let Some(pos) = spell_shards.iter().position(|s| s == shard) {
+                    spell_shards.remove(pos);
+                }
+            }
+            // Also reduce generic if the reduction specifies generic mana
+            if let crate::types::mana::ManaCost::Cost {
+                generic: spell_generic,
+                ..
+            } = &mut cost
+            {
+                *spell_generic = spell_generic.saturating_sub(*reduction_generic);
+            }
+        }
+    }
+
+    pay_and_push(
+        state,
+        player,
+        pending.object_id,
+        pending.card_id,
+        pending.ability,
+        &cost,
+        pending.casting_variant,
+        pending.distribute,
         events,
     )
 }
@@ -1364,5 +1496,240 @@ mod tests {
         });
         // {1}{U} + {2}{U} = {3}{U}{U}
         assert_eq!(adjusted.mana_value(), 5);
+    }
+
+    // --- CR 601.2b: Defiler cost reduction tests ---
+
+    #[test]
+    fn find_defiler_reduction_matches_color() {
+        use crate::types::ability::StaticDefinition;
+        use crate::types::mana::{ManaColor, ManaCostShard};
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Create a green creature spell being cast
+        let spell_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&spell_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.objects.get_mut(&spell_id).unwrap().color = vec![ManaColor::Green];
+
+        // Create Defiler of Vigor (green Defiler) on battlefield
+        let defiler_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Defiler of Vigor".to_string(),
+            Zone::Battlefield,
+        );
+        let reduction = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        };
+        state
+            .objects
+            .get_mut(&defiler_id)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::DefilerCostReduction {
+                color: ManaColor::Green,
+                life_cost: 2,
+                mana_reduction: reduction.clone(),
+            }));
+
+        let result = find_defiler_reduction(&state, PlayerId(0), spell_id);
+        assert!(
+            result.is_some(),
+            "Should find Defiler reduction for green spell"
+        );
+        let (life, mana_red) = result.unwrap();
+        assert_eq!(life, 2);
+        assert_eq!(mana_red, reduction);
+    }
+
+    #[test]
+    fn find_defiler_reduction_ignores_wrong_color() {
+        use crate::types::ability::StaticDefinition;
+        use crate::types::mana::{ManaColor, ManaCostShard};
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Create a red creature spell
+        let spell_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Goblin Guide".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&spell_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.objects.get_mut(&spell_id).unwrap().color = vec![ManaColor::Red];
+
+        // Create Defiler of Vigor (green) — should not match red spell
+        let defiler_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Defiler of Vigor".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&defiler_id)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::DefilerCostReduction {
+                color: ManaColor::Green,
+                life_cost: 2,
+                mana_reduction: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Green],
+                    generic: 0,
+                },
+            }));
+
+        let result = find_defiler_reduction(&state, PlayerId(0), spell_id);
+        assert!(
+            result.is_none(),
+            "Green Defiler should not reduce red spell"
+        );
+    }
+
+    #[test]
+    fn find_defiler_reduction_ignores_non_permanent() {
+        use crate::types::ability::StaticDefinition;
+        use crate::types::mana::{ManaColor, ManaCostShard};
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Create a green instant spell (not a permanent)
+        let spell_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Giant Growth".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&spell_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Instant);
+        state.objects.get_mut(&spell_id).unwrap().color = vec![ManaColor::Green];
+
+        // Create Defiler
+        let defiler_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Defiler of Vigor".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&defiler_id)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::DefilerCostReduction {
+                color: ManaColor::Green,
+                life_cost: 2,
+                mana_reduction: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Green],
+                    generic: 0,
+                },
+            }));
+
+        let result = find_defiler_reduction(&state, PlayerId(0), spell_id);
+        assert!(
+            result.is_none(),
+            "Defiler should not reduce non-permanent spells"
+        );
+    }
+
+    #[test]
+    fn handle_defiler_payment_accepted_reduces_cost() {
+        use crate::types::mana::ManaCostShard;
+
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Creature".to_string(),
+            Zone::Hand,
+        );
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "Permanent".to_string(),
+                description: None,
+            },
+            Vec::new(),
+            spell_id,
+            PlayerId(0),
+        );
+
+        let pending = PendingCast::new(
+            spell_id,
+            CardId(1),
+            ability,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+                generic: 2,
+            },
+        );
+
+        let mana_reduction = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        };
+
+        let mut events = Vec::new();
+        let _result = handle_defiler_payment(
+            &mut state,
+            PlayerId(0),
+            pending,
+            2,
+            &mana_reduction,
+            true,
+            &mut events,
+        );
+
+        // Life should be reduced by 2
+        assert_eq!(state.players[0].life, 18, "Life should decrease by 2");
+
+        // Check that a LifeChanged event was emitted
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::LifeChanged {
+                    player_id,
+                    amount: -2
+                } if *player_id == PlayerId(0)
+            )),
+            "Should emit LifeChanged event"
+        );
     }
 }

@@ -427,6 +427,35 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             casting::handle_cancel_cast(state, pending_cast, &mut events);
             WaitingFor::Priority { player: *player }
         }
+        // CR 601.2b: Defiler cycle — player decides whether to pay life for mana reduction.
+        (
+            WaitingFor::DefilerPayment {
+                player,
+                life_cost,
+                mana_reduction,
+                pending_cast,
+            },
+            GameAction::DecideOptionalCost { pay },
+        ) => casting_costs::handle_defiler_payment(
+            state,
+            *player,
+            *pending_cast.clone(),
+            *life_cost,
+            mana_reduction,
+            pay,
+            &mut events,
+        )?,
+        (
+            WaitingFor::DefilerPayment {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => {
+            casting::handle_cancel_cast(state, pending_cast, &mut events);
+            WaitingFor::Priority { player: *player }
+        }
         // CR 601.2b: Player selected cards to discard as additional casting cost.
         (
             WaitingFor::DiscardForCost {

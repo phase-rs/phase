@@ -354,6 +354,19 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        // CR 601.2b: Defiler cycle — accept or decline life payment for mana reduction.
+        WaitingFor::DefilerPayment { player, .. } => vec![
+            candidate(
+                GameAction::DecideOptionalCost { pay: true },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::DecideOptionalCost { pay: false },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+        ],
         WaitingFor::DiscardForCost {
             player,
             count,

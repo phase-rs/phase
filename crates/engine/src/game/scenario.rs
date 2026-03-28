@@ -1047,6 +1047,7 @@ impl GameRunner {
             WaitingFor::ModeChoice { .. } => "ModeChoice",
             WaitingFor::DiscardToHandSize { .. } => "DiscardToHandSize",
             WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
+            WaitingFor::DefilerPayment { .. } => "DefilerPayment",
             WaitingFor::AdventureCastChoice { .. } => "AdventureCastChoice",
             WaitingFor::WarpCostChoice { .. } => "WarpCostChoice",
             WaitingFor::MultiTargetSelection { .. } => "MultiTargetSelection",

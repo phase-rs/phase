@@ -271,6 +271,16 @@ fn deterministic_choice(
         return Some(GameAction::DecideOptionalCost { pay: true });
     }
 
+    // CR 601.2b: Defiler — accept life payment when life cushion is sufficient.
+    if let WaitingFor::DefilerPayment {
+        life_cost, player, ..
+    } = &state.waiting_for
+    {
+        let life = state.players[player.0 as usize].life;
+        let pay = life > (*life_cost as i32) * 3;
+        return Some(GameAction::DecideOptionalCost { pay });
+    }
+
     if let WaitingFor::OptionalEffectChoice { .. } = &state.waiting_for {
         return Some(GameAction::DecideOptionalEffect { accept: true });
     }

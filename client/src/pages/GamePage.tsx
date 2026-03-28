@@ -854,6 +854,12 @@ function GamePageContent({
           <OptionalCostModal />
         )}
 
+      {/* Defiler cycle — optional life payment for mana reduction */}
+      {waitingFor?.type === "DefilerPayment" &&
+        waitingFor.data.player === playerId && (
+          <DefilerPaymentModal />
+        )}
+
       {/* Optional effect choice ("You may X") / Opponent may choice */}
       {(waitingFor?.type === "OptionalEffectChoice" || waitingFor?.type === "OpponentMayChoice") &&
         waitingFor.data.player === playerId && (
@@ -1623,6 +1629,32 @@ function OptionalCostModal() {
         dispatch({ type: "DecideOptionalCost", data: { pay: id === "pay" } })
       }
       onClose={isMandatoryChoice ? undefined : () => dispatch({ type: "CancelCast" })}
+    />
+  );
+}
+
+// ── Defiler Payment Modal ────────────────────────────────────────────
+
+function DefilerPaymentModal() {
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+
+  if (waitingFor?.type !== "DefilerPayment") return null;
+
+  const { life_cost } = waitingFor.data;
+
+  return (
+    <ChoiceModal
+      title="Defiler Cost Reduction"
+      subtitle={`Pay ${life_cost} life to reduce the mana cost?`}
+      options={[
+        { id: "pay", label: `Pay ${life_cost} life` },
+        { id: "skip", label: "Decline" },
+      ]}
+      onChoose={(id) =>
+        dispatch({ type: "DecideOptionalCost", data: { pay: id === "pay" } })
+      }
+      onClose={() => dispatch({ type: "CancelCast" })}
     />
   );
 }

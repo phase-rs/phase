@@ -397,6 +397,7 @@ export type WaitingFor =
   | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; unavailable_modes?: number[] } }
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
   | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; pending_cast: PendingCast } }
+  | { type: "DefilerPayment"; data: { player: PlayerId; life_cost: number; mana_reduction: ManaCost; pending_cast: PendingCast } }
   | { type: "AdventureCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
   | { type: "WarpCostChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; normal_cost: ManaCost; warp_cost: ManaCost } }
   | { type: "DiscardForCost"; data: { player: PlayerId; count: number; cards: ObjectId[]; pending_cast: PendingCast } }
