@@ -50,6 +50,8 @@ fn main() {
     let mut names_out: Option<PathBuf> = None;
     let mut stats = false;
     let mut filter_names: Vec<String> = Vec::new();
+    #[cfg(feature = "forge")]
+    let mut forge_path: Option<PathBuf> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -83,6 +85,15 @@ fn main() {
                     .split('|')
                     .map(|s| s.trim().to_lowercase())
                     .collect();
+            }
+            #[cfg(feature = "forge")]
+            "--forge" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --forge requires a path to Forge cardsfolder/");
+                    process::exit(1);
+                }
+                forge_path = Some(PathBuf::from(&args[i]));
             }
             _ if data_dir.is_none() && !args[i].starts_with('-') => {
                 data_dir = Some(PathBuf::from(&args[i]));
@@ -130,6 +141,25 @@ fn main() {
         }
     };
 
+    // Build Forge index if --forge flag or PHASE_FORGE_PATH env var is set.
+    #[cfg(feature = "forge")]
+    let forge_index = {
+        let path = forge_path.or_else(|| std::env::var("PHASE_FORGE_PATH").ok().map(PathBuf::from));
+        match path {
+            Some(p) if p.exists() => {
+                eprintln!("Building Forge index from: {}", p.display());
+                let idx = engine::database::forge::ForgeIndex::scan(&p);
+                eprintln!("Forge index: {} face names", idx.len());
+                Some(idx)
+            }
+            Some(p) => {
+                eprintln!("Warning: Forge path {} not found, skipping", p.display());
+                None
+            }
+            None => None,
+        }
+    };
+
     let mut face_index: BTreeMap<String, CardExportEntry> = BTreeMap::new();
     let mut total_cards = 0u32;
     let mut cards_with_unimplemented = 0u32;
@@ -173,19 +203,22 @@ fn main() {
                 }
             }
 
-            for face in layout_faces(&layout) {
-                let key = face.name.to_lowercase();
+            for face_ref in layout_faces(&layout) {
+                let key = face_ref.name.to_lowercase();
                 let legalities = legalities_by_face.remove(&key).unwrap_or_default();
-                face_index.insert(
-                    key,
-                    CardExportEntry {
-                        face: face.clone(),
-                        legalities,
-                    },
-                );
+                let mut face = face_ref.clone();
+                #[cfg(feature = "forge")]
+                if let Some(ref fi) = forge_index {
+                    engine::database::forge::apply_forge_fallback(&mut face, fi);
+                }
+                face_index.insert(key, CardExportEntry { face, legalities });
             }
         } else {
-            let face = build_oracle_face(&faces[0], oracle_id);
+            let mut face = build_oracle_face(&faces[0], oracle_id);
+            #[cfg(feature = "forge")]
+            if let Some(ref fi) = forge_index {
+                engine::database::forge::apply_forge_fallback(&mut face, fi);
+            }
             let key = face.name.to_lowercase();
             let legalities = legalities_to_export_map(&normalize_legalities(&faces[0].legalities));
 
