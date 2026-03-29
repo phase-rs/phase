@@ -229,6 +229,7 @@ pub(crate) fn extract_player_from_event(
         GameEvent::SpellCast { controller, .. } => Some(*controller),
         GameEvent::PermanentSacrificed { player_id, .. } => Some(*player_id),
         GameEvent::Cycled { player_id, .. } => Some(*player_id),
+        GameEvent::PlayerPerformedAction { player_id, .. } => Some(*player_id),
         GameEvent::CrimeCommitted { player_id, .. } => Some(*player_id),
         GameEvent::PlayerEliminated { player_id, .. } => Some(*player_id),
         // For object-centric events, extract the controller
@@ -1234,6 +1235,17 @@ mod tests {
             target: TargetRef::Object(creature_id),
             amount: 2,
             is_combat: false,
+        };
+        let result = extract_player_from_event(&event, &state);
+        assert_eq!(result, Some(PlayerId(1)));
+    }
+
+    #[test]
+    fn extract_player_from_player_action_returns_acting_player() {
+        let state = GameState::new_two_player(42);
+        let event = crate::types::events::GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(1),
+            action: crate::types::events::PlayerActionKind::Scry,
         };
         let result = extract_player_from_event(&event, &state);
         assert_eq!(result, Some(PlayerId(1)));

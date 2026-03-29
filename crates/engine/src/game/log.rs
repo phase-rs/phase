@@ -167,7 +167,8 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::CompanionMovedToHand { .. }
         | GameEvent::EnergyChanged { .. }
         | GameEvent::PlayerCounterChanged { .. }
-        | GameEvent::ManaExpended { .. } => LogCategory::Special,
+        | GameEvent::ManaExpended { .. }
+        | GameEvent::PlayerPerformedAction { .. } => LogCategory::Special,
     }
 }
 
@@ -193,6 +194,12 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::PriorityPassed { player_id } => {
             vec![player_seg(state, *player_id), text(" passes priority")]
         }
+
+        GameEvent::PlayerPerformedAction { player_id, action } => vec![
+            player_seg(state, *player_id),
+            text(" performed action "),
+            text(&format!("{action:?}")),
+        ],
 
         GameEvent::SpellCast {
             controller,

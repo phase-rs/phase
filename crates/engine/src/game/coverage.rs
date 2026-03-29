@@ -1147,7 +1147,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Seek { .. }
         | Effect::SetLifeTotal { .. }
         | Effect::SetDayNight { .. }
-        | Effect::GiveControl { .. } => {}
+        | Effect::GiveControl { .. }
+        | Effect::Learn => {}
     }
     d
 }

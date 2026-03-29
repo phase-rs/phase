@@ -8,7 +8,7 @@ use crate::game::mana_abilities;
 use crate::game::mana_sources;
 use crate::types::ability::ChoiceType;
 use crate::types::ability::TargetRef;
-use crate::types::actions::GameAction;
+use crate::types::actions::{GameAction, LearnOption};
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{ConvokeMode, GameState, TargetSelectionSlot, WaitingFor};
 use crate::types::match_config::DeckCardCount;
@@ -169,6 +169,29 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        // CR 701.48a: Learn — rummage each card in hand, or skip.
+        WaitingFor::LearnChoice { player, hand_cards } => {
+            let mut actions: Vec<_> = hand_cards
+                .iter()
+                .map(|&card_id| {
+                    candidate(
+                        GameAction::LearnDecision {
+                            choice: LearnOption::Rummage { card_id },
+                        },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
+                })
+                .collect();
+            actions.push(candidate(
+                GameAction::LearnDecision {
+                    choice: LearnOption::Skip,
+                },
+                TacticalClass::Selection,
+                Some(*player),
+            ));
+            actions
+        }
         WaitingFor::TapCreaturesForManaAbility {
             player,
             count,

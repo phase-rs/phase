@@ -7,7 +7,7 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ChoiceType, ChoiceValue, ChosenAttribute, Effect,
     EffectKind, ResolvedAbility, TargetFilter, TargetRef, UnlessCost,
 };
-use crate::types::actions::GameAction;
+use crate::types::actions::{GameAction, LearnOption};
 use crate::types::events::{BendingType, GameEvent};
 use crate::types::game_state::{
     ActionResult, AutoPassMode, AutoPassRequest, ConvokeMode, GameState, WaitingFor,
@@ -1758,6 +1758,59 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 }
             }
 
+            state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
+            if let Some(cont) = state.pending_continuation.take() {
+                let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
+            }
+            state.waiting_for.clone()
+        }
+        // CR 701.48a: Learn — player chose to rummage or skip.
+        (WaitingFor::LearnChoice { player, hand_cards }, GameAction::LearnDecision { choice }) => {
+            let p = *player;
+            let legal = hand_cards.clone();
+            match choice.clone() {
+                LearnOption::Rummage { card_id } => {
+                    let cid = card_id;
+                    if !legal.contains(&cid) {
+                        return Err(EngineError::InvalidAction(
+                            "Selected card not in hand".to_string(),
+                        ));
+                    }
+                    // CR 701.48a: Discard through standard pipeline (triggers Madness etc.)
+                    if let effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
+                        effects::discard::discard_as_cost(state, cid, p, &mut events)
+                    {
+                        state.waiting_for =
+                            crate::game::replacement::replacement_choice_waiting_for(
+                                choice_player,
+                                state,
+                            );
+                        return Ok(ActionResult {
+                            events,
+                            waiting_for: state.waiting_for.clone(),
+                            log_entries: vec![],
+                        });
+                    }
+                    // CR 701.48a: Draw one card.
+                    let draw_ability = ResolvedAbility::new(
+                        Effect::Draw {
+                            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        },
+                        vec![],
+                        ObjectId(0),
+                        p,
+                    );
+                    let _ = effects::draw::resolve(state, &draw_ability, &mut events);
+                }
+                LearnOption::Skip => {
+                    // Declining to learn — no effect.
+                }
+            }
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::Learn,
+                source_id: ObjectId(0),
+            });
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;
             if let Some(cont) = state.pending_continuation.take() {

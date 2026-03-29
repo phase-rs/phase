@@ -16,6 +16,7 @@ use super::statics::StaticMode;
 use super::triggers::TriggerMode;
 use super::zones::Zone;
 use crate::game::game_object::CounterType;
+use crate::types::events::PlayerActionKind;
 
 // ---------------------------------------------------------------------------
 // Supporting types
@@ -2499,6 +2500,8 @@ pub enum Effect {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
     },
+    /// CR 701.48a: Learn — you may discard a card to draw a card, or get a Lesson from outside the game.
+    Learn,
     /// CR 702.166a: Forage — exile three cards from your graveyard or sacrifice a Food.
     Forage,
     /// CR 702.163a: Collect evidence N — exile cards with total mana value N or more from graveyard.
@@ -2753,6 +2756,7 @@ impl Effect {
             | Effect::Monstrosity { .. }
             | Effect::Bolster { .. }
             | Effect::Adapt { .. }
+            | Effect::Learn
             | Effect::Forage
             | Effect::CollectEvidence { .. }
             | Effect::Endure { .. }
@@ -2869,6 +2873,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::RuntimeHandled { handler } => match handler {
             RuntimeHandler::NinjutsuFamily => "RuntimeHandled:NinjutsuFamily",
         },
+        Effect::Learn => "Learn",
         Effect::Forage => "Forage",
         Effect::CollectEvidence { .. } => "CollectEvidence",
         Effect::Endure { .. } => "Endure",
@@ -2987,6 +2992,7 @@ pub enum EffectKind {
     AdditionalCombatPhase,
     Double,
     RuntimeHandled,
+    Learn,
     Forage,
     CollectEvidence,
     Endure,
@@ -3106,6 +3112,7 @@ impl From<&Effect> for EffectKind {
             Effect::AdditionalCombatPhase { .. } => EffectKind::AdditionalCombatPhase,
             Effect::Double { .. } => EffectKind::Double,
             Effect::RuntimeHandled { .. } => EffectKind::RuntimeHandled,
+            Effect::Learn => EffectKind::Learn,
             Effect::Forage => EffectKind::Forage,
             Effect::CollectEvidence { .. } => EffectKind::CollectEvidence,
             Effect::Endure { .. } => EffectKind::Endure,
@@ -3854,6 +3861,9 @@ pub struct TriggerDefinition {
     /// CR 508.3a: Filter for attack target type ("attacks a planeswalker").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attack_target_filter: Option<crate::types::triggers::AttackTargetFilter>,
+    /// Typed player actions for PlayerPerformedAction trigger mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_actions: Option<Vec<PlayerActionKind>>,
 }
 
 impl TriggerDefinition {
@@ -3879,6 +3889,7 @@ impl TriggerDefinition {
             batched: false,
             expend_threshold: None,
             attack_target_filter: None,
+            player_actions: None,
         }
     }
 
@@ -3954,6 +3965,11 @@ impl TriggerDefinition {
 
     pub fn counter_filter(mut self, filter: CounterTriggerFilter) -> Self {
         self.counter_filter = Some(filter);
+        self
+    }
+
+    pub fn player_actions(mut self, actions: Vec<PlayerActionKind>) -> Self {
+        self.player_actions = Some(actions);
         self
     }
 }
@@ -4675,6 +4691,7 @@ mod tests {
             batched: false,
             expend_threshold: None,
             attack_target_filter: None,
+            player_actions: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: TriggerDefinition = serde_json::from_str(&json).unwrap();

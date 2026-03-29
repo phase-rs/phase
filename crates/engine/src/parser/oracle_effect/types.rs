@@ -190,6 +190,8 @@ pub(super) enum ImperativeFamilyAst {
     /// CR 509.1c: Must be blocked this turn if able.
     MustBeBlocked,
     Investigate,
+    /// CR 701.48a: Learn.
+    Learn,
     /// CR 701.62a: Manifest dread.
     ManifestDread,
     BecomeMonarch,

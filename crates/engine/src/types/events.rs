@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::game::game_object::CounterType;
@@ -16,6 +17,13 @@ pub enum BendingType {
     Air,
     Earth,
     Water,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum PlayerActionKind {
+    SearchedLibrary,
+    Scry,
+    Surveil,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,6 +198,10 @@ pub enum GameEvent {
     Cycled {
         player_id: PlayerId,
         object_id: ObjectId,
+    },
+    PlayerPerformedAction {
+        player_id: PlayerId,
+        action: PlayerActionKind,
     },
     /// CR 701.19a: Regeneration shield — consumed on use, expires at cleanup.
     Regenerated {

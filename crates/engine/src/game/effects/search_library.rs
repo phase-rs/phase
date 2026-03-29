@@ -1,6 +1,6 @@
 use crate::game::filter::matches_target_filter_controlled;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, WaitingFor};
 
 /// CR 701.23a + CR 401.2: Search a library — look through it, find card(s) matching criteria, then shuffle.
@@ -20,6 +20,10 @@ pub fn resolve(
         .iter()
         .find(|p| p.id == ability.controller)
         .ok_or(EffectError::PlayerNotFound)?;
+    events.push(GameEvent::PlayerPerformedAction {
+        player_id: ability.controller,
+        action: PlayerActionKind::SearchedLibrary,
+    });
     state
         .players_who_searched_library_this_turn
         .insert(ability.controller);
@@ -146,6 +150,14 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::SearchedLibrary,
+            } if *player_id == PlayerId(0)
+        )));
+
         match &state.waiting_for {
             WaitingFor::SearchChoice {
                 player,
@@ -195,6 +207,13 @@ mod tests {
             !matches!(state.waiting_for, WaitingFor::SearchChoice { .. }),
             "Should not set SearchChoice for empty library"
         );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::SearchedLibrary,
+            } if *player_id == PlayerId(0)
+        )));
         assert!(events.iter().any(|e| matches!(
             e,
             GameEvent::EffectResolved {

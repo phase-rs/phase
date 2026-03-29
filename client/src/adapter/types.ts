@@ -423,7 +423,14 @@ export type WaitingFor =
   | { type: "RetargetChoice"; data: { player: PlayerId; stack_entry_index: number; scope: RetargetScope; current_targets: TargetRef[]; legal_new_targets: TargetRef[] } }
   | { type: "ConniveDiscard"; data: { player: PlayerId; conniver_id: ObjectId; source_id: ObjectId; cards: ObjectId[]; count: number } }
   | { type: "DiscardChoice"; data: { player: PlayerId; count: number; cards: ObjectId[]; source_id: ObjectId; effect_kind: string } }
-  | { type: "ManifestDreadChoice"; data: { player: PlayerId; cards: ObjectId[] } };
+  | { type: "ManifestDreadChoice"; data: { player: PlayerId; cards: ObjectId[] } }
+  | { type: "LearnChoice"; data: { player: PlayerId; hand_cards: ObjectId[] } };
+
+// ── Learn ────────────────────────────────────────────────────────────────
+
+export type LearnOption =
+  | { type: "Rummage"; data: { card_id: ObjectId } }
+  | { type: "Skip" };
 
 // ── Distribution ─────────────────────────────────────────────────────────
 
@@ -514,7 +521,8 @@ export type GameAction =
   | { type: "CancelAutoPass" }
   | { type: "AssignCombatDamage"; data: { assignments: [ObjectId, number][]; trample_damage: number; controller_damage: number } }
   | { type: "DistributeAmong"; data: { distribution: [TargetRef, number][] } }
-  | { type: "RetargetSpell"; data: { new_targets: TargetRef[] } };
+  | { type: "RetargetSpell"; data: { new_targets: TargetRef[] } }
+  | { type: "LearnDecision"; data: { choice: LearnOption } };
 
 // ── Game Events (discriminated union, tag="type", content="data") ────────
 

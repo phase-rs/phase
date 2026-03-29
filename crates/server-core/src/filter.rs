@@ -121,6 +121,20 @@ pub fn filter_state_for_player(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 701.48a: During LearnChoice, opponents shouldn't see which cards are in hand.
+    if let WaitingFor::LearnChoice {
+        player,
+        ref hand_cards,
+    } = state.waiting_for
+    {
+        if player != viewer {
+            filtered.waiting_for = WaitingFor::LearnChoice {
+                player,
+                hand_cards: hand_cards.iter().map(|_| ObjectId(0)).collect(),
+            };
+        }
+    }
+
     // Only show the viewer's own auto-pass flag
     filtered.auto_pass.retain(|pid, _| *pid == viewer);
 

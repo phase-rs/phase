@@ -1466,6 +1466,8 @@ pub(super) fn parse_imperative_family_ast(
         }
         // CR 702.136: "investigate"
         "investigate" => Some(ImperativeFamilyAst::Investigate),
+        // CR 701.48a: "learn"
+        "learn" => Some(ImperativeFamilyAst::Learn),
         // CR 701.62a: "manifest dread"
         "manifest" => {
             if lower == "manifest dread" {
@@ -1902,6 +1904,7 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             }
         }
         ImperativeFamilyAst::Investigate => Effect::Investigate,
+        ImperativeFamilyAst::Learn => Effect::Learn,
         ImperativeFamilyAst::ManifestDread => Effect::ManifestDread,
         ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch,
         ImperativeFamilyAst::Proliferate => Effect::Proliferate,

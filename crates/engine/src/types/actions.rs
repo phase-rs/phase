@@ -163,6 +163,20 @@ pub enum GameAction {
     RetargetSpell {
         new_targets: Vec<TargetRef>,
     },
+    /// CR 701.48a: Learn — choose to rummage (discard a card, draw a card) or skip.
+    LearnDecision {
+        choice: LearnOption,
+    },
+}
+
+/// CR 701.48a: Learn choice — rummage a specific card, or skip entirely.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum LearnOption {
+    /// Discard the specified card, then draw one.
+    Rummage { card_id: ObjectId },
+    /// Decline to learn (skip).
+    Skip,
 }
 
 impl GameAction {

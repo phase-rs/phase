@@ -12,6 +12,7 @@ use crate::types::ability::{
     TriggerDefinition, TypeFilter, TypedFilter, UnlessCost, UnlessPayModifier,
 };
 use crate::types::card_type::CoreType;
+use crate::types::events::PlayerActionKind;
 use crate::types::phase::Phase;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -683,7 +684,28 @@ fn split_trigger(tp: TextPair<'_>) -> (String, String) {
 }
 
 fn find_effect_boundary(lower: &str) -> Option<usize> {
-    lower.find(", ")
+    let mut search_start = 0;
+    while let Some(rel_pos) = lower[search_start..].find(", ") {
+        let comma_pos = search_start + rel_pos;
+        let after = &lower[comma_pos + 2..];
+        if !continues_player_action_list(after) {
+            return Some(comma_pos);
+        }
+        search_start = comma_pos + 2;
+    }
+    None
+}
+
+fn continues_player_action_list(after_comma: &str) -> bool {
+    let trimmed = after_comma.trim_start();
+    let candidate = trimmed
+        .strip_prefix("or ")
+        .unwrap_or(trimmed)
+        .split(", ")
+        .next()
+        .unwrap_or(trimmed)
+        .trim();
+    parse_player_action_phrase(candidate).is_some()
 }
 
 fn make_base() -> TriggerDefinition {
@@ -1813,6 +1835,10 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
 
 /// Parse player-centric triggers: "you gain life", "you cast a/an ...", "you draw a card"
 fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    if let Some(result) = try_parse_player_action_trigger(lower) {
+        return Some(result);
+    }
+
     if lower.contains("you gain life") {
         let mut def = make_base();
         def.mode = TriggerMode::LifeGained;
@@ -2162,6 +2188,81 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     }
 
     None
+}
+
+fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    for (prefix, valid_target) in [
+        ("whenever you ", Some(TargetFilter::Controller)),
+        (
+            "whenever an opponent ",
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            )),
+        ),
+        ("whenever a player ", None),
+        ("when you ", Some(TargetFilter::Controller)),
+        (
+            "when an opponent ",
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            )),
+        ),
+        ("when a player ", None),
+    ] {
+        let Some(rest) = lower.strip_prefix(prefix) else {
+            continue;
+        };
+        let actions = parse_player_action_list(rest)?;
+        let mut def = make_base();
+        def.valid_target = valid_target.clone();
+        match actions.as_slice() {
+            [PlayerActionKind::SearchedLibrary] => {
+                def.mode = TriggerMode::SearchedLibrary;
+                return Some((TriggerMode::SearchedLibrary, def));
+            }
+            [PlayerActionKind::Scry] => {
+                def.mode = TriggerMode::Scry;
+                return Some((TriggerMode::Scry, def));
+            }
+            [PlayerActionKind::Surveil] => {
+                def.mode = TriggerMode::Surveil;
+                return Some((TriggerMode::Surveil, def));
+            }
+            _ => {
+                def.mode = TriggerMode::PlayerPerformedAction;
+                def.player_actions = Some(actions.clone());
+                return Some((TriggerMode::PlayerPerformedAction, def));
+            }
+        }
+    }
+
+    None
+}
+
+fn parse_player_action_list(text: &str) -> Option<Vec<PlayerActionKind>> {
+    let normalized = text
+        .replace(", or ", "|")
+        .replace(" or ", "|")
+        .replace(", ", "|");
+    let parts: Vec<_> = normalized.split('|').collect();
+    if parts.is_empty() {
+        return None;
+    }
+
+    let mut actions = Vec::with_capacity(parts.len());
+    for part in parts {
+        actions.push(parse_player_action_phrase(part.trim())?);
+    }
+    Some(actions)
+}
+
+fn parse_player_action_phrase(text: &str) -> Option<PlayerActionKind> {
+    match text {
+        "search your library" | "searches their library" => Some(PlayerActionKind::SearchedLibrary),
+        "scry" | "scries" => Some(PlayerActionKind::Scry),
+        "surveil" | "surveils" => Some(PlayerActionKind::Surveil),
+        _ => None,
+    }
 }
 
 /// Parse "whenever you cast your Nth spell each turn" (or "in a turn") and
@@ -3665,6 +3766,88 @@ mod tests {
         assert_eq!(
             def.constraint,
             Some(TriggerConstraint::NthDrawThisTurn { n: 3 })
+        );
+    }
+
+    #[test]
+    fn trigger_you_search_your_library() {
+        let def = parse_trigger_line(
+            "Whenever you search your library, scry 1.",
+            "Search Elemental",
+        );
+        assert_eq!(def.mode, TriggerMode::SearchedLibrary);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_opponent_searches_their_library() {
+        let def = parse_trigger_line(
+            "Whenever an opponent searches their library, you gain 1 life and draw a card.",
+            "Archivist of Oghma",
+        );
+        assert_eq!(def.mode, TriggerMode::SearchedLibrary);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_you_scry() {
+        let def = parse_trigger_line(
+            "Whenever you scry, put a +1/+1 counter on this creature.",
+            "Thoughtbound Phantasm",
+        );
+        assert_eq!(def.mode, TriggerMode::Scry);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_you_surveil() {
+        let def = parse_trigger_line(
+            "Whenever you surveil, put a +1/+1 counter on Mirko.",
+            "Mirko, Obsessive Theorist",
+        );
+        assert_eq!(def.mode, TriggerMode::Surveil);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_you_scry_or_surveil() {
+        let def = parse_trigger_line(
+            "Whenever you scry or surveil, draw a card.",
+            "Matoya, Archon Elder",
+        );
+        assert_eq!(def.mode, TriggerMode::PlayerPerformedAction);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(
+            def.player_actions,
+            Some(vec![PlayerActionKind::Scry, PlayerActionKind::Surveil])
+        );
+    }
+
+    #[test]
+    fn trigger_opponent_scries_surveils_or_searches() {
+        let def = parse_trigger_line(
+            "Whenever an opponent scries, surveils, or searches their library, put a +1/+1 counter on River Song. Then River Song deals damage to that player equal to its power.",
+            "River Song",
+        );
+        assert_eq!(def.mode, TriggerMode::PlayerPerformedAction);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            ))
+        );
+        assert_eq!(
+            def.player_actions,
+            Some(vec![
+                PlayerActionKind::Scry,
+                PlayerActionKind::Surveil,
+                PlayerActionKind::SearchedLibrary,
+            ])
         );
     }
 

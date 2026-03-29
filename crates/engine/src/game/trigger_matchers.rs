@@ -6,7 +6,7 @@ use crate::types::ability::{
     ControllerRef, DamageKindFilter, EffectKind, TargetFilter, TargetRef, TriggerDefinition,
     TypedFilter,
 };
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, StackEntryKind};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -72,6 +72,10 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::LandPlayed, match_land_played);
     r.insert(TriggerMode::SpellCopy, match_spell_cast);
     r.insert(TriggerMode::ManaAdded, match_mana_added);
+    r.insert(TriggerMode::SearchedLibrary, match_player_action);
+    r.insert(TriggerMode::Scry, match_player_action);
+    r.insert(TriggerMode::Surveil, match_player_action);
+    r.insert(TriggerMode::PlayerPerformedAction, match_player_action);
 
     // Zone-based: leaves the battlefield
     r.insert(TriggerMode::LeavesBattlefield, match_leaves_battlefield);
@@ -201,8 +205,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::Vote,
         TriggerMode::BecomeRenowned,
         TriggerMode::Proliferate,
-        TriggerMode::Surveil,
-        TriggerMode::Scry,
         TriggerMode::Abandoned,
         TriggerMode::ClaimPrize,
         TriggerMode::CollectEvidence,
@@ -215,7 +217,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::ManifestDread,
         TriggerMode::Mentored,
         TriggerMode::Mutates,
-        TriggerMode::SearchedLibrary,
         TriggerMode::SeekAll,
         TriggerMode::SetInMotion,
         TriggerMode::Specializes,
@@ -840,6 +841,31 @@ pub(super) fn match_drawn(
         valid_player_matches(trigger, state, *player_id, source_id)
     } else {
         false
+    }
+}
+
+pub(super) fn match_player_action(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::PlayerPerformedAction { player_id, action } = event else {
+        return false;
+    };
+    if !valid_player_matches(trigger, state, *player_id, source_id) {
+        return false;
+    }
+
+    match trigger.mode {
+        TriggerMode::SearchedLibrary => *action == PlayerActionKind::SearchedLibrary,
+        TriggerMode::Scry => *action == PlayerActionKind::Scry,
+        TriggerMode::Surveil => *action == PlayerActionKind::Surveil,
+        TriggerMode::PlayerPerformedAction => trigger
+            .player_actions
+            .as_ref()
+            .is_some_and(|actions| actions.contains(action)),
+        _ => false,
     }
 }
 
@@ -1760,11 +1786,12 @@ fn stack_entry_targets_any(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::parser::oracle_trigger::parse_trigger_line;
     use crate::types::ability::{
         QuantityExpr, ResolvedAbility, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
-    use crate::types::events::GameEvent;
+    use crate::types::events::{GameEvent, PlayerActionKind};
     use crate::types::game_state::{CastingVariant, GameState, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -1792,6 +1819,111 @@ mod tests {
             to: Zone::Battlefield,
         };
         assert!(match_changes_zone(&event, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn searched_library_matches_you_scope() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Search Elemental".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = parse_trigger_line(
+            "Whenever you search your library, scry 1.",
+            "Search Elemental",
+        );
+        let event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::SearchedLibrary,
+        };
+        assert!(match_player_action(&event, &trigger, source_id, &state));
+    }
+
+    #[test]
+    fn searched_library_rejects_controller_for_opponent_scope() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Archivist of Oghma".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = parse_trigger_line(
+            "Whenever an opponent searches their library, you gain 1 life and draw a card.",
+            "Archivist of Oghma",
+        );
+        let event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::SearchedLibrary,
+        };
+        assert!(!match_player_action(&event, &trigger, source_id, &state));
+    }
+
+    #[test]
+    fn searched_library_matches_opponent_scope() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Wan Shi Tong, Librarian".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = parse_trigger_line(
+            "Whenever an opponent searches their library, put a +1/+1 counter on Wan Shi Tong and draw a card.",
+            "Wan Shi Tong, Librarian",
+        );
+        let event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(1),
+            action: PlayerActionKind::SearchedLibrary,
+        };
+        assert!(match_player_action(&event, &trigger, source_id, &state));
+    }
+
+    #[test]
+    fn multi_action_trigger_matches_allowed_action() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(13),
+            PlayerId(0),
+            "River Song".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = parse_trigger_line(
+            "Whenever an opponent scries, surveils, or searches their library, put a +1/+1 counter on River Song. Then River Song deals damage to that player equal to its power.",
+            "River Song",
+        );
+        let event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(1),
+            action: PlayerActionKind::Surveil,
+        };
+        assert!(match_player_action(&event, &trigger, source_id, &state));
+    }
+
+    #[test]
+    fn multi_action_trigger_rejects_disallowed_action() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(14),
+            PlayerId(0),
+            "Matoya, Archon Elder".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = parse_trigger_line(
+            "Whenever you scry or surveil, draw a card.",
+            "Matoya, Archon Elder",
+        );
+        let event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::SearchedLibrary,
+        };
+        assert!(!match_player_action(&event, &trigger, source_id, &state));
     }
 
     #[test]

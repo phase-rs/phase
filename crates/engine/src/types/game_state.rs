@@ -440,6 +440,12 @@ pub enum WaitingFor {
         source_id: ObjectId,
         effect_kind: crate::types::ability::EffectKind,
     },
+    /// CR 701.48a: Learn — player chooses to rummage (discard→draw) or skip.
+    /// `hand_cards` lists cards eligible for discard.
+    LearnChoice {
+        player: PlayerId,
+        hand_cards: Vec<ObjectId>,
+    },
     /// CR 701.62a: Player chooses one of the top 2 revealed cards to manifest face-down.
     /// The unchosen card goes to graveyard. Cards are visible only to the manifesting player.
     ManifestDreadChoice {
@@ -805,6 +811,7 @@ impl WaitingFor {
             | WaitingFor::RevealChoice { player, .. }
             | WaitingFor::SearchChoice { player, .. }
             | WaitingFor::ChooseFromZoneChoice { player, .. }
+            | WaitingFor::LearnChoice { player, .. }
             | WaitingFor::ManifestDreadChoice { player, .. }
             | WaitingFor::TriggerTargetSelection { player, .. }
             | WaitingFor::BetweenGamesSideboard { player, .. }

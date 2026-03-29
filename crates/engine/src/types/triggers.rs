@@ -262,6 +262,8 @@ pub enum TriggerMode {
     Surveil,
     /// CR 701.22: Triggers when a player scries.
     Scry,
+    /// General typed player-action trigger for joined action lists.
+    PlayerPerformedAction,
 
     // Combat events
     /// CR 701.14: Triggers when creatures fight.
@@ -442,6 +444,7 @@ impl FromStr for TriggerMode {
             "Saddled" => TriggerMode::Saddled,
             "Sacrificed" => TriggerMode::Sacrificed,
             "SacrificedOnce" => TriggerMode::SacrificedOnce,
+            "PlayerPerformedAction" => TriggerMode::PlayerPerformedAction,
             "Scry" => TriggerMode::Scry,
             "SearchedLibrary" => TriggerMode::SearchedLibrary,
             "SeekAll" => TriggerMode::SeekAll,
@@ -695,6 +698,7 @@ mod tests {
             "Saddled",
             "Sacrificed",
             "SacrificedOnce",
+            "PlayerPerformedAction",
             "Scry",
             "SearchedLibrary",
             "SeekAll",
@@ -736,8 +740,8 @@ mod tests {
             }
         }
         assert!(
-            known_count >= 143,
-            "Expected 143+ known trigger modes, got {known_count}"
+            known_count >= 144,
+            "Expected 144+ known trigger modes, got {known_count}"
         );
     }
 }

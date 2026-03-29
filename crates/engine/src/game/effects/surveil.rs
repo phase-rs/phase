@@ -1,6 +1,6 @@
 use crate::game::quantity::resolve_quantity;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, WaitingFor};
 
 /// CR 701.25a: Surveil N — look at top N, put any number into graveyard, rest on top in any order.
@@ -31,6 +31,11 @@ pub fn resolve(
         });
         return Ok(());
     }
+
+    events.push(GameEvent::PlayerPerformedAction {
+        player_id: ability.controller,
+        action: PlayerActionKind::Surveil,
+    });
 
     let cards: Vec<_> = player.library[..count].to_vec();
 
@@ -83,6 +88,14 @@ mod tests {
         let ability = make_surveil_ability(2);
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::Surveil,
+            } if *player_id == PlayerId(0)
+        )));
 
         match &state.waiting_for {
             WaitingFor::SurveilChoice { player, cards } => {

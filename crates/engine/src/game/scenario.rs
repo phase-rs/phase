@@ -1073,6 +1073,7 @@ impl GameRunner {
             WaitingFor::RetargetChoice { .. } => "RetargetChoice",
             WaitingFor::WardDiscardChoice { .. } => "WardDiscardChoice",
             WaitingFor::WardSacrificeChoice { .. } => "WardSacrificeChoice",
+            WaitingFor::LearnChoice { .. } => "LearnChoice",
         }
     }
 

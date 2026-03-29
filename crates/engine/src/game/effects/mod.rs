@@ -57,6 +57,7 @@ pub mod gift_delivery;
 pub mod goad;
 pub mod grant_permission;
 pub mod investigate;
+pub mod learn;
 pub mod life;
 pub mod mana;
 pub mod manifest_dread;
@@ -222,6 +223,7 @@ pub fn resolve_effect(
         Effect::ExtraTurn { .. } => extra_turn::resolve(state, ability, events),
         Effect::Double { .. } => double::resolve(state, ability, events),
         Effect::RuntimeHandled { .. } => Ok(()), // Handled by dedicated engine path
+        Effect::Learn => learn::resolve(state, ability, events),
         // New keyword actions — stub handlers (recognized for coverage, no-op for now)
         Effect::Forage
         | Effect::CollectEvidence { .. }
@@ -1050,6 +1052,7 @@ fn resolve_unless_payer(
                 .as_ref()
                 .and_then(|event| match event {
                     GameEvent::SpellCast { controller, .. } => Some(*controller),
+                    GameEvent::PlayerPerformedAction { player_id, .. } => Some(*player_id),
                     _ => None,
                 })
         }
@@ -1109,6 +1112,19 @@ mod tests {
         let mut events = Vec::new();
         let result = resolve_effect(&mut state, &ability, &mut events);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn resolve_unless_payer_uses_player_action_event_player() {
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_event = Some(GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(1),
+            action: crate::types::events::PlayerActionKind::SearchedLibrary,
+        });
+        assert_eq!(
+            resolve_unless_payer(&state, &TargetFilter::TriggeringPlayer),
+            Some(PlayerId(1))
+        );
     }
 
     #[test]

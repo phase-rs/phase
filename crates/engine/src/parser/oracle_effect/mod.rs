@@ -3468,6 +3468,28 @@ fn strip_card_type_conditional(text: &str) -> (Option<AbilityCondition>, String)
     (None, text.to_string())
 }
 
+/// Parse "it's a/an [non][type] [card]" condition text into `AbilityCondition::RevealedHasCardType`.
+/// Shared by suffix conditional stripping (e.g. "put it onto the battlefield if it's a land card").
+fn parse_its_a_type_condition(condition_text: &str) -> Option<AbilityCondition> {
+    let rest = condition_text
+        .strip_prefix("it's a ")
+        .or_else(|| condition_text.strip_prefix("it's an "))?;
+    let (negated, rest) = if let Some(r) = rest.strip_prefix("non") {
+        (true, r)
+    } else {
+        (false, rest)
+    };
+    // Strip trailing " card" if present
+    let type_str = rest
+        .strip_suffix(" card")
+        .unwrap_or(rest)
+        .trim_end_matches('.');
+    let type_word = type_str.rsplit(' ').next().unwrap_or(type_str);
+    let capitalized = format!("{}{}", &type_word[..1].to_uppercase(), &type_word[1..]);
+    let card_type = CoreType::from_str(&capitalized).ok()?;
+    Some(AbilityCondition::RevealedHasCardType { card_type, negated })
+}
+
 /// CR 205.1a: Parse "it's a/an [type]" into an Animate effect with AddType + RemoveType.
 /// Used by the Glimmer cycle: "It's an enchantment." after returning to battlefield.
 ///
@@ -3788,12 +3810,17 @@ fn strip_suffix_conditional(text: &str) -> (Option<AbilityCondition>, String) {
         "that creature has ",
         "that permanent has ",
         "you cast it from",
-        "it's a ",
     ];
     for prefix in &excluded_prefixes {
         if condition_text.starts_with(prefix) {
             return (None, text.to_string());
         }
+    }
+
+    // Handle "it's a/an [non][type] [card]" suffix pattern (Archdruid's Charm etc.)
+    if let Some(cond) = parse_its_a_type_condition(condition_text) {
+        let effect_text = text[..if_pos].trim().to_string();
+        return (Some(cond), effect_text);
     }
 
     // Try to parse the condition text into a typed AbilityCondition.
