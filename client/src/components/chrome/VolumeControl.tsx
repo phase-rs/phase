@@ -39,7 +39,7 @@ export function VolumeControl({ variant }: VolumeControlProps) {
   const setMasterMuted = usePreferencesStore((s) => s.setMasterMuted);
   const [expanded, setExpanded] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
-  const hideTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleToggleMute = useCallback(() => {
     const next = !masterMuted;
@@ -68,7 +68,7 @@ export function VolumeControl({ variant }: VolumeControlProps) {
   const cancelHide = useCallback(() => {
     if (hideTimerRef.current) {
       clearTimeout(hideTimerRef.current);
-      hideTimerRef.current = undefined;
+      hideTimerRef.current = null;
     }
   }, []);
 
