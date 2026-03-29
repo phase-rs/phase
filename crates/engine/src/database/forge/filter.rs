@@ -24,7 +24,11 @@ pub(crate) fn translate_filter(filter_str: &str) -> Result<TargetFilter, ForgeTr
         "Any" | "any" => return Ok(TargetFilter::Any),
         "Card.Self" | "CARDNAME" | "Self" => return Ok(TargetFilter::SelfRef),
         "You" | "Player.You" => return Ok(TargetFilter::Controller),
-        "Opponent" | "Player.Opp" => return Ok(TargetFilter::Player),
+        "Opponent" | "Player.Opp" => {
+            return Ok(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            ))
+        }
         "Player" => return Ok(TargetFilter::Player),
         _ => {}
     }

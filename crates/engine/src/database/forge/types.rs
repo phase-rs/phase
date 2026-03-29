@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-#[allow(dead_code)]
 /// Intermediate AST for a single Forge card face.
 ///
 /// This struct captures the raw parsed content of a Forge `.txt` card script
@@ -28,6 +27,8 @@ pub(crate) struct ForgeCard {
     /// Oracle text (for diagnostics only — not used in translation).
     pub oracle_text: Option<String>,
     /// Back face for DFC cards (parsed from content after `ALTERNATE`).
+    /// Used by `ForgeIndex::parse_card()` to select the correct face.
+    #[allow(dead_code)]
     pub alternate: Option<Box<ForgeCard>>,
 }
 
@@ -71,7 +72,6 @@ impl ForgeParams {
     }
 }
 
-#[allow(dead_code)]
 /// Errors that can occur during Forge → phase.rs translation.
 #[derive(Debug, Clone)]
 pub(crate) enum ForgeTranslateError {
@@ -80,6 +80,7 @@ pub(crate) enum ForgeTranslateError {
     /// A required parameter was missing.
     MissingParam { param: String, context: String },
     /// A filter string we couldn't parse.
+    #[allow(dead_code)]
     UnparsableFilter(String),
     /// A Cost$ token we don't recognize.
     UnparsableCost(String),

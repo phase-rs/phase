@@ -17,6 +17,7 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
+use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
@@ -316,6 +317,7 @@ pub fn resolve(
         fallback_keywords,
         tapped,
         count,
+        owner_filter,
         enters_attacking,
     ) = match &ability.effect {
         Effect::Token {
@@ -327,6 +329,7 @@ pub fn resolve(
             keywords,
             tapped,
             count,
+            owner,
             enters_attacking,
             ..
         } => (
@@ -338,6 +341,7 @@ pub fn resolve(
             keywords.clone(),
             *tapped,
             resolve_quantity(state, count, ability.controller, ability.source_id).max(0) as u32,
+            owner,
             *enters_attacking,
         ),
         _ => (
@@ -349,9 +353,11 @@ pub fn resolve(
             vec![],
             false,
             1,
+            &TargetFilter::Controller,
             false,
         ),
     };
+    let token_owner = resolve_token_owner(state, ability, owner_filter);
 
     let parsed = parse_token_script(&script_name).or_else(|| {
         build_token_attrs_from_effect(
@@ -375,7 +381,7 @@ pub fn resolve(
     // CR 614.1a: Propose entire token batch for replacement pipeline.
     // Replacement effects (Doubling Season, Primal Vigor) modify count.
     let proposed = ProposedEvent::CreateToken {
-        owner: ability.controller,
+        owner: token_owner,
         name: display_name.clone(),
         count,
         applied: HashSet::new(),
@@ -525,6 +531,32 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+fn resolve_token_owner(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    owner_filter: &TargetFilter,
+) -> PlayerId {
+    match owner_filter {
+        TargetFilter::Controller => ability.controller,
+        TargetFilter::ParentTargetController => ability
+            .targets
+            .iter()
+            .find_map(|target| match target {
+                TargetRef::Object(id) => state.objects.get(id).map(|object| object.controller),
+                TargetRef::Player(pid) => Some(*pid),
+            })
+            .unwrap_or(ability.controller),
+        _ => ability
+            .targets
+            .iter()
+            .find_map(|target| match target {
+                TargetRef::Player(pid) => Some(*pid),
+                TargetRef::Object(id) => state.objects.get(id).map(|object| object.controller),
+            })
+            .unwrap_or(ability.controller),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -882,6 +914,7 @@ mod tests {
                 keywords: vec![],
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
             },
@@ -962,6 +995,7 @@ mod tests {
                 keywords: vec![],
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
             },
@@ -1013,6 +1047,7 @@ mod tests {
                 keywords: vec![],
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 2 },
+                owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
             },
@@ -1054,6 +1089,7 @@ mod tests {
                 keywords: vec![],
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
             },
@@ -1085,6 +1121,7 @@ mod tests {
                 keywords: vec![],
                 tapped: true,
                 count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
             },
@@ -1114,6 +1151,7 @@ mod tests {
                 keywords: vec![],
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 2 },
+                owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
             },
@@ -1147,6 +1185,51 @@ mod tests {
             .collect();
         assert_eq!(target_ids.len(), 2);
         assert_ne!(target_ids[0], target_ids[1]);
+    }
+
+    #[test]
+    fn parent_target_controller_owns_created_tokens() {
+        let mut state = GameState::new_two_player(42);
+        let target_id = zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Target Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Token {
+                name: "Map".to_string(),
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
+                types: vec!["Artifact".to_string(), "Map".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 2 },
+                owner: TargetFilter::ParentTargetController,
+                attach_to: None,
+                enters_attacking: false,
+            },
+            vec![TargetRef::Object(target_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let created: Vec<_> = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|object| object.is_token)
+            .collect();
+        assert_eq!(created.len(), 2);
+        assert!(created
+            .iter()
+            .all(|object| object.controller == PlayerId(1)));
+        assert!(created.iter().all(|object| object.owner == PlayerId(1)));
     }
 
     // ── Predefined token abilities ────────────────────────────────────

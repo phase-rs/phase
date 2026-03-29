@@ -299,6 +299,12 @@ fn parse_subject_application(subject: &str, ctx: &ParseContext) -> Option<Subjec
             target: None,
         });
     }
+    if lower == "its controller" || lower == "their controller" {
+        return Some(SubjectApplication {
+            affected: TargetFilter::ParentTargetController,
+            target: None,
+        });
+    }
     // Explicit self-reference — always SelfRef
     if matches!(lower.as_str(), "~" | "this" | "this card")
         || SELF_REF_TYPE_PHRASES.iter().any(|p| lower == *p)

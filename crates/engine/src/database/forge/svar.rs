@@ -234,9 +234,11 @@ mod tests {
         ]);
         let mut resolver = SvarResolver::new(&svars);
         let result = resolver.resolve_ability("A");
-        // Should detect cycle at B → A
-        // The exact error depends on where the cycle manifests
-        assert!(result.is_err() || result.is_ok());
+        // B tries to resolve A again, which is already on the stack → CyclicSvar
+        assert!(
+            result.is_err(),
+            "expected cycle detection error, got {result:?}"
+        );
     }
 
     #[test]

@@ -119,17 +119,17 @@ pub fn gate_candidates(
 fn assess_candidate(ctx: &PolicyContext<'_>) -> GateDecision {
     match &ctx.candidate.action {
         GameAction::CastSpell { .. } | GameAction::ActivateAbility { .. } => assess_pre_cast(ctx),
-        GameAction::ChooseTarget { target } => match target {
-            Some(target) => {
-                let penalty = target_choice_penalty(ctx, target);
-                if penalty < 0.0 {
-                    GateDecision::AllowWithPenalty(penalty)
-                } else {
-                    GateDecision::Allow
-                }
+        GameAction::ChooseTarget {
+            target: Some(target),
+        } => {
+            let penalty = target_choice_penalty(ctx, target);
+            if penalty < 0.0 {
+                GateDecision::AllowWithPenalty(penalty)
+            } else {
+                GateDecision::Allow
             }
-            None => GateDecision::Allow,
-        },
+        }
+        GameAction::ChooseTarget { target: None } => GateDecision::Allow,
         GameAction::SelectTargets { targets } => {
             let penalty = targets
                 .iter()

@@ -85,6 +85,20 @@ impl CardDatabase {
             .find(|face| face.name == printed_ref.face_name)
     }
 
+    pub fn get_other_face_by_printed_ref(&self, printed_ref: &PrintedCardRef) -> Option<&CardFace> {
+        let mut other_faces = self
+            .oracle_id_index
+            .get(&printed_ref.oracle_id)?
+            .iter()
+            .filter_map(|name| self.face_index.get(name))
+            .filter(|face| face.name != printed_ref.face_name);
+        let other = other_faces.next()?;
+        if other_faces.next().is_some() {
+            return None;
+        }
+        Some(other)
+    }
+
     pub fn get_legalities(&self, name: &str) -> Option<&CardLegalities> {
         self.legalities.get(&name.to_lowercase())
     }

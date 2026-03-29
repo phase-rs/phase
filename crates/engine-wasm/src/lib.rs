@@ -188,6 +188,7 @@ pub fn initialize_game(
                 }
 
                 load_deck_into_state(&mut state, &payload);
+                rehydrate_game_from_card_db(&mut state, db);
                 state.all_card_names = db.card_names();
                 None
             });

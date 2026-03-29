@@ -23,7 +23,7 @@ pub(crate) fn translate_static(
         })?;
 
     match mode_str {
-        // CR 604.3: Continuous effects that modify characteristics.
+        // CR 613.1: Continuous effects that modify characteristics via the layer system.
         "Continuous" => translate_continuous(line),
 
         // CR 601.2f: Increase casting cost.
@@ -56,7 +56,7 @@ pub(crate) fn translate_static(
     }
 }
 
-/// CR 604.3: Continuous effect — modifies power, toughness, keywords, etc.
+/// CR 613.1: Continuous effect — modifies power, toughness, keywords, etc. via the layer system.
 fn translate_continuous(line: &ForgeAbilityLine) -> Result<StaticDefinition, ForgeTranslateError> {
     let params = &line.params;
     let mut def = StaticDefinition::continuous();

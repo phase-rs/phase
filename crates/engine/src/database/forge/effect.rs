@@ -1,5 +1,6 @@
 use crate::types::ability::{
-    Effect, GainLifePlayer, ManaProduction, PtValue, QuantityExpr, TargetFilter,
+    ControllerRef, Effect, GainLifePlayer, ManaProduction, PtValue, QuantityExpr, TargetFilter,
+    TypedFilter,
 };
 use crate::types::mana::ManaColor;
 use crate::types::Zone;
@@ -21,7 +22,7 @@ pub(crate) fn translate_effect(
         .ok_or_else(|| ForgeTranslateError::Other("no SP$ or DB$ in params".to_string()))?;
 
     match effect_type {
-        // CR 120.2a: Deal damage to a target.
+        // CR 120.2b: Deal damage as an effect of a spell or ability.
         "DealDamage" => translate_deal_damage(params, resolver),
         // CR 121.1: Draw cards.
         "Draw" => translate_draw(params, resolver),
@@ -29,19 +30,19 @@ pub(crate) fn translate_effect(
         "GainLife" => translate_gain_life(params, resolver),
         // CR 119.3: Lose life.
         "LoseLife" => translate_lose_life(params, resolver),
-        // CR 613.4a: Modify power/toughness of target.
+        // CR 613.4c: Modify power/toughness of target creature.
         "Pump" => translate_pump(params, resolver),
-        // CR 613.4a: Modify power/toughness of all matching creatures.
+        // CR 613.4c: Modify power/toughness of all matching creatures.
         "PumpAll" => translate_pump_all(params, resolver),
         // CR 122.1: Place counters on a permanent.
         "PutCounter" => translate_put_counter(params, resolver),
-        // CR 111.1: Create token(s).
-        "Token" => translate_token(params),
-        // CR 701.18a: Destroy target.
+        // CR 701.7a: Create token(s).
+        "Token" => translate_token(params, resolver),
+        // CR 701.8a: Destroy target permanent.
         "Destroy" => translate_destroy(params),
-        // CR 701.18a: Destroy all matching permanents.
+        // CR 701.8a: Destroy all matching permanents.
         "DestroyAll" => translate_destroy_all(params),
-        // CR 701.21a: Tap/untap target.
+        // CR 701.26a: Tap/untap target permanent.
         "Tap" => translate_tap(params),
         "TapAll" => translate_tap(params),
         "Untap" => translate_untap(params),
@@ -49,28 +50,28 @@ pub(crate) fn translate_effect(
         // CR 400.7: Move objects between zones.
         "ChangeZone" | "ChangeZoneAll" => translate_change_zone(params),
         // CR 106.1: Produce mana.
-        "Mana" | "ManaReflectedProduced" => translate_mana(params),
-        // CR 701.8a: Discard cards.
+        "Mana" | "ManaReflectedProduced" => translate_mana(params, resolver),
+        // CR 701.9a: Discard cards.
         "Discard" => translate_discard(params, resolver),
-        // CR 701.17a: Sacrifice permanents.
+        // CR 701.21a: Sacrifice permanents.
         "Sacrifice" | "SacrificeAll" => translate_sacrifice(params),
         // CR 701.17a: Mill cards.
         "Mill" => translate_mill(params, resolver),
-        // CR 701.17a: Scry.
+        // CR 701.22a: Scry.
         "Scry" => translate_scry(params, resolver),
-        // CR 701.15a: Fight.
+        // CR 701.14a: Fight.
         "Fight" => Ok(Effect::Unimplemented {
             name: "forge:Fight".to_string(),
             description: None,
         }),
-        // CR 701.20e: Dig/Reveal from top.
+        // Dig/Reveal from top (Forge-specific, no direct CR equivalent).
         "Dig" => Ok(Effect::Unimplemented {
             name: "forge:Dig".to_string(),
             description: None,
         }),
-        // CR 701.42: Investigate.
+        // CR 701.16a: Investigate — create a Clue artifact token.
         "Investigate" => Ok(Effect::Investigate),
-        // CR 701.41: Surveil.
+        // CR 701.25a: Surveil.
         "Surveil" => translate_surveil(params, resolver),
         // Charm — modal spells (handled at orchestrator level via SVar resolution)
         "Charm" => Ok(Effect::Unimplemented {
@@ -92,9 +93,9 @@ pub(crate) fn translate_effect(
             name: "forge:Effect".to_string(),
             description: None,
         }),
-        // Counter — counter a spell/ability
+        // CR 701.6a: Counter a spell or ability on the stack.
         "Counter" => translate_counter(params),
-        // Bounce — return to hand
+        // CR 701.26a: Return to hand (bounce).
         "Bounce" | "BounceAll" => translate_bounce(params),
         _ => Err(ForgeTranslateError::UnsupportedEffect(
             effect_type.to_string(),
@@ -122,7 +123,35 @@ fn resolve_target(params: &ForgeParams, key: &str) -> TargetFilter {
         .unwrap_or(TargetFilter::Any)
 }
 
-// CR 120.2a: Deal damage to a target.
+/// Map Forge `Defined$` values to a `TargetFilter` representing the player/object
+/// an effect applies to.
+///
+/// Forge uses `Defined$` to specify "who" — `You` (controller), `Opponent`,
+/// `TriggeredCardController`, `Targeted`, `Enchanted`, etc.
+fn resolve_defined(params: &ForgeParams) -> TargetFilter {
+    match params.get("Defined") {
+        Some("You") | Some("Self") | None => TargetFilter::Controller,
+        Some("Opponent") | Some("OpponentOfTriggered") => {
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        }
+        Some("Targeted") | Some("TargetedPlayer") => TargetFilter::Player,
+        Some("TriggeredCardController") | Some("TriggeredPlayer") => TargetFilter::TriggeringPlayer,
+        Some("Enchanted") | Some("EnchantedController") => TargetFilter::AttachedTo,
+        Some("ParentTarget") => TargetFilter::ParentTarget,
+        Some("DefendingPlayer") => TargetFilter::DefendingPlayer,
+        Some(_) => TargetFilter::Controller, // Unknown → default to controller
+    }
+}
+
+/// Check if `Defined$` targets an opponent rather than the controller.
+fn defined_is_opponent(params: &ForgeParams) -> bool {
+    matches!(
+        params.get("Defined"),
+        Some("Opponent") | Some("OpponentOfTriggered")
+    )
+}
+
+// CR 120.2b: Deal damage as an effect of a spell or ability.
 fn translate_deal_damage(
     params: &ForgeParams,
     resolver: &mut SvarResolver,
@@ -151,10 +180,17 @@ fn translate_gain_life(
     resolver: &mut SvarResolver,
 ) -> Result<Effect, ForgeTranslateError> {
     let amount = resolve_quantity(params, "LifeAmount", resolver);
-    Ok(Effect::GainLife {
-        amount,
-        player: GainLifePlayer::Controller,
-    })
+    // Forge Defined$ determines who gains life. GainLifePlayer only has
+    // Controller and TargetedController — opponent gains aren't expressible
+    // in the current type, so we stay with Controller for non-opponent cases.
+    let player = if defined_is_opponent(params) {
+        // TODO: GainLifePlayer doesn't have an Opponent variant; this stays
+        // as Controller until the engine type is extended.
+        GainLifePlayer::Controller
+    } else {
+        GainLifePlayer::Controller
+    };
+    Ok(Effect::GainLife { amount, player })
 }
 
 // CR 119.3: Lose life.
@@ -166,7 +202,7 @@ fn translate_lose_life(
     Ok(Effect::LoseLife { amount })
 }
 
-// CR 613.4a: Pump target creature.
+// CR 613.4c: Modify power/toughness of target creature.
 fn translate_pump(
     params: &ForgeParams,
     resolver: &mut SvarResolver,
@@ -181,7 +217,7 @@ fn translate_pump(
     })
 }
 
-// CR 613.4a: Pump all matching creatures.
+// CR 613.4c: Modify power/toughness of all matching creatures.
 fn translate_pump_all(
     params: &ForgeParams,
     resolver: &mut SvarResolver,
@@ -229,12 +265,17 @@ fn translate_put_counter(
     })
 }
 
-// CR 111.1: Create token(s).
-fn translate_token(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> {
-    // Forge tokens can be defined inline or via TokenScript$
+// CR 701.7a: Create token(s).
+fn translate_token(
+    params: &ForgeParams,
+    resolver: &mut SvarResolver,
+) -> Result<Effect, ForgeTranslateError> {
+    // TokenScript$ is the authoritative token definition (e.g., "c_a_treasure_sac").
+    // The engine's parse_token_script() resolves these at runtime.
+    // TokenName$ is a display override; fall back to "Token" if neither is present.
     let name = params
-        .get("TokenName")
-        .or_else(|| params.get("TokenScript"))
+        .get("TokenScript")
+        .or_else(|| params.get("TokenName"))
         .unwrap_or("Token")
         .to_string();
 
@@ -260,11 +301,7 @@ fn translate_token(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> 
         .map(|s| s.split(',').map(|t| t.trim().to_string()).collect())
         .unwrap_or_default();
 
-    let count = params
-        .get("TokenAmount")
-        .and_then(|s| s.parse::<i32>().ok())
-        .map(|n| QuantityExpr::Fixed { value: n })
-        .unwrap_or(QuantityExpr::Fixed { value: 1 });
+    let count = resolve_quantity(params, "TokenAmount", resolver);
 
     Ok(Effect::Token {
         name,
@@ -281,7 +318,7 @@ fn translate_token(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> 
     })
 }
 
-// CR 701.18a: Destroy target.
+// CR 701.8a: Destroy target permanent.
 fn translate_destroy(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> {
     let target = resolve_target(params, "ValidTgts");
     let cant_regenerate = params.has("NoRegen");
@@ -291,7 +328,7 @@ fn translate_destroy(params: &ForgeParams) -> Result<Effect, ForgeTranslateError
     })
 }
 
-// CR 701.18a: Destroy all matching permanents.
+// CR 701.8a: Destroy all matching permanents.
 fn translate_destroy_all(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> {
     let target = resolve_target(params, "ValidCards");
     let cant_regenerate = params.has("NoRegen");
@@ -301,13 +338,13 @@ fn translate_destroy_all(params: &ForgeParams) -> Result<Effect, ForgeTranslateE
     })
 }
 
-// CR 701.21a: Tap target.
+// CR 701.26a: Tap target permanent.
 fn translate_tap(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> {
     let target = resolve_target(params, "ValidTgts");
     Ok(Effect::Tap { target })
 }
 
-// CR 701.21a: Untap target.
+// CR 701.26a: Untap target permanent.
 fn translate_untap(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> {
     let target = resolve_target(params, "ValidTgts");
     Ok(Effect::Untap { target })
@@ -336,9 +373,12 @@ fn translate_change_zone(params: &ForgeParams) -> Result<Effect, ForgeTranslateE
 }
 
 // CR 106.1: Produce mana.
-fn translate_mana(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> {
-    let produced = params.get("Produced").unwrap_or("");
-    let colors: Vec<ManaColor> = produced
+fn translate_mana(
+    params: &ForgeParams,
+    resolver: &mut SvarResolver,
+) -> Result<Effect, ForgeTranslateError> {
+    let produced_str = params.get("Produced").unwrap_or("");
+    let colors: Vec<ManaColor> = produced_str
         .split_whitespace()
         .filter_map(|c| match c {
             "W" => Some(ManaColor::White),
@@ -350,12 +390,31 @@ fn translate_mana(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> {
         })
         .collect();
 
+    // Amount$ controls how many times the produced set is generated.
+    // E.g., Produced$ R | Amount$ 3 → produce 3 red mana.
+    let amount = resolve_quantity(params, "Amount", resolver);
+
     let produced = if colors.is_empty() {
         ManaProduction::AnyOneColor {
-            count: QuantityExpr::Fixed { value: 1 },
+            count: amount,
             color_options: ManaColor::ALL.to_vec(),
         }
+    } else if colors.len() == 1 {
+        // Single color with amount: repeat the color N times.
+        // E.g., Produced$ R | Amount$ 3 → Fixed { colors: [R, R, R] }
+        // For dynamic amounts, use AnyOneColor with the single color option.
+        match amount {
+            QuantityExpr::Fixed { value } => {
+                let repeated = vec![colors[0]; value as usize];
+                ManaProduction::Fixed { colors: repeated }
+            }
+            _ => ManaProduction::AnyOneColor {
+                count: amount,
+                color_options: colors,
+            },
+        }
     } else {
+        // Multiple colors: the full set is produced once (Amount$ is unusual here).
         ManaProduction::Fixed { colors }
     };
 
@@ -366,23 +425,22 @@ fn translate_mana(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> {
     })
 }
 
-// CR 701.8a: Discard cards.
+// CR 701.9a: Discard cards.
 fn translate_discard(
     params: &ForgeParams,
     resolver: &mut SvarResolver,
 ) -> Result<Effect, ForgeTranslateError> {
-    let count_val = resolve_quantity(params, "NumCards", resolver);
-    let count = match count_val {
-        QuantityExpr::Fixed { value } => value as u32,
-        _ => 1,
-    };
-    Ok(Effect::DiscardCard {
+    let count = resolve_quantity(params, "NumCards", resolver);
+    let target = resolve_defined(params);
+    let random = params.get("Mode") == Some("Random");
+    Ok(Effect::Discard {
         count,
-        target: TargetFilter::Controller,
+        target,
+        random,
     })
 }
 
-// CR 701.17a: Sacrifice permanents.
+// CR 701.16a: Sacrifice permanents.
 fn translate_sacrifice(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> {
     let target = params
         .get("SacValid")
@@ -392,20 +450,21 @@ fn translate_sacrifice(params: &ForgeParams) -> Result<Effect, ForgeTranslateErr
     Ok(Effect::Sacrifice { target })
 }
 
-// CR 701.17a: Mill cards.
+// CR 701.13a: Mill cards.
 fn translate_mill(
     params: &ForgeParams,
     resolver: &mut SvarResolver,
 ) -> Result<Effect, ForgeTranslateError> {
     let count = resolve_quantity(params, "NumCards", resolver);
+    let target = resolve_defined(params);
     Ok(Effect::Mill {
         count,
-        target: TargetFilter::Controller,
+        target,
         destination: Zone::Graveyard,
     })
 }
 
-// CR 701.17a: Scry.
+// CR 701.22a: Scry.
 fn translate_scry(
     params: &ForgeParams,
     resolver: &mut SvarResolver,
@@ -414,7 +473,7 @@ fn translate_scry(
     Ok(Effect::Scry { count })
 }
 
-// CR 701.41: Surveil.
+// CR 701.25a: Surveil.
 fn translate_surveil(
     params: &ForgeParams,
     resolver: &mut SvarResolver,
@@ -423,7 +482,7 @@ fn translate_surveil(
     Ok(Effect::Surveil { count })
 }
 
-// CR 701.5a: Counter a spell/ability.
+// CR 701.6a: Counter a spell or ability on the stack.
 fn translate_counter(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> {
     let target = resolve_target(params, "ValidTgts");
     Ok(Effect::Counter {
@@ -433,7 +492,7 @@ fn translate_counter(params: &ForgeParams) -> Result<Effect, ForgeTranslateError
     })
 }
 
-// CR 701.8a: Return to hand (bounce).
+// CR 701.26a: Return to owner's hand.
 fn translate_bounce(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> {
     let target = resolve_target(params, "ValidTgts");
     Ok(Effect::ChangeZone {

@@ -195,34 +195,50 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
                 }
             }
 
-            // CR 715: Populate back_face for Adventure cards so the Adventure
-            // half's characteristics are available at cast time.
+            // Populate back_face for dual-faced layouts so the other face's
+            // characteristics are available for transform, adventure cast, and
+            // preview display (Ctrl-hover).
             if obj.back_face.is_none() {
-                if let Some(card_rules) = db.get_by_name(&card_face.name) {
-                    if let CardLayout::Adventure(_, ref adventure_face) = card_rules.layout {
-                        let mut back = BackFaceData {
-                            name: String::new(),
-                            power: None,
-                            toughness: None,
-                            loyalty: None,
-                            card_types: Default::default(),
-                            mana_cost: Default::default(),
-                            keywords: Vec::new(),
-                            abilities: Vec::new(),
-                            trigger_definitions: Vec::new(),
-                            replacement_definitions: Vec::new(),
-                            static_definitions: Vec::new(),
-                            color: Vec::new(),
-                            printed_ref: None,
-                            modal: None,
-                            additional_cost: None,
-                            strive_cost: None,
-                            casting_restrictions: Vec::new(),
-                            casting_options: Vec::new(),
-                        };
-                        apply_card_face_to_back_face(&mut back, adventure_face);
-                        obj.back_face = Some(back);
-                    }
+                let second_face = db
+                    .get_by_name(&card_face.name)
+                    .and_then(|card_rules| match &card_rules.layout {
+                        // CR 715: Adventure half available at cast time
+                        CardLayout::Adventure(_, back) => Some(back),
+                        // CR 712: Transform / Modal DFC / Meld / Omen back face
+                        CardLayout::Transform(_, back)
+                        | CardLayout::Modal(_, back)
+                        | CardLayout::Meld(_, back)
+                        | CardLayout::Omen(_, back) => Some(back),
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        obj.printed_ref
+                            .as_ref()
+                            .and_then(|printed_ref| db.get_other_face_by_printed_ref(printed_ref))
+                    });
+                if let Some(face) = second_face {
+                    let mut back = BackFaceData {
+                        name: String::new(),
+                        power: None,
+                        toughness: None,
+                        loyalty: None,
+                        card_types: Default::default(),
+                        mana_cost: Default::default(),
+                        keywords: Vec::new(),
+                        abilities: Vec::new(),
+                        trigger_definitions: Vec::new(),
+                        replacement_definitions: Vec::new(),
+                        static_definitions: Vec::new(),
+                        color: Vec::new(),
+                        printed_ref: None,
+                        modal: None,
+                        additional_cost: None,
+                        strive_cost: None,
+                        casting_restrictions: Vec::new(),
+                        casting_options: Vec::new(),
+                    };
+                    apply_card_face_to_back_face(&mut back, face);
+                    obj.back_face = Some(back);
                 }
             }
         }
@@ -324,5 +340,110 @@ pub fn derive_colors_from_mana_cost(mana_cost: &ManaCost) -> Vec<ManaColor> {
             }
             colors
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::CardDatabase;
+    use crate::game::deck_loading::create_object_from_card_face;
+    use crate::types::ability::{
+        AbilityDefinition, AdditionalCost, CastingRestriction, ModalChoice, ReplacementDefinition,
+        SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
+    };
+    use crate::types::card::CardFace;
+    use crate::types::card_type::{CardType, CoreType};
+    use crate::types::game_state::GameState;
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+    use crate::types::player::PlayerId;
+
+    fn test_face(
+        name: &str,
+        oracle_id: &str,
+        core_types: Vec<CoreType>,
+        mana_cost: ManaCost,
+    ) -> CardFace {
+        CardFace {
+            name: name.to_string(),
+            mana_cost,
+            card_type: CardType {
+                supertypes: vec![],
+                core_types,
+                subtypes: vec![],
+            },
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            oracle_text: None,
+            non_ability_text: None,
+            flavor_name: None,
+            keywords: Vec::<Keyword>::new(),
+            abilities: Vec::<AbilityDefinition>::new(),
+            triggers: Vec::<TriggerDefinition>::new(),
+            static_abilities: Vec::<StaticDefinition>::new(),
+            replacements: Vec::<ReplacementDefinition>::new(),
+            color_override: None,
+            scryfall_oracle_id: Some(oracle_id.to_string()),
+            modal: None::<ModalChoice>,
+            additional_cost: None::<AdditionalCost>,
+            casting_restrictions: Vec::<CastingRestriction>::new(),
+            casting_options: Vec::<SpellCastingOption>::new(),
+            solve_condition: None::<SolveCondition>,
+            strive_cost: None,
+            brawl_commander: false,
+        }
+    }
+
+    #[test]
+    fn rehydrate_populates_adventure_back_face_from_export_db() {
+        let giant = test_face(
+            "Bonecrusher Giant",
+            "shared-adventure-oracle-id",
+            vec![CoreType::Creature],
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 2,
+            },
+        );
+        let stomp = test_face(
+            "Stomp",
+            "shared-adventure-oracle-id",
+            vec![CoreType::Instant],
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            },
+        );
+        let export = serde_json::json!({
+            "bonecrusher giant": giant,
+            "stomp": stomp,
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&export).expect("export db should parse");
+
+        let mut state = GameState::default();
+        let object_id = create_object_from_card_face(
+            &mut state,
+            db.get_face_by_name("Bonecrusher Giant").unwrap(),
+            PlayerId(0),
+        );
+        let obj = state.objects.get(&object_id).unwrap();
+        assert!(
+            obj.back_face.is_none(),
+            "precondition: deck loading starts with only the front face"
+        );
+
+        rehydrate_game_from_card_db(&mut state, &db);
+
+        let obj = state.objects.get(&object_id).unwrap();
+        let back_face = obj
+            .back_face
+            .as_ref()
+            .expect("rehydrate should attach the adventure face");
+        assert_eq!(back_face.name, "Stomp");
+        assert_eq!(back_face.color, vec![ManaColor::Red]);
     }
 }

@@ -300,20 +300,47 @@ fn replace_unimplemented_triggers(face: &mut CardFace, forge_triggers: &[Trigger
 }
 
 /// Replace unimplemented statics by matching on StaticMode.
+///
+/// Strategy: For each Oracle static with empty modifications (likely a placeholder),
+/// find a Forge static with the same mode and replace it. Then append any Forge
+/// statics whose modes don't appear in the Oracle set at all.
 fn replace_unimplemented_statics(face: &mut CardFace, forge_statics: &[StaticDefinition]) {
     if forge_statics.is_empty() {
         return;
     }
 
-    // Append statics that Oracle didn't parse
-    if forge_statics.len() > face.static_abilities.len() {
-        for forge_static in &forge_statics[face.static_abilities.len()..] {
+    // Replace existing placeholder statics by mode
+    for oracle_static in &mut face.static_abilities {
+        let is_placeholder =
+            oracle_static.modifications.is_empty() && oracle_static.affected.is_none();
+        if is_placeholder {
+            if let Some(forge_static) = forge_statics
+                .iter()
+                .find(|fs| fs.mode == oracle_static.mode)
+            {
+                *oracle_static = forge_static.clone();
+            }
+        }
+    }
+
+    // Append statics whose modes don't exist in Oracle's set
+    let oracle_modes: Vec<_> = face
+        .static_abilities
+        .iter()
+        .map(|s| s.mode.clone())
+        .collect();
+    for forge_static in forge_statics {
+        if !oracle_modes.contains(&forge_static.mode) {
             face.static_abilities.push(forge_static.clone());
         }
     }
 }
 
 /// Replace unimplemented replacements by matching on ReplacementEvent.
+///
+/// Strategy: For each Oracle replacement with no execute chain (placeholder),
+/// find a Forge replacement with the same event and replace it. Then append any
+/// Forge replacements whose events don't appear in the Oracle set at all.
 fn replace_unimplemented_replacements(
     face: &mut CardFace,
     forge_replacements: &[ReplacementDefinition],
@@ -322,10 +349,24 @@ fn replace_unimplemented_replacements(
         return;
     }
 
-    // Append replacements that Oracle didn't parse
-    if forge_replacements.len() > face.replacements.len() {
-        for forge_replacement in &forge_replacements[face.replacements.len()..] {
-            face.replacements.push(forge_replacement.clone());
+    // Replace existing placeholder replacements by event
+    for oracle_repl in &mut face.replacements {
+        let is_placeholder = oracle_repl.execute.is_none();
+        if is_placeholder {
+            if let Some(forge_repl) = forge_replacements
+                .iter()
+                .find(|fr| fr.event == oracle_repl.event)
+            {
+                *oracle_repl = forge_repl.clone();
+            }
+        }
+    }
+
+    // Append replacements whose events don't exist in Oracle's set
+    let oracle_events: Vec<_> = face.replacements.iter().map(|r| r.event.clone()).collect();
+    for forge_repl in forge_replacements {
+        if !oracle_events.contains(&forge_repl.event) {
+            face.replacements.push(forge_repl.clone());
         }
     }
 }
@@ -333,7 +374,6 @@ fn replace_unimplemented_replacements(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     use crate::database::forge::loader::parse_params;
     use crate::database::forge::types::{ForgeAbilityLine, ForgeCard};
@@ -389,8 +429,10 @@ mod tests {
     #[test]
     fn test_apply_fallback_only_replaces_unimplemented() {
         // Create a CardFace with 2 abilities: one working, one Unimplemented
-        let mut face = CardFace::default();
-        face.name = "Test Card".to_string();
+        let mut face = CardFace {
+            name: "Test Card".to_string(),
+            ..CardFace::default()
+        };
 
         let working = AbilityDefinition::new(
             AbilityKind::Spell,

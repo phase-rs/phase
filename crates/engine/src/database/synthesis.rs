@@ -211,6 +211,7 @@ pub fn synthesize_mobilize(face: &mut CardFace) {
                 keywords: vec![],
                 tapped: true,
                 count: qty.clone(),
+                owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: true,
             };

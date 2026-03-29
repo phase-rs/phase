@@ -25,6 +25,7 @@ pub fn resolve(
             keywords: vec![],
             tapped: false,
             count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+            owner: crate::types::ability::TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
         },

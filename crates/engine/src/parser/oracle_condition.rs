@@ -163,7 +163,8 @@ fn parse_source_condition(text: &str) -> Option<ParsedCondition> {
     }
     // "this creature doesn't have [keyword]"
     if let Some(keyword_text) = text.strip_prefix("this creature doesn't have ") {
-        if let Ok(keyword) = Keyword::from_str(keyword_text.trim()) {
+        let keyword: Keyword = keyword_text.trim().parse().unwrap();
+        if !matches!(keyword, Keyword::Unknown(_)) {
             return Some(ParsedCondition::SourceLacksKeyword { keyword });
         }
     }
@@ -267,7 +268,8 @@ fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
         .strip_prefix("you control a creature with ")
         .or_else(|| text.strip_prefix("you control a creature that has "))
     {
-        if let Ok(keyword) = Keyword::from_str(keyword_text.trim()) {
+        let keyword: Keyword = keyword_text.trim().parse().unwrap();
+        if !matches!(keyword, Keyword::Unknown(_)) {
             return Some(ParsedCondition::YouControlCreatureWithKeyword { keyword });
         }
     }

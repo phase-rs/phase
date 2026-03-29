@@ -70,6 +70,7 @@ pub fn resolve_mana_ability(
 }
 
 /// CR 605.3b: Mana abilities resolve immediately unless paying the cost requires a choice.
+#[allow(clippy::too_many_arguments)]
 pub fn activate_mana_ability(
     state: &mut GameState,
     source_id: ObjectId,
