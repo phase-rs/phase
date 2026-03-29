@@ -15,7 +15,8 @@
         "title": "phase.rs",
         "width": 1280,
         "height": 800,
-        "resizable": true
+        "resizable": true,
+        "fullscreen": true
       }
     ],
     "security": {

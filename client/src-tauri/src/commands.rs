@@ -5,6 +5,7 @@ use engine::game::combat::has_summoning_sickness;
 use engine::game::coverage::unimplemented_mechanics;
 use engine::game::engine::apply;
 use engine::game::static_abilities::{check_static_ability, StaticCheckContext};
+use engine::types::statics::StaticMode;
 use engine::game::{load_deck_into_state, start_game, DeckPayload};
 use engine::types::game_state::ActionResult;
 use engine::types::match_config::MatchConfig;
@@ -70,7 +71,7 @@ pub fn get_game_state(state: tauri::State<AppState>) -> Result<GameState, String
                 player_id: Some(p.id),
                 ..Default::default()
             };
-            check_static_ability(game, "MayLookAtTopOfLibrary", &ctx)
+            check_static_ability(game, StaticMode::MayLookAtTopOfLibrary, &ctx)
         })
         .collect();
     for (i, flag) in peek_flags.into_iter().enumerate() {

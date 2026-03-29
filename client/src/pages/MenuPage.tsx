@@ -10,6 +10,7 @@ import {
   ACTIVE_DECK_KEY,
   listSavedDeckNames,
 } from "../constants/storage";
+import { isTauri } from "../services/sidecar";
 import {
   clearActiveGame,
   loadActiveGame,
@@ -231,6 +232,19 @@ export function MenuPage() {
             <div className="rounded-full border border-white/8 bg-black/16 px-4 py-2 text-sm text-slate-500">
               Saved match available
             </div>
+          </div>
+        )}
+
+        {isTauri() && (
+          <div className="mt-6 flex justify-center">
+            <button
+              onClick={() => {
+                import("@tauri-apps/plugin-process").then((m) => m.exit(0));
+              }}
+              className="rounded-full border border-white/8 bg-black/20 px-5 py-1.5 text-xs font-medium text-slate-500 backdrop-blur-sm transition-colors hover:border-red-500/30 hover:text-red-400"
+            >
+              Exit
+            </button>
           </div>
         )}
 
