@@ -1,6 +1,6 @@
 use engine::ai_support::{AiDecisionContext, CandidateAction};
 use engine::game::game_object::GameObject;
-use engine::types::ability::{Effect, ResolvedAbility};
+use engine::types::ability::{AbilityDefinition, Effect, ResolvedAbility};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
@@ -57,7 +57,7 @@ impl<'a> PolicyContext<'a> {
                 return self
                     .source_object()
                     .into_iter()
-                    .flat_map(|object| object.abilities.iter().map(|ability| &*ability.effect))
+                    .flat_map(|object| object.abilities.iter().flat_map(collect_definition_effects))
                     .collect();
             }
             GameAction::ActivateAbility {
@@ -69,7 +69,7 @@ impl<'a> PolicyContext<'a> {
                     .objects
                     .get(source_id)
                     .and_then(|object| object.abilities.get(*ability_index))
-                    .map(|ability| vec![&*ability.effect])
+                    .map(collect_definition_effects)
                     .unwrap_or_default();
             }
             _ => {}
@@ -99,14 +99,28 @@ pub(crate) fn collect_ability_effects(ability: &ResolvedAbility) -> Vec<&Effect>
     effects
 }
 
+fn collect_definition_effects(ability: &AbilityDefinition) -> Vec<&Effect> {
+    let mut effects = vec![&*ability.effect];
+    let mut current = &ability.sub_ability;
+    while let Some(sub) = current {
+        effects.push(&*sub.effect);
+        current = &sub.sub_ability;
+    }
+    effects
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use engine::ai_support::{ActionMetadata, TacticalClass};
-    use engine::types::ability::{PtValue, QuantityExpr, TargetFilter};
+    use engine::game::zones::create_object;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, PtValue, QuantityExpr, TargetFilter,
+    };
     use engine::types::game_state::{PendingCast, TargetSelectionSlot};
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::ManaCost;
+    use engine::types::zones::Zone;
 
     #[test]
     fn effects_returns_pending_cast_during_target_selection() {
@@ -219,6 +233,66 @@ mod tests {
             2,
             "Should collect both main and sub-ability effects"
         );
+        assert!(matches!(effects[0], Effect::Pump { .. }));
+        assert!(matches!(effects[1], Effect::Draw { .. }));
+    }
+
+    #[test]
+    fn cast_spell_effects_walk_sub_ability_chain() {
+        let mut state = GameState::new_two_player(42);
+        let config = AiConfig::default();
+        let card_id = CardId(1);
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Pump {
+                power: PtValue::Fixed(2),
+                toughness: PtValue::Fixed(2),
+                target: TargetFilter::Any,
+            },
+        );
+        ability.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        )));
+        let spell_id = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Test Spell".to_string(),
+            Zone::Hand,
+        );
+        state.objects.get_mut(&spell_id).unwrap().abilities = vec![ability];
+
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: Vec::new(),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Spell,
+            },
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+        };
+
+        let effects = ctx.effects();
+        assert_eq!(effects.len(), 2);
         assert!(matches!(effects[0], Effect::Pump { .. }));
         assert!(matches!(effects[1], Effect::Draw { .. }));
     }

@@ -1,4 +1,5 @@
-use engine::types::ability::{Effect, QuantityExpr, TargetRef};
+use engine::game::filter::matches_target_filter;
+use engine::types::ability::{Effect, QuantityExpr, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::identifiers::ObjectId;
@@ -9,7 +10,8 @@ use crate::eval::{evaluate_creature, threat_level};
 
 use super::context::PolicyContext;
 use super::effect_classify::{
-    aura_polarity, effect_polarity, is_spell_beneficial, targets_creatures, targets_creatures_only,
+    aggregate_player_impact, aura_polarity, effect_polarity, extract_target_filter,
+    is_spell_beneficial, targeted_player_impact, targets_creatures, targets_creatures_only,
     EffectPolarity,
 };
 use super::registry::TacticalPolicy;
@@ -47,8 +49,11 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
     // For harmful spells, only penalise when targeting is creature-exclusive.
     // Burn spells with TargetFilter::Any can still go face — don't block those.
     let mut has_harmful_creature_only_target = effects.iter().any(|effect| {
-        matches!(effect_polarity(effect), EffectPolarity::Harmful) && targets_creatures_only(effect)
+        !matches!(effect, Effect::Bounce { .. })
+            && matches!(effect_polarity(effect), EffectPolarity::Harmful)
+            && targets_creatures_only(effect)
     });
+    let has_harmful_bounce = effects.iter().any(is_hostile_or_neutral_bounce);
 
     // Auras have no active effects — detect polarity via static definitions.
     if effects.is_empty() {
@@ -63,7 +68,7 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
         }
     }
 
-    if !has_beneficial_creature_target && !has_harmful_creature_only_target {
+    if !has_beneficial_creature_target && !has_harmful_creature_only_target && !has_harmful_bounce {
         return 0.0;
     }
 
@@ -90,7 +95,45 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
         penalty -= 8.0;
     }
 
+    // Harmful bounce with no opposing legal targets will force a self-bounce line.
+    if has_harmful_bounce && !has_opponent_bounce_target(ctx, &effects) {
+        penalty -= 8.0;
+    }
+
     penalty
+}
+
+fn has_opponent_bounce_target(ctx: &PolicyContext<'_>, effects: &[&Effect]) -> bool {
+    let Some(source) = ctx.source_object() else {
+        return false;
+    };
+
+    effects
+        .iter()
+        .filter(|effect| is_hostile_or_neutral_bounce(effect))
+        .filter_map(|effect| match effect {
+            Effect::Bounce { target, .. } => Some(target),
+            _ => None,
+        })
+        .any(|target| {
+            ctx.state.battlefield.iter().any(|&object_id| {
+                ctx.state.objects.get(&object_id).is_some_and(|object| {
+                    object.controller != ctx.ai_player
+                        && matches_target_filter(ctx.state, object_id, target, source.id)
+                })
+            })
+        })
+}
+
+fn is_hostile_or_neutral_bounce(effect: &&Effect) -> bool {
+    let Effect::Bounce { .. } = effect else {
+        return false;
+    };
+    !matches!(
+        extract_target_filter(effect),
+        Some(TargetFilter::Typed(typed))
+            if matches!(typed.controller, Some(engine::types::ability::ControllerRef::You))
+    )
 }
 
 fn score_target_ref(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
@@ -98,8 +141,17 @@ fn score_target_ref(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
     match target {
         TargetRef::Player(player_id) => {
             let is_self = *player_id == ctx.ai_player;
+            let player_impact = targeted_player_impact(ctx, *player_id)
+                .unwrap_or_else(|| aggregate_player_impact(ctx));
+            let prefers_self = if player_impact > 0.25 {
+                true
+            } else if player_impact < -0.25 {
+                false
+            } else {
+                beneficial
+            };
             // Beneficial spells → target self; harmful → target opponent
-            if beneficial == is_self {
+            if prefers_self == is_self {
                 4.0 + threat_level(ctx.state, ctx.ai_player, *player_id) * 8.0
             } else {
                 -100.0
@@ -528,6 +580,177 @@ mod tests {
     }
 
     #[test]
+    fn discard_then_draw_player_target_prefers_self() {
+        let state = make_state();
+        let config = AiConfig::default();
+        let sub = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+            },
+            Vec::new(),
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::DiscardCard {
+                count: 1,
+                target: TargetFilter::Any,
+            },
+            Vec::new(),
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+        let legal_targets = vec![
+            TargetRef::Player(PlayerId(0)),
+            TargetRef::Player(PlayerId(1)),
+        ];
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TargetSelection {
+                player: PlayerId(0),
+                pending_cast: Box::new(PendingCast::new(
+                    ObjectId(100),
+                    CardId(100),
+                    ability.clone(),
+                    ManaCost::zero(),
+                )),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: legal_targets.clone(),
+                    optional: false,
+                }],
+                selection: Default::default(),
+            },
+            candidates: Vec::new(),
+        };
+        let self_candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(0))),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Target,
+            },
+        };
+        let self_ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &self_candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+        };
+        let opp_candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(1))),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Target,
+            },
+        };
+        let opp_ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &opp_candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+        };
+
+        let self_score = AntiSelfHarmPolicy.score(&self_ctx);
+        let opp_score = AntiSelfHarmPolicy.score(&opp_ctx);
+        assert!(
+            self_score > opp_score,
+            "Net card-positive discard/draw should prefer self: self={self_score}, opp={opp_score}"
+        );
+    }
+
+    #[test]
+    fn opponent_discards_and_you_draw_prefers_opponent() {
+        let state = make_state();
+        let config = AiConfig::default();
+        let sub = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            Vec::new(),
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::DiscardCard {
+                count: 1,
+                target: TargetFilter::Any,
+            },
+            Vec::new(),
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TargetSelection {
+                player: PlayerId(0),
+                pending_cast: Box::new(PendingCast::new(
+                    ObjectId(100),
+                    CardId(100),
+                    ability,
+                    ManaCost::zero(),
+                )),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: vec![
+                        TargetRef::Player(PlayerId(0)),
+                        TargetRef::Player(PlayerId(1)),
+                    ],
+                    optional: false,
+                }],
+                selection: Default::default(),
+            },
+            candidates: Vec::new(),
+        };
+        let self_candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(0))),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Target,
+            },
+        };
+        let self_ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &self_candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+        };
+        let opp_candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(1))),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Target,
+            },
+        };
+        let opp_ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &opp_candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+        };
+
+        let self_score = AntiSelfHarmPolicy.score(&self_ctx);
+        let opp_score = AntiSelfHarmPolicy.score(&opp_ctx);
+        assert!(
+            opp_score > self_score,
+            "Targeted discard plus untargeted draw should still prefer opponent: self={self_score}, opp={opp_score}"
+        );
+    }
+
+    #[test]
     fn plus_counter_is_beneficial() {
         let effect = Effect::AddCounter {
             counter_type: "+1/+1".to_string(),
@@ -616,6 +839,122 @@ mod tests {
         assert!(
             score < -5.0,
             "Casting pump with no friendly creatures should be heavily penalised, got {score}"
+        );
+    }
+
+    #[test]
+    fn pre_cast_penalises_bounce_with_only_friendly_targets() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(0), "Otter", 1, 1);
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(301),
+            PlayerId(0),
+            "Boomerang Basics".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&spell_id).unwrap();
+        obj.abilities = vec![engine::types::ability::AbilityDefinition::new(
+            engine::types::ability::AbilityKind::Spell,
+            Effect::Bounce {
+                target: TargetFilter::Typed(
+                    engine::types::ability::TypedFilter::new(TypeFilter::Permanent)
+                        .with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
+                ),
+                destination: None,
+            },
+        )];
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: CardId(301),
+                targets: Vec::new(),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Spell,
+            },
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+        };
+
+        let score = AntiSelfHarmPolicy.score(&ctx);
+        assert!(
+            score < -5.0,
+            "Casting bounce with only friendly targets should be heavily penalised, got {score}"
+        );
+    }
+
+    #[test]
+    fn pre_cast_allows_explicit_self_bounce_patterns() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(0), "Otter", 1, 1);
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(302),
+            PlayerId(0),
+            "Deputy of Acquittals".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&spell_id).unwrap();
+        obj.abilities = vec![engine::types::ability::AbilityDefinition::new(
+            engine::types::ability::AbilityKind::Spell,
+            Effect::Bounce {
+                target: TargetFilter::Typed(
+                    engine::types::ability::TypedFilter::new(TypeFilter::Creature)
+                        .controller(engine::types::ability::ControllerRef::You),
+                ),
+                destination: None,
+            },
+        )];
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: CardId(302),
+                targets: Vec::new(),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Spell,
+            },
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+        };
+
+        let score = AntiSelfHarmPolicy.score(&ctx);
+        assert!(
+            score >= 0.0,
+            "Explicit self-bounce patterns should not be treated as self-harm, got {score}"
         );
     }
 

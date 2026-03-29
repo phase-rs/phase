@@ -1,5 +1,8 @@
 use engine::game::game_object::GameObject;
-use engine::types::ability::{ContinuousModification, Effect, PtValue, TargetFilter, TypeFilter};
+use engine::types::ability::{
+    ContinuousModification, ControllerRef, Effect, PtValue, QuantityExpr, TargetFilter, TypeFilter,
+};
+use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
@@ -163,6 +166,14 @@ pub(crate) fn targets_creatures(effect: &Effect) -> bool {
 /// Defaults to false (assume harmful) when uncertain — safe fallback since most
 /// targeted spells in MTG are removal/damage.
 pub(crate) fn is_spell_beneficial(ctx: &PolicyContext<'_>) -> bool {
+    let player_impact = aggregate_player_impact(ctx);
+    if player_impact > 0.25 {
+        return true;
+    }
+    if player_impact < -0.25 {
+        return false;
+    }
+
     let effects = ctx.effects();
 
     // Check active effects for a clear polarity signal.
@@ -182,6 +193,81 @@ pub(crate) fn is_spell_beneficial(ctx: &PolicyContext<'_>) -> bool {
     }
 
     false
+}
+
+pub(crate) fn aggregate_player_impact(ctx: &PolicyContext<'_>) -> f64 {
+    ctx.effects()
+        .iter()
+        .map(|effect| player_impact(*effect))
+        .sum()
+}
+
+pub(crate) fn targeted_player_impact(ctx: &PolicyContext<'_>, player: PlayerId) -> Option<f64> {
+    let source_controller = ctx.source_object().map(|object| object.controller);
+    let mut found_targeted_effect = false;
+    let mut impact = 0.0;
+
+    for effect in ctx.effects() {
+        let Some(filter) = extract_target_filter(effect) else {
+            continue;
+        };
+        if local_player_matches_target_filter(filter, player, source_controller) {
+            found_targeted_effect = true;
+            impact += player_impact(effect);
+        }
+    }
+
+    found_targeted_effect.then_some(impact)
+}
+
+fn local_player_matches_target_filter(
+    filter: &TargetFilter,
+    player_id: PlayerId,
+    source_controller: Option<PlayerId>,
+) -> bool {
+    match filter {
+        TargetFilter::Any | TargetFilter::Player => true,
+        TargetFilter::SelfRef => false,
+        TargetFilter::Controller => source_controller == Some(player_id),
+        TargetFilter::Typed(typed) if typed.type_filters.is_empty() => match typed.controller {
+            Some(ControllerRef::You) => source_controller == Some(player_id),
+            Some(ControllerRef::Opponent) => {
+                source_controller.is_some_and(|ctrl| ctrl != player_id)
+            }
+            None => true,
+        },
+        TargetFilter::Typed(_) => false,
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|filter| local_player_matches_target_filter(filter, player_id, source_controller)),
+        TargetFilter::And { filters } => filters
+            .iter()
+            .all(|filter| local_player_matches_target_filter(filter, player_id, source_controller)),
+        _ => false,
+    }
+}
+
+fn player_impact(effect: &Effect) -> f64 {
+    match effect {
+        Effect::Draw { count } => quantity_weight(count, 1.25),
+        Effect::Discard { count, .. } => -quantity_weight(count, 1.5),
+        Effect::DiscardCard { count, .. } => -(*count as f64 * 1.5),
+        Effect::GainLife { amount, .. } => quantity_weight(amount, 0.15),
+        Effect::LoseLife { amount } => -quantity_weight(amount, 0.15),
+        _ => match effect_polarity(effect) {
+            EffectPolarity::Beneficial => 1.0,
+            EffectPolarity::Harmful => -1.0,
+            EffectPolarity::Contextual => 0.0,
+        },
+    }
+}
+
+fn quantity_weight(quantity: &QuantityExpr, factor: f64) -> f64 {
+    factor
+        * match quantity {
+            QuantityExpr::Fixed { value } => (*value).max(0) as f64,
+            _ => 1.0,
+        }
 }
 
 /// Determines whether an Aura is beneficial or harmful to its target by inspecting
