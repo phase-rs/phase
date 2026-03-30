@@ -922,6 +922,28 @@ fn add_controller(filter: TargetFilter, controller: ControllerRef) -> TargetFilt
 // Event verb parsing: matches the event after the subject
 // ---------------------------------------------------------------------------
 
+/// Parse the "to <target>" qualifier that follows a damage verb.
+/// Returns a `TargetFilter` for the three common cases:
+/// - "to a player"         → `Player`
+/// - "to an opponent"      → opponent-controlled TypedFilter
+/// - "to you"              → `Controller`
+/// Other qualifiers (e.g. "to a player or planeswalker") are left as `None`
+/// so the trigger fires for any target, matching current behaviour.
+fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
+    let rest = after_verb.trim_start().strip_prefix("to ")?;
+    if rest.starts_with("a player") {
+        Some(TargetFilter::Player)
+    } else if rest.starts_with("an opponent") || rest.starts_with("one of your opponents") {
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ))
+    } else if rest.starts_with("you") {
+        Some(TargetFilter::Controller)
+    } else {
+        None
+    }
+}
+
 /// Try to parse an event verb and build a TriggerDefinition from subject + event.
 fn try_parse_event(
     subject: &TargetFilter,
@@ -980,19 +1002,27 @@ fn try_parse_event(
     }
 
     // CR 120.1: "deals combat damage" / "deal combat damage" (plural for &-names after ~ normalization)
-    if rest.starts_with("deals combat damage") || rest.starts_with("deal combat damage") {
+    if let Some(after) = rest
+        .strip_prefix("deals combat damage")
+        .or_else(|| rest.strip_prefix("deal combat damage"))
+    {
         let mut def = make_base();
         def.mode = TriggerMode::DamageDone;
         def.damage_kind = DamageKindFilter::CombatOnly;
         def.valid_source = Some(subject.clone());
+        def.valid_target = parse_damage_to_qualifier(after);
         return Some((TriggerMode::DamageDone, def));
     }
 
     // CR 120.1: "deals damage" / "deal damage" (plural for &-names)
-    if rest.starts_with("deals damage") || rest.starts_with("deal damage") {
+    if let Some(after) = rest
+        .strip_prefix("deals damage")
+        .or_else(|| rest.strip_prefix("deal damage"))
+    {
         let mut def = make_base();
         def.mode = TriggerMode::DamageDone;
         def.valid_source = Some(subject.clone());
+        def.valid_target = parse_damage_to_qualifier(after);
         return Some((TriggerMode::DamageDone, def));
     }
 
@@ -2791,6 +2821,35 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::DamageDone);
         assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+    }
+
+    #[test]
+    fn trigger_combat_damage_to_opponent() {
+        let def = parse_trigger_line(
+            "Whenever ~ deals combat damage to an opponent, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_combat_damage_no_qualifier() {
+        // "deals combat damage" with no "to X" — fires for any target
+        let def = parse_trigger_line(
+            "Whenever ~ deals combat damage, put a +1/+1 counter on ~.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(def.valid_target, None);
     }
 
     #[test]
@@ -3539,6 +3598,7 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::DamageDone);
         assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
         assert_eq!(def.valid_source, Some(TargetFilter::AttachedTo));
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
     }
 
     #[test]
@@ -4489,6 +4549,7 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::DamageDone);
         assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
     }
 
     #[test]
