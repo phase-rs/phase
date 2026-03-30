@@ -21,6 +21,13 @@ export function createAIController(config: AIControllerConfig): AIController {
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   let unsubscribe: (() => void) | null = null;
 
+  // Track consecutive failures on the same WaitingFor state to break infinite loops.
+  // When the AI returns null or the engine rejects the action, the WaitingFor doesn't
+  // change — without a cap, checkAndSchedule would retry forever.
+  let lastWaitingForType: string | null = null;
+  let consecutiveFailures = 0;
+  const MAX_CONSECUTIVE_FAILURES = 3;
+
   const aiPlayerIds = new Set(config.playerIds);
 
   function checkAndSchedule() {
@@ -37,6 +44,20 @@ export function createAIController(config: AIControllerConfig): AIController {
     // Check if it's an AI player's turn
     if (!("data" in waitingFor) || !waitingFor.data || !("player" in waitingFor.data)) return;
     if (!aiPlayerIds.has(waitingFor.data.player)) return;
+
+    // Reset failure counter when the WaitingFor state changes
+    if (waitingFor.type !== lastWaitingForType) {
+      lastWaitingForType = waitingFor.type;
+      consecutiveFailures = 0;
+    }
+
+    if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+      debugLog(
+        `AI stuck: ${MAX_CONSECUTIVE_FAILURES} consecutive failures on ${waitingFor.type}, stopping retries`,
+        "warn",
+      );
+      return;
+    }
 
     scheduleAction(waitingFor.data.player);
   }
@@ -63,6 +84,7 @@ export function createAIController(config: AIControllerConfig): AIController {
         pending = false;
         return;
       }
+      let failed = false;
       try {
         const { gameState } = useGameStore.getState();
         const action = await actionPromise;
@@ -71,13 +93,19 @@ export function createAIController(config: AIControllerConfig): AIController {
             `AI getAiAction returned null for player ${playerId} (waitingFor: ${gameState?.waiting_for?.type ?? "none"})`,
             "warn",
           );
-          pending = false;
+          failed = true;
           return;
         }
         await dispatchAction(action);
+        // Successful dispatch — reset failure counter
+        consecutiveFailures = 0;
       } catch (e) {
         debugLog(`AI error choosing action: ${e instanceof Error ? e.message : String(e)}`);
+        failed = true;
       } finally {
+        if (failed) {
+          consecutiveFailures++;
+        }
         pending = false;
         if (active) checkAndSchedule();
       }
