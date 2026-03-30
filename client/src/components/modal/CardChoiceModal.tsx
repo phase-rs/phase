@@ -5,7 +5,7 @@ import { CardImage } from "../card/CardImage.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
-import type { ObjectId, WaitingFor } from "../../adapter/types.ts";
+import type { ObjectId, TargetFilter, WaitingFor } from "../../adapter/types.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { ChoiceOverlay, ConfirmButton, ScrollableCardStrip } from "./ChoiceOverlay.tsx";
 import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
@@ -847,11 +847,12 @@ function ExileFromGraveyardModal({ data }: { data: ExileFromGraveyardForCost["da
 
 // ── Discard to Hand Size Modal ───────────────────────────────────────────────
 
-function DiscardModal({ data, title = "Discard" }: { data: DiscardToHandSize["data"]; title?: string }) {
+function DiscardModal({ data, title = "Discard" }: { data: DiscardToHandSize["data"] & { unless_filter?: TargetFilter }; title?: string }) {
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const inspectObject = useUiStore((s) => s.inspectObject);
   const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
+  const hasUnlessOption = data.unless_filter != null;
 
   const toggleSelect = useCallback(
     (id: ObjectId) => {
@@ -877,12 +878,14 @@ function DiscardModal({ data, title = "Discard" }: { data: DiscardToHandSize["da
 
   if (!objects) return null;
 
-  const isReady = selected.size === data.count;
+  // CR 608.2c: "discard N unless you discard a [type]" — accept 1 card OR count cards.
+  // Engine validates the filter match; frontend just allows submission.
+  const isReady = selected.size === data.count || (hasUnlessOption && selected.size === 1);
 
   return (
     <ChoiceOverlay
       title={title}
-      subtitle={`Choose ${data.count} card${data.count > 1 ? "s" : ""} to discard`}
+      subtitle={hasUnlessOption ? `Choose ${data.count} cards or 1 matching card to discard` : `Choose ${data.count} card${data.count > 1 ? "s" : ""} to discard`}
       footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Discard (${selected.size}/${data.count})`} />}
     >
       <ScrollableCardStrip>

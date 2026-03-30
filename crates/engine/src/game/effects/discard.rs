@@ -27,12 +27,17 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let num_cards: u32 = match &ability.effect {
-        Effect::DiscardCard { count, .. } => *count,
-        Effect::Discard { count, .. } => {
-            resolve_quantity(state, count, ability.controller, ability.source_id) as u32
-        }
-        _ => 1,
+    let (num_cards, unless_filter) = match &ability.effect {
+        Effect::DiscardCard { count, .. } => (*count, None),
+        Effect::Discard {
+            count,
+            unless_filter,
+            ..
+        } => (
+            resolve_quantity(state, count, ability.controller, ability.source_id) as u32,
+            unless_filter.clone(),
+        ),
+        _ => (1, None),
     };
 
     // Check if targets specify specific cards to discard
@@ -142,6 +147,7 @@ pub fn resolve(
                 cards: hand_cards,
                 source_id: ability.source_id,
                 effect_kind: EffectKind::from(&ability.effect),
+                unless_filter,
             };
             // EffectResolved is emitted by the engine handler after the player chooses.
             return Ok(());
@@ -348,6 +354,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
                 random: false,
+                unless_filter: None,
             },
             vec![],
             ObjectId(100),
@@ -388,6 +395,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 random: false,
+                unless_filter: None,
             },
             vec![],
             ObjectId(100),
@@ -419,6 +427,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
                 random: false,
+                unless_filter: None,
             },
             vec![],
             ObjectId(100),

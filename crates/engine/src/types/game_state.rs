@@ -439,6 +439,10 @@ pub enum WaitingFor {
         cards: Vec<ObjectId>,
         source_id: ObjectId,
         effect_kind: crate::types::ability::EffectKind,
+        /// CR 608.2c: "discard N unless you discard a [type]" — when set,
+        /// the player may discard 1 card matching this filter instead of `count`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unless_filter: Option<crate::types::ability::TargetFilter>,
     },
     /// CR 701.48a: Learn — player chooses to rummage (discard→draw) or skip.
     /// `hand_cards` lists cards eligible for discard.
@@ -1852,6 +1856,7 @@ mod tests {
             cards: vec![ObjectId(1)],
             source_id: ObjectId(100),
             effect_kind: crate::types::ability::EffectKind::Discard,
+            unless_filter: None,
         }));
         variants.push(Box::new(WaitingFor::DefilerPayment {
             player: PlayerId(0),

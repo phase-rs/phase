@@ -2272,6 +2272,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 cards: legal_cards,
                 source_id,
                 effect_kind,
+                unless_filter,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
@@ -2280,8 +2281,20 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             let legal = legal_cards.clone();
             let src = *source_id;
             let kind = *effect_kind;
+            let unless_f = unless_filter.clone();
 
-            if chosen.len() != expected {
+            // CR 608.2c: "discard N unless you discard a [type]" — accept 1 card
+            // if it matches the unless filter, otherwise require exactly `count`.
+            let unless_satisfied = unless_f.as_ref().is_some_and(|filter| {
+                chosen.len() == 1
+                    && chosen.iter().all(|&card_id| {
+                        crate::game::filter::matches_target_filter(
+                            state, card_id, filter, src,
+                        )
+                    })
+            });
+
+            if !unless_satisfied && chosen.len() != expected {
                 return Err(EngineError::InvalidAction(format!(
                     "Must discard exactly {} card(s), got {}",
                     expected,

@@ -1896,6 +1896,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         | Effect::Suspect { target }
         | Effect::Goad { target }
         | Effect::Mill { target, .. }
+        | Effect::Discard { target, .. }
         | Effect::PutAtLibraryPosition { target, .. }
             if *target == TargetFilter::Any || *target == TargetFilter::Controller =>
         {

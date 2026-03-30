@@ -1791,6 +1791,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
                 random: false,
+                unless_filter: None,
             },
             vec![],
             ObjectId(100),

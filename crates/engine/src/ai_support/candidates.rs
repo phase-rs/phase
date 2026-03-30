@@ -369,12 +369,6 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
             player,
             count,
             cards,
-        }
-        | WaitingFor::DiscardChoice {
-            player,
-            count,
-            cards,
-            ..
         } => combinations(cards, *count)
             .into_iter()
             .map(|combo| {
@@ -385,6 +379,49 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        WaitingFor::DiscardChoice {
+            player,
+            count,
+            cards,
+            unless_filter,
+            source_id,
+            ..
+        } => {
+            let mut actions: Vec<_> = combinations(cards, *count)
+                .into_iter()
+                .map(|combo| {
+                    candidate(
+                        GameAction::SelectCards { cards: combo },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
+                })
+                .collect();
+            // CR 608.2c: "discard N unless you discard a [type]" — also generate
+            // single-card selections for cards matching the unless filter.
+            // Guard: skip when count == 1, since combinations already covers all singles.
+            if *count > 1 {
+                if let Some(filter) = unless_filter {
+                    for &card_id in cards {
+                        if crate::game::filter::matches_target_filter(
+                            state,
+                            card_id,
+                            filter,
+                            *source_id,
+                        ) {
+                            actions.push(candidate(
+                                GameAction::SelectCards {
+                                    cards: vec![card_id],
+                                },
+                                TacticalClass::Selection,
+                                Some(*player),
+                            ));
+                        }
+                    }
+                }
+            }
+            actions
+        }
         WaitingFor::OptionalCostChoice { player, .. } => vec![
             candidate(
                 GameAction::DecideOptionalCost { pay: true },

@@ -16,7 +16,7 @@ use crate::types::zones::Zone;
 use super::super::oracle_target::parse_target;
 use super::super::oracle_util::{
     contains_object_pronoun, contains_possessive, parse_count_expr, parse_mana_symbols,
-    parse_number, parse_ordinal, starts_with_possessive, strip_after, TextPair,
+    parse_number, parse_ordinal, split_around, starts_with_possessive, strip_after, TextPair,
 };
 
 /// Earthbend keyword action default target: "target land you control".
@@ -231,6 +231,36 @@ fn strip_article(text: &str) -> &str {
     }
 }
 
+/// CR 608.2c: Extract "unless you discard a [type] card" suffix from discard text.
+/// Returns the text with the suffix stripped and the parsed filter, or the original text
+/// with None if no "unless you discard" clause is present.
+///
+/// Handles: creature, artifact, instant or sorcery, basic land, enchantment, subtype cards.
+fn parse_discard_unless_filter<'a>(
+    lower: &'a str,
+    _original: &'a str,
+) -> (&'a str, Option<TargetFilter>) {
+    let Some((before, after_unless)) = split_around(lower, " unless you discard ") else {
+        return (lower, None);
+    };
+
+    // Strip leading article "a " / "an "
+    let type_text = strip_article(after_unless);
+    // Strip trailing " card" / " card." — parse_target expects type phrase without "card"
+    let type_text = type_text
+        .strip_suffix(" card.")
+        .or_else(|| type_text.strip_suffix(" card"))
+        .unwrap_or(type_text)
+        .trim_end_matches('.');
+
+    let (filter, _) = parse_target(type_text);
+    if matches!(filter, TargetFilter::Any) {
+        // parse_target couldn't parse the type — don't strip
+        return (lower, None);
+    }
+    (before, Some(filter))
+}
+
 /// NOTE: Shares verb prefixes with `try_parse_verb_and_target` in `mod.rs`.
 /// When adding a new targeted verb here, check if it also needs to be added there
 /// (for compound action splitting like "tap target creature and put a counter on it").
@@ -276,13 +306,24 @@ pub(super) fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<Targe
                     qty: QuantityRef::HandSize,
                 },
                 random,
+                unless_filter: None,
             });
         }
+        // CR 608.2c: Strip "unless you discard a [type] card" suffix before count parsing.
+        // Compute original-case offset before the unless strip narrows the slice.
         let original_after = &text[text.len() - after_discard.len()..];
+        let (after_discard, unless_filter) =
+            parse_discard_unless_filter(after_discard, original_after);
+        // Re-derive original_after for the narrowed (unless-stripped) text.
+        let original_after = &original_after[..after_discard.len()];
         let count = parse_count_expr(original_after)
             .map(|(q, _)| q)
             .unwrap_or(QuantityExpr::Fixed { value: 1 });
-        return Some(TargetedImperativeAst::Discard { count, random });
+        return Some(TargetedImperativeAst::Discard {
+            count,
+            random,
+            unless_filter,
+        });
     }
     if lower.starts_with("return ") {
         let rest = &text[7..];
@@ -351,10 +392,17 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         TargetedImperativeAst::Tap { target } => Effect::Tap { target },
         TargetedImperativeAst::Untap { target } => Effect::Untap { target },
         TargetedImperativeAst::Sacrifice { target } => Effect::Sacrifice { target },
-        TargetedImperativeAst::Discard { count, random } => Effect::Discard {
+        TargetedImperativeAst::Discard {
             count,
-            target: TargetFilter::Any,
             random,
+            unless_filter,
+        } => Effect::Discard {
+            count,
+            // CR 701.8a: "Discard" with no subject defaults to the controller.
+            // Subject injection overrides this for "target player discards" patterns.
+            target: TargetFilter::Controller,
+            random,
+            unless_filter,
         },
         TargetedImperativeAst::Return { target } => Effect::Bounce {
             target,
@@ -2694,6 +2742,54 @@ mod tests {
                 );
             }
             other => panic!("Expected Discard with Fixed(2), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_discard_unless_creature() {
+        let text = "discard two cards unless you discard a creature card";
+        let lower = text.to_lowercase();
+        let result = parse_targeted_action_ast(text, &lower);
+        match result {
+            Some(TargetedImperativeAst::Discard {
+                count,
+                unless_filter,
+                ..
+            }) => {
+                assert!(
+                    matches!(count, QuantityExpr::Fixed { value: 2 }),
+                    "Expected Fixed(2), got {count:?}"
+                );
+                assert!(
+                    unless_filter.is_some(),
+                    "Expected unless_filter for creature"
+                );
+            }
+            other => panic!("Expected Discard with unless_filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_discard_unless_pirate() {
+        let text = "discard two cards unless you discard a Pirate card";
+        let lower = text.to_lowercase();
+        let result = parse_targeted_action_ast(text, &lower);
+        match result {
+            Some(TargetedImperativeAst::Discard {
+                count,
+                unless_filter,
+                ..
+            }) => {
+                assert!(
+                    matches!(count, QuantityExpr::Fixed { value: 2 }),
+                    "Expected Fixed(2), got {count:?}"
+                );
+                assert!(
+                    unless_filter.is_some(),
+                    "Expected unless_filter for Pirate subtype"
+                );
+            }
+            other => panic!("Expected Discard with unless_filter, got {other:?}"),
         }
     }
 }

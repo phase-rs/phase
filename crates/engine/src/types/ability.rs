@@ -2199,6 +2199,10 @@ pub enum Effect {
         /// CR 701.8a: When true, the discard is random (e.g., "discard a card at random").
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         random: bool,
+        /// CR 608.2c: "discard N cards unless you discard a [type] card" — when set,
+        /// the player may discard 1 card matching this filter instead of `count` cards.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unless_filter: Option<TargetFilter>,
     },
     Shuffle {
         #[serde(default = "default_target_filter_controller")]

@@ -5168,4 +5168,34 @@ mod tests {
             result.statics,
         );
     }
+
+    #[test]
+    fn discard_unless_creature_card() {
+        let r = parse(
+            "Draw three cards. Then discard two cards unless you discard a creature card.",
+            "Winternight Stories",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let sub = r.abilities[0]
+            .sub_ability
+            .as_ref()
+            .expect("Should have sub_ability for discard");
+        match &*sub.effect {
+            Effect::Discard {
+                count,
+                unless_filter,
+                ..
+            } => {
+                assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+                assert!(unless_filter.is_some(), "Expected unless_filter, got None");
+            }
+            other => panic!(
+                "Expected Discard, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+    }
 }

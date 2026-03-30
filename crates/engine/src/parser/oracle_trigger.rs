@@ -188,7 +188,14 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
 
     // "unless you [verb]" without "pays" — strip the clause even if we can't
     // fully parse the cost. This ensures the main effect text is clean.
+    // Exception: "unless you discard" is an effect-level modifier (discard count
+    // reduction), not a trigger-level payment — preserve it for the effect parser.
     let Some(pays_pos) = after_unless.find("pays ") else {
+        if after_unless.starts_with("you discard ") {
+            // CR 608.2c: "unless you discard a [type]" is handled by the Discard
+            // effect parser — don't strip it here.
+            return (text.to_string(), None);
+        }
         // Still strip the unless clause so the main effect parses correctly.
         let cleaned = text[..unless_pos].trim().to_string();
         return (cleaned, None);
