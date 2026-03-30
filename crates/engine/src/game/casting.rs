@@ -1379,8 +1379,25 @@ pub fn can_cast_object_now(state: &GameState, player: PlayerId, object_id: Objec
         }
     }
 
-    (prepared.modal.is_some() || spell_has_legal_targets(state, obj, player))
-        && can_pay_cost_after_auto_tap(state, player, prepared.object_id, &prepared.mana_cost)
+    let creature_face_ok = (prepared.modal.is_some() || spell_has_legal_targets(state, obj, player))
+        && can_pay_cost_after_auto_tap(state, player, prepared.object_id, &prepared.mana_cost);
+
+    if creature_face_ok {
+        return true;
+    }
+
+    // CR 715.3a: For adventure cards, also evaluate the adventure face (instant/sorcery).
+    // The creature face may be unaffordable while the adventure face is castable — in that
+    // case the card is still legally castable and will prompt AdventureCastChoice.
+    if is_adventure_card(obj) {
+        let mut sim = state.clone();
+        if let Some(sim_obj) = sim.objects.get_mut(&object_id) {
+            swap_to_adventure_face(sim_obj);
+        }
+        return can_cast_object_now(&sim, player, object_id);
+    }
+
+    false
 }
 
 /// Returns true if the player can pay this mana cost after auto-tapping
@@ -3678,6 +3695,34 @@ mod tests {
         });
 
         obj_id
+    }
+
+    /// Regression: adventure card is castable (via adventure face) even when the
+    /// creature face cost is unaffordable. Previously can_cast_object_now gated on
+    /// the creature face cost and would return false, suppressing AdventureCastChoice.
+    #[test]
+    fn adventure_cast_choice_when_only_adventure_affordable() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_adventure_in_hand(&mut state, PlayerId(0));
+        // Creature costs {2}{R} (3 mana) — only give 2 mana (enough for adventure {1}{R} only)
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 2);
+
+        // can_cast_object_now must return true since adventure face is affordable
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), obj_id),
+            "Adventure card should be castable when adventure face cost is affordable"
+        );
+
+        let mut events = Vec::new();
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(70), &mut events).unwrap();
+
+        assert!(
+            matches!(result, WaitingFor::AdventureCastChoice { player, .. }
+                if player == PlayerId(0)),
+            "Expected AdventureCastChoice even when only adventure face is affordable, got {:?}",
+            result
+        );
     }
 
     #[test]
