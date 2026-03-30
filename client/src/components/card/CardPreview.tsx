@@ -147,8 +147,6 @@ function CardPreviewInner({
     : null;
 
   const margin = 16;
-  const altTop = cursorStyle ? Math.max(margin, pointerPosition!.y - 40) : margin;
-  const altMaxHeight = viewportHeight - altTop - margin;
 
   const style: React.CSSProperties = position
     ? {
@@ -157,7 +155,7 @@ function CardPreviewInner({
       }
     : cursorStyle
       ? altHeld
-        ? { ...cursorStyle, top: altTop }
+        ? { ...cursorStyle, top: margin }
         : {
             ...cursorStyle,
             top: Math.min(
@@ -177,7 +175,7 @@ function CardPreviewInner({
       data-card-preview
     >
       {altHeld && obj ? (
-        <ParsedAbilitiesPanel obj={obj} maxHeight={altMaxHeight} />
+        <ParsedAbilitiesPanel obj={obj} maxHeight={viewportHeight - margin * 2} />
       ) : (
         <CardImagePreview
           cardName={displayName}
