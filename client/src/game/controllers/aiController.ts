@@ -45,15 +45,27 @@ export function createAIController(config: AIControllerConfig): AIController {
     if (pending) return;
     pending = true;
 
+    // Start computing immediately — in parallel with the artificial delay.
+    // This turns additive latency (delay + compute) into max(delay, compute),
+    // which matters most for VeryHard where the pool search takes 1-2 seconds.
+    const { adapter } = useGameStore.getState();
+    const actionPromise = adapter
+      ? adapter.getAiAction(config.difficulty, playerId)
+      : Promise.resolve(null);
+    // Suppress unhandled-rejection warnings if stop() cancels the timeout
+    // before it fires and nothing else awaits this promise.
+    actionPromise.catch(() => {});
+
     const delay = AI_BASE_DELAY_MS + Math.random() * AI_DELAY_VARIANCE_MS;
     timeoutId = setTimeout(async () => {
+      timeoutId = null;
+      if (!active) {
+        pending = false;
+        return;
+      }
       try {
-        const { adapter, gameState } = useGameStore.getState();
-        if (!adapter) {
-          pending = false;
-          return;
-        }
-        const action = await adapter.getAiAction(config.difficulty, playerId);
+        const { gameState } = useGameStore.getState();
+        const action = await actionPromise;
         if (action == null) {
           debugLog(
             `AI getAiAction returned null for player ${playerId} (waitingFor: ${gameState?.waiting_for?.type ?? "none"})`,
