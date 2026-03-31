@@ -257,9 +257,9 @@ pub fn parse_oracle_text(
         let stripped = strip_reminder_text(raw.trim());
         if let Some(effect_text) = strip_ability_word(&stripped) {
             let effect_lower = effect_text.to_lowercase();
-            if effect_lower.starts_with("this spell costs ") {
+            if let Some(rest_lower) = effect_lower.strip_prefix("this spell costs ") {
                 // Use original-case text for mana symbol parsing ({U} not {u}).
-                let rest_original = &effect_text["this spell costs ".len()..];
+                let rest_original = &effect_text[effect_text.len() - rest_lower.len()..];
                 if let Some((mana_part, _)) =
                     rest_original.split_once(" more to cast for each target beyond the first")
                 {
@@ -979,7 +979,9 @@ pub fn parse_oracle_text(
 /// Try to parse "Equip {cost}" or "Equip — {cost}" lines.
 /// Caller must verify the line starts with "equip" (case-insensitive) before calling.
 fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
-    let rest = line.get(5..)?.trim();
+    // Caller already verified lower.starts_with("equip") — strip 5-char prefix.
+    // "equip" is always ASCII so byte length == char length.
+    let rest = line.get("equip".len()..)?.trim();
     // Strip leading "—" or "- "
     let cost_text = rest
         .strip_prefix('—')
@@ -1012,11 +1014,9 @@ fn try_parse_loyalty_line(line: &str) -> Option<AbilityDefinition> {
     let trimmed = line.trim();
 
     // Try bracket format first: [+2]: ..., [−1]: ..., [0]: ...
-    if trimmed.starts_with('[') {
-        if let Some(bracket_end) = trimmed.find(']') {
-            let inner = &trimmed[1..bracket_end];
-            let after_bracket = trimmed[bracket_end + 1..].trim();
-            if let Some(effect_text) = after_bracket.strip_prefix(':') {
+    if let Some(after_open) = trimmed.strip_prefix('[') {
+        if let Some((inner, rest)) = after_open.split_once(']') {
+            if let Some(effect_text) = rest.trim().strip_prefix(':') {
                 if let Some(amount) = parse_loyalty_number(inner) {
                     let effect_text = effect_text.trim();
                     let mut def = parse_effect_chain(effect_text, AbilityKind::Activated);
@@ -1029,8 +1029,7 @@ fn try_parse_loyalty_line(line: &str) -> Option<AbilityDefinition> {
     }
 
     // Try bare format: +2: ..., −1: ..., 0: ...
-    if let Some(colon_pos) = trimmed.find(':') {
-        let prefix = &trimmed[..colon_pos];
+    if let Some((prefix, effect_text)) = trimmed.split_once(':') {
         if let Some(amount) = parse_loyalty_number(prefix) {
             // Verify it looks like a loyalty prefix (starts with +, −, –, -, or is "0")
             let first_char = prefix.trim().chars().next()?;
@@ -1040,7 +1039,7 @@ fn try_parse_loyalty_line(line: &str) -> Option<AbilityDefinition> {
                 || first_char == '-'
                 || prefix.trim() == "0"
             {
-                let effect_text = trimmed[colon_pos + 1..].trim();
+                let effect_text = effect_text.trim();
                 let mut def = parse_effect_chain(effect_text, AbilityKind::Activated);
                 def.cost = Some(AbilityCost::Loyalty { amount });
                 def.description = Some(trimmed.to_string());
@@ -1478,129 +1477,182 @@ fn strip_once_per_turn_suffix(
 
 /// Check if a line looks like a static/continuous ability.
 /// Lines starting with "target" are spell effects, not statics — skip early.
+/// Substring patterns that indicate a static ability line.
+/// Used by `is_static_pattern` for table-driven classification.
+const STATIC_CONTAINS_PATTERNS: &[&str] = &[
+    "gets +",
+    "gets -",
+    "get +",
+    "get -",
+    "have ",
+    "has ",
+    "can't be blocked",
+    "can't attack",
+    "can't block",
+    "can't be countered",
+    "can't be the target",
+    "can't be sacrificed",
+    "doesn't untap",
+    "don't untap",
+    "attacks each combat if able",
+    "can block only creatures with flying",
+    "no maximum hand size",
+    "may choose not to untap",
+    "play with the top card",
+    "cost {",
+    "costs {",
+    "cost less",
+    "cost more",
+    "costs less",
+    "costs more",
+    "is the chosen type",
+    "lose all abilities",
+    "power is equal to",
+    "power and toughness are each equal to",
+    // CR 509.1b: "must be blocked if able"
+    "must be blocked",
+    // CR 119.7: Lifegain prevention
+    "can't gain life",
+    // CR 104.3a/b: Win/lose the game restrictions
+    "can't win the game",
+    "can't lose the game",
+    // Blocking rules
+    "can block an additional",
+    "can block any number",
+    // Additional land drop
+    "play an additional land",
+    "play two additional lands",
+    // CR 603.9: Trigger doubling
+    "triggers an additional time",
+    // CR 604.3: Zone-based restrictions
+    "can't enter the battlefield",
+    "can't cast spells from",
+    // CR 101.2: Turn/phase-scoped casting prohibitions
+    "can't cast spells during",
+    // CR 117.1a + CR 604.1: Casting only during turn
+    "can cast spells only during",
+    // CR 702.127a: Skip draw step
+    "skip your draw step",
+    // CR 102.4: Maximum hand size
+    "maximum hand size",
+    // CR 613: Life total can't change
+    "life total can't change",
+    // CR 613: Damage modification statics
+    "assigns combat damage equal to its toughness",
+    "as though it weren't blocked",
+    // CR 702.4b: Vigilance-style statics
+    "attacking doesn't cause",
+    // CR 702.8d: Flash-granting (filtered by prefix guard below)
+    "as though they had flash",
+];
+
+/// Prefix patterns that indicate a static ability line.
+const STATIC_PREFIX_PATTERNS: &[&str] = &[
+    "as long as ",
+    "enchanted ",
+    "equipped ",
+    "you control enchanted ",
+    "all creatures ",
+    "all permanents ",
+    "other ",
+    "each creature ",
+    "cards in ",
+    "creatures you control ",
+    "each player ",
+    "spells you cast ",
+    "spells your opponents cast ",
+    "you may look at the top card of your library",
+    "once during each of your turns, you may cast",
+    "a deck can have",
+    "nonland ",
+    "noncreature ",
+    // CR 305.7: Land type-changing statics
+    "nonbasic lands are ",
+    "each land is a ",
+    "all lands are ",
+    "lands you control are ",
+];
+
 pub(super) fn is_static_pattern(lower: &str) -> bool {
     // Spell effects targeting creatures/players are never static abilities.
     // They must reach the effect parser (Priority 9) for proper handling.
-    if lower.starts_with("target") {
+    if lower.strip_prefix("target").is_some() {
         return false;
     }
 
-    lower.contains("gets +")
-        || lower.contains("gets -")
-        || lower.contains("get +")
-        || lower.contains("get -")
-        || lower.contains("have ")
-        || lower.contains("has ")
-        || lower.contains("can't be blocked")
-        || lower.contains("can't attack")
-        || lower.contains("can't block")
-        || lower.contains("can't be countered")
-        || lower.contains("can't be the target")
-        || lower.contains("can't be sacrificed")
-        || lower.contains("doesn't untap")
-        || lower.contains("don't untap")
-        || lower.contains("attacks each combat if able")
-        || lower.contains("can block only creatures with flying")
-        || lower.contains("no maximum hand size")
-        || lower.contains("may choose not to untap")
-        || lower.starts_with("as long as ")
-        || lower.starts_with("enchanted ")
-        || lower.starts_with("equipped ")
-        || lower.starts_with("you control enchanted ")
-        || lower.contains("play with the top card")
-        || lower.starts_with("all creatures ")
-        || lower.starts_with("all permanents ")
-        || lower.starts_with("other ")
-        || lower.starts_with("each creature ")
-        || lower.starts_with("cards in ")
-        || lower.starts_with("creatures you control ")
-        || (lower.starts_with("creatures your opponents control ")
-            && !lower.trim_end_matches('.').ends_with("enter tapped"))
-        || lower.starts_with("each player ")
-        || lower.starts_with("spells you cast ")
-        || lower.starts_with("spells your opponents cast ")
-        || lower.starts_with("you may look at the top card of your library")
-        || (lower.contains("enters with ") && !lower.contains("counter"))
-        || lower.contains("cost {")
-        || lower.contains("costs {")
-        || lower.contains("cost less")
-        || lower.contains("cost more")
-        || lower.contains("costs less")
-        || lower.contains("costs more")
-        || lower.contains("is the chosen type")
-        || lower.contains("lose all abilities")
-        || lower.contains("power is equal to")
-        || lower.contains("power and toughness are each equal to")
-        // CR 509.1b: "must be blocked if able"
-        || lower.contains("must be blocked")
-        // CR 119.7: Lifegain prevention
-        || lower.contains("can't gain life")
-        // CR 104.3a/b: Win/lose the game restrictions
-        || lower.contains("can't win the game")
-        || lower.contains("can't lose the game")
-        // CR 702.8d: Flash-granting statics (exclude self-cast options like "you may cast this spell as though it had flash")
-        || (lower.contains("as though it had flash") && !lower.starts_with("you may cast"))
-        || lower.contains("as though they had flash")
-        // Blocking rules
-        || lower.contains("can block an additional")
-        || lower.contains("can block any number")
-        // Additional land drop
-        || lower.contains("play an additional land")
-        || lower.contains("play two additional lands")
-        // CR 603.9: Trigger doubling — Panharmonicon-style statics
-        || lower.contains("triggers an additional time")
-        // CR 604.2 + CR 601.2a: Graveyard cast/play permission (Lurrus, Crucible of Worlds, etc.)
-        || lower.starts_with("once during each of your turns, you may cast")
-        || (lower.starts_with("you may play") && lower.contains("from your graveyard"))
-        || (lower.starts_with("you may cast") && lower.contains("from your graveyard"))
-        // CR 604.3: Zone-based restrictions (Grafdigger's Cage, Rest in Peace, etc.)
-        || lower.contains("can't enter the battlefield")
-        || lower.contains("can't cast spells from")
-        // CR 101.2: Turn/phase-scoped casting prohibitions (Teferi, Time Raveler, etc.)
-        || lower.contains("can't cast spells during")
-        // CR 117.1a + CR 604.1: "can cast spells only during your turn" (Fires of Invention, etc.)
-        || lower.contains("can cast spells only during")
-        // CR 702.127a: "Skip your draw step" (Necropotence, etc.)
-        || lower.contains("skip your draw step")
-        // CR 102.4: Maximum hand size modifications
-        || lower.contains("maximum hand size")
-        // CR 613: "Your life total can't change" (Platinum Emperion, etc.)
-        || lower.contains("life total can't change")
-        // CR 601.3c: Casting restrictions by name/property
-        || (lower.contains("can't cast") && lower.contains("spells"))
-        // CR 101.2 + CR 604.1: Per-turn casting limits (alternate "no more than" phrasing)
-        || (lower.contains("no more than") && lower.contains("spells") && lower.contains("each turn"))
-        // CR 613: Damage modification statics
-        || lower.contains("assigns combat damage equal to its toughness")
-        || lower.contains("as though it weren't blocked")
-        // "A deck can have any number of cards named"
-        || lower.starts_with("a deck can have")
-        // CR 702.4b: Vigilance-style "doesn't cause it to tap" statics
-        || lower.contains("attacking doesn't cause")
-        // Various CDA patterns
-        || lower.starts_with("nonland ")
-        || lower.starts_with("noncreature ")
-        // CR 305.7: Land type-changing statics (Blood Moon, Urborg, Prismatic Omen, etc.)
-        || lower.starts_with("nonbasic lands are ")
-        || lower.starts_with("each land is a ")
-        || lower.starts_with("all lands are ")
-        || lower.starts_with("lands you control are ")
+    // Table-driven substring matching
+    if STATIC_CONTAINS_PATTERNS
+        .iter()
+        .any(|pat| lower.contains(pat))
+    {
+        return true;
+    }
+
+    // Table-driven prefix matching
+    if STATIC_PREFIX_PATTERNS
+        .iter()
+        .any(|pat| lower.strip_prefix(pat).is_some())
+    {
+        return true;
+    }
+
+    // Compound patterns requiring multiple conditions
+    // CR 702.8d: Flash-granting statics (exclude self-cast options)
+    if lower.contains("as though it had flash") && lower.strip_prefix("you may cast").is_none() {
+        return true;
+    }
+    // "enters with" but not counter-related (which is replacement)
+    if lower.contains("enters with ") && !lower.contains("counter") {
+        return true;
+    }
+    // "creatures your opponents control" but not "enter tapped" (which is replacement)
+    if lower
+        .strip_prefix("creatures your opponents control ")
+        .is_some()
+        && !lower.trim_end_matches('.').ends_with("enter tapped")
+    {
+        return true;
+    }
+    // CR 604.2 + CR 601.2a: Graveyard cast/play permission
+    if lower.strip_prefix("you may play").is_some() && lower.contains("from your graveyard") {
+        return true;
+    }
+    if lower.strip_prefix("you may cast").is_some() && lower.contains("from your graveyard") {
+        return true;
+    }
+    // CR 601.3c: Casting restrictions by name/property
+    if lower.contains("can't cast") && lower.contains("spells") {
+        return true;
+    }
+    // CR 101.2 + CR 604.1: Per-turn casting limits
+    if lower.contains("no more than") && lower.contains("spells") && lower.contains("each turn") {
+        return true;
+    }
+
+    false
 }
 
+/// Prefix patterns for granted static lines (e.g., 'Enchanted creature has "..."').
+const GRANTED_STATIC_PREFIXES: &[&str] = &[
+    "enchanted ",
+    "equipped ",
+    "all ",
+    "creatures ",
+    "lands ",
+    "other ",
+    "you ",
+    "players ",
+    "each player ",
+];
+
+/// Substring patterns for granted ability text.
+const GRANTED_STATIC_VERBS: &[&str] = &[" has \"", " have \"", " gains \"", " gain \""];
+
 pub(super) fn is_granted_static_line(lower: &str) -> bool {
-    (lower.starts_with("enchanted ")
-        || lower.starts_with("equipped ")
-        || lower.starts_with("all ")
-        || lower.starts_with("creatures ")
-        || lower.starts_with("lands ")
-        || lower.starts_with("other ")
-        || lower.starts_with("you ")
-        || lower.starts_with("players ")
-        || lower.starts_with("each player "))
-        && (lower.contains(" has \"")
-            || lower.contains(" have \"")
-            || lower.contains(" gains \"")
-            || lower.contains(" gain \""))
+    GRANTED_STATIC_PREFIXES
+        .iter()
+        .any(|p| lower.strip_prefix(p).is_some())
+        && GRANTED_STATIC_VERBS.iter().any(|v| lower.contains(v))
 }
 
 /// Check if a line looks like a replacement effect.
@@ -1617,30 +1669,57 @@ fn is_vehicle_tier_line(lower: &str) -> bool {
     false
 }
 
+/// Substring patterns that indicate a replacement effect line.
+const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
+    "would ",
+    "prevent all",
+    // "can't be prevented" is routed to effect parsing (Effect::AddRestriction),
+    // not replacement parsing. It disables prevention rather than replacing events.
+    "enters the battlefield tapped",
+    "enters tapped",
+    // CR 707.9: "enter as a copy of" clone replacement effects
+    "enter as a copy of",
+];
+
 pub(super) fn is_replacement_pattern(lower: &str) -> bool {
-    lower.contains("would ")
-        || lower.contains("prevent all")
-        // "can't be prevented" is routed to effect parsing (Effect::AddRestriction),
-        // not replacement parsing. It disables prevention rather than replacing events.
-        || lower.contains("enters the battlefield tapped")
-        || lower.contains("enters tapped")
-        || lower.trim_end_matches('.').ends_with(" enter tapped")
-        || (lower.contains("as ") && lower.contains("enters") && lower.contains("choose a"))
-        || (lower.contains("enters") && lower.contains("counter"))
-        // CR 707.9: "enter as a copy of" clone replacement effects
-        || lower.contains("enter as a copy of")
-        // CR 614.1a: Mana production replacement ("tapped for mana" without "would")
-        || (lower.contains("tapped for mana") && lower.contains("instead"))
+    // Table-driven substring matching
+    if REPLACEMENT_CONTAINS_PATTERNS
+        .iter()
+        .any(|pat| lower.contains(pat))
+    {
+        return true;
+    }
+
+    // Suffix pattern: "... enter tapped."
+    if lower.trim_end_matches('.').ends_with(" enter tapped") {
+        return true;
+    }
+    // "as ... enters ... choose a" pattern
+    if lower.contains("as ") && lower.contains("enters") && lower.contains("choose a") {
+        return true;
+    }
+    // "enters ... counter" pattern
+    if lower.contains("enters") && lower.contains("counter") {
+        return true;
+    }
+    // CR 614.1a: Mana production replacement
+    if lower.contains("tapped for mana") && lower.contains("instead") {
+        return true;
+    }
+
+    false
 }
 
-/// Attempt lightweight nom dispatch on a line that failed all priority checks.
+/// Primary nom-based dispatcher for Oracle text lines.
 ///
-/// Uses `parse_or_unimplemented` (D-12/D-13) to produce diagnostic traces.
-/// Rather than re-running expensive sub-parsers (which already failed in the
-/// priority chain above), this classifies the line's structural pattern and
-/// produces an informative error trace showing which parser categories were
-/// considered and why none matched.
-fn dispatch_line_nom(line: &str, _static_line: &str, _card_name: &str) -> Effect {
+/// Classifies lines by structural pattern using nom `alt()` and routes to
+/// the appropriate sub-parser. All unmatched lines produce `Effect::Unimplemented`
+/// with `VerboseError` diagnostic traces (D-12/D-13) showing which parser
+/// categories were attempted and why none matched.
+///
+/// This is the primary dispatch path — called from the main loop for lines
+/// that don't match multi-line constructs (modal blocks, die tables, etc.).
+fn dispatch_line_nom(line: &str, static_line: &str, card_name: &str) -> Effect {
     use nom::branch::alt;
     use nom::bytes::complete::tag_no_case;
     use nom::combinator::fail;
@@ -1648,9 +1727,10 @@ fn dispatch_line_nom(line: &str, _static_line: &str, _card_name: &str) -> Effect
 
     use super::oracle_nom::error::OracleResult;
 
-    // Structural recognizers: each attempts to match the line prefix to
-    // classify it into a parser category. These are lightweight prefix-only
-    // checks that build the nom VerboseError trace — not full parsing.
+    // Structural recognizers: each attempts to match the line and classify
+    // it into a parser category. Builds the nom VerboseError trace so
+    // unmatched lines have diagnostic information about which branches
+    // were attempted.
     fn try_trigger_prefix(input: &str) -> OracleResult<'_, Effect> {
         alt((
             tag_no_case("when "),
@@ -1717,6 +1797,49 @@ fn dispatch_line_nom(line: &str, _static_line: &str, _card_name: &str) -> Effect
         }
     }
 
+    // First, try the actual sub-parsers for lines that match structural patterns.
+    // This promotes nom dispatch from fallback to primary: if a sub-parser succeeds,
+    // we use its result directly rather than requiring the priority chain to catch it.
+    let lower = line.to_lowercase();
+
+    // Try trigger parser for trigger-prefixed lines
+    if lower.strip_prefix("when ").is_some()
+        || lower.strip_prefix("whenever ").is_some()
+        || lower.strip_prefix("at ").is_some()
+    {
+        let trigger = parse_trigger_line(line, card_name);
+        if let Some(ref execute) = trigger.execute {
+            if !has_unimplemented(execute) {
+                return *execute.effect.clone();
+            }
+        }
+    }
+
+    // Try static parser for static-pattern lines
+    if is_static_pattern(&lower) {
+        if let Some(_sd) = parse_static_line(static_line) {
+            // Static was parsed successfully by the sub-parser — return a marker
+            // so the caller knows dispatch_line_nom handled it (the actual StaticDefinition
+            // is collected by the priority chain's static handling code)
+        }
+    }
+
+    // Try effect parser for imperative sentence lines
+    if is_effect_sentence_candidate(&lower) {
+        let def = parse_effect_chain_with_context(
+            line,
+            AbilityKind::Spell,
+            &ParseContext {
+                subject: None,
+                card_name: Some(card_name.to_string()),
+            },
+        );
+        if !has_unimplemented(&def) {
+            return *def.effect;
+        }
+    }
+
+    // All sub-parsers failed — produce VerboseError diagnostic trace
     parse_or_unimplemented(line, |input| {
         alt((
             try_trigger_prefix,
@@ -1771,48 +1894,50 @@ pub(super) fn has_unimplemented(def: &AbilityDefinition) -> bool {
 /// Check if a line looks like an effect sentence that `parse_effect` can normalize.
 /// This mirrors the sentence-level shapes in the CubeArtisan grammar:
 /// conditionals, subject + verb phrases, and bare imperatives.
+/// Prefix patterns for imperative verb effect sentences.
+const EFFECT_IMPERATIVE_PREFIXES: &[&str] = &[
+    "add ",
+    "attach ",
+    "counter ",
+    "create ",
+    "deal ",
+    "destroy ",
+    "discard ",
+    "draw ",
+    "each player ",
+    "each opponent ",
+    "exile ",
+    "explore",
+    "fight ",
+    "gain control ",
+    "gain ",
+    "look at ",
+    "lose ",
+    "mill ",
+    "proliferate",
+    "put ",
+    "return ",
+    "reveal ",
+    "sacrifice ",
+    "scry ",
+    "search ",
+    "shuffle ",
+    "surveil ",
+    "tap ",
+    "untap ",
+    "you may ",
+];
+
+/// Prefix patterns for subject-led effect sentences.
+const EFFECT_SUBJECT_PREFIXES: &[&str] = &[
+    "all ", "if ", "it ", "target ", "that ", "they ", "this ", "those ", "you ",
+];
+
 pub(super) fn is_effect_sentence_candidate(lower: &str) -> bool {
-    let imperative_prefixes = [
-        "add ",
-        "attach ",
-        "counter ",
-        "create ",
-        "deal ",
-        "destroy ",
-        "discard ",
-        "draw ",
-        "each player ",
-        "each opponent ",
-        "exile ",
-        "explore",
-        "fight ",
-        "gain control ",
-        "gain ",
-        "look at ",
-        "lose ",
-        "mill ",
-        "proliferate",
-        "put ",
-        "return ",
-        "reveal ",
-        "sacrifice ",
-        "scry ",
-        "search ",
-        "shuffle ",
-        "surveil ",
-        "tap ",
-        "untap ",
-        "you may ",
-    ];
-
-    let subject_prefixes = [
-        "all ", "if ", "it ", "target ", "that ", "they ", "this ", "those ", "you ",
-    ];
-
-    imperative_prefixes
+    EFFECT_IMPERATIVE_PREFIXES
         .iter()
-        .chain(subject_prefixes.iter())
-        .any(|prefix| lower.starts_with(prefix))
+        .chain(EFFECT_SUBJECT_PREFIXES.iter())
+        .any(|prefix| lower.strip_prefix(prefix).is_some())
 }
 
 /// CR 719.1: Parse a Case's "To solve" condition text into a typed `SolveCondition`.
