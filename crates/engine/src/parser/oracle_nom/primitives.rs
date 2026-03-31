@@ -67,9 +67,7 @@ fn parse_article_number(input: &str) -> OracleResult<'_, u32> {
     // Try "an" before "a" (longest match first).
     let (rest, _) = alt((tag("an"), tag("a"))).parse(input)?;
     match rest.chars().next() {
-        None | Some(' ' | ',' | ';' | '.' | ':' | ')' | '/' | '-' | '\'' | '"') => {
-            Ok((rest, 1))
-        }
+        None | Some(' ' | ',' | ';' | '.' | ':' | ')' | '/' | '-' | '\'' | '"') => Ok((rest, 1)),
         _ => Err(nom::Err::Error(nom_language::error::VerboseError {
             errors: vec![(
                 input,
@@ -313,6 +311,204 @@ pub fn ws_tag(
     preceded(opt(space0), tag(t))
 }
 
+/// Parse an evergreen keyword name from Oracle text.
+///
+/// Uses a table lookup (longest-match-first within shared prefixes) to avoid
+/// deep nom `alt` nesting which causes stack overflow in debug builds.
+/// Returns the keyword string as matched (lowercase).
+pub fn parse_keyword_name(input: &str) -> OracleResult<'_, &str> {
+    // Longest-match-first within shared prefixes (e.g. "first strike" before "flash").
+    static KEYWORDS: &[&str] = &[
+        "first strike",
+        "double strike",
+        "trample over planeswalkers",
+        "trample",
+        "flying",
+        "deathtouch",
+        "lifelink",
+        "vigilance",
+        "haste",
+        "reach",
+        "defender",
+        "menace",
+        "indestructible",
+        "hexproof",
+        "shroud",
+        "flash",
+        "fear",
+        "intimidate",
+        "skulk",
+        "shadow",
+        "horsemanship",
+        "wither",
+        "infect",
+        "prowess",
+        "undying",
+        "persist",
+        "cascade",
+        "exalted",
+        "flanking",
+        "evolve",
+        "extort",
+        "exploit",
+        "explore",
+        "ascend",
+        "convoke",
+        "delve",
+        "devoid",
+        "changeling",
+        "phasing",
+        "decayed",
+        "unleash",
+        "riot",
+        "ward",
+        "protection",
+        "landwalk",
+        "islandwalk",
+        "swampwalk",
+        "mountainwalk",
+        "forestwalk",
+        "plainswalk",
+    ];
+
+    for &kw in KEYWORDS {
+        if let Some(rest) = input.strip_prefix(kw) {
+            // Require word boundary after keyword
+            match rest.chars().next() {
+                None | Some(' ' | ',' | ';' | '.' | ':' | ')' | '/' | '\'' | '"' | '\n') => {
+                    return Ok((rest, kw));
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    Err(nom::Err::Error(nom_language::error::VerboseError {
+        errors: vec![(
+            input,
+            nom_language::error::VerboseErrorKind::Context("keyword name"),
+        )],
+    }))
+}
+
+/// Parse an imperative verb from Oracle text.
+///
+/// Matches common Oracle text action verbs: "destroy", "exile", "draw",
+/// "create", "sacrifice", "discard", "return", "put", "counter", "gain",
+/// "lose", "deal", "tap", "untap", "search", "shuffle", "reveal", "mill",
+/// "scry", "surveil", "fight".
+/// Returns the matched verb as a string slice.
+pub fn parse_verb(input: &str) -> OracleResult<'_, &str> {
+    static VERBS: &[&str] = &[
+        // Longest-match-first within shared prefixes
+        "destroys",
+        "destroy",
+        "exiles",
+        "exile",
+        "draws",
+        "draw",
+        "creates",
+        "create",
+        "sacrifices",
+        "sacrifice",
+        "discards",
+        "discard",
+        "returns",
+        "return",
+        "puts",
+        "put",
+        "counters",
+        "counter",
+        "gains",
+        "gain",
+        "loses",
+        "lose",
+        "deals",
+        "deal",
+        "taps",
+        "tap",
+        "untaps",
+        "untap",
+        "searches",
+        "search",
+        "shuffles",
+        "shuffle",
+        "reveals",
+        "reveal",
+        "mills",
+        "mill",
+        "scry",
+        "surveil",
+        "fights",
+        "fight",
+        "prevents",
+        "prevent",
+        "regenerate",
+        "attach",
+        "detach",
+        "transform",
+        "investigate",
+        "populate",
+        "proliferate",
+        "bolster",
+        "explore",
+        "adapt",
+    ];
+
+    for &verb in VERBS {
+        if let Some(rest) = input.strip_prefix(verb) {
+            // Require word boundary after verb
+            match rest.chars().next() {
+                None | Some(' ' | ',' | ';' | '.' | ':' | ')' | '/' | '\'' | '"' | '\n') => {
+                    return Ok((rest, verb));
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    Err(nom::Err::Error(nom_language::error::VerboseError {
+        errors: vec![(
+            input,
+            nom_language::error::VerboseErrorKind::Context("verb"),
+        )],
+    }))
+}
+
+/// Parse common Oracle phrase fragments.
+///
+/// Matches "you may", "choose one", "choose two", "up to", "each",
+/// "each player", "each opponent", "target player".
+pub fn parse_phrase_fragment(input: &str) -> OracleResult<'_, &str> {
+    static FRAGMENTS: &[&str] = &[
+        "you may",
+        "choose one",
+        "choose two",
+        "choose three",
+        "choose one or more",
+        "choose one or both",
+        "up to",
+        "each player",
+        "each opponent",
+        "target player",
+        "target opponent",
+        "any target",
+    ];
+
+    for &frag in FRAGMENTS {
+        if let Some(rest) = input.strip_prefix(frag) {
+            return Ok((rest, frag));
+        }
+    }
+
+    Err(nom::Err::Error(nom_language::error::VerboseError {
+        errors: vec![(
+            input,
+            nom_language::error::VerboseErrorKind::Context("phrase fragment"),
+        )],
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,5 +698,66 @@ mod tests {
     fn test_parse_roman_numeral_failure() {
         assert!(parse_roman_numeral("ABC").is_err());
         assert!(parse_roman_numeral("").is_err());
+    }
+
+    #[test]
+    fn test_parse_keyword_name_basic() {
+        let (rest, kw) = parse_keyword_name("flying creature").unwrap();
+        assert_eq!(kw, "flying");
+        assert_eq!(rest, " creature");
+
+        let (rest2, kw2) = parse_keyword_name("first strike, deathtouch").unwrap();
+        assert_eq!(kw2, "first strike");
+        assert_eq!(rest2, ", deathtouch");
+
+        let (rest3, kw3) = parse_keyword_name("trample over planeswalkers").unwrap();
+        assert_eq!(kw3, "trample over planeswalkers");
+        assert_eq!(rest3, "");
+    }
+
+    #[test]
+    fn test_parse_keyword_name_word_boundary() {
+        // "flashback" should NOT match as "flash"
+        assert!(parse_keyword_name("flashback").is_err());
+        // "defender" at end of input → ok
+        let (rest, kw) = parse_keyword_name("defender").unwrap();
+        assert_eq!(kw, "defender");
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_verb_basic() {
+        let (rest, v) = parse_verb("destroy target").unwrap();
+        assert_eq!(v, "destroy");
+        assert_eq!(rest, " target");
+
+        let (rest2, v2) = parse_verb("draws a card").unwrap();
+        assert_eq!(v2, "draws");
+        assert_eq!(rest2, " a card");
+
+        let (rest3, v3) = parse_verb("exile it").unwrap();
+        assert_eq!(v3, "exile");
+        assert_eq!(rest3, " it");
+    }
+
+    #[test]
+    fn test_parse_verb_word_boundary() {
+        // "created" should NOT match "create" (word boundary)
+        assert!(parse_verb("created").is_err());
+        // "sacrifice" at end of input → ok
+        let (rest, v) = parse_verb("sacrifice.").unwrap();
+        assert_eq!(v, "sacrifice");
+        assert_eq!(rest, ".");
+    }
+
+    #[test]
+    fn test_parse_phrase_fragment() {
+        let (rest, f) = parse_phrase_fragment("you may draw").unwrap();
+        assert_eq!(f, "you may");
+        assert_eq!(rest, " draw");
+
+        let (rest2, f2) = parse_phrase_fragment("each opponent loses").unwrap();
+        assert_eq!(f2, "each opponent");
+        assert_eq!(rest2, " loses");
     }
 }

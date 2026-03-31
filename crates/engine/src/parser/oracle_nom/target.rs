@@ -12,7 +12,8 @@ use nom::Parser;
 
 use super::error::OracleResult;
 use super::primitives::parse_color;
-use crate::types::ability::{ControllerRef, TargetFilter, TypeFilter, TypedFilter};
+use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter};
+use crate::types::card_type::Supertype;
 use crate::types::mana::ManaColor;
 
 /// Parse a "target <type phrase>" from Oracle text.
@@ -24,12 +25,18 @@ pub fn parse_target_phrase(input: &str) -> OracleResult<'_, TargetFilter> {
 
 /// Parse a type phrase into a `TargetFilter`.
 ///
-/// Handles: optional color prefix, core type(s) joined by " or ",
-/// and optional controller suffix. This is the nom equivalent of
-/// `oracle_target::parse_type_phrase`.
+/// Handles: optional "non" prefix, optional supertype, optional color prefix,
+/// core type(s) joined by " or ", and optional controller suffix. This is the
+/// nom equivalent of `oracle_target::parse_type_phrase`.
 pub fn parse_type_phrase(input: &str) -> OracleResult<'_, TargetFilter> {
+    // Optional "non" prefix (consumed separately from type negation)
+    let (rest, non_prefix) = opt(parse_non_prefix).parse(input)?;
+
+    // Optional supertype prefix ("legendary", "basic", "snow")
+    let (rest, supertype_opt) = opt(parse_supertype_prefix).parse(rest)?;
+
     // Optional color prefix
-    let (rest, color_opt) = opt(parse_color_prefix).parse(input)?;
+    let (rest, color_opt) = opt(parse_color_prefix).parse(rest)?;
 
     // Core type(s) joined by " or "
     let (rest, types) = parse_type_list(rest)?;
@@ -37,8 +44,54 @@ pub fn parse_type_phrase(input: &str) -> OracleResult<'_, TargetFilter> {
     // Optional controller suffix
     let (rest, controller) = opt(preceded(space1, parse_controller_suffix)).parse(rest)?;
 
-    let filter = build_type_filter(types, color_opt, controller);
+    let mut filter = build_type_filter(types, color_opt, supertype_opt, controller);
+
+    // Wrap in Non if "non" prefix was present
+    if non_prefix.is_some() {
+        filter = match filter {
+            TargetFilter::Typed(tf) => {
+                if tf.type_filters.len() == 1 {
+                    // Wrap the single type in Non
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Non(Box::new(
+                            tf.type_filters.into_iter().next().unwrap(),
+                        ))],
+                        controller: tf.controller,
+                        properties: tf.properties,
+                    })
+                } else {
+                    // Wrap the AnyOf in Non
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Non(Box::new(TypeFilter::AnyOf(
+                            tf.type_filters,
+                        )))],
+                        controller: tf.controller,
+                        properties: tf.properties,
+                    })
+                }
+            }
+            other => other,
+        };
+    }
+
     Ok((rest, filter))
+}
+
+/// Parse a "non" prefix: "non" or "non-" followed by implicit word boundary.
+fn parse_non_prefix(input: &str) -> OracleResult<'_, &str> {
+    alt((tag("non-"), tag("non"))).parse(input)
+}
+
+/// Parse a supertype prefix ("legendary ", "basic ", "snow ") consuming trailing space.
+fn parse_supertype_prefix(input: &str) -> OracleResult<'_, Supertype> {
+    let (rest, st) = alt((
+        value(Supertype::Legendary, tag("legendary")),
+        value(Supertype::Basic, tag("basic")),
+        value(Supertype::Snow, tag("snow")),
+    ))
+    .parse(input)?;
+    let (rest, _) = space1.parse(rest)?;
+    Ok((rest, st))
 }
 
 /// Parse a color word followed by a space, consuming both.
@@ -80,19 +133,112 @@ fn parse_type_list(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
     Ok((remaining, types))
 }
 
-/// Parse a single type filter word.
-fn parse_type_filter_word(input: &str) -> OracleResult<'_, TypeFilter> {
+/// Parse a single type filter word (singular or plural).
+///
+/// Uses a manual lookup to avoid deep nom `alt` nesting which causes
+/// stack overflow in debug builds.
+pub fn parse_type_filter_word(input: &str) -> OracleResult<'_, TypeFilter> {
+    // Table of (prefix, TypeFilter) — longest-match-first within shared prefixes.
+    static TYPE_WORDS: &[(&str, TypeFilter)] = &[
+        ("creatures", TypeFilter::Creature),
+        ("creature", TypeFilter::Creature),
+        ("artifacts", TypeFilter::Artifact),
+        ("artifact", TypeFilter::Artifact),
+        ("enchantments", TypeFilter::Enchantment),
+        ("enchantment", TypeFilter::Enchantment),
+        ("instants", TypeFilter::Instant),
+        ("instant", TypeFilter::Instant),
+        ("sorceries", TypeFilter::Sorcery),
+        ("sorcery", TypeFilter::Sorcery),
+        ("planeswalkers", TypeFilter::Planeswalker),
+        ("planeswalker", TypeFilter::Planeswalker),
+        ("lands", TypeFilter::Land),
+        ("land", TypeFilter::Land),
+        ("battle", TypeFilter::Battle),
+        ("permanents", TypeFilter::Permanent),
+        ("permanent", TypeFilter::Permanent),
+        ("cards", TypeFilter::Card),
+        ("card", TypeFilter::Card),
+        // "spell"/"spells" → Card per existing parser convention (CR 108.1)
+        ("spells", TypeFilter::Card),
+        ("spell", TypeFilter::Card),
+    ];
+
+    for &(word, ref tf) in TYPE_WORDS {
+        if let Some(rest) = input.strip_prefix(word) {
+            return Ok((rest, tf.clone()));
+        }
+    }
+
+    Err(nom::Err::Error(nom_language::error::VerboseError {
+        errors: vec![(
+            input,
+            nom_language::error::VerboseErrorKind::Context("type filter word"),
+        )],
+    }))
+}
+
+/// Parse a self-reference from Oracle text: "~", "it", "this creature",
+/// "this permanent", "this spell", "this enchantment", "this artifact".
+///
+/// Returns `TargetFilter::SelfRef` when a self-reference is recognized.
+pub fn parse_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
     alt((
-        value(TypeFilter::Creature, tag("creature")),
-        value(TypeFilter::Artifact, tag("artifact")),
-        value(TypeFilter::Enchantment, tag("enchantment")),
-        value(TypeFilter::Instant, tag("instant")),
-        value(TypeFilter::Sorcery, tag("sorcery")),
-        value(TypeFilter::Planeswalker, tag("planeswalker")),
-        value(TypeFilter::Land, tag("land")),
-        value(TypeFilter::Battle, tag("battle")),
-        value(TypeFilter::Permanent, tag("permanent")),
-        value(TypeFilter::Card, tag("card")),
+        value(TargetFilter::SelfRef, tag("~")),
+        parse_it_self_reference,
+        value(TargetFilter::SelfRef, tag("this creature")),
+        value(TargetFilter::SelfRef, tag("this permanent")),
+        value(TargetFilter::SelfRef, tag("this spell")),
+        value(TargetFilter::SelfRef, tag("this enchantment")),
+        value(TargetFilter::SelfRef, tag("this artifact")),
+        value(TargetFilter::SelfRef, tag("this land")),
+    ))
+    .parse(input)
+}
+
+/// Parse "it" as a self-reference, requiring a word boundary after "it"
+/// to prevent false matches on words like "item", "iterate".
+fn parse_it_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, _) = tag("it").parse(input)?;
+    match rest.chars().next() {
+        None | Some(' ' | ',' | ';' | '.' | ':' | ')' | '/' | '\'' | '"') => {
+            Ok((rest, TargetFilter::SelfRef))
+        }
+        _ => Err(nom::Err::Error(nom_language::error::VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Context(
+                    "self-reference 'it' requires word boundary",
+                ),
+            )],
+        })),
+    }
+}
+
+/// Parse an event context reference from Oracle text.
+///
+/// Matches "that spell", "that player", "that creature", "defending player",
+/// "the defending player", "that card", "that permanent".
+/// Returns a `TargetFilter` for the referenced entity.
+pub fn parse_event_context_ref(input: &str) -> OracleResult<'_, TargetFilter> {
+    alt((
+        // Longest-match-first: "that spell's controller" before "that spell"
+        value(
+            TargetFilter::TriggeringSpellController,
+            tag("that spell's controller"),
+        ),
+        value(
+            TargetFilter::TriggeringSpellOwner,
+            tag("that spell's owner"),
+        ),
+        value(TargetFilter::TriggeringSource, tag("that spell")),
+        value(TargetFilter::TriggeringSource, tag("that creature")),
+        value(TargetFilter::TriggeringSource, tag("that permanent")),
+        value(TargetFilter::TriggeringSource, tag("that card")),
+        value(TargetFilter::TriggeringPlayer, tag("that player")),
+        // CR 506.3d: "defending player" / "the defending player"
+        value(TargetFilter::DefendingPlayer, tag("the defending player")),
+        value(TargetFilter::DefendingPlayer, tag("defending player")),
     ))
     .parse(input)
 }
@@ -100,7 +246,8 @@ fn parse_type_filter_word(input: &str) -> OracleResult<'_, TypeFilter> {
 /// Build a `TargetFilter` from parsed components.
 fn build_type_filter(
     types: Vec<TypeFilter>,
-    _color: Option<ManaColor>,
+    color: Option<ManaColor>,
+    supertype: Option<Supertype>,
     controller: Option<ControllerRef>,
 ) -> TargetFilter {
     let type_filters: Vec<TypeFilter> = if types.len() == 1 {
@@ -109,10 +256,18 @@ fn build_type_filter(
         vec![TypeFilter::AnyOf(types)]
     };
 
+    let mut properties = Vec::new();
+    if let Some(c) = color {
+        properties.push(FilterProp::HasColor { color: c });
+    }
+    if let Some(st) = supertype {
+        properties.push(FilterProp::HasSupertype { value: st });
+    }
+
     TargetFilter::Typed(TypedFilter {
         type_filters,
         controller,
-        properties: Vec::new(),
+        properties,
     })
 }
 
@@ -197,5 +352,115 @@ mod tests {
             }
             _ => panic!("expected Typed filter"),
         }
+    }
+
+    #[test]
+    fn test_parse_type_phrase_with_color() {
+        let (rest, filter) = parse_type_phrase("white creature").unwrap();
+        assert_eq!(rest, "");
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                assert!(tf.properties.contains(&FilterProp::HasColor {
+                    color: ManaColor::White
+                }));
+            }
+            _ => panic!("expected Typed filter"),
+        }
+    }
+
+    #[test]
+    fn test_parse_type_phrase_with_supertype() {
+        let (rest, filter) = parse_type_phrase("legendary creature").unwrap();
+        assert_eq!(rest, "");
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                assert!(tf.properties.contains(&FilterProp::HasSupertype {
+                    value: Supertype::Legendary
+                }));
+            }
+            _ => panic!("expected Typed filter"),
+        }
+    }
+
+    #[test]
+    fn test_parse_type_phrase_nonland() {
+        // "nonland" → Non(Land) with trailing text unconsumed
+        let (rest, filter) = parse_type_phrase("nonland permanent").unwrap();
+        // The parser reads "non" prefix, then "land" as type, leaving " permanent"
+        // It wraps the parsed type in Non
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(
+                    tf.type_filters,
+                    vec![TypeFilter::Non(Box::new(TypeFilter::Land))]
+                );
+            }
+            _ => panic!("expected Typed filter"),
+        }
+        assert_eq!(rest, " permanent");
+    }
+
+    #[test]
+    fn test_parse_self_reference() {
+        let (rest, f) = parse_self_reference("~ gets").unwrap();
+        assert_eq!(rest, " gets");
+        assert_eq!(f, TargetFilter::SelfRef);
+
+        let (rest2, f2) = parse_self_reference("it deals").unwrap();
+        assert_eq!(rest2, " deals");
+        assert_eq!(f2, TargetFilter::SelfRef);
+
+        let (rest3, f3) = parse_self_reference("this creature gets").unwrap();
+        assert_eq!(rest3, " gets");
+        assert_eq!(f3, TargetFilter::SelfRef);
+    }
+
+    #[test]
+    fn test_parse_self_reference_it_word_boundary() {
+        // "item" should NOT match as "it" self-reference
+        assert!(parse_self_reference("item").is_err());
+        assert!(parse_self_reference("iterate").is_err());
+
+        // "it" at end of input should match
+        let (rest, f) = parse_self_reference("it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(f, TargetFilter::SelfRef);
+    }
+
+    #[test]
+    fn test_parse_event_context_ref() {
+        let (rest, f) = parse_event_context_ref("that spell's controller gains").unwrap();
+        assert_eq!(rest, " gains");
+        assert_eq!(f, TargetFilter::TriggeringSpellController);
+
+        let (rest2, f2) = parse_event_context_ref("that player loses").unwrap();
+        assert_eq!(rest2, " loses");
+        assert_eq!(f2, TargetFilter::TriggeringPlayer);
+
+        let (rest3, f3) = parse_event_context_ref("defending player").unwrap();
+        assert_eq!(rest3, "");
+        assert_eq!(f3, TargetFilter::DefendingPlayer);
+
+        let (rest4, f4) = parse_event_context_ref("that spell is countered").unwrap();
+        assert_eq!(rest4, " is countered");
+        assert_eq!(f4, TargetFilter::TriggeringSource);
+    }
+
+    #[test]
+    fn test_parse_type_filter_word_plurals() {
+        let r = parse_type_filter_word("creatures you");
+        assert!(r.is_ok());
+        let (rest, _t) = r.unwrap();
+        assert_eq!(rest, " you");
+    }
+
+    #[test]
+    fn test_parse_type_filter_word_spell() {
+        // "spell" maps to Card per existing parser convention (CR 108.1)
+        let (rest, t) = parse_type_filter_word("spell").unwrap();
+        assert!(matches!(t, TypeFilter::Card), "expected Card for spell");
+        assert_eq!(rest, "");
     }
 }
