@@ -334,7 +334,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
       ) : (
         <>
           <div className={`relative z-10 rounded-lg overflow-hidden ${glowClass}`}>
-            <CardImage cardName={obj.name} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.card_id === 0} />
+            <CardImage cardName={obj.name} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.card_id === 0} tokenFilters={obj.card_id === 0 ? { power: obj.power, toughness: obj.toughness, colors: obj.color } : undefined} />
             {/* Keyword strip overlay — inside the card image wrapper so absolute positioning works */}
             {showKeywordStrip && obj.keywords.length > 0 && !obj.face_down && (
               <KeywordStrip keywords={obj.keywords} baseKeywords={obj.base_keywords} />
@@ -424,7 +424,7 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
       {useArtCrop ? (
         <ArtCropCard objectId={objectId} />
       ) : (
-        <CardImage cardName={obj.name} size="small" colors={displayColors} isToken={obj.card_id === 0} />
+        <CardImage cardName={obj.name} size="small" colors={displayColors} isToken={obj.card_id === 0} tokenFilters={obj.card_id === 0 ? { power: obj.power, toughness: obj.toughness, colors: obj.color } : undefined} />
       )}
     </div>
   );

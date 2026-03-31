@@ -1,4 +1,5 @@
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import type { TokenSearchFilters } from "../../services/scryfall.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
 
 interface CardImageProps {
@@ -10,6 +11,7 @@ interface CardImageProps {
   unimplementedMechanics?: string[];
   colors?: string[];
   isToken?: boolean;
+  tokenFilters?: TokenSearchFilters;
 }
 
 export function CardImage({
@@ -21,8 +23,9 @@ export function CardImage({
   unimplementedMechanics,
   colors,
   isToken = false,
+  tokenFilters,
 }: CardImageProps) {
-  const { src, isLoading } = useCardImage(cardName, { size, faceIndex, isToken });
+  const { src, isLoading } = useCardImage(cardName, { size, faceIndex, isToken, tokenFilters });
 
   const tappedStyle = tapped ? "rotate-[90deg] origin-center" : "";
   const baseClasses = `w-[var(--card-w)] h-[var(--card-h)] rounded-lg transition-transform duration-200 ${tappedStyle} ${className}`;

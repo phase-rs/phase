@@ -170,11 +170,28 @@ export async function fetchCardImageUrl(
   return getImageUrl(card, size, faceIndex);
 }
 
+const MANA_COLOR_TO_SCRYFALL: Record<string, string> = {
+  White: "w", Blue: "u", Black: "b", Red: "r", Green: "g",
+};
+
+export interface TokenSearchFilters {
+  power?: number | null;
+  toughness?: number | null;
+  colors?: string[];
+}
+
 export async function fetchTokenImageUrl(
   tokenName: string,
   size: ImageSize = "normal",
+  filters?: TokenSearchFilters,
 ): Promise<string> {
-  const query = `t:token !"${tokenName}"`;
+  let query = `t:token !"${tokenName}"`;
+  if (filters?.power != null) query += ` pow=${filters.power}`;
+  if (filters?.toughness != null) query += ` tou=${filters.toughness}`;
+  if (filters?.colors != null) {
+    const colorStr = filters.colors.map((c) => MANA_COLOR_TO_SCRYFALL[c] ?? "").join("");
+    query += colorStr ? ` c=${colorStr}` : " c=c";
+  }
   const url = `https://api.scryfall.com/cards/search?q=${encodeURIComponent(query)}&order=released&dir=desc`;
   const response = await rateLimitedFetch(url);
   if (!response.ok) {

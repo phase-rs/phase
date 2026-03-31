@@ -58,6 +58,7 @@ function CardPreviewInner({
     size: "normal",
     faceIndex,
     isToken,
+    tokenFilters: isToken ? { power: obj?.power, toughness: obj?.toughness, colors: obj?.color } : undefined,
   });
   const classLevel = obj?.class_level;
   const [pointerPosition, setPointerPosition] = useState<{ x: number; y: number } | null>(null);

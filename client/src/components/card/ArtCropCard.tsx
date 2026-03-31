@@ -26,7 +26,11 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
 
   const cardName = obj?.name ?? "";
   const isToken = obj?.card_id === 0;
-  const { src, isLoading } = useCardImage(cardName, { size: "art_crop", isToken });
+  const { src, isLoading } = useCardImage(cardName, {
+    size: "art_crop",
+    isToken,
+    tokenFilters: isToken ? { power: obj?.power, toughness: obj?.toughness, colors: obj?.color } : undefined,
+  });
 
   const { frameGradient, lightText, ptDisplay } = useMemo(() => {
     if (!obj) return { frameGradient: "", lightText: false, ptDisplay: null };
