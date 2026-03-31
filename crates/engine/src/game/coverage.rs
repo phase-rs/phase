@@ -2880,6 +2880,7 @@ fn condition_variant_name(cond: &AbilityCondition) -> &'static str {
         AbilityCondition::HasMaxSpeed => "HasMaxSpeed",
         AbilityCondition::TargetHasKeywordInstead { .. } => "TargetHasKeywordInstead",
         AbilityCondition::TargetMatchesFilter { .. } => "TargetMatchesFilter",
+        AbilityCondition::SourceMatchesFilter { .. } => "SourceMatchesFilter",
         AbilityCondition::IsYourTurn { .. } => "IsYourTurn",
         AbilityCondition::ZoneChangedThisWay { .. } => "ZoneChangedThisWay",
     }
@@ -3580,13 +3581,13 @@ fn is_counter_reference(lower: &str) -> bool {
             // Match +N/+M pattern then check what follows
             let after_pattern = rest
                 .find('/')
-                .and_then(|slash| {
+                .map(|slash| {
                     // Skip past the /+N or /-N part
                     let after_slash = &rest[slash + 1..];
                     let digits_end = after_slash
                         .find(|c: char| !c.is_ascii_digit() && c != '+' && c != '-')
                         .unwrap_or(after_slash.len());
-                    Some(&after_slash[digits_end..])
+                    &after_slash[digits_end..]
                 });
             if let Some(after) = after_pattern {
                 let trimmed = after.trim_start();
