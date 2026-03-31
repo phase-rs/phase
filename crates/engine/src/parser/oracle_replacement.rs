@@ -1163,8 +1163,8 @@ fn parse_player_life_condition(norm_lower: &str) -> Option<ReplacementCondition>
     // Delegate to nom_primitives::parse_number (input already lowercase)
     let (nom_rest, amount) = nom_primitives::parse_number.parse(rest).ok()?;
     let remainder = nom_rest.trim_start();
-    if !remainder.trim().starts_with("or less life")
-        && !remainder.trim().starts_with("or fewer life")
+    if remainder.trim().strip_prefix("or less life").is_none()
+        && remainder.trim().strip_prefix("or fewer life").is_none()
     {
         return None;
     }
@@ -1222,9 +1222,7 @@ fn parse_turn_of_game_condition(norm_lower: &str) -> Option<ReplacementCondition
         return None;
     }
     // Expect "turn" (optionally followed by "of the game")
-    if !remaining.starts_with("turn") {
-        return None;
-    }
+    remaining.strip_prefix("turn")?;
     Some(ReplacementCondition::UnlessQuantity {
         lhs: QuantityExpr::Ref {
             qty: QuantityRef::TurnsTaken,
