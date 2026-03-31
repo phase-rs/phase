@@ -14,7 +14,8 @@ use axum::routing::get;
 use axum::Router;
 use clap::Parser;
 use engine::ai_support::{
-    auto_pass_recommended as engine_auto_pass, legal_actions as engine_legal_actions,
+    auto_pass_recommended as engine_auto_pass,
+    legal_actions_with_costs as engine_legal_actions_with_costs,
 };
 use engine::database::CardDatabase;
 use engine::game::{validate_deck_for_format, DeckCompatibilityRequest};
@@ -700,7 +701,7 @@ async fn handle_client_message(
 
                     // Only send GameStarted when the game is full (all seats claimed)
                     if session.is_full() {
-                        let legal_actions = engine_legal_actions(&session.state);
+                        let (legal_actions, spell_costs_all) = engine_legal_actions_with_costs(&session.state);
                         let auto_pass = engine_auto_pass(&session.state, &legal_actions);
                         let actor = server_core::acting_player(&session.state.waiting_for);
                         let player_names = session.display_names.clone();
@@ -719,6 +720,7 @@ async fn handle_client_message(
                             player_names: player_names.clone(),
                             legal_actions: joiner_legals,
                             auto_pass_recommended: if is_joiner_actor { auto_pass } else { false },
+                            spell_costs: if is_joiner_actor { spell_costs_all.clone() } else { HashMap::new() },
                             player_token: Some(player_token.clone()),
                         };
                         if let Ok(json) = serde_json::to_string(&msg) {
@@ -743,6 +745,7 @@ async fn handle_client_message(
                                     player_names: player_names.clone(),
                                     legal_actions: p_legals,
                                     auto_pass_recommended: if is_actor { auto_pass } else { false },
+                                    spell_costs: if is_actor { spell_costs_all.clone() } else { HashMap::new() },
                                     player_token: None,
                                 });
                             }
@@ -835,7 +838,7 @@ async fn handle_client_message(
 
             match action_result {
                 Ok((
-                    (raw_state, events, legal_actions, log_entries, auto_pass_rec),
+                    (raw_state, events, legal_actions, log_entries, auto_pass_rec, spell_costs),
                     ai_results,
                     actor,
                     eliminated,
@@ -868,6 +871,12 @@ async fn handle_client_message(
                                         } else {
                                             false
                                         };
+                                    let p_spell_costs =
+                                        if ai_results.is_empty() && actor == Some(*pid) {
+                                            spell_costs.clone()
+                                        } else {
+                                            HashMap::new()
+                                        };
                                     let _ = s.send(ServerMessage::StateUpdate {
                                         state: pstate.clone(),
                                         events: events.clone(),
@@ -875,6 +884,7 @@ async fn handle_client_message(
                                         auto_pass_recommended: p_auto_pass,
                                         eliminated_players: eliminated.clone(),
                                         log_entries: log_entries.clone(),
+                                        spell_costs: p_spell_costs,
                                     });
                                 }
                             }
@@ -884,7 +894,7 @@ async fn handle_client_message(
                     // Broadcast AI follow-up results with delays
                     for (i, result) in ai_results.iter().enumerate() {
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        let (ai_raw_state, ai_events, ai_legal, ai_log_entries, ai_auto_pass) =
+                        let (ai_raw_state, ai_events, ai_legal, ai_log_entries, ai_auto_pass, ai_spell_costs) =
                             result;
                         let is_last = i == ai_results.len() - 1;
 
@@ -910,6 +920,11 @@ async fn handle_client_message(
                                     } else {
                                         false
                                     };
+                                    let p_spell_costs = if is_last && actor == Some(*pid) {
+                                        ai_spell_costs.clone()
+                                    } else {
+                                        HashMap::new()
+                                    };
                                     let _ = s.send(ServerMessage::StateUpdate {
                                         state: pstate.clone(),
                                         events: ai_events.clone(),
@@ -917,6 +932,7 @@ async fn handle_client_message(
                                         auto_pass_recommended: p_auto_pass,
                                         eliminated_players: eliminated.clone(),
                                         log_entries: ai_log_entries.clone(),
+                                        spell_costs: p_spell_costs,
                                     });
                                 }
                             }
@@ -1002,7 +1018,7 @@ async fn handle_client_message(
                                         }
                                     });
 
-                            let legal_actions_all = engine_legal_actions(&session.state);
+                            let (legal_actions_all, spell_costs_all) = engine_legal_actions_with_costs(&session.state);
                             let auto_pass = engine_auto_pass(&session.state, &legal_actions_all);
                             let actor = server_core::acting_player(&session.state.waiting_for);
                             let is_actor = actor == Some(player);
@@ -1015,6 +1031,7 @@ async fn handle_client_message(
                                 player_names,
                                 legal_actions: player_legals,
                                 auto_pass_recommended: if is_actor { auto_pass } else { false },
+                                spell_costs: if is_actor { spell_costs_all } else { HashMap::new() },
                                 player_token: None,
                             };
 
@@ -1092,7 +1109,7 @@ async fn handle_client_message(
                     // Broadcast AI follow-up results with delays (filter outside lock)
                     for result in ai_results {
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        let (raw_state, events, legal_actions, log_entries, auto_pass) = result;
+                        let (raw_state, events, legal_actions, log_entries, auto_pass, spell_costs) = result;
                         let actor = {
                             let mgr = state.lock().await;
                             let session = mgr.sessions.get(&game_code).unwrap();
@@ -1108,6 +1125,7 @@ async fn handle_client_message(
                             auto_pass_recommended: if is_actor { auto_pass } else { false },
                             eliminated_players: vec![],
                             log_entries,
+                            spell_costs: if is_actor { spell_costs } else { HashMap::new() },
                         });
                     }
                 }
@@ -1257,7 +1275,7 @@ async fn handle_client_message(
                     );
 
                     let session = mgr.sessions.get_mut(&game_code).unwrap();
-                    let legal_actions = engine_legal_actions(&session.state);
+                    let (legal_actions, spell_costs_all) = engine_legal_actions_with_costs(&session.state);
                     let auto_pass = engine_auto_pass(&session.state, &legal_actions);
                     let actor = server_core::acting_player(&session.state.waiting_for);
                     let player_names = session.display_names.clone();
@@ -1274,6 +1292,7 @@ async fn handle_client_message(
                         player_names,
                         legal_actions: host_legals,
                         auto_pass_recommended: if is_actor { auto_pass } else { false },
+                        spell_costs: if is_actor { spell_costs_all } else { HashMap::new() },
                         player_token: None,
                     };
 
@@ -1311,7 +1330,7 @@ async fn handle_client_message(
                 // Filter outside the lock for each AI result
                 for result in ai_results {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    let (raw_state, events, legal_actions, log_entries, auto_pass) = result;
+                    let (raw_state, events, legal_actions, log_entries, auto_pass, spell_costs) = result;
                     let actor = {
                         let mgr = state.lock().await;
                         let session = mgr.sessions.get(&game_code).unwrap();
@@ -1328,6 +1347,7 @@ async fn handle_client_message(
                             auto_pass_recommended: if is_actor { auto_pass } else { false },
                             eliminated_players: vec![],
                             log_entries,
+                            spell_costs: if is_actor { spell_costs } else { HashMap::new() },
                         });
                     }
                 }
@@ -1480,7 +1500,7 @@ async fn handle_client_message(
 
                     // Only send GameStarted when the game is full
                     if is_full {
-                        let legal_actions = engine_legal_actions(&session.state);
+                        let (legal_actions, spell_costs_all) = engine_legal_actions_with_costs(&session.state);
                         let auto_pass = engine_auto_pass(&session.state, &legal_actions);
                         let actor = server_core::acting_player(&session.state.waiting_for);
 
@@ -1510,6 +1530,7 @@ async fn handle_client_message(
                             player_names: player_names.clone(),
                             legal_actions: joiner_legals,
                             auto_pass_recommended: if is_joiner_actor { auto_pass } else { false },
+                            spell_costs: if is_joiner_actor { spell_costs_all.clone() } else { HashMap::new() },
                             player_token: Some(player_token.clone()),
                         };
                         if let Ok(json) = serde_json::to_string(&msg) {
@@ -1545,6 +1566,7 @@ async fn handle_client_message(
                                     player_names: player_names.clone(),
                                     legal_actions: p_legals,
                                     auto_pass_recommended: if is_actor { auto_pass } else { false },
+                                    spell_costs: if is_actor { spell_costs_all.clone() } else { HashMap::new() },
                                     player_token: None,
                                 });
                             }

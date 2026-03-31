@@ -1,14 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use engine::ai_support::{auto_pass_recommended, legal_actions as engine_legal_actions};
+use engine::ai_support::{auto_pass_recommended, legal_actions_with_costs as engine_legal_actions_with_costs};
 use engine::game::deck_loading::{load_deck_into_state, DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{apply, start_game};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::identifiers::ObjectId;
 use engine::types::log::GameLogEntry;
+use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
 use engine::types::player::PlayerId;
 use phase_ai::config::{AiConfig, AiDifficulty, Platform};
@@ -20,7 +22,7 @@ use crate::persist::{PersistedLobbyMeta, PersistedSession};
 use crate::protocol::PlayerSlotInfo;
 use crate::reconnect::ReconnectManager;
 
-/// Result of handling a game action: raw state snapshot, events, legal actions, and log entries.
+/// Result of handling a game action: raw state snapshot, events, legal actions, log entries, and spell costs.
 /// The caller is responsible for filtering the state per-player before sending.
 pub type ActionResult = (
     GameState,
@@ -28,6 +30,7 @@ pub type ActionResult = (
     Vec<GameAction>,
     Vec<GameLogEntry>,
     bool, // auto_pass_recommended
+    HashMap<ObjectId, ManaCost>,
 );
 
 /// Returns the player who must act for the given WaitingFor, or None if the game is over.
@@ -130,7 +133,7 @@ impl GameSession {
         ai_results
             .into_iter()
             .map(|r| {
-                let legal = engine_legal_actions(&self.state);
+                let (legal, spell_costs) = engine_legal_actions_with_costs(&self.state);
                 let auto_pass = auto_pass_recommended(&self.state, &legal);
                 (
                     self.state.clone(),
@@ -138,6 +141,7 @@ impl GameSession {
                     legal,
                     r.log_entries,
                     auto_pass,
+                    spell_costs,
                 )
             })
             .collect()
@@ -486,7 +490,7 @@ impl SessionManager {
         // This allows canceling UntilEndOfTurn while the opponent has priority.
         if matches!(action, GameAction::CancelAutoPass) {
             session.state.auto_pass.remove(&player);
-            let new_legal_actions = engine_legal_actions(&session.state);
+            let (new_legal_actions, spell_costs) = engine_legal_actions_with_costs(&session.state);
             let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
             return Ok((
                 session.state.clone(),
@@ -494,6 +498,7 @@ impl SessionManager {
                 new_legal_actions,
                 vec![],
                 auto_pass,
+                spell_costs,
             ));
         }
 
@@ -517,7 +522,7 @@ impl SessionManager {
         let skip_legality =
             action.is_mana_ability() || matches!(action, GameAction::SetAutoPass { .. });
         if !skip_legality {
-            let legal_actions = engine_legal_actions(&session.state);
+            let (legal_actions, _) = engine_legal_actions_with_costs(&session.state);
             if !legal_actions.contains(&action) {
                 warn!(game = %game_code, player = ?player, reason = "illegal_action", "action rejected");
                 return Err(format!("Illegal action: {:?}", action));
@@ -542,7 +547,7 @@ impl SessionManager {
             "action applied"
         );
 
-        let new_legal_actions = engine_legal_actions(&session.state);
+        let (new_legal_actions, spell_costs) = engine_legal_actions_with_costs(&session.state);
         let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
 
         Ok((
@@ -551,6 +556,7 @@ impl SessionManager {
             new_legal_actions,
             result.log_entries,
             auto_pass,
+            spell_costs,
         ))
     }
 

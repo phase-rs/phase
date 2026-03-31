@@ -1,8 +1,12 @@
+use std::collections::HashMap;
+
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::GameState;
+use engine::types::identifiers::ObjectId;
 use engine::types::log::GameLogEntry;
+use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
 use engine::types::player::PlayerId;
 use phase_ai::config::AiDifficulty;
@@ -119,6 +123,8 @@ pub enum ServerMessage {
         legal_actions: Vec<GameAction>,
         #[serde(default)]
         auto_pass_recommended: bool,
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        spell_costs: HashMap<ObjectId, ManaCost>,
         /// Included for joiners so they can persist the token for reconnection.
         /// Omitted (None) for hosts (who get it via GameCreated) and reconnects.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,6 +141,8 @@ pub enum ServerMessage {
         eliminated_players: Vec<PlayerId>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         log_entries: Vec<GameLogEntry>,
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        spell_costs: HashMap<ObjectId, ManaCost>,
     },
     ActionRejected {
         reason: String,
@@ -429,6 +437,7 @@ mod tests {
             player_names: vec!["Me".to_string(), "Opponent".to_string()],
             legal_actions: vec![GameAction::PassPriority],
             auto_pass_recommended: false,
+            spell_costs: HashMap::new(),
             player_token: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -460,6 +469,7 @@ mod tests {
             player_names: vec![],
             legal_actions: vec![],
             auto_pass_recommended: false,
+            spell_costs: HashMap::new(),
             player_token: None,
         };
         let json = serde_json::to_string(&msg).unwrap();

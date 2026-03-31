@@ -5,7 +5,7 @@ use rand_chacha::ChaCha20Rng;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
-use engine::ai_support::{auto_pass_recommended, legal_actions};
+use engine::ai_support::{auto_pass_recommended, legal_actions_with_costs};
 use engine::database::CardDatabase;
 use engine::game::derived::derive_display_state;
 use engine::game::engine::apply;
@@ -16,6 +16,8 @@ use engine::game::{
 };
 use engine::types::format::FormatConfig;
 use engine::types::match_config::MatchConfig;
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::ManaCost;
 use engine::types::{GameAction, GameState, PlayerId};
 
 /// Result of `get_legal_actions_js` — bundles actions with the engine's auto-pass
@@ -25,6 +27,9 @@ use engine::types::{GameAction, GameState, PlayerId};
 struct LegalActionsResult {
     actions: Vec<GameAction>,
     auto_pass_recommended: bool,
+    /// Effective mana costs for castable spells, keyed by object_id.
+    /// Reflects all cost modifiers (reductions, commander tax, alt costs).
+    spell_costs: std::collections::HashMap<ObjectId, ManaCost>,
 }
 
 /// Serialize a Rust value to a JS object via JSON.
@@ -245,16 +250,17 @@ pub fn get_game_state() -> JsValue {
     }
 }
 
-/// Get the legal actions and auto-pass recommendation for the current game state.
-/// Returns `{ actions: GameAction[], autoPassRecommended: boolean }`.
+/// Get the legal actions, auto-pass recommendation, and spell costs for the current game state.
+/// Returns `{ actions: GameAction[], autoPassRecommended: boolean, spellCosts: Record<ObjectId, ManaCost> }`.
 #[wasm_bindgen]
 pub fn get_legal_actions_js() -> JsValue {
     match with_state(|state| {
-        let actions = legal_actions(state);
+        let (actions, spell_costs) = legal_actions_with_costs(state);
         let auto_pass = auto_pass_recommended(state, &actions);
         to_js(&LegalActionsResult {
             actions,
             auto_pass_recommended: auto_pass,
+            spell_costs,
         })
     }) {
         Ok(val) => val,

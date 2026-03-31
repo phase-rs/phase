@@ -1,6 +1,8 @@
 mod candidates;
 mod context;
 
+use std::collections::HashMap;
+
 use crate::game::engine::apply;
 use crate::game::mana_abilities;
 use crate::game::mana_sources;
@@ -8,6 +10,8 @@ use crate::types::ability::AbilityKind;
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::identifiers::ObjectId;
+use crate::types::mana::ManaCost;
 
 pub use candidates::{candidate_actions, ActionMetadata, CandidateAction, TacticalClass};
 pub use context::{build_decision_context, AiDecisionContext};
@@ -81,11 +85,33 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
 }
 
 pub fn legal_actions(state: &GameState) -> Vec<GameAction> {
+    legal_actions_with_costs(state).0
+}
+
+/// Returns legal actions plus effective mana costs for castable spells.
+///
+/// The spell costs map contains the post-reduction effective cost for each
+/// CastSpell action's object_id, reflecting all modifiers (alt costs, commander
+/// tax, battlefield reducers, affinity). Frontends use this to display dynamic
+/// mana cost overlays on cards in hand.
+pub fn legal_actions_with_costs(state: &GameState) -> (Vec<GameAction>, HashMap<ObjectId, ManaCost>) {
     let mut actions: Vec<GameAction> = validated_candidate_actions(state)
         .into_iter()
         .map(|candidate| candidate.action)
         .filter(|action| !action.is_mana_ability())
         .collect();
+
+    // Build spell costs map from CastSpell actions.
+    let mut spell_costs = HashMap::new();
+    if let WaitingFor::Priority { player } = &state.waiting_for {
+        for action in &actions {
+            if let GameAction::CastSpell { object_id, .. } = action {
+                if let Some(cost) = crate::game::casting::effective_spell_cost(state, *player, *object_id) {
+                    spell_costs.insert(*object_id, cost);
+                }
+            }
+        }
+    }
 
     // CR 605.3a: Append activatable mana abilities so the frontend knows the player
     // has meaningful actions beyond PassPriority. These are excluded from
@@ -93,7 +119,7 @@ pub fn legal_actions(state: &GameState) -> Vec<GameAction> {
     // priority_actions), but the frontend needs them to avoid incorrect auto-pass.
     actions.extend(activatable_mana_ability_actions(state));
 
-    actions
+    (actions, spell_costs)
 }
 
 /// CR 605.1b: Enumerate activatable mana abilities for the priority player.

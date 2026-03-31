@@ -444,6 +444,19 @@ pub fn graveyard_lands_playable_by_permission(
     results
 }
 
+/// Returns the effective mana cost for casting a spell, after all modifiers
+/// (alt costs, commander tax, battlefield reducers, affinity).
+/// Returns `None` if the object cannot be cast.
+pub fn effective_spell_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<crate::types::mana::ManaCost> {
+    prepare_spell_cast(state, player, object_id)
+        .ok()
+        .map(|p| p.mana_cost)
+}
+
 fn prepare_spell_cast(
     state: &GameState,
     player: PlayerId,
