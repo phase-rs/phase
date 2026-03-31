@@ -1,8 +1,15 @@
 use std::str::FromStr;
 
+use nom::branch::alt;
+use nom::bytes::complete::tag;
+use nom::combinator::value;
 use nom::Parser;
+use nom_language::error::VerboseError;
 
 use super::oracle_effect::{parse_effect_chain_with_context, ParseContext};
+#[allow(unused_imports)]
+use super::oracle_nom::bridge::nom_on_lower;
+use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_target::parse_type_phrase;
@@ -41,7 +48,9 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     // effect optional at resolution — the player chooses whether to perform it.
     // Mid-chain "you may" is per-sentence optional, handled by
     // parse_effect_chain → strip_optional_effect_prefix().
-    let optional = effect_lower.strip_prefix("you may ").is_some();
+    let optional = tag::<_, _, VerboseError<&str>>("you may ")
+        .parse(effect_lower.as_str())
+        .is_ok();
 
     // Extract intervening-if condition from effect text
     let (effect_without_if, if_condition) = extract_if_condition(&effect_lower);
@@ -193,7 +202,10 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
     // Exception: "unless you discard" is an effect-level modifier (discard count
     // reduction), not a trigger-level payment — preserve it for the effect parser.
     let Some(pays_pos) = after_unless.find("pays ") else {
-        if after_unless.strip_prefix("you discard ").is_some() {
+        if tag::<_, _, VerboseError<&str>>("you discard ")
+            .parse(after_unless)
+            .is_ok()
+        {
             // CR 608.2c: "unless you discard a [type]" is handled by the Discard
             // effect parser — don't strip it here.
             return (text.to_string(), None);
@@ -254,9 +266,12 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
 /// stripping the "where X is" prefix.
 fn parse_where_x_is_trigger(text: &str) -> Option<QuantityExpr> {
     let trimmed = text.trim().trim_start_matches(',').trim();
-    let rest = trimmed
-        .strip_prefix("where x is ")
-        .or_else(|| trimmed.strip_prefix("where X is "))?;
+    let (rest, ()) = alt((
+        value((), tag::<_, _, VerboseError<&str>>("where x is ")),
+        value((), tag("where X is ")),
+    ))
+    .parse(trimmed)
+    .ok()?;
     let rest_lower = rest.to_lowercase();
     // Try nom quantity ref combinator first for common patterns
     if let Ok((_rem, qty)) = nom_quantity::parse_quantity_ref.parse(&rest_lower) {
@@ -335,7 +350,10 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                 );
             }
 
-            if after.strip_prefix("life this turn").is_some() {
+            if tag::<_, _, VerboseError<&str>>("life this turn")
+                .parse(after)
+                .is_ok()
+            {
                 let clause_len = pattern.len() + "life this turn".len();
                 return (
                     strip_condition_clause(text, pos, clause_len),
@@ -357,7 +375,10 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     if let Some(pos) = tp.find("if you cast it") {
         // Guard: must not be followed by " from" (which is the zone-specific variant)
         let after = &lower[pos + "if you cast it".len()..];
-        if after.strip_prefix(" from").is_none() {
+        if tag::<_, _, VerboseError<&str>>(" from")
+            .parse(after)
+            .is_err()
+        {
             return (
                 strip_condition_clause(text, pos, "if you cast it".len()),
                 Some(TriggerCondition::WasCast),
@@ -368,33 +389,43 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     // CR 603.4: "if there are N or more cards in your graveyard" — graveyard threshold.
     // Also handles "N or more card types among cards in your graveyard" (delirium).
     // Composes QuantityComparison + ZoneCardCount/CardTypesInGraveyards (no new types needed).
-    if let Some(rest) = lower.strip_prefix("if there are ") {
+    if let Ok((rest, ())) =
+        value((), tag::<_, _, VerboseError<&str>>("if there are ")).parse(lower.as_str())
+    {
         if let Some((n, after_n)) = parse_number(rest) {
             // parse_number consumes trailing whitespace, so after_n starts without a leading space.
-            let maybe = after_n
-                .strip_prefix("or more card types among cards in your graveyard")
-                .map(|rem| {
+            let maybe = value(
+                (),
+                tag::<_, _, VerboseError<&str>>("or more card types among cards in your graveyard"),
+            )
+            .parse(after_n)
+            .ok()
+            .map(|(rem, _)| {
+                (
+                    rem,
+                    QuantityRef::CardTypesInGraveyards {
+                        scope: CountScope::Controller,
+                    },
+                )
+            })
+            .or_else(|| {
+                value(
+                    (),
+                    tag::<_, _, VerboseError<&str>>("or more cards in your graveyard"),
+                )
+                .parse(after_n)
+                .ok()
+                .map(|(rem, _)| {
                     (
                         rem,
-                        QuantityRef::CardTypesInGraveyards {
+                        QuantityRef::ZoneCardCount {
+                            zone: ZoneRef::Graveyard,
+                            card_types: vec![],
                             scope: CountScope::Controller,
                         },
                     )
                 })
-                .or_else(|| {
-                    after_n
-                        .strip_prefix("or more cards in your graveyard")
-                        .map(|rem| {
-                            (
-                                rem,
-                                QuantityRef::ZoneCardCount {
-                                    zone: ZoneRef::Graveyard,
-                                    card_types: vec![],
-                                    scope: CountScope::Controller,
-                                },
-                            )
-                        })
-                });
+            });
             if let Some((suffix, lhs_qty)) = maybe {
                 let condition = TriggerCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref { qty: lhs_qty },
@@ -440,7 +471,10 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             .find("sneak cost was paid")
             .map(|p| {
                 let after = &lower[p + "sneak cost was paid".len()..];
-                let extra = if after.strip_prefix(" this turn").is_some() {
+                let extra = if tag::<_, _, VerboseError<&str>>(" this turn")
+                    .parse(after)
+                    .is_ok()
+                {
                     " this turn".len()
                 } else {
                     0
@@ -463,7 +497,10 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             .find("ninjutsu cost was paid")
             .map(|p| {
                 let after = &lower[p + "ninjutsu cost was paid".len()..];
-                let extra = if after.strip_prefix(" this turn").is_some() {
+                let extra = if tag::<_, _, VerboseError<&str>>(" this turn")
+                    .parse(after)
+                    .is_ok()
+                {
                     " this turn".len()
                 } else {
                     0
@@ -603,7 +640,10 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                 }
             }
             // Fallback: "if you cast a spell this turn" (no type filter)
-            if after.strip_prefix("spell this turn").is_some() {
+            if tag::<_, _, VerboseError<&str>>("spell this turn")
+                .parse(after)
+                .is_ok()
+            {
                 let clause_len = prefix.len() + "spell this turn".len();
                 return (
                     strip_condition_clause(text, pos, clause_len),
@@ -700,7 +740,9 @@ fn parse_control_count_condition(lower: &str) -> Option<(TriggerCondition, usize
     let after_prefix = &lower[start + "if you control ".len()..];
     let (nom_rest, n) = nom_primitives::parse_number.parse(after_prefix).ok()?;
     let rest = nom_rest.trim_start();
-    let or_more = rest.strip_prefix("or more ")?;
+    let (or_more, ()) = value((), tag::<_, _, VerboseError<&str>>("or more "))
+        .parse(rest)
+        .ok()?;
     let (filter, leftover) = parse_type_phrase(or_more);
     if filter == TargetFilter::Any {
         return None;
@@ -765,8 +807,9 @@ fn find_effect_boundary(lower: &str) -> Option<usize> {
 
 fn continues_player_action_list(after_comma: &str) -> bool {
     let trimmed = after_comma.trim_start();
-    let candidate = trimmed
-        .strip_prefix("or ")
+    let candidate = value((), tag::<_, _, VerboseError<&str>>("or "))
+        .parse(trimmed)
+        .map(|(rest, _)| rest)
         .unwrap_or(trimmed)
         .split(", ")
         .next()
@@ -802,15 +845,20 @@ pub(crate) fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerD
     }
 
     // --- Subject + event decomposition ---
-    // Strip leading "when"/"whenever"
-    let after_keyword = lower
-        .strip_prefix("whenever ")
-        .or_else(|| lower.strip_prefix("when "))
-        .unwrap_or(&lower);
+    // Strip leading "when"/"whenever" using nom alt()
+    let after_keyword = alt((
+        value((), tag::<_, _, VerboseError<&str>>("whenever ")),
+        value((), tag("when ")),
+    ))
+    .parse(lower.as_str())
+    .map(|(rest, _)| rest)
+    .unwrap_or(&lower);
 
     // Parse the subject ("~", "another creature you control", "a creature", etc.)
     // CR 603.2c: Detect "one or more" quantifier for batched trigger semantics
-    let is_batched = after_keyword.strip_prefix("one or more ").is_some();
+    let is_batched = tag::<_, _, VerboseError<&str>>("one or more ")
+        .parse(after_keyword)
+        .is_ok();
     let (subject, rest) = parse_trigger_subject(after_keyword);
 
     // Parse event verb from the remaining text
@@ -835,10 +883,13 @@ pub(crate) fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerD
 /// `resolve_it_pronoun` will fall back to `SelfRef`.
 fn extract_trigger_subject_for_context(condition_text: &str) -> TargetFilter {
     let lower = condition_text.to_lowercase();
-    let after_keyword = lower
-        .strip_prefix("whenever ")
-        .or_else(|| lower.strip_prefix("when "))
-        .unwrap_or(&lower);
+    let after_keyword = alt((
+        value((), tag::<_, _, VerboseError<&str>>("whenever ")),
+        value((), tag("when ")),
+    ))
+    .parse(lower.as_str())
+    .map(|(rest, _)| rest)
+    .unwrap_or(&lower);
     let (subject, _) = parse_trigger_subject(after_keyword);
     subject
 }
@@ -859,7 +910,9 @@ fn parse_trigger_subject(text: &str) -> (TargetFilter, &str) {
 
     // Check for "or " combinator to build compound subjects
     let rest_trimmed = rest.trim_start();
-    if let Some(after_or) = rest_trimmed.strip_prefix("or ") {
+    if let Ok((after_or, ())) =
+        value((), tag::<_, _, VerboseError<&str>>("or ")).parse(rest_trimmed)
+    {
         let (second, final_rest) = parse_trigger_subject(after_or);
         return (merge_or_filters(first, second), final_rest);
     }
@@ -870,55 +923,60 @@ fn parse_trigger_subject(text: &str) -> (TargetFilter, &str) {
 /// Parse a single (non-compound) trigger subject.
 fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
     // Self-reference: "~"
-    if let Some(rest) = text.strip_prefix("~ ") {
+    if let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>("~ ")).parse(text) {
         return (TargetFilter::SelfRef, rest);
     }
     if text == "~" {
         return (TargetFilter::SelfRef, "");
     }
 
-    if let Some(rest) = text.strip_prefix("this ") {
+    if let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>("this ")).parse(text) {
         let noun_end = rest.find(' ').unwrap_or(rest.len());
         if noun_end > 0 {
             return (TargetFilter::SelfRef, rest[noun_end..].trim_start());
         }
     }
 
-    // "equipped creature" / "enchanted creature" — the permanent this card is attached to
-    if let Some(rest) = text.strip_prefix("equipped creature ") {
+    // "equipped creature" / "enchanted creature/land/permanent" — AttachedTo
+    // Use nom alt() for the set of fixed attached-to prefixes (input already lowercase)
+    fn parse_attached_to_prefix(input: &str) -> OracleResult<'_, ()> {
+        alt((
+            value((), tag("equipped creature ")),
+            value((), tag("enchanted creature ")),
+            value((), tag("enchanted land ")),
+            value((), tag("enchanted permanent ")),
+        ))
+        .parse(input)
+    }
+    if let Ok((rest, ())) = parse_attached_to_prefix.parse(text) {
         return (TargetFilter::AttachedTo, rest);
     }
-    if text == "equipped creature" {
-        return (TargetFilter::AttachedTo, "");
+    // Exact-match variants (no trailing space — end of input)
+    fn parse_attached_to_exact(input: &str) -> OracleResult<'_, ()> {
+        alt((
+            value((), tag("equipped creature")),
+            value((), tag("enchanted creature")),
+            value((), tag("enchanted land")),
+            value((), tag("enchanted permanent")),
+        ))
+        .parse(input)
     }
-    if let Some(rest) = text.strip_prefix("enchanted creature ") {
-        return (TargetFilter::AttachedTo, rest);
-    }
-    if text == "enchanted creature" {
-        return (TargetFilter::AttachedTo, "");
-    }
-    if let Some(rest) = text.strip_prefix("enchanted land ") {
-        return (TargetFilter::AttachedTo, rest);
-    }
-    if text == "enchanted land" {
-        return (TargetFilter::AttachedTo, "");
-    }
-    // "enchanted permanent" (some aura triggers use this phrasing)
-    if let Some(rest) = text.strip_prefix("enchanted permanent ") {
-        return (TargetFilter::AttachedTo, rest);
-    }
-    if text == "enchanted permanent" {
+    if let Ok((_rest, ())) = parse_attached_to_exact.parse(text) {
         return (TargetFilter::AttachedTo, "");
     }
 
     // "another <type phrase>" — compose with FilterProp::Another
-    if let Some(after_another) = text.strip_prefix("another ") {
+    if let Ok((after_another, ())) =
+        value((), tag::<_, _, VerboseError<&str>>("another ")).parse(text)
+    {
         let (filter, rest) = parse_type_phrase(after_another);
         let with_another = add_another_prop(filter);
         return (with_another, rest);
     }
 
-    if let Some(after_quantifier) = text.strip_prefix("one or more ") {
+    if let Ok((after_quantifier, ())) =
+        value((), tag::<_, _, VerboseError<&str>>("one or more ")).parse(text)
+    {
         let (filter, rest) = parse_type_phrase(after_quantifier);
         if rest.len() < after_quantifier.len() {
             return (filter, rest);
@@ -926,8 +984,12 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
     }
 
     // "a "/"an " + type phrase (general subject)
-    let after_article = text.strip_prefix("a ").or_else(|| text.strip_prefix("an "));
-    if let Some(after) = after_article {
+    if let Ok((after, ())) = alt((
+        value((), tag::<_, _, VerboseError<&str>>("a ")),
+        value((), tag("an ")),
+    ))
+    .parse(text)
+    {
         let (filter, rest) = parse_type_phrase(after);
         return (filter, rest);
     }
@@ -997,20 +1059,29 @@ fn add_controller(filter: TargetFilter, controller: ControllerRef) -> TargetFilt
 /// Other qualifiers (e.g. "to a player or planeswalker") are left as `None`
 /// so the trigger fires for any target, matching current behaviour.
 fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
-    let rest = after_verb.trim_start().strip_prefix("to ")?;
-    if rest.strip_prefix("a player").is_some() {
-        Some(TargetFilter::Player)
-    } else if rest.strip_prefix("an opponent").is_some()
-        || rest.strip_prefix("one of your opponents").is_some()
-    {
-        Some(TargetFilter::Typed(
-            TypedFilter::default().controller(ControllerRef::Opponent),
+    let (rest, ()) = value((), tag::<_, _, VerboseError<&str>>("to "))
+        .parse(after_verb.trim_start())
+        .ok()?;
+    // Use nom alt() to match damage target qualifiers (input already lowercase)
+    fn parse_damage_target(input: &str) -> OracleResult<'_, TargetFilter> {
+        alt((
+            value(TargetFilter::Player, tag("a player")),
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                tag("an opponent"),
+            ),
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                tag("one of your opponents"),
+            ),
+            value(TargetFilter::Controller, tag("you")),
         ))
-    } else if rest.strip_prefix("you").is_some() {
-        Some(TargetFilter::Controller)
-    } else {
-        None
+        .parse(input)
     }
+    parse_damage_target
+        .parse(rest)
+        .ok()
+        .map(|(_, filter)| filter)
 }
 
 /// Try to parse an event verb and build a TriggerDefinition from subject + event.
@@ -1021,11 +1092,14 @@ fn try_parse_event(
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     let rest = rest.trim_start();
 
-    // "enters or attacks" / "enters the battlefield or attacks" — compound trigger
-    if rest.strip_prefix("enters or attacks").is_some()
-        || rest
-            .strip_prefix("enters the battlefield or attacks")
-            .is_some()
+    // --- Compound triggers (nom alt for prefix matching) ---
+    // "enters or attacks" / "enters the battlefield or attacks"
+    if tag::<_, _, VerboseError<&str>>("enters or attacks")
+        .parse(rest)
+        .is_ok()
+        || tag::<_, _, VerboseError<&str>>("enters the battlefield or attacks")
+            .parse(rest)
+            .is_ok()
     {
         let mut def = make_base();
         def.mode = TriggerMode::EntersOrAttacks;
@@ -1034,8 +1108,11 @@ fn try_parse_event(
         return Some((TriggerMode::EntersOrAttacks, def));
     }
 
-    // "attacks or blocks" — compound trigger
-    if rest.strip_prefix("attacks or blocks").is_some() {
+    // "attacks or blocks"
+    if tag::<_, _, VerboseError<&str>>("attacks or blocks")
+        .parse(rest)
+        .is_ok()
+    {
         let mut def = make_base();
         def.mode = TriggerMode::AttacksOrBlocks;
         def.valid_card = Some(subject.clone());
@@ -1043,8 +1120,7 @@ fn try_parse_event(
     }
 
     // "enters [the battlefield]" / "enter [the battlefield]" (plural for "one or more" subjects)
-    // Also handles "enters from your hand" (origin filter).
-    if rest.strip_prefix("enter").is_some() {
+    if tag::<_, _, VerboseError<&str>>("enter").parse(rest).is_ok() {
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZone;
         def.destination = Some(Zone::Battlefield);
@@ -1060,14 +1136,15 @@ fn try_parse_event(
     }
 
     // CR 700.4: "Dies"/"die" means "is put into a graveyard from the battlefield."
-    if rest.strip_prefix("die").is_some()
-        || rest
-            .strip_prefix("is put into a graveyard from the battlefield")
-            .is_some()
-        || rest
-            .strip_prefix("are put into a graveyard from the battlefield")
-            .is_some()
-    {
+    fn parse_dies_verb(input: &str) -> OracleResult<'_, ()> {
+        alt((
+            value((), tag("die")),
+            value((), tag("is put into a graveyard from the battlefield")),
+            value((), tag("are put into a graveyard from the battlefield")),
+        ))
+        .parse(input)
+    }
+    if parse_dies_verb.parse(rest).is_ok() {
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZone;
         def.origin = Some(Zone::Battlefield);
@@ -1076,10 +1153,12 @@ fn try_parse_event(
         return Some((TriggerMode::ChangesZone, def));
     }
 
-    // CR 120.1: "deals combat damage" / "deal combat damage" (plural for &-names after ~ normalization)
-    if let Some(after) = rest
-        .strip_prefix("deals combat damage")
-        .or_else(|| rest.strip_prefix("deal combat damage"))
+    // CR 120.1: "deals combat damage" / "deal combat damage" (plural for &-names)
+    if let Ok((after, ())) = alt((
+        value((), tag::<_, _, VerboseError<&str>>("deals combat damage")),
+        value((), tag("deal combat damage")),
+    ))
+    .parse(rest)
     {
         let mut def = make_base();
         def.mode = TriggerMode::DamageDone;
@@ -1090,9 +1169,11 @@ fn try_parse_event(
     }
 
     // CR 120.1: "deals damage" / "deal damage" (plural for &-names)
-    if let Some(after) = rest
-        .strip_prefix("deals damage")
-        .or_else(|| rest.strip_prefix("deal damage"))
+    if let Ok((after, ())) = alt((
+        value((), tag::<_, _, VerboseError<&str>>("deals damage")),
+        value((), tag("deal damage")),
+    ))
+    .parse(rest)
     {
         let mut def = make_base();
         def.mode = TriggerMode::DamageDone;
@@ -1102,14 +1183,13 @@ fn try_parse_event(
     }
 
     // CR 508.1a: "~ and at least N other creatures attack" (Battalion/Pack Tactics)
-    if let Some(after_and) = rest
-        .strip_prefix("and at least ")
-        .or_else(|| rest.strip_prefix("and "))
+    if let Ok((after_and, ())) = alt((
+        value((), tag::<_, _, VerboseError<&str>>("and at least ")),
+        value((), tag("and ")),
+    ))
+    .parse(rest)
     {
         if after_and.contains("attack") {
-            // Parse N from "two other creatures attack" / "one other creature attacks"
-            // Uses oracle_util::parse_number (not nom directly) because the word-boundary
-            // guard prevents "another" from false-matching as "a" + "nother".
             if let Some((n, _rest_after_n)) = parse_number(after_and) {
                 let mut def = make_base();
                 def.mode = TriggerMode::Attacks;
@@ -1122,21 +1202,29 @@ fn try_parse_event(
 
     // "attacks" (singular) or "attack" (plural — multi-name cards like "Raph & Leo")
     // Guard against false-matching "attacker"/"attacking".
-    if let Some(after) = rest.strip_prefix("attacks").or_else(|| {
-        rest.strip_prefix("attack")
-            .filter(|r| !r.starts_with("er") && !r.starts_with("ing"))
-    }) {
+    let attacks_result = tag::<_, _, VerboseError<&str>>("attacks")
+        .parse(rest)
+        .map(|(r, _)| r)
+        .ok()
+        .or_else(|| {
+            tag::<_, _, VerboseError<&str>>("attack")
+                .parse(rest)
+                .ok()
+                .map(|(r, _)| r)
+                .filter(|r| !r.starts_with("er") && !r.starts_with("ing"))
+        });
+    if let Some(after) = attacks_result {
         // CR 508.3a: Detect attack target qualifier ("attacks a planeswalker" etc.)
         use crate::types::triggers::AttackTargetFilter;
-        let attack_target_filter = if after.strip_prefix(" a planeswalker").is_some() {
-            Some(AttackTargetFilter::Planeswalker)
-        } else if after.strip_prefix(" a player").is_some() {
-            Some(AttackTargetFilter::Player)
-        } else if after.strip_prefix(" a battle").is_some() {
-            Some(AttackTargetFilter::Battle)
-        } else {
-            None
-        };
+        fn parse_attack_target(input: &str) -> OracleResult<'_, AttackTargetFilter> {
+            alt((
+                value(AttackTargetFilter::Planeswalker, tag(" a planeswalker")),
+                value(AttackTargetFilter::Player, tag(" a player")),
+                value(AttackTargetFilter::Battle, tag(" a battle")),
+            ))
+            .parse(input)
+        }
+        let attack_target_filter = parse_attack_target.parse(after).ok().map(|(_, f)| f);
         let mut def = make_base();
         def.mode = TriggerMode::Attacks;
         def.valid_card = Some(subject.clone());
@@ -1145,126 +1233,144 @@ fn try_parse_event(
     }
 
     // "blocks" — fires for the blocking creature.
-    // "blocks or becomes blocked" is parsed as Blocks only (blocker side).
-    if rest.strip_prefix("blocks").is_some() {
+    if tag::<_, _, VerboseError<&str>>("blocks")
+        .parse(rest)
+        .is_ok()
+    {
         let mut def = make_base();
         def.mode = TriggerMode::Blocks;
         def.valid_card = Some(subject.clone());
         return Some((TriggerMode::Blocks, def));
     }
 
-    // "leaves the battlefield"
-    if rest.strip_prefix("leaves the battlefield").is_some()
-        || rest.strip_prefix("leaves").is_some()
+    // "leaves the battlefield" / "leaves"
+    if alt((
+        value(
+            (),
+            tag::<_, _, VerboseError<&str>>("leaves the battlefield"),
+        ),
+        value((), tag("leaves")),
+    ))
+    .parse(rest)
+    .is_ok()
     {
         let mut def = make_base();
         def.mode = TriggerMode::LeavesBattlefield;
         def.valid_card = Some(subject.clone());
-        // LTB triggers fire from the graveyard (object has already moved)
         def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
         return Some((TriggerMode::LeavesBattlefield, def));
     }
 
     // CR 700.4: "is put into a graveyard from [zone]" / "is put into [possessive] graveyard [from zone]"
-    // Generalized handler for all "put into graveyard" zone-change patterns.
-    // Covers: "is/are put into a/your/an opponent's graveyard [from the battlefield/anywhere/your library]"
     if let Some(result) = try_parse_put_into_graveyard(subject, rest) {
         return Some(result);
     }
 
-    // "becomes blocked"
-    if rest.strip_prefix("becomes blocked").is_some() {
-        let mut def = make_base();
-        def.mode = TriggerMode::BecomesBlocked;
-        def.valid_card = Some(subject.clone());
-        return Some((TriggerMode::BecomesBlocked, def));
+    // Simple event verbs using nom alt() — each maps to a single TriggerMode
+    // These are all "is_some()" pattern strip_prefix calls
+    #[derive(Clone)]
+    enum SimpleEvent {
+        BecomesBlocked,
+        BecomesTargetSpellOrAbility,
+        BecomesTargetSpellOnly,
+        DealtCombatDamage,
+        DealtDamage,
+        BecomesTapped,
+        TappedForMana,
+        BecomesUntapped,
+        TurnFaceUp,
+        Mutates,
+        ExploitsCreature,
+        Exploits,
+        Transforms,
     }
-
-    if rest
-        .strip_prefix("becomes the target of a spell or ability")
-        .is_some()
-    {
-        let mut def = make_base();
-        def.mode = TriggerMode::BecomesTarget;
-        def.valid_card = Some(subject.clone());
-        return Some((TriggerMode::BecomesTarget, def));
+    fn parse_simple_event(input: &str) -> OracleResult<'_, SimpleEvent> {
+        alt((
+            value(SimpleEvent::BecomesBlocked, tag("becomes blocked")),
+            value(
+                SimpleEvent::BecomesTargetSpellOrAbility,
+                tag("becomes the target of a spell or ability"),
+            ),
+            value(
+                SimpleEvent::BecomesTargetSpellOnly,
+                tag("becomes the target of a spell"),
+            ),
+            value(
+                SimpleEvent::DealtCombatDamage,
+                tag("is dealt combat damage"),
+            ),
+            value(SimpleEvent::DealtDamage, tag("is dealt damage")),
+            value(SimpleEvent::BecomesTapped, tag("becomes tapped")),
+            value(SimpleEvent::TappedForMana, tag("is tapped for mana")),
+        ))
+        .or(alt((
+            value(SimpleEvent::BecomesUntapped, tag("becomes untapped")),
+            value(SimpleEvent::BecomesUntapped, tag("untaps")),
+            value(SimpleEvent::TurnFaceUp, tag("is turned face up")),
+            value(SimpleEvent::Mutates, tag("mutates")),
+            // CR 702.110c: "exploits a creature" — exploit trigger
+            value(SimpleEvent::ExploitsCreature, tag("exploits a creature")),
+            value(SimpleEvent::Exploits, tag("exploits")),
+            // CR 712.14: "transforms" / "transforms into"
+            value(SimpleEvent::Transforms, tag("transforms")),
+        )))
+        .parse(input)
     }
-
-    // CR 114.1a: "becomes the target of a spell" (spell only, no abilities)
-    if rest.strip_prefix("becomes the target of a spell").is_some() {
+    if let Ok((_, event)) = parse_simple_event.parse(rest) {
         let mut def = make_base();
-        def.mode = TriggerMode::BecomesTarget;
-        def.valid_card = Some(subject.clone());
-        def.valid_source = Some(TargetFilter::StackSpell);
-        return Some((TriggerMode::BecomesTarget, def));
-    }
-
-    // "is dealt combat damage" / "is dealt damage"
-    if rest.strip_prefix("is dealt combat damage").is_some() {
-        let mut def = make_base();
-        def.mode = TriggerMode::DamageReceived;
-        def.damage_kind = DamageKindFilter::CombatOnly;
-        def.valid_card = Some(subject.clone());
-        return Some((TriggerMode::DamageReceived, def));
-    }
-    if rest.strip_prefix("is dealt damage").is_some() {
-        let mut def = make_base();
-        def.mode = TriggerMode::DamageReceived;
-        def.valid_card = Some(subject.clone());
-        return Some((TriggerMode::DamageReceived, def));
-    }
-
-    // "becomes tapped"
-    if rest.strip_prefix("becomes tapped").is_some() {
-        let mut def = make_base();
-        def.mode = TriggerMode::Taps;
-        def.valid_card = Some(subject.clone());
-        return Some((TriggerMode::Taps, def));
-    }
-
-    if rest.strip_prefix("is tapped for mana").is_some() {
-        let mut def = make_base();
-        def.mode = TriggerMode::TapsForMana;
-        def.valid_card = Some(subject.clone());
-        return Some((TriggerMode::TapsForMana, def));
-    }
-
-    if rest.strip_prefix("becomes untapped").is_some() || rest.strip_prefix("untaps").is_some() {
-        let mut def = make_base();
-        def.mode = TriggerMode::Untaps;
-        def.valid_card = Some(subject.clone());
-        return Some((TriggerMode::Untaps, def));
-    }
-
-    if rest.strip_prefix("is turned face up").is_some() {
-        let mut def = make_base();
-        def.mode = TriggerMode::TurnFaceUp;
-        def.valid_card = Some(subject.clone());
-        return Some((TriggerMode::TurnFaceUp, def));
-    }
-
-    if rest.strip_prefix("mutates").is_some() {
-        let mut def = make_base();
-        def.mode = TriggerMode::Mutates;
-        def.valid_card = Some(subject.clone());
-        return Some((TriggerMode::Mutates, def));
-    }
-
-    // CR 702.110c: "exploits a creature" — exploit trigger
-    if rest.strip_prefix("exploits a creature").is_some() || rest.strip_prefix("exploits").is_some()
-    {
-        let mut def = make_base();
-        def.mode = TriggerMode::Exploited;
-        def.valid_card = Some(subject.clone());
-        return Some((TriggerMode::Exploited, def));
-    }
-
-    // CR 712.14: "transforms" / "transforms into" — transform trigger
-    if rest.strip_prefix("transforms").is_some() {
-        let mut def = make_base();
-        def.mode = TriggerMode::Transformed;
-        def.valid_source = Some(subject.clone());
-        return Some((TriggerMode::Transformed, def));
+        match event {
+            SimpleEvent::BecomesBlocked => {
+                def.mode = TriggerMode::BecomesBlocked;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::BecomesTargetSpellOrAbility => {
+                def.mode = TriggerMode::BecomesTarget;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::BecomesTargetSpellOnly => {
+                def.mode = TriggerMode::BecomesTarget;
+                def.valid_card = Some(subject.clone());
+                def.valid_source = Some(TargetFilter::StackSpell);
+            }
+            SimpleEvent::DealtCombatDamage => {
+                def.mode = TriggerMode::DamageReceived;
+                def.damage_kind = DamageKindFilter::CombatOnly;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::DealtDamage => {
+                def.mode = TriggerMode::DamageReceived;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::BecomesTapped => {
+                def.mode = TriggerMode::Taps;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::TappedForMana => {
+                def.mode = TriggerMode::TapsForMana;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::BecomesUntapped => {
+                def.mode = TriggerMode::Untaps;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::TurnFaceUp => {
+                def.mode = TriggerMode::TurnFaceUp;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::Mutates => {
+                def.mode = TriggerMode::Mutates;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::ExploitsCreature | SimpleEvent::Exploits => {
+                def.mode = TriggerMode::Exploited;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::Transforms => {
+                def.mode = TriggerMode::Transformed;
+                def.valid_source = Some(subject.clone());
+            }
+        }
+        return Some((def.mode.clone(), def));
     }
 
     // Counter-related events: "a +1/+1 counter is put on ~" / "one or more counters are put on ~"
@@ -1391,7 +1497,7 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         "whenever enchanted player is attacked",
         "when enchanted player is attacked",
     ] {
-        if lower.strip_prefix(prefix).is_some() {
+        if tag::<_, _, VerboseError<&str>>(prefix).parse(lower).is_ok() {
             let mut def = make_base();
             def.mode = TriggerMode::Attacks;
             // AttachedTo here references the player the aura is attached to
@@ -1401,7 +1507,7 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
     }
 
     for prefix in ["whenever you cast or copy ", "when you cast or copy "] {
-        if let Some(rest) = lower.strip_prefix(prefix) {
+        if let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) {
             if matches!(
                 rest,
                 "an instant or sorcery spell" | "a instant or sorcery spell"
@@ -1428,7 +1534,7 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         "whenever a creature dealt damage by ~ this turn dies",
         "when a creature dealt damage by ~ this turn dies",
     ] {
-        if lower.strip_prefix(prefix).is_some() {
+        if tag::<_, _, VerboseError<&str>>(prefix).parse(lower).is_ok() {
             let mut def = make_base();
             def.mode = TriggerMode::ChangesZone;
             def.origin = Some(Zone::Battlefield);
@@ -1451,7 +1557,7 @@ fn try_parse_n_or_more_attacks(lower: &str) -> Option<(TriggerMode, TriggerDefin
         ("whenever two or more ", 2),
         ("when two or more ", 2),
     ] {
-        let Some(rest) = lower.strip_prefix(prefix) else {
+        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
             continue;
         };
         // Strip optional " a player" target suffix before checking for "attack"
@@ -1492,7 +1598,7 @@ fn try_parse_n_or_more_attacks(lower: &str) -> Option<(TriggerMode, TriggerDefin
 /// CR 603.10c: "One or more" triggers fire once per batch of simultaneous events.
 fn try_parse_one_or_more_die(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     for prefix in ["whenever one or more ", "when one or more "] {
-        let Some(rest) = lower.strip_prefix(prefix) else {
+        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
             continue;
         };
         let Some(subject_text) = rest
@@ -1523,7 +1629,7 @@ fn try_parse_one_or_more_die(lower: &str) -> Option<(TriggerMode, TriggerDefinit
 /// CR 603.10c: "One or more" triggers fire once per batch of simultaneous events.
 fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     for prefix in ["whenever one or more ", "when one or more "] {
-        let Some(rest) = lower.strip_prefix(prefix) else {
+        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
             continue;
         };
 
@@ -1596,7 +1702,7 @@ fn try_parse_one_or_more_combat_damage_to_player(
     lower: &str,
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     for prefix in ["whenever one or more ", "when one or more "] {
-        let Some(rest) = lower.strip_prefix(prefix) else {
+        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
             continue;
         };
         let Some(subject_text) = rest
@@ -1701,7 +1807,7 @@ fn try_parse_self_or_another_controlled_subtype_enters(
     lower: &str,
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     for prefix in ["whenever ~ or another ", "when ~ or another "] {
-        let Some(rest) = lower.strip_prefix(prefix) else {
+        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
             continue;
         };
         let Some(subject_text) = rest
@@ -1747,7 +1853,7 @@ fn try_parse_another_controlled_subtype_enters(
     lower: &str,
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     for prefix in ["whenever another ", "when another "] {
-        let Some(rest) = lower.strip_prefix(prefix) else {
+        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
             continue;
         };
         let Some(subject_text) = rest
@@ -1781,7 +1887,7 @@ fn try_parse_another_controlled_subtype_enters(
 
 fn try_parse_controlled_subtype_attacks(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     for prefix in ["whenever a ", "whenever an ", "when a ", "when an "] {
-        let Some(rest) = lower.strip_prefix(prefix) else {
+        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
             continue;
         };
         let Some(subject_text) = rest.strip_suffix(" attacks") else {
@@ -1896,24 +2002,32 @@ fn build_controlled_subtype_filters(
 /// Parse phase triggers: "At the beginning of your upkeep/end step/combat/draw step"
 fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     // CR 511.2: "at end of combat" triggers as the end of combat step begins.
-    if let Some(rest) = lower
-        .strip_prefix("at end of combat")
-        .or_else(|| lower.strip_prefix("at the end of combat"))
+    if let Ok((rest, ())) = alt((
+        value((), tag::<_, _, VerboseError<&str>>("at end of combat")),
+        value((), tag("at the end of combat")),
+    ))
+    .parse(lower)
     {
         let mut def = make_base();
         def.mode = TriggerMode::Phase;
         def.phase = Some(Phase::EndCombat);
         // CR 511.2: "on your turn" restricts to active player's combat.
         let rest = rest.trim();
-        if rest.strip_prefix("on your turn").is_some()
-            || rest.strip_prefix("on each of your turns").is_some()
+        if alt((
+            value((), tag::<_, _, VerboseError<&str>>("on your turn")),
+            value((), tag("on each of your turns")),
+        ))
+        .parse(rest)
+        .is_ok()
         {
             def.constraint = Some(TriggerConstraint::OnlyDuringYourTurn);
         }
         return Some((TriggerMode::Phase, def));
     }
 
-    let stripped = lower.strip_prefix("at the beginning of")?;
+    let (stripped, ()) = value((), tag::<_, _, VerboseError<&str>>("at the beginning of"))
+        .parse(lower)
+        .ok()?;
     let phase_text = stripped.trim();
     let mut def = make_base();
     def.mode = TriggerMode::Phase;
@@ -1974,7 +2088,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // CR 700.14: "whenever you expend N" — cumulative mana spent on spells this turn
     // CR 700.14: Delegate number parsing to nom combinator (input already lowercase)
     for prefix in ["whenever you expend ", "when you expend "] {
-        if let Some(rest) = lower.strip_prefix(prefix) {
+        if let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) {
             if let Ok((_rem, n)) = nom_primitives::parse_number.parse(rest) {
                 let mut def = make_base();
                 def.mode = TriggerMode::ManaExpend;
@@ -2061,7 +2175,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     }
 
     for prefix in ["whenever you tap ", "when you tap "] {
-        let Some(rest) = lower.strip_prefix(prefix) else {
+        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
             continue;
         };
         let Some(subject_text) = rest.strip_suffix(" for mana") else {
@@ -2080,7 +2194,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     }
 
     for prefix in ["whenever a player taps ", "when a player taps "] {
-        let Some(rest) = lower.strip_prefix(prefix) else {
+        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
             continue;
         };
         let Some(subject_text) = rest.strip_suffix(" for mana") else {
@@ -2116,7 +2230,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     }
 
     for prefix in ["whenever you sacrifice ", "when you sacrifice "] {
-        let Some(rest) = lower.strip_prefix(prefix) else {
+        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
             continue;
         };
         let (filter, remainder) = parse_trigger_subject(rest);
@@ -2172,8 +2286,9 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         // Truncate at ", " to avoid passing the effect clause (e.g., ", you gain 1 life")
         // into parse_type_phrase where it would cause infinite recursion.
         let after_casts = &lower[casts_pos + " casts a".len()..].trim_start();
-        let after_article = after_casts
-            .strip_prefix("n ") // "an" → strip the trailing "n "
+        let after_article = value((), tag::<_, _, VerboseError<&str>>("n ")) // "an" → strip the trailing "n "
+            .parse(after_casts)
+            .map(|(rest, _)| rest)
             .unwrap_or(after_casts)
             .trim_start();
         let spell_clause = after_article
@@ -2326,7 +2441,7 @@ fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerD
         ),
         ("when a player ", None),
     ] {
-        let Some(rest) = lower.strip_prefix(prefix) else {
+        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
             continue;
         };
         let actions = parse_player_action_list(rest)?;
@@ -2410,8 +2525,12 @@ fn try_parse_nth_spell_you(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     let filter = extract_spell_type_filter(rest);
     let after_qualifier = skip_to_word(rest, "spell");
     // CR 601.2: Standard "each turn" / "in a turn" patterns
-    if after_qualifier.strip_prefix("spell each turn").is_some()
-        || after_qualifier.strip_prefix("spell in a turn").is_some()
+    if alt((
+        value((), tag::<_, _, VerboseError<&str>>("spell each turn")),
+        value((), tag("spell in a turn")),
+    ))
+    .parse(after_qualifier)
+    .is_ok()
     {
         let mut def = make_base();
         def.mode = TriggerMode::SpellCast;
@@ -2420,12 +2539,15 @@ fn try_parse_nth_spell_you(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     }
     // CR 601.2: "during each opponent's turn" — same nth-spell tracking but only
     // during opponents' turns.
-    if after_qualifier
-        .strip_prefix("spell during each opponent's turn")
-        .is_some()
-        || after_qualifier
-            .strip_prefix("spell during each opponent\u{2019}s turn")
-            .is_some()
+    if alt((
+        value(
+            (),
+            tag::<_, _, VerboseError<&str>>("spell during each opponent's turn"),
+        ),
+        value((), tag("spell during each opponent\u{2019}s turn")),
+    ))
+    .parse(after_qualifier)
+    .is_ok()
     {
         let mut def = make_base();
         def.mode = TriggerMode::SpellCast;
@@ -2444,8 +2566,12 @@ fn try_parse_nth_spell_opponent(lower: &str) -> Option<(TriggerMode, TriggerDefi
     let (n, rest) = parse_ordinal(after)?;
     let filter = extract_spell_type_filter(rest);
     let after_qualifier = skip_to_word(rest, "spell");
-    if after_qualifier.strip_prefix("spell each turn").is_some()
-        || after_qualifier.strip_prefix("spell in a turn").is_some()
+    if alt((
+        value((), tag::<_, _, VerboseError<&str>>("spell each turn")),
+        value((), tag("spell in a turn")),
+    ))
+    .parse(after_qualifier)
+    .is_ok()
     {
         let mut def = make_base();
         def.mode = TriggerMode::SpellCast;
@@ -2468,8 +2594,12 @@ fn try_parse_nth_spell_any_player(lower: &str) -> Option<(TriggerMode, TriggerDe
     let (n, rest) = parse_ordinal(after)?;
     let filter = extract_spell_type_filter(rest);
     let after_qualifier = skip_to_word(rest, "spell");
-    if after_qualifier.strip_prefix("spell each turn").is_some()
-        || after_qualifier.strip_prefix("spell in a turn").is_some()
+    if alt((
+        value((), tag::<_, _, VerboseError<&str>>("spell each turn")),
+        value((), tag("spell in a turn")),
+    ))
+    .parse(after_qualifier)
+    .is_ok()
     {
         let mut def = make_base();
         def.mode = TriggerMode::SpellCast;
@@ -2521,8 +2651,12 @@ fn try_parse_nth_draw_you(lower: &str) -> Option<(TriggerMode, TriggerDefinition
     let prefix = "you draw your ";
     let after = strip_after(lower, prefix)?;
     let (n, rest) = parse_ordinal(after)?;
-    if rest.strip_prefix("card each turn").is_some()
-        || rest.strip_prefix("card in a turn").is_some()
+    if alt((
+        value((), tag::<_, _, VerboseError<&str>>("card each turn")),
+        value((), tag("card in a turn")),
+    ))
+    .parse(rest)
+    .is_ok()
     {
         let mut def = make_base();
         def.mode = TriggerMode::Drawn;
@@ -2537,8 +2671,12 @@ fn try_parse_nth_draw_opponent(lower: &str) -> Option<(TriggerMode, TriggerDefin
     let prefix = "an opponent draws their ";
     let after = strip_after(lower, prefix)?;
     let (n, rest) = parse_ordinal(after)?;
-    if rest.strip_prefix("card each turn").is_some()
-        || rest.strip_prefix("card in a turn").is_some()
+    if alt((
+        value((), tag::<_, _, VerboseError<&str>>("card each turn")),
+        value((), tag("card in a turn")),
+    ))
+    .parse(rest)
+    .is_ok()
     {
         let mut def = make_base();
         def.mode = TriggerMode::Drawn;
@@ -2557,8 +2695,12 @@ fn try_parse_nth_draw_any_player(lower: &str) -> Option<(TriggerMode, TriggerDef
     let prefix = "a player draws their ";
     let after = strip_after(lower, prefix)?;
     let (n, rest) = parse_ordinal(after)?;
-    if rest.strip_prefix("card each turn").is_some()
-        || rest.strip_prefix("card in a turn").is_some()
+    if alt((
+        value((), tag::<_, _, VerboseError<&str>>("card each turn")),
+        value((), tag("card in a turn")),
+    ))
+    .parse(rest)
+    .is_ok()
     {
         let mut def = make_base();
         def.mode = TriggerMode::Drawn;
@@ -2622,9 +2764,12 @@ fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinit
 /// Also handles zone constraints like "while it's exiled" (e.g. suspend cards).
 fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     // Pattern: "a [type] counter is removed from [subject] [while ...]"
-    let after_a = lower
-        .strip_prefix("whenever a ")
-        .or_else(|| lower.strip_prefix("when a "))?;
+    let (after_a, ()) = alt((
+        value((), tag::<_, _, VerboseError<&str>>("whenever a ")),
+        value((), tag("when a ")),
+    ))
+    .parse(lower)
+    .ok()?;
 
     let counter_pos = after_a.find(" counter is removed from ")?;
     let counter_type = after_a[..counter_pos].trim();
@@ -2678,48 +2823,56 @@ fn try_parse_put_into_graveyard(
     rest: &str,
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     // Match the verb prefix: "is put into " or "are put into "
-    let after_verb = rest
-        .strip_prefix("is put into ")
-        .or_else(|| rest.strip_prefix("are put into "))?;
+    let (after_verb, ()) = alt((
+        value((), tag::<_, _, VerboseError<&str>>("is put into ")),
+        value((), tag("are put into ")),
+    ))
+    .parse(rest)
+    .ok()?;
 
     // Parse the graveyard possessive: "a graveyard", "your graveyard", "an opponent's graveyard"
-    let (valid_target, after_gy) = if let Some(after) = after_verb.strip_prefix("a graveyard") {
-        (None, after)
-    } else if let Some(after) = after_verb.strip_prefix("your graveyard") {
-        (
-            Some(TargetFilter::Typed(
-                TypedFilter::default().controller(ControllerRef::You),
-            )),
-            after,
-        )
-    } else if let Some(after) = after_verb.strip_prefix("an opponent's graveyard") {
-        (
-            Some(TargetFilter::Typed(
-                TypedFilter::default().controller(ControllerRef::Opponent),
-            )),
-            after,
-        )
-    } else {
-        return None;
-    };
+    fn parse_graveyard_possessive(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+        alt((
+            value(None, tag("a graveyard")),
+            value(
+                Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+                tag("your graveyard"),
+            ),
+            value(
+                Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                tag("an opponent's graveyard"),
+            ),
+        ))
+        .parse(input)
+    }
+    let (after_gy, valid_target) = parse_graveyard_possessive.parse(after_verb).ok()?;
 
     // Parse optional "from [zone]" clause
     let after_gy = after_gy.trim_start();
-    let origin = if let Some(after_from) = after_gy.strip_prefix("from ") {
+    let origin = if let Ok((after_from, ())) =
+        value((), tag::<_, _, VerboseError<&str>>("from ")).parse(after_gy)
+    {
         let after_from = after_from.trim_start();
-        if after_from.strip_prefix("the battlefield").is_some() {
-            Some(Zone::Battlefield)
-        } else if after_from.strip_prefix("anywhere").is_some() {
-            // CR 700.4: "from anywhere" means no origin restriction
-            None
-        } else if after_from.strip_prefix("your library").is_some() {
-            Some(Zone::Library)
-        } else if after_from.strip_prefix("your hand").is_some() {
-            Some(Zone::Hand)
-        } else {
-            // Unknown origin zone -- treat as no restriction
-            None
+        // Use nom alt() for origin zone matching
+        fn parse_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
+            alt((
+                value(Some(Zone::Battlefield), tag("the battlefield")),
+                // CR 700.4: "from anywhere" means no origin restriction
+                value(None, tag("anywhere")),
+                value(Some(Zone::Library), tag("your library")),
+                value(Some(Zone::Hand), tag("your hand")),
+            ))
+            .parse(input)
         }
+        parse_origin_zone
+            .parse(after_from)
+            .ok()
+            .map(|(_, z)| z)
+            .unwrap_or(None)
     } else {
         // No "from" clause -- no origin restriction (any zone to graveyard)
         None
@@ -2740,7 +2893,7 @@ fn try_parse_one_or_more_put_into_graveyard(
     lower: &str,
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     for prefix in ["whenever one or more ", "when one or more "] {
-        let Some(rest) = lower.strip_prefix(prefix) else {
+        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
             continue;
         };
 
@@ -2756,40 +2909,49 @@ fn try_parse_one_or_more_put_into_graveyard(
                 &rest[put_into_pos + " is put into ".len()..]
             };
 
-        // Parse the graveyard possessive
-        let (valid_target, after_gy) = if let Some(after) = after_put.strip_prefix("a graveyard") {
-            (None, after)
-        } else if let Some(after) = after_put.strip_prefix("your graveyard") {
-            (
-                Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::You),
-                )),
-                after,
-            )
-        } else if let Some(after) = after_put.strip_prefix("an opponent's graveyard") {
-            (
-                Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::Opponent),
-                )),
-                after,
-            )
-        } else {
+        // Parse the graveyard possessive using nom alt()
+        // Reuse the same combinator as try_parse_put_into_graveyard
+        fn parse_gy_possessive_batch(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+            alt((
+                value(None, tag("a graveyard")),
+                value(
+                    Some(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::You),
+                    )),
+                    tag("your graveyard"),
+                ),
+                value(
+                    Some(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::Opponent),
+                    )),
+                    tag("an opponent's graveyard"),
+                ),
+            ))
+            .parse(input)
+        }
+        let Ok((after_gy, valid_target)) = parse_gy_possessive_batch.parse(after_put) else {
             continue;
         };
 
-        // Parse optional "from [zone]" clause
+        // Parse optional "from [zone]" clause using nom
         let after_gy = after_gy.trim_start();
-        let origin = if let Some(after_from) = after_gy.strip_prefix("from ") {
+        let origin = if let Ok((after_from, ())) =
+            value((), tag::<_, _, VerboseError<&str>>("from ")).parse(after_gy)
+        {
             let after_from = after_from.trim_start();
-            if after_from.strip_prefix("the battlefield").is_some() {
-                Some(Zone::Battlefield)
-            } else if after_from.strip_prefix("anywhere").is_some() {
-                None
-            } else if after_from.strip_prefix("your library").is_some() {
-                Some(Zone::Library)
-            } else {
-                None
+            fn parse_origin_zone_batch(input: &str) -> OracleResult<'_, Option<Zone>> {
+                alt((
+                    value(Some(Zone::Battlefield), tag("the battlefield")),
+                    value(None, tag("anywhere")),
+                    value(Some(Zone::Library), tag("your library")),
+                ))
+                .parse(input)
             }
+            parse_origin_zone_batch
+                .parse(after_from)
+                .ok()
+                .map(|(_, z)| z)
+                .unwrap_or(None)
         } else {
             None
         };
@@ -2829,21 +2991,27 @@ fn try_parse_discard_trigger(
     make_base: &dyn Fn() -> TriggerDefinition,
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     // Strip "whenever " / "when " prefix to get the event clause
-    let event = lower
-        .strip_prefix("whenever ")
-        .or_else(|| lower.strip_prefix("when "))?;
+    let (event, ()) = alt((
+        value((), tag::<_, _, VerboseError<&str>>("whenever ")),
+        value((), tag("when ")),
+    ))
+    .parse(lower)
+    .ok()?;
 
     // CR 603.10c: Batched discard triggers — "one or more" fire once per batch.
-    if event.strip_prefix("you discard one or more").is_some() {
+    if tag::<_, _, VerboseError<&str>>("you discard one or more")
+        .parse(event)
+        .is_ok()
+    {
         let mut def = make_base();
         def.mode = TriggerMode::DiscardedAll;
         def.valid_target = Some(TargetFilter::Controller);
         def.batched = true;
         return Some((TriggerMode::DiscardedAll, def));
     }
-    if event
-        .strip_prefix("one or more players discard one or more")
-        .is_some()
+    if tag::<_, _, VerboseError<&str>>("one or more players discard one or more")
+        .parse(event)
+        .is_ok()
     {
         let mut def = make_base();
         def.mode = TriggerMode::DiscardedAll;
@@ -2851,19 +3019,17 @@ fn try_parse_discard_trigger(
         return Some((TriggerMode::DiscardedAll, def));
     }
 
-    // Determine subject and find "discards"/"discard" verb
-    let (controller_ref, after_verb) = if let Some(rest) = event.strip_prefix("you discard ") {
-        (Some(ControllerRef::You), rest)
-    } else if let Some(rest) = event.strip_prefix("an opponent discards ") {
-        (Some(ControllerRef::Opponent), rest)
-    } else if let Some(rest) = event.strip_prefix("a player discards ") {
-        // "a player" = any player, no controller restriction
-        (None, rest)
-    } else if let Some(rest) = event.strip_prefix("each player discards ") {
-        (None, rest)
-    } else {
-        return None;
-    };
+    // Determine subject and find "discards"/"discard" verb using nom alt()
+    fn parse_discard_subject(input: &str) -> OracleResult<'_, Option<ControllerRef>> {
+        alt((
+            value(Some(ControllerRef::You), tag("you discard ")),
+            value(Some(ControllerRef::Opponent), tag("an opponent discards ")),
+            value(None, tag("a player discards ")),
+            value(None, tag("each player discards ")),
+        ))
+        .parse(input)
+    }
+    let (after_verb, controller_ref) = parse_discard_subject.parse(event).ok()?;
 
     let mut def = make_base();
     def.mode = TriggerMode::Discarded;
