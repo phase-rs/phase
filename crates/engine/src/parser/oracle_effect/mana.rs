@@ -384,8 +384,10 @@ pub(super) fn parse_mana_color_set(text: &str) -> Option<Vec<ManaColor>> {
         }
 
         // Comma-separated: ",[ and/or | or | and ] ..."
-        if next.starts_with(',') {
-            let stripped = next[1..].trim_start();
+        if let Some((_, after_comma)) =
+            nom_on_lower(next, &next_lower, |i| value((), tag(",")).parse(i))
+        {
+            let stripped = after_comma.trim_start();
             let stripped_lower = stripped.to_lowercase();
             if let Some((_, after_conj)) = nom_on_lower(stripped, &stripped_lower, |i| {
                 alt((
@@ -403,8 +405,10 @@ pub(super) fn parse_mana_color_set(text: &str) -> Option<Vec<ManaColor>> {
         }
 
         // Slash separator
-        if next.starts_with('/') {
-            rest = next[1..].trim_start();
+        if let Some((_, after_slash)) =
+            nom_on_lower(next, &next_lower, |i| value((), tag("/")).parse(i))
+        {
+            rest = after_slash.trim_start();
             continue;
         }
 

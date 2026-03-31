@@ -1,8 +1,11 @@
 use std::str::FromStr;
 
+use nom::branch::alt;
+use nom::bytes::complete::tag;
+use nom::combinator::value;
 use nom::Parser;
 
-use super::types::*;
+use crate::parser::oracle_nom::error::OracleResult;
 use crate::types::ability::{Effect, FilterProp, PtValue, QuantityExpr, QuantityRef, TargetFilter};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -10,6 +13,18 @@ use crate::types::mana::ManaColor;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_target::parse_target;
 use super::super::oracle_util::{parse_number, strip_reminder_text, TextPair};
+use super::types::*;
+
+/// Bridge: run a nom combinator on a lowercase copy, mapping the consumed length
+/// back to the original-case text to compute the correct remainder.
+fn nom_on_lower<'a, T, F>(text: &'a str, lower: &str, mut parser: F) -> Option<(T, &'a str)>
+where
+    F: FnMut(&str) -> OracleResult<'_, T>,
+{
+    let (rest, result) = parser(lower).ok()?;
+    let consumed = lower.len() - rest.len();
+    Some((result, &text[consumed..]))
+}
 
 pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
     let text = strip_reminder_text(text);
@@ -19,8 +34,11 @@ pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
     if lower.contains("token that's a copy of") || lower.contains("token thats a copy of") {
         let tp = TextPair::new(&text, &lower);
         let after_copy_tp = tp.strip_after("copy of ").unwrap_or(tp);
-        // Handle "another target ..." — strip "another" prefix and add FilterProp::Another
-        let has_another = after_copy_tp.lower.strip_prefix("another ").is_some();
+        // Handle "another target ..." -- strip "another" prefix and add FilterProp::Another
+        let has_another = nom_on_lower(after_copy_tp.original, after_copy_tp.lower, |i| {
+            value((), tag("another ")).parse(i)
+        })
+        .is_some();
         let target_text = if has_another {
             after_copy_tp.strip_prefix("another ").unwrap().original
         } else {
@@ -41,9 +59,8 @@ pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
         });
     }
 
-    let after = lower
-        .strip_prefix("create ")
-        .map(|rest| &text[text.len() - rest.len()..])
+    let after = nom_on_lower(&text, &lower, |i| value((), tag("create ")).parse(i))
+        .map(|(_, rest)| rest)
         .unwrap_or(&text)
         .trim();
     let token = parse_token_description(after)?;
@@ -87,13 +104,18 @@ pub(super) fn parse_token_description(text: &str) -> Option<TokenDescription> {
 
     loop {
         let trimmed = rest.trim_start();
-        if let Some(stripped) = trimmed.strip_prefix("tapped ") {
+        let trimmed_lower = trimmed.to_lowercase();
+        if let Some((_, after)) = nom_on_lower(trimmed, &trimmed_lower, |i| {
+            value((), tag("tapped ")).parse(i)
+        }) {
             tapped = true;
-            rest = stripped;
+            rest = after;
             continue;
         }
-        if let Some(stripped) = trimmed.strip_prefix("untapped ") {
-            rest = stripped;
+        if let Some((_, after)) = nom_on_lower(trimmed, &trimmed_lower, |i| {
+            value((), tag("untapped ")).parse(i)
+        }) {
+            rest = after;
             continue;
         }
         break;
@@ -156,7 +178,7 @@ pub(super) fn parse_token_description(text: &str) -> Option<TokenDescription> {
         }
     }
 
-    // CR 609.3: "for each [thing] this way" — count from preceding zone moves.
+    // CR 609.3: "for each [thing] this way" -- count from preceding zone moves.
     // Matches "for each card put into a graveyard this way", "for each creature
     // exiled this way", etc.
     {
@@ -205,7 +227,10 @@ pub(super) fn parse_token_description(text: &str) -> Option<TokenDescription> {
 
 fn parse_token_count_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
     let trimmed = text.trim_start();
-    if let Some(rest) = trimmed.strip_prefix("X ") {
+    let lower = trimmed.to_lowercase();
+
+    // "X " / "x " -> Variable X
+    if let Some((_, rest)) = nom_on_lower(trimmed, &lower, |i| value((), tag("x ")).parse(i)) {
         return Some((
             QuantityExpr::Ref {
                 qty: QuantityRef::Variable {
@@ -215,17 +240,10 @@ fn parse_token_count_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
             rest,
         ));
     }
-    if let Some(rest) = trimmed.strip_prefix("x ") {
-        return Some((
-            QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "X".to_string(),
-                },
-            },
-            rest,
-        ));
-    }
-    if let Some(rest) = trimmed.strip_prefix("that many ") {
+    // "that many " -> EventContextAmount
+    if let Some((_, rest)) =
+        nom_on_lower(trimmed, &lower, |i| value((), tag("that many ")).parse(i))
+    {
         return Some((
             QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount,
@@ -233,7 +251,10 @@ fn parse_token_count_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
             rest,
         ));
     }
-    if let Some(rest) = trimmed.strip_prefix("a number of ") {
+    // "a number of " -> deferred count
+    if let Some((_, rest)) =
+        nom_on_lower(trimmed, &lower, |i| value((), tag("a number of ")).parse(i))
+    {
         return Some((
             QuantityExpr::Ref {
                 qty: QuantityRef::Variable {
@@ -263,9 +284,10 @@ fn parse_named_token_preamble(text: &str) -> Option<(String, &str)> {
     }
 
     let after_comma = text[comma + 1..].trim_start();
-    let rest = after_comma
-        .strip_prefix("a ")
-        .or_else(|| after_comma.strip_prefix("an "))?;
+    let after_lower = after_comma.to_lowercase();
+    let (_, rest) = nom_on_lower(after_comma, &after_lower, |i| {
+        alt((value((), tag("a ")), value((), tag("an ")))).parse(i)
+    })?;
     Some((name.to_string(), rest))
 }
 
@@ -291,10 +313,15 @@ fn parse_token_pt_component(text: &str) -> Option<PtValue> {
 fn strip_token_supertypes(mut text: &str) -> &str {
     loop {
         let trimmed = text.trim_start();
-        let Some(stripped) = ["legendary ", "snow ", "basic "]
-            .iter()
-            .find_map(|prefix| trimmed.strip_prefix(prefix))
-        else {
+        let trimmed_lower = trimmed.to_lowercase();
+        let Some((_, stripped)) = nom_on_lower(trimmed, &trimmed_lower, |i| {
+            alt((
+                value((), tag("legendary ")),
+                value((), tag("snow ")),
+                value((), tag("basic ")),
+            ))
+            .parse(i)
+        }) else {
             return trimmed;
         };
         text = stripped;
@@ -315,11 +342,10 @@ fn parse_token_color_prefix(mut text: &str) -> (Vec<ManaColor>, &str) {
         text = rest;
 
         let trimmed = text.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("and ") {
-            text = rest;
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix(", ") {
+        let trimmed_lower = trimmed.to_lowercase();
+        if let Some((_, rest)) = nom_on_lower(trimmed, &trimmed_lower, |i| {
+            alt((value((), tag("and ")), value((), tag(", ")))).parse(i)
+        }) {
             text = rest;
             continue;
         }
@@ -337,8 +363,11 @@ fn parse_token_color_prefix(mut text: &str) -> (Vec<ManaColor>, &str) {
 /// Note: only matches lowercase color words (matching the original behavior)
 /// since token descriptions preserve Oracle casing.
 fn strip_color_word(text: &str) -> Option<(Option<ManaColor>, &str)> {
-    // "colorless" is not a ManaColor — handle before delegating to nom
-    if let Some(rest) = text.strip_prefix("colorless") {
+    // "colorless" is not a ManaColor -- handle before delegating to nom
+    let text_lower = text.to_lowercase();
+    if let Some((_, rest)) =
+        nom_on_lower(text, &text_lower, |i| value((), tag("colorless")).parse(i))
+    {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             return Some((None, rest.trim_start()));
         }
@@ -360,8 +389,9 @@ fn split_token_head(text: &str) -> Option<(&str, &str)> {
     let pos = lower.find(" token")?;
     let head = text[..pos].trim();
     let mut suffix = &text[pos + " token".len()..];
-    if let Some(stripped) = suffix.strip_prefix('s') {
-        suffix = stripped;
+    // Strip plural 's' suffix
+    if suffix.starts_with('s') {
+        suffix = &suffix[1..];
     }
     if head.is_empty() {
         return None;
@@ -371,7 +401,10 @@ fn split_token_head(text: &str) -> Option<(&str, &str)> {
 
 fn parse_token_name_clause(text: &str) -> (Option<String>, &str) {
     let trimmed = text.trim_start();
-    let Some(after_named) = trimmed.strip_prefix("named ") else {
+    let trimmed_lower = trimmed.to_lowercase();
+    let Some((_, after_named)) = nom_on_lower(trimmed, &trimmed_lower, |i| {
+        value((), tag("named ")).parse(i)
+    }) else {
         return (None, trimmed);
     };
 
@@ -474,7 +507,7 @@ fn parse_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> {
 fn known_named_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> {
     let lower = descriptor.trim().to_lowercase();
 
-    // CR 303.7: Role tokens are Enchantment — Aura Role tokens.
+    // CR 303.7: Role tokens are Enchantment -- Aura Role tokens.
     if let Some(identity) = known_role_token_identity(&lower) {
         return Some(identity);
     }
@@ -500,7 +533,7 @@ fn known_named_token_identity(descriptor: &str) -> Option<(String, Vec<String>)>
     ))
 }
 
-/// CR 303.7: Role tokens are predefined Enchantment — Aura Role tokens with
+/// CR 303.7: Role tokens are predefined Enchantment -- Aura Role tokens with
 /// "enchant creature you control". Each Role type grants fixed abilities to the
 /// enchanted creature.
 fn known_role_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> {
@@ -530,7 +563,10 @@ fn known_role_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> 
 
 pub(super) fn parse_token_keyword_clause(text: &str) -> Vec<Keyword> {
     let trimmed = text.trim_start();
-    let Some(after_with) = trimmed.strip_prefix("with ") else {
+    let trimmed_lower = trimmed.to_lowercase();
+    let Some((_, after_with)) = nom_on_lower(trimmed, &trimmed_lower, |i| {
+        value((), tag("with ")).parse(i)
+    }) else {
         return Vec::new();
     };
 
@@ -597,7 +633,7 @@ mod tests {
 
     #[test]
     fn keyword_clause_with_trailing_comma_before_where() {
-        // "with flying, where X is..." — comma must not poison the keyword
+        // "with flying, where X is..." -- comma must not poison the keyword
         let kws = parse_token_keyword_clause("with flying, where X is that spell's mana value");
         assert_eq!(kws, vec![Keyword::Flying]);
     }
