@@ -41,7 +41,7 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     // effect optional at resolution — the player chooses whether to perform it.
     // Mid-chain "you may" is per-sentence optional, handled by
     // parse_effect_chain → strip_optional_effect_prefix().
-    let optional = effect_lower.starts_with("you may ");
+    let optional = effect_lower.strip_prefix("you may ").is_some();
 
     // Extract intervening-if condition from effect text
     let (effect_without_if, if_condition) = extract_if_condition(&effect_lower);
@@ -122,10 +122,7 @@ fn parse_trigger_constraint(lower: &str) -> Option<TriggerConstraint> {
     }
     // CR 603.4: "this ability triggers only the first N times each turn"
     // Delegates to nom_primitives::parse_number for the count (input already lowercase).
-    if let Some(rest) = lower
-        .find("triggers only the first ")
-        .map(|pos| &lower[pos + "triggers only the first ".len()..])
-    {
+    if let Some(rest) = strip_after(lower, "triggers only the first ") {
         if let Some(times_pos) = rest.find(" time") {
             let n_text = &rest[..times_pos];
             if let Ok((_rem, n)) = nom_primitives::parse_number.parse(n_text) {
@@ -196,7 +193,7 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
     // Exception: "unless you discard" is an effect-level modifier (discard count
     // reduction), not a trigger-level payment — preserve it for the effect parser.
     let Some(pays_pos) = after_unless.find("pays ") else {
-        if after_unless.starts_with("you discard ") {
+        if after_unless.strip_prefix("you discard ").is_some() {
             // CR 608.2c: "unless you discard a [type]" is handled by the Discard
             // effect parser — don't strip it here.
             return (text.to_string(), None);
@@ -338,7 +335,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                 );
             }
 
-            if after.starts_with("life this turn") {
+            if after.strip_prefix("life this turn").is_some() {
                 let clause_len = pattern.len() + "life this turn".len();
                 return (
                     strip_condition_clause(text, pos, clause_len),
@@ -360,7 +357,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     if let Some(pos) = tp.find("if you cast it") {
         // Guard: must not be followed by " from" (which is the zone-specific variant)
         let after = &lower[pos + "if you cast it".len()..];
-        if !after.starts_with(" from") {
+        if after.strip_prefix(" from").is_none() {
             return (
                 strip_condition_clause(text, pos, "if you cast it".len()),
                 Some(TriggerCondition::WasCast),
@@ -443,7 +440,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             .find("sneak cost was paid")
             .map(|p| {
                 let after = &lower[p + "sneak cost was paid".len()..];
-                let extra = if after.starts_with(" this turn") {
+                let extra = if after.strip_prefix(" this turn").is_some() {
                     " this turn".len()
                 } else {
                     0
@@ -466,7 +463,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             .find("ninjutsu cost was paid")
             .map(|p| {
                 let after = &lower[p + "ninjutsu cost was paid".len()..];
-                let extra = if after.starts_with(" this turn") {
+                let extra = if after.strip_prefix(" this turn").is_some() {
                     " this turn".len()
                 } else {
                     0
@@ -606,7 +603,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                 }
             }
             // Fallback: "if you cast a spell this turn" (no type filter)
-            if after.starts_with("spell this turn") {
+            if after.strip_prefix("spell this turn").is_some() {
                 let clause_len = prefix.len() + "spell this turn".len();
                 return (
                     strip_condition_clause(text, pos, clause_len),
@@ -813,7 +810,7 @@ pub(crate) fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerD
 
     // Parse the subject ("~", "another creature you control", "a creature", etc.)
     // CR 603.2c: Detect "one or more" quantifier for batched trigger semantics
-    let is_batched = after_keyword.starts_with("one or more ");
+    let is_batched = after_keyword.strip_prefix("one or more ").is_some();
     let (subject, rest) = parse_trigger_subject(after_keyword);
 
     // Parse event verb from the remaining text
@@ -1001,13 +998,15 @@ fn add_controller(filter: TargetFilter, controller: ControllerRef) -> TargetFilt
 /// so the trigger fires for any target, matching current behaviour.
 fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
     let rest = after_verb.trim_start().strip_prefix("to ")?;
-    if rest.starts_with("a player") {
+    if rest.strip_prefix("a player").is_some() {
         Some(TargetFilter::Player)
-    } else if rest.starts_with("an opponent") || rest.starts_with("one of your opponents") {
+    } else if rest.strip_prefix("an opponent").is_some()
+        || rest.strip_prefix("one of your opponents").is_some()
+    {
         Some(TargetFilter::Typed(
             TypedFilter::default().controller(ControllerRef::Opponent),
         ))
-    } else if rest.starts_with("you") {
+    } else if rest.strip_prefix("you").is_some() {
         Some(TargetFilter::Controller)
     } else {
         None
@@ -1023,8 +1022,10 @@ fn try_parse_event(
     let rest = rest.trim_start();
 
     // "enters or attacks" / "enters the battlefield or attacks" — compound trigger
-    if rest.starts_with("enters or attacks")
-        || rest.starts_with("enters the battlefield or attacks")
+    if rest.strip_prefix("enters or attacks").is_some()
+        || rest
+            .strip_prefix("enters the battlefield or attacks")
+            .is_some()
     {
         let mut def = make_base();
         def.mode = TriggerMode::EntersOrAttacks;
@@ -1034,7 +1035,7 @@ fn try_parse_event(
     }
 
     // "attacks or blocks" — compound trigger
-    if rest.starts_with("attacks or blocks") {
+    if rest.strip_prefix("attacks or blocks").is_some() {
         let mut def = make_base();
         def.mode = TriggerMode::AttacksOrBlocks;
         def.valid_card = Some(subject.clone());
@@ -1043,7 +1044,7 @@ fn try_parse_event(
 
     // "enters [the battlefield]" / "enter [the battlefield]" (plural for "one or more" subjects)
     // Also handles "enters from your hand" (origin filter).
-    if rest.starts_with("enter") {
+    if rest.strip_prefix("enter").is_some() {
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZone;
         def.destination = Some(Zone::Battlefield);
@@ -1059,9 +1060,13 @@ fn try_parse_event(
     }
 
     // CR 700.4: "Dies"/"die" means "is put into a graveyard from the battlefield."
-    if rest.starts_with("die")
-        || rest.starts_with("is put into a graveyard from the battlefield")
-        || rest.starts_with("are put into a graveyard from the battlefield")
+    if rest.strip_prefix("die").is_some()
+        || rest
+            .strip_prefix("is put into a graveyard from the battlefield")
+            .is_some()
+        || rest
+            .strip_prefix("are put into a graveyard from the battlefield")
+            .is_some()
     {
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZone;
@@ -1141,7 +1146,7 @@ fn try_parse_event(
 
     // "blocks" — fires for the blocking creature.
     // "blocks or becomes blocked" is parsed as Blocks only (blocker side).
-    if rest.starts_with("blocks") {
+    if rest.strip_prefix("blocks").is_some() {
         let mut def = make_base();
         def.mode = TriggerMode::Blocks;
         def.valid_card = Some(subject.clone());
@@ -1149,7 +1154,9 @@ fn try_parse_event(
     }
 
     // "leaves the battlefield"
-    if rest.starts_with("leaves the battlefield") || rest.starts_with("leaves") {
+    if rest.strip_prefix("leaves the battlefield").is_some()
+        || rest.strip_prefix("leaves").is_some()
+    {
         let mut def = make_base();
         def.mode = TriggerMode::LeavesBattlefield;
         def.valid_card = Some(subject.clone());
@@ -1166,14 +1173,17 @@ fn try_parse_event(
     }
 
     // "becomes blocked"
-    if rest.starts_with("becomes blocked") {
+    if rest.strip_prefix("becomes blocked").is_some() {
         let mut def = make_base();
         def.mode = TriggerMode::BecomesBlocked;
         def.valid_card = Some(subject.clone());
         return Some((TriggerMode::BecomesBlocked, def));
     }
 
-    if rest.starts_with("becomes the target of a spell or ability") {
+    if rest
+        .strip_prefix("becomes the target of a spell or ability")
+        .is_some()
+    {
         let mut def = make_base();
         def.mode = TriggerMode::BecomesTarget;
         def.valid_card = Some(subject.clone());
@@ -1190,14 +1200,14 @@ fn try_parse_event(
     }
 
     // "is dealt combat damage" / "is dealt damage"
-    if rest.starts_with("is dealt combat damage") {
+    if rest.strip_prefix("is dealt combat damage").is_some() {
         let mut def = make_base();
         def.mode = TriggerMode::DamageReceived;
         def.damage_kind = DamageKindFilter::CombatOnly;
         def.valid_card = Some(subject.clone());
         return Some((TriggerMode::DamageReceived, def));
     }
-    if rest.starts_with("is dealt damage") {
+    if rest.strip_prefix("is dealt damage").is_some() {
         let mut def = make_base();
         def.mode = TriggerMode::DamageReceived;
         def.valid_card = Some(subject.clone());
@@ -1205,35 +1215,35 @@ fn try_parse_event(
     }
 
     // "becomes tapped"
-    if rest.starts_with("becomes tapped") {
+    if rest.strip_prefix("becomes tapped").is_some() {
         let mut def = make_base();
         def.mode = TriggerMode::Taps;
         def.valid_card = Some(subject.clone());
         return Some((TriggerMode::Taps, def));
     }
 
-    if rest.starts_with("is tapped for mana") {
+    if rest.strip_prefix("is tapped for mana").is_some() {
         let mut def = make_base();
         def.mode = TriggerMode::TapsForMana;
         def.valid_card = Some(subject.clone());
         return Some((TriggerMode::TapsForMana, def));
     }
 
-    if rest.starts_with("becomes untapped") || rest.starts_with("untaps") {
+    if rest.strip_prefix("becomes untapped").is_some() || rest.strip_prefix("untaps").is_some() {
         let mut def = make_base();
         def.mode = TriggerMode::Untaps;
         def.valid_card = Some(subject.clone());
         return Some((TriggerMode::Untaps, def));
     }
 
-    if rest.starts_with("is turned face up") {
+    if rest.strip_prefix("is turned face up").is_some() {
         let mut def = make_base();
         def.mode = TriggerMode::TurnFaceUp;
         def.valid_card = Some(subject.clone());
         return Some((TriggerMode::TurnFaceUp, def));
     }
 
-    if rest.starts_with("mutates") {
+    if rest.strip_prefix("mutates").is_some() {
         let mut def = make_base();
         def.mode = TriggerMode::Mutates;
         def.valid_card = Some(subject.clone());
@@ -1241,7 +1251,8 @@ fn try_parse_event(
     }
 
     // CR 702.110c: "exploits a creature" — exploit trigger
-    if rest.starts_with("exploits a creature") || rest.starts_with("exploits") {
+    if rest.strip_prefix("exploits a creature").is_some() || rest.strip_prefix("exploits").is_some()
+    {
         let mut def = make_base();
         def.mode = TriggerMode::Exploited;
         def.valid_card = Some(subject.clone());
@@ -1249,7 +1260,7 @@ fn try_parse_event(
     }
 
     // CR 712.14: "transforms" / "transforms into" — transform trigger
-    if rest.starts_with("transforms") {
+    if rest.strip_prefix("transforms").is_some() {
         let mut def = make_base();
         def.mode = TriggerMode::Transformed;
         def.valid_source = Some(subject.clone());
@@ -1380,7 +1391,7 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         "whenever enchanted player is attacked",
         "when enchanted player is attacked",
     ] {
-        if lower.starts_with(prefix) {
+        if lower.strip_prefix(prefix).is_some() {
             let mut def = make_base();
             def.mode = TriggerMode::Attacks;
             // AttachedTo here references the player the aura is attached to
@@ -1417,7 +1428,7 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         "whenever a creature dealt damage by ~ this turn dies",
         "when a creature dealt damage by ~ this turn dies",
     ] {
-        if lower.starts_with(prefix) {
+        if lower.strip_prefix(prefix).is_some() {
             let mut def = make_base();
             def.mode = TriggerMode::ChangesZone;
             def.origin = Some(Zone::Battlefield);
@@ -1894,7 +1905,9 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
         def.phase = Some(Phase::EndCombat);
         // CR 511.2: "on your turn" restricts to active player's combat.
         let rest = rest.trim();
-        if rest.starts_with("on your turn") || rest.starts_with("on each of your turns") {
+        if rest.strip_prefix("on your turn").is_some()
+            || rest.strip_prefix("on each of your turns").is_some()
+        {
             def.constraint = Some(TriggerConstraint::OnlyDuringYourTurn);
         }
         return Some((TriggerMode::Phase, def));
@@ -2397,8 +2410,8 @@ fn try_parse_nth_spell_you(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     let filter = extract_spell_type_filter(rest);
     let after_qualifier = skip_to_word(rest, "spell");
     // CR 601.2: Standard "each turn" / "in a turn" patterns
-    if after_qualifier.starts_with("spell each turn")
-        || after_qualifier.starts_with("spell in a turn")
+    if after_qualifier.strip_prefix("spell each turn").is_some()
+        || after_qualifier.strip_prefix("spell in a turn").is_some()
     {
         let mut def = make_base();
         def.mode = TriggerMode::SpellCast;
@@ -2407,8 +2420,12 @@ fn try_parse_nth_spell_you(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     }
     // CR 601.2: "during each opponent's turn" — same nth-spell tracking but only
     // during opponents' turns.
-    if after_qualifier.starts_with("spell during each opponent's turn")
-        || after_qualifier.starts_with("spell during each opponent\u{2019}s turn")
+    if after_qualifier
+        .strip_prefix("spell during each opponent's turn")
+        .is_some()
+        || after_qualifier
+            .strip_prefix("spell during each opponent\u{2019}s turn")
+            .is_some()
     {
         let mut def = make_base();
         def.mode = TriggerMode::SpellCast;
@@ -2427,8 +2444,8 @@ fn try_parse_nth_spell_opponent(lower: &str) -> Option<(TriggerMode, TriggerDefi
     let (n, rest) = parse_ordinal(after)?;
     let filter = extract_spell_type_filter(rest);
     let after_qualifier = skip_to_word(rest, "spell");
-    if after_qualifier.starts_with("spell each turn")
-        || after_qualifier.starts_with("spell in a turn")
+    if after_qualifier.strip_prefix("spell each turn").is_some()
+        || after_qualifier.strip_prefix("spell in a turn").is_some()
     {
         let mut def = make_base();
         def.mode = TriggerMode::SpellCast;
@@ -2451,8 +2468,8 @@ fn try_parse_nth_spell_any_player(lower: &str) -> Option<(TriggerMode, TriggerDe
     let (n, rest) = parse_ordinal(after)?;
     let filter = extract_spell_type_filter(rest);
     let after_qualifier = skip_to_word(rest, "spell");
-    if after_qualifier.starts_with("spell each turn")
-        || after_qualifier.starts_with("spell in a turn")
+    if after_qualifier.strip_prefix("spell each turn").is_some()
+        || after_qualifier.strip_prefix("spell in a turn").is_some()
     {
         let mut def = make_base();
         def.mode = TriggerMode::SpellCast;
@@ -2504,7 +2521,9 @@ fn try_parse_nth_draw_you(lower: &str) -> Option<(TriggerMode, TriggerDefinition
     let prefix = "you draw your ";
     let after = strip_after(lower, prefix)?;
     let (n, rest) = parse_ordinal(after)?;
-    if rest.starts_with("card each turn") || rest.starts_with("card in a turn") {
+    if rest.strip_prefix("card each turn").is_some()
+        || rest.strip_prefix("card in a turn").is_some()
+    {
         let mut def = make_base();
         def.mode = TriggerMode::Drawn;
         def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n });
@@ -2518,7 +2537,9 @@ fn try_parse_nth_draw_opponent(lower: &str) -> Option<(TriggerMode, TriggerDefin
     let prefix = "an opponent draws their ";
     let after = strip_after(lower, prefix)?;
     let (n, rest) = parse_ordinal(after)?;
-    if rest.starts_with("card each turn") || rest.starts_with("card in a turn") {
+    if rest.strip_prefix("card each turn").is_some()
+        || rest.strip_prefix("card in a turn").is_some()
+    {
         let mut def = make_base();
         def.mode = TriggerMode::Drawn;
         def.valid_target = Some(TargetFilter::Typed(
@@ -2536,7 +2557,9 @@ fn try_parse_nth_draw_any_player(lower: &str) -> Option<(TriggerMode, TriggerDef
     let prefix = "a player draws their ";
     let after = strip_after(lower, prefix)?;
     let (n, rest) = parse_ordinal(after)?;
-    if rest.starts_with("card each turn") || rest.starts_with("card in a turn") {
+    if rest.strip_prefix("card each turn").is_some()
+        || rest.strip_prefix("card in a turn").is_some()
+    {
         let mut def = make_base();
         def.mode = TriggerMode::Drawn;
         def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n });
@@ -2684,14 +2707,14 @@ fn try_parse_put_into_graveyard(
     let after_gy = after_gy.trim_start();
     let origin = if let Some(after_from) = after_gy.strip_prefix("from ") {
         let after_from = after_from.trim_start();
-        if after_from.starts_with("the battlefield") {
+        if after_from.strip_prefix("the battlefield").is_some() {
             Some(Zone::Battlefield)
-        } else if after_from.starts_with("anywhere") {
+        } else if after_from.strip_prefix("anywhere").is_some() {
             // CR 700.4: "from anywhere" means no origin restriction
             None
-        } else if after_from.starts_with("your library") {
+        } else if after_from.strip_prefix("your library").is_some() {
             Some(Zone::Library)
-        } else if after_from.starts_with("your hand") {
+        } else if after_from.strip_prefix("your hand").is_some() {
             Some(Zone::Hand)
         } else {
             // Unknown origin zone -- treat as no restriction
@@ -2758,11 +2781,11 @@ fn try_parse_one_or_more_put_into_graveyard(
         let after_gy = after_gy.trim_start();
         let origin = if let Some(after_from) = after_gy.strip_prefix("from ") {
             let after_from = after_from.trim_start();
-            if after_from.starts_with("the battlefield") {
+            if after_from.strip_prefix("the battlefield").is_some() {
                 Some(Zone::Battlefield)
-            } else if after_from.starts_with("anywhere") {
+            } else if after_from.strip_prefix("anywhere").is_some() {
                 None
-            } else if after_from.starts_with("your library") {
+            } else if after_from.strip_prefix("your library").is_some() {
                 Some(Zone::Library)
             } else {
                 None
@@ -2811,14 +2834,17 @@ fn try_parse_discard_trigger(
         .or_else(|| lower.strip_prefix("when "))?;
 
     // CR 603.10c: Batched discard triggers — "one or more" fire once per batch.
-    if event.starts_with("you discard one or more") {
+    if event.strip_prefix("you discard one or more").is_some() {
         let mut def = make_base();
         def.mode = TriggerMode::DiscardedAll;
         def.valid_target = Some(TargetFilter::Controller);
         def.batched = true;
         return Some((TriggerMode::DiscardedAll, def));
     }
-    if event.starts_with("one or more players discard one or more") {
+    if event
+        .strip_prefix("one or more players discard one or more")
+        .is_some()
+    {
         let mut def = make_base();
         def.mode = TriggerMode::DiscardedAll;
         def.batched = true;
