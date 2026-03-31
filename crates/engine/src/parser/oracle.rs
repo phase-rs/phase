@@ -1,3 +1,7 @@
+use nom::branch::alt;
+use nom::bytes::complete::tag;
+use nom::combinator::value;
+use nom::Parser;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
@@ -10,6 +14,8 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
+
+use super::oracle_nom::bridge::nom_on_lower;
 
 use super::oracle_casting::{
     parse_additional_cost_line, parse_casting_restriction_line, parse_spell_casting_option_line,
@@ -256,9 +262,9 @@ pub fn parse_oracle_text(
         let stripped = strip_reminder_text(raw.trim());
         if let Some(effect_text) = strip_ability_word(&stripped) {
             let effect_lower = effect_text.to_lowercase();
-            if let Some(rest_lower) = effect_lower.strip_prefix("this spell costs ") {
-                // Use original-case text for mana symbol parsing ({U} not {u}).
-                let rest_original = &effect_text[effect_text.len() - rest_lower.len()..];
+            if let Some(((), rest_original)) = nom_on_lower(&effect_text, &effect_lower, |i| {
+                value((), tag("this spell costs ")).parse(i)
+            }) {
                 if let Some((mana_part, _)) =
                     rest_original.split_once(" more to cast for each target beyond the first")
                 {
@@ -331,8 +337,7 @@ pub fn parse_oracle_text(
         // Guard: "{Keyword} abilities you activate cost {N} less" is a static ability,
         // not a keyword line. Don't let keyword extraction consume it.
         let lower_guard = line.to_lowercase();
-        let is_ability_cost_static =
-            lower_guard.contains("abilities you activate cost") && lower_guard.contains("less");
+        let is_ability_cost_static = is_ability_activate_cost_static(&lower_guard);
         if !is_ability_cost_static {
             if let Some(extracted) = extract_keyword_line(&line, mtgjson_keyword_names) {
                 result.extracted_keywords.extend(extracted);
@@ -401,7 +406,7 @@ pub fn parse_oracle_text(
 
         if is_granted_static_line(&lower) {
             // B20: Handle compound "can't win/lose" lines by splitting
-            if lower.contains("can't win the game") && lower.contains("can't lose the game") {
+            if is_cant_win_lose_compound(&lower) {
                 for clause in static_line.split(" and ") {
                     let trimmed = clause.trim().trim_end_matches('.');
                     if !trimmed.is_empty() {
@@ -422,20 +427,19 @@ pub fn parse_oracle_text(
         }
 
         // Priority 3b: Case "To solve — {condition}" line (CR 719.1)
-        if let Some(rest) = lower
-            .strip_prefix("to solve — ")
-            .or_else(|| lower.strip_prefix("to solve -- "))
-        {
-            result.solve_condition = Some(parse_solve_condition(rest));
+        if let Some(((), rest_original)) = nom_on_lower(&line, &lower, |i| {
+            value((), alt((tag("to solve \u{2014} "), tag("to solve -- ")))).parse(i)
+        }) {
+            let rest_lower = rest_original.to_lowercase();
+            result.solve_condition = Some(parse_solve_condition(&rest_lower));
             i += 1;
             continue;
         }
 
         // CR 719.4: Case "Solved — {cost}: {effect}" activated ability.
-        if let Some(rest) = line
-            .strip_prefix("Solved — ")
-            .or_else(|| line.strip_prefix("Solved -- "))
-        {
+        if let Some(((), rest)) = nom_on_lower(&line, &lower, |i| {
+            value((), alt((tag("solved \u{2014} "), tag("solved -- ")))).parse(i)
+        }) {
             if let Some(colon_pos) = find_activated_colon(rest) {
                 let cost_text = rest[..colon_pos].trim();
                 let effect_text = rest[colon_pos + 1..].trim();
@@ -463,12 +467,12 @@ pub fn parse_oracle_text(
         }
 
         // Priority 3c: Channel — "Channel — {cost}, Discard this card: {effect}" (CR 207.2c + CR 602.1)
-        if let Some(rest) = lower
-            .strip_prefix("channel — ")
-            .or_else(|| lower.strip_prefix("channel -- "))
-        {
-            if let Some(colon_pos) = find_activated_colon(rest) {
-                let prefix_len = line.len() - rest.len();
+        if let Some(((), rest_original)) = nom_on_lower(&line, &lower, |i| {
+            value((), alt((tag("channel \u{2014} "), tag("channel -- ")))).parse(i)
+        }) {
+            let rest_lower = rest_original.to_lowercase();
+            if let Some(colon_pos) = find_activated_colon(&rest_lower) {
+                let prefix_len = line.len() - rest_original.len();
                 let cost_text = line[prefix_len..prefix_len + colon_pos].trim();
                 let effect_text = line[prefix_len + colon_pos + 1..].trim();
                 let (effect_text, constraints) = strip_activated_constraints(effect_text);
@@ -528,7 +532,7 @@ pub fn parse_oracle_text(
             i += 1;
             // CR 706: If the activated ability ends with "roll a dN", consume
             // subsequent d20 table lines and attach them as die result branches.
-            if effect_text.to_lowercase().contains("roll a d") {
+            if has_roll_die_pattern(&effect_text.to_lowercase()) {
                 i = attach_die_result_branches_to_chain(&mut def, &lines, i);
             }
             result.abilities.push(def);
@@ -542,7 +546,7 @@ pub fn parse_oracle_text(
             i += 1;
             // CR 706: If the trigger's effect ends with "roll a dN", consume
             // subsequent d20 table lines and attach them as die result branches.
-            if lower.contains("roll a d") {
+            if has_roll_die_pattern(&lower) {
                 if let Some(ref mut execute) = trigger.execute {
                     i = attach_die_result_branches_to_chain(execute, &lines, i);
                 }
@@ -568,7 +572,7 @@ pub fn parse_oracle_text(
                     trigger.condition = ability_word_to_trigger_condition(&aw_name);
                 }
                 i += 1;
-                if effect_lower.contains("roll a d") {
+                if has_roll_die_pattern(&effect_lower) {
                     if let Some(ref mut execute) = trigger.execute {
                         i = attach_die_result_branches_to_chain(execute, &lines, i);
                     }
@@ -593,13 +597,8 @@ pub fn parse_oracle_text(
                 let sl = stripped.to_lowercase();
                 sl.starts_with("when ") || sl.starts_with("whenever ") || sl.starts_with("at ")
             });
-            let defer_to_effect_parser = is_ability_word_trigger
-                || (is_spell
-                    && (((lower.contains(" deals ") || lower.contains(" deal "))
-                        && lower.contains(" damage"))
-                        || lower.contains("until end of turn")
-                        || lower.contains("until your next turn")
-                        || lower.contains("this turn")));
+            let defer_to_effect_parser =
+                is_ability_word_trigger || (is_spell && should_defer_spell_to_effect(&lower));
             if !defer_to_effect_parser {
                 // B7: Ability-word-prefixed static lines — strip prefix and attach condition.
                 // Must happen here (Priority 7) because Priority 9 (spell catch-all) would
@@ -621,7 +620,7 @@ pub fn parse_oracle_text(
                 // B20: Handle compound "can't win/lose" lines by splitting
                 // at " and " so both CantWinTheGame and CantLoseTheGame emit.
                 // CR 104.3a / CR 104.3b: Both restrictions must be independent statics.
-                if lower.contains("can't win the game") && lower.contains("can't lose the game") {
+                if is_cant_win_lose_compound(&lower) {
                     for clause in static_line.split(" and ") {
                         let trimmed = clause.trim().trim_end_matches('.');
                         if !trimmed.is_empty() {
@@ -638,10 +637,7 @@ pub fn parse_oracle_text(
                 // E.g., Fires of Invention: "You can cast spells only during your turn and
                 // you can cast no more than two spells each turn."
                 // CR 117.1a + CR 604.1: Both restrictions are independent statics.
-                if lower.contains("only during your turn")
-                    && lower.contains(" and ")
-                    && lower.contains("each turn")
-                {
+                if is_compound_turn_limit(&lower) {
                     for clause in static_line.split(" and ") {
                         let trimmed = clause.trim().trim_end_matches('.');
                         if !trimmed.is_empty() {
@@ -675,7 +671,7 @@ pub fn parse_oracle_text(
         }
 
         // Priority 8c: "If this card is in your opening hand, you may begin the game with it on the battlefield"
-        if lower.contains("opening hand") && lower.contains("begin the game") {
+        if is_opening_hand_begin_game(&lower) {
             result.abilities.push(
                 AbilityDefinition::new(
                     AbilityKind::BeginGame,
@@ -699,11 +695,7 @@ pub fn parse_oracle_text(
         // Priority 8b-defiler: "As an additional cost to cast [color] permanent spells,
         // you may pay N life." + next line "Those spells cost {C} less to cast."
         // This is a static ability on the permanent, not a self-cost for this spell.
-        if lower.starts_with("as an additional cost to cast ")
-            && !lower.contains("this spell")
-            && lower.contains("you may pay")
-            && lower.contains(" life")
-        {
+        if is_defiler_cost_pattern(&lower) {
             if let Some(static_def) =
                 parse_defiler_cost_reduction(&lower, i + 1 < lines.len(), || {
                     lines.get(i + 1).map(|l| l.to_lowercase())
@@ -807,7 +799,7 @@ pub fn parse_oracle_text(
             i += 1;
             // CR 706: If the parsed chain ends with "roll a dN", consume
             // subsequent d20 table lines and attach them as die result branches.
-            if lower.contains("roll a d") {
+            if has_roll_die_pattern(&lower) {
                 i = attach_die_result_branches_to_chain(&mut def, &lines, i);
             }
             result.abilities.push(def);
@@ -821,10 +813,7 @@ pub fn parse_oracle_text(
         }
 
         // "The flashback cost is equal to its mana cost" → extract Flashback keyword
-        if lower.contains("flashback cost")
-            && lower.contains("equal to")
-            && lower.contains("mana cost")
-        {
+        if is_flashback_equal_mana_cost(&lower) {
             result.extracted_keywords.push(Keyword::Flashback(
                 crate::types::mana::ManaCost::SelfManaCost,
             ));
@@ -890,7 +879,7 @@ pub fn parse_oracle_text(
                 let mut trigger = parse_trigger_line(&effect_text, card_name);
                 i += 1;
                 // CR 706: Consume subsequent d20 table lines for triggered die rolls.
-                if effect_lower.contains("roll a d") {
+                if has_roll_die_pattern(&effect_lower) {
                     if let Some(ref mut execute) = trigger.execute {
                         i = attach_die_result_branches_to_chain(execute, &lines, i);
                     }
@@ -1449,6 +1438,62 @@ fn strip_once_per_turn_suffix(
     }
 }
 
+/// Check if lowercased text contains both "can't win the game" and "can't lose the game".
+/// Used for the B20 compound can't-win/lose line splitting pattern.
+fn is_cant_win_lose_compound(lower: &str) -> bool {
+    lower.contains("can't win the game") && lower.contains("can't lose the game")
+}
+
+/// Check if lowercased text contains "roll a d" (die roll table indicator).
+fn has_roll_die_pattern(lower: &str) -> bool {
+    lower.contains("roll a d")
+}
+
+/// Check if line matches the "flashback cost is equal to its mana cost" pattern.
+fn is_flashback_equal_mana_cost(lower: &str) -> bool {
+    lower.contains("flashback cost") && lower.contains("equal to") && lower.contains("mana cost")
+}
+
+/// Check if line matches the defiler cycle guard: "as an additional cost to cast [color]
+/// permanent spells, you may pay N life" (but NOT "this spell").
+fn is_defiler_cost_pattern(lower: &str) -> bool {
+    lower.starts_with("as an additional cost to cast ")
+        && !lower.contains("this spell")
+        && lower.contains("you may pay")
+        && lower.contains(" life")
+}
+
+/// Check if line matches the "only during your turn" + per-turn compound clause.
+fn is_compound_turn_limit(lower: &str) -> bool {
+    lower.contains("only during your turn")
+        && lower.contains(" and ")
+        && lower.contains("each turn")
+}
+
+/// Check if line matches "opening hand" + "begin the game" pattern.
+fn is_opening_hand_begin_game(lower: &str) -> bool {
+    lower.contains("opening hand") && lower.contains("begin the game")
+}
+
+/// Check if line is an "{Keyword} abilities you activate cost {N} less" static.
+fn is_ability_activate_cost_static(lower: &str) -> bool {
+    lower.contains("abilities you activate cost") && lower.contains("less")
+}
+
+/// Check if line matches "damage ... can't be prevented" pattern.
+fn is_damage_prevention_pattern(lower: &str) -> bool {
+    lower.contains("damage") && lower.contains("can't be prevented")
+}
+
+/// Check if a spell line should be deferred from static parsing to the effect parser.
+/// Matches lines with damage verbs + damage, or explicit duration suffixes.
+fn should_defer_spell_to_effect(lower: &str) -> bool {
+    ((lower.contains(" deals ") || lower.contains(" deal ")) && lower.contains(" damage"))
+        || lower.contains("until end of turn")
+        || lower.contains("until your next turn")
+        || lower.contains("this turn")
+}
+
 /// Check if a line looks like a static/continuous ability.
 /// Lines starting with "target" are spell effects, not statics — skip early.
 /// Substring patterns that indicate a static ability line.
@@ -1550,7 +1595,7 @@ const STATIC_PREFIX_PATTERNS: &[&str] = &[
 pub(super) fn is_static_pattern(lower: &str) -> bool {
     // Spell effects targeting creatures/players are never static abilities.
     // They must reach the effect parser (Priority 9) for proper handling.
-    if lower.strip_prefix("target").is_some() {
+    if lower.starts_with("target") {
         return false;
     }
 
@@ -1565,14 +1610,20 @@ pub(super) fn is_static_pattern(lower: &str) -> bool {
     // Table-driven prefix matching
     if STATIC_PREFIX_PATTERNS
         .iter()
-        .any(|pat| lower.strip_prefix(pat).is_some())
+        .any(|pat| lower.starts_with(pat))
     {
         return true;
     }
 
     // Compound patterns requiring multiple conditions
+    is_static_compound_pattern(lower)
+}
+
+/// Compound multi-condition patterns for `is_static_pattern`.
+/// Separated to keep the main function focused on table-driven matching.
+fn is_static_compound_pattern(lower: &str) -> bool {
     // CR 702.8d: Flash-granting statics (exclude self-cast options)
-    if lower.contains("as though it had flash") && lower.strip_prefix("you may cast").is_none() {
+    if lower.contains("as though it had flash") && !lower.starts_with("you may cast") {
         return true;
     }
     // "enters with" but not counter-related (which is replacement)
@@ -1580,18 +1631,15 @@ pub(super) fn is_static_pattern(lower: &str) -> bool {
         return true;
     }
     // "creatures your opponents control" but not "enter tapped" (which is replacement)
-    if lower
-        .strip_prefix("creatures your opponents control ")
-        .is_some()
+    if lower.starts_with("creatures your opponents control ")
         && !lower.trim_end_matches('.').ends_with("enter tapped")
     {
         return true;
     }
     // CR 604.2 + CR 601.2a: Graveyard cast/play permission
-    if lower.strip_prefix("you may play").is_some() && lower.contains("from your graveyard") {
-        return true;
-    }
-    if lower.strip_prefix("you may cast").is_some() && lower.contains("from your graveyard") {
+    if (lower.starts_with("you may play") || lower.starts_with("you may cast"))
+        && lower.contains("from your graveyard")
+    {
         return true;
     }
     // CR 601.3c: Casting restrictions by name/property
@@ -1602,7 +1650,6 @@ pub(super) fn is_static_pattern(lower: &str) -> bool {
     if lower.contains("no more than") && lower.contains("spells") && lower.contains("each turn") {
         return true;
     }
-
     false
 }
 
@@ -1623,9 +1670,7 @@ const GRANTED_STATIC_PREFIXES: &[&str] = &[
 const GRANTED_STATIC_VERBS: &[&str] = &[" has \"", " have \"", " gains \"", " gain \""];
 
 pub(super) fn is_granted_static_line(lower: &str) -> bool {
-    GRANTED_STATIC_PREFIXES
-        .iter()
-        .any(|p| lower.strip_prefix(p).is_some())
+    GRANTED_STATIC_PREFIXES.iter().any(|p| lower.starts_with(p))
         && GRANTED_STATIC_VERBS.iter().any(|v| lower.contains(v))
 }
 
@@ -1668,6 +1713,12 @@ pub(super) fn is_replacement_pattern(lower: &str) -> bool {
     if lower.trim_end_matches('.').ends_with(" enter tapped") {
         return true;
     }
+    // Compound multi-condition patterns
+    is_replacement_compound_pattern(lower)
+}
+
+/// Compound multi-condition patterns for `is_replacement_pattern`.
+fn is_replacement_compound_pattern(lower: &str) -> bool {
     // "as ... enters ... choose a" pattern
     if lower.contains("as ") && lower.contains("enters") && lower.contains("choose a") {
         return true;
@@ -1680,7 +1731,6 @@ pub(super) fn is_replacement_pattern(lower: &str) -> bool {
     if lower.contains("tapped for mana") && lower.contains("instead") {
         return true;
     }
-
     false
 }
 
@@ -1698,9 +1748,7 @@ fn dispatch_line_nom(line: &str, _static_line: &str, card_name: &str) -> Effect 
 
     // Try effect parsing for lines matching effect sentence structure
     // (subsumes old Priority 14a damage-prevention and Priority 14b effect candidates)
-    if is_effect_sentence_candidate(&lower)
-        || (lower.contains("damage") && lower.contains("can't be prevented"))
-    {
+    if is_effect_sentence_candidate(&lower) || is_damage_prevention_pattern(&lower) {
         let def = parse_effect_chain_with_context(line, AbilityKind::Spell, &ctx);
         if !has_unimplemented(&def) {
             return *def.effect;
@@ -1842,7 +1890,7 @@ pub(super) fn is_effect_sentence_candidate(lower: &str) -> bool {
     EFFECT_IMPERATIVE_PREFIXES
         .iter()
         .chain(EFFECT_SUBJECT_PREFIXES.iter())
-        .any(|prefix| lower.strip_prefix(prefix).is_some())
+        .any(|prefix| lower.starts_with(prefix))
 }
 
 /// CR 719.1: Parse a Case's "To solve" condition text into a typed `SolveCondition`.
@@ -1851,12 +1899,17 @@ fn parse_solve_condition(text: &str) -> SolveCondition {
     use crate::types::ability::{ControllerRef, FilterProp, TargetFilter};
 
     // "you control no suspected skeletons" → ObjectCount { filter, EQ, 0 }
-    if let Some(rest) = text.strip_prefix("you control no ") {
+    // Input `text` is already lowercase from the caller.
+    if let Some(((), rest)) =
+        nom_on_lower(text, text, |i| value((), tag("you control no ")).parse(i))
+    {
         let rest = rest.trim_end_matches('.');
         let mut properties = Vec::new();
 
         // Check for "suspected" qualifier
-        let rest = if let Some(after) = rest.strip_prefix("suspected ") {
+        let rest = if let Some(((), after)) =
+            nom_on_lower(rest, rest, |i| value((), tag("suspected ")).parse(i))
+        {
             properties.push(FilterProp::Suspected);
             after
         } else {
@@ -1903,7 +1956,10 @@ fn parse_defiler_cost_reduction(
     next_line_lower: impl FnOnce() -> Option<String>,
 ) -> Option<StaticDefinition> {
     // Extract color from "to cast [color] permanent spells"
-    let after_cast = lower.strip_prefix("as an additional cost to cast ")?;
+    // Input `lower` is already lowercase from the caller.
+    let ((), after_cast) = nom_on_lower(lower, lower, |i| {
+        value((), tag("as an additional cost to cast ")).parse(i)
+    })?;
     let perm_pos = after_cast.find(" permanent spell")?;
     let color_word = after_cast[..perm_pos].trim();
     let color = match color_word {
@@ -1928,7 +1984,9 @@ fn parse_defiler_cost_reduction(
     let next_trimmed = next_lower.trim().trim_end_matches('.');
 
     // "those spells cost {X} less to cast"
-    let cost_rest = next_trimmed.strip_prefix("those spells cost ")?;
+    let ((), cost_rest) = nom_on_lower(next_trimmed, next_trimmed, |i| {
+        value((), tag("those spells cost ")).parse(i)
+    })?;
     let less_pos = cost_rest.find(" less to cast")?;
     let mana_text = cost_rest[..less_pos].trim();
 
@@ -2104,9 +2162,10 @@ fn try_parse_die_roll_table(
 
 /// CR 706: Parse die side count from "roll a dN" patterns in lowercased text.
 fn parse_roll_die_sides(lower: &str) -> Option<u8> {
-    let rest = lower
-        .strip_prefix("roll a d")
-        .or_else(|| lower.strip_prefix("rolls a d"))?;
+    // Input is already lowercase from the caller.
+    let ((), rest) = nom_on_lower(lower, lower, |i| {
+        value((), alt((tag("roll a d"), tag("rolls a d")))).parse(i)
+    })?;
     let rest = rest.trim_end_matches('.');
     if let Ok(sides) = rest.parse::<u8>() {
         return Some(sides);
@@ -2142,7 +2201,10 @@ fn parse_escape_keyword(line: &str) -> Option<Keyword> {
     // After the cost, expect ", Exile N other cards from your graveyard"
     let rest = rest.trim_start_matches(',').trim();
     let rest_lower = rest.to_lowercase();
-    let exile_part = rest_lower.strip_prefix("exile ")?;
+    // rest_lower is already lowercase.
+    let ((), exile_part) = nom_on_lower(&rest_lower, &rest_lower, |i| {
+        value((), tag("exile ")).parse(i)
+    })?;
 
     // Parse the number ("two", "five", "eight", etc.)
     let (exile_count, _) = super::oracle_util::parse_number(exile_part)?;
@@ -2155,9 +2217,8 @@ fn parse_escape_keyword(line: &str) -> Option<Keyword> {
 /// The cost is space-separated from "Harmonize", with optional reminder text in parens.
 /// Returns `Keyword::Harmonize(cost)` or None if the line doesn't match.
 fn parse_harmonize_keyword(line: &str) -> Option<Keyword> {
-    let rest = line
-        .strip_prefix("Harmonize ")
-        .or_else(|| line.strip_prefix("harmonize "))?;
+    let lower = line.to_lowercase();
+    let ((), rest) = nom_on_lower(line, &lower, |i| value((), tag("harmonize ")).parse(i))?;
 
     // Strip reminder text in parentheses if present
     let cost_str = if let Some(paren_start) = rest.find('(') {
