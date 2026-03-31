@@ -7,6 +7,7 @@
 //! All combinators use the standardized `OracleResult` type alias and the
 //! trait-based `.parse(input)` API from nom 8.0.
 
+pub mod bridge;
 pub mod condition;
 pub mod context;
 pub mod duration;
