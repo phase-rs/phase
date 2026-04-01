@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::ability::{CardPlayMode, QuantityRef, TargetFilter};
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost};
+use super::phase::Phase;
 
 /// CR 101.2: Who is prohibited from casting spells.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -240,6 +241,11 @@ pub enum StaticMode {
         /// Mana cost reduction if life is paid
         mana_reduction: ManaCost,
     },
+    /// CR 614.1b + CR 614.10: "Skip your [step] step" — replacement effect that replaces
+    /// the named step with nothing. Parameterized by Phase to cover draw/untap/upkeep.
+    SkipStep {
+        step: Phase,
+    },
     /// Fallback for unrecognized static mode strings.
     Other(String),
 }
@@ -268,6 +274,7 @@ impl Hash for StaticMode {
                 once_per_turn.hash(state);
                 play_mode.hash(state);
             }
+            StaticMode::SkipStep { step } => step.hash(state),
             // Data-carrying variants with non-Hash fields: discriminant only.
             // These are never used as HashMap keys (handled by is_data_carrying_static).
             StaticMode::ReduceCost { .. }
@@ -369,6 +376,7 @@ impl fmt::Display for StaticMode {
             StaticMode::DefilerCostReduction { color, .. } => {
                 write!(f, "DefilerCostReduction({color:?})")
             }
+            StaticMode::SkipStep { step } => write!(f, "SkipStep({step:?})"),
             // Fallback
             StaticMode::Other(s) => write!(f, "{s}"),
         }
@@ -532,6 +540,17 @@ impl FromStr for StaticMode {
                     StaticMode::AdditionalLandDrop {
                         count: rest.parse().unwrap_or(1),
                     }
+                } else if let Some(inner) = other
+                    .strip_prefix("SkipStep(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    let step = match inner {
+                        "Draw" => Phase::Draw,
+                        "Untap" => Phase::Untap,
+                        "Upkeep" => Phase::Upkeep,
+                        _ => return Ok(StaticMode::Other(other.to_string())),
+                    };
+                    StaticMode::SkipStep { step }
                 } else {
                     StaticMode::Other(other.to_string())
                 }

@@ -200,6 +200,35 @@ pub(crate) fn evaluate_condition(
         StaticCondition::SourceMatchesFilter { filter } => {
             crate::game::filter::matches_target_filter(state, source_id, filter, source_id)
         }
+        // CR 509.1b: True when the defending player controls a permanent matching the filter.
+        // Only meaningful during combat — finds the defending player from the source's
+        // attacker info in the CombatState.
+        StaticCondition::DefendingPlayerControls { filter } => state
+            .combat
+            .as_ref()
+            .and_then(|combat| {
+                combat
+                    .attackers
+                    .iter()
+                    .find(|a| a.object_id == source_id)
+                    .map(|a| a.defending_player)
+            })
+            .is_some_and(|defending| {
+                state.objects.values().any(|obj| {
+                    obj.controller == defending
+                        && crate::game::filter::matches_target_filter(
+                            state, obj.id, filter, source_id,
+                        )
+                })
+            }),
+        // CR 506.5: True when the source creature is the only attacking creature.
+        StaticCondition::SourceAttackingAlone => state.combat.as_ref().is_some_and(|combat| {
+            combat.attackers.len() == 1
+                && combat
+                    .attackers
+                    .first()
+                    .is_some_and(|a| a.object_id == source_id)
+        }),
         StaticCondition::None => true,
     }
 }
@@ -562,10 +591,13 @@ fn filter_references_type(filter: &TargetFilter) -> bool {
 /// Check if a TargetFilter references abilities/keywords (used for dependency ordering).
 fn filter_references_ability(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(TypedFilter { properties, .. }) => properties
-            .iter()
-            .any(|p| matches!(p, crate::types::ability::FilterProp::WithKeyword { .. }
-                                | crate::types::ability::FilterProp::WithoutKeyword { .. })),
+        TargetFilter::Typed(TypedFilter { properties, .. }) => properties.iter().any(|p| {
+            matches!(
+                p,
+                crate::types::ability::FilterProp::WithKeyword { .. }
+                    | crate::types::ability::FilterProp::WithoutKeyword { .. }
+            )
+        }),
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
             filters.iter().any(filter_references_ability)
         }

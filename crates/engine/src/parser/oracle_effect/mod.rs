@@ -4369,6 +4369,8 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
         | StaticCondition::IsRingBearer
         | StaticCondition::SourceIsTapped
         | StaticCondition::SourceInZone { .. }
+        | StaticCondition::DefendingPlayerControls { .. }
+        | StaticCondition::SourceAttackingAlone
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::And { .. }
         | StaticCondition::Or { .. }
@@ -9982,6 +9984,45 @@ mod tests {
             ),
             "Expected SourceMatchesFilter condition, got {:?}",
             def.condition
+        );
+    }
+
+    #[test]
+    fn pump_all_lowercase_trigger_body() {
+        // Regression: trigger effect text arrives lowercase from parse_trigger_line.
+        // "creatures you control get +1/+1 until end of turn" must parse as PumpAll.
+        let def = parse_effect_chain_with_context(
+            "creatures you control get +1/+1 until end of turn.",
+            AbilityKind::Spell,
+            &ParseContext::default(),
+        );
+        assert!(
+            matches!(*def.effect, Effect::PumpAll { .. }),
+            "expected PumpAll, got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn pump_all_lowercase_with_trigger_subject_context() {
+        // Realistic context: trigger sets subject from condition text.
+        let def = parse_effect_chain_with_context(
+            "creatures you control get +1/+1 until end of turn.",
+            AbilityKind::Spell,
+            &ParseContext {
+                subject: Some(TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![FilterProp::Another],
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(*def.effect, Effect::PumpAll { .. }),
+            "expected PumpAll with trigger context, got {:?}",
+            def.effect
         );
     }
 }

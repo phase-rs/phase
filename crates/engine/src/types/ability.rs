@@ -1387,6 +1387,15 @@ pub enum StaticCondition {
     ClassLevelGE {
         level: u8,
     },
+    /// CR 509.1b: True when the defending player controls a permanent matching the filter.
+    /// Used for conditional evasion ("can't be blocked as long as defending player controls
+    /// an artifact"). Distinct from `IsPresent` because it references the defending player,
+    /// not the source's controller.
+    DefendingPlayerControls {
+        filter: TargetFilter,
+    },
+    /// CR 506.5: True when the source creature is the only attacking creature.
+    SourceAttackingAlone,
     /// Condition text that the parser could not yet decompose into a typed variant.
     /// Evaluated permissively (always true) so the static effect still applies.
     Unrecognized {

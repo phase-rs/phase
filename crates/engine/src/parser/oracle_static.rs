@@ -1,13 +1,18 @@
 use std::borrow::Cow;
 use std::str::FromStr;
 
+use nom::branch::alt;
 use nom::bytes::complete::tag;
+use nom::combinator::value;
 use nom::Parser;
 
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_effect::parse_effect_chain;
+use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition as nom_condition;
+use super::oracle_nom::filter as nom_filter;
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_nom::target as nom_target;
 use super::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use super::oracle_target::{parse_combat_status_prefix, parse_counter_suffix, parse_type_phrase};
 use super::oracle_util::{
@@ -23,6 +28,7 @@ use crate::types::ability::{
 use crate::types::card_type::Supertype;
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
+use crate::types::phase::Phase;
 use crate::types::statics::{CastingProhibitionCondition, CastingProhibitionScope, StaticMode};
 use crate::types::zones::Zone;
 
@@ -114,6 +120,18 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         }
     }
 
+    // --- "Skip your [step] step" ---
+    // CR 614.1b + CR 614.10: Replacement effect that replaces the named step with nothing.
+    if let Some(rest_tp) = nom_tag_tp(&tp, "skip your ") {
+        if let Some(step) = parse_step_name(rest_tp.lower.trim_end_matches('.')) {
+            return Some(
+                StaticDefinition::new(StaticMode::SkipStep { step })
+                    .affected(TargetFilter::SelfRef)
+                    .description(text.to_string()),
+            );
+        }
+    }
+
     // --- "You control enchanted creature/permanent/land/artifact" (Control Magic pattern) ---
     // CR 303.4e + CR 613.2: Aura-based continuous control-changing effects.
     if let Some(type_word) = nom_tag_lower(
@@ -151,6 +169,13 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text) {
             return Some(def);
         }
+    }
+
+    // CR 613.1d + CR 205.1a: "Enchanted [permanent-type] is a [type] [with base P/T N/N]
+    // [in addition to its other types]" — type-changing aura effects.
+    // Must come before the basic-land-type handler which is a subset of this pattern.
+    if let Some(def) = parse_enchanted_is_type(&tp, &text) {
+        return Some(def);
     }
 
     // CR 305.7: "Enchanted land is a [type]" — must be before general "enchanted land" handler.
@@ -243,6 +268,40 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
                     ),
                     rest,
                 )
+            // CR 613.1: "Creatures you control that are [property] get/have ..."
+            } else if let Some(that_rest_tp) = nom_tag_tp(&rest_tp, "that are ") {
+                if let Some((prop, prop_rest_original)) = nom_on_lower(
+                    that_rest_tp.original,
+                    that_rest_tp.lower,
+                    nom_filter::parse_property_filter,
+                ) {
+                    (
+                        TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .controller(ControllerRef::You)
+                                .properties(vec![prop]),
+                        ),
+                        prop_rest_original.trim_start(),
+                    )
+                } else if let Some((color, color_rest_original)) = nom_on_lower(
+                    that_rest_tp.original,
+                    that_rest_tp.lower,
+                    nom_primitives::parse_color,
+                ) {
+                    (
+                        TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .controller(ControllerRef::You)
+                                .properties(vec![FilterProp::HasColor { color }]),
+                        ),
+                        color_rest_original.trim_start(),
+                    )
+                } else {
+                    (
+                        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                        after_prefix,
+                    )
+                }
             } else {
                 (
                     TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
@@ -258,15 +317,44 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     // CR 613.7: "Other" excludes the source permanent itself via FilterProp::Another.
     if let Some(rest_tp) = nom_tag_tp(&tp, "other creatures you control ") {
         let after_prefix = rest_tp.original;
-        let (filter, predicate_text) =
-            if let Some((prop, rest)) = strip_counter_condition_prefix(after_prefix) {
+        let (filter, predicate_text) = if let Some((prop, rest)) =
+            strip_counter_condition_prefix(after_prefix)
+        {
+            (
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![prop, FilterProp::Another]),
+                ),
+                rest,
+            )
+        // CR 613.1: "Other creatures you control that are [property] get/have ..."
+        } else if let Some(that_rest_tp) = nom_tag_tp(&rest_tp, "that are ") {
+            if let Some((prop, prop_rest_original)) = nom_on_lower(
+                that_rest_tp.original,
+                that_rest_tp.lower,
+                nom_filter::parse_property_filter,
+            ) {
                 (
                     TargetFilter::Typed(
                         TypedFilter::creature()
                             .controller(ControllerRef::You)
                             .properties(vec![prop, FilterProp::Another]),
                     ),
-                    rest,
+                    prop_rest_original.trim_start(),
+                )
+            } else if let Some((color, color_rest_original)) = nom_on_lower(
+                that_rest_tp.original,
+                that_rest_tp.lower,
+                nom_primitives::parse_color,
+            ) {
+                (
+                    TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::HasColor { color }, FilterProp::Another]),
+                    ),
+                    color_rest_original.trim_start(),
                 )
             } else {
                 (
@@ -277,7 +365,17 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
                     ),
                     after_prefix,
                 )
-            };
+            }
+        } else {
+            (
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::Another]),
+                ),
+                after_prefix,
+            )
+        };
         if let Some(def) = parse_continuous_gets_has(predicate_text, filter, &text) {
             return Some(def);
         }
@@ -495,21 +593,35 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         }
     }
 
-    // --- "~ can't be blocked" ---
-    if tp.lower.contains("can't be blocked") {
-        // Guard: "can't be blocked except by..." requires a more specific handler
-        if has_unconsumed_conditional(tp.lower) || tp.lower.contains("except by") {
-            tracing::warn!(
-                text = text,
-                "Unconsumed conditional in 'can't be blocked' catch-all — parser may need extension"
-            );
-            // Fall through to let a more specific handler catch it, or return None
-        } else {
-            return Some(
-                StaticDefinition::new(StaticMode::CantBeBlocked)
-                    .affected(TargetFilter::SelfRef)
-                    .description(text.to_string()),
-            );
+    // --- "~ can't be blocked [as long as condition]" ---
+    // CR 509.1a: Handles both unconditional and conditional "can't be blocked".
+    // "except by" patterns are handled separately by CantBeBlockedExceptBy.
+    if tp.lower.contains("can't be blocked") && !tp.lower.contains("except by") {
+        // Find text after "can't be blocked" and try to parse a condition
+        if let Some(blocked_pos) = tp.lower.find("can't be blocked") {
+            let after_blocked = tp.lower[blocked_pos + "can't be blocked".len()..]
+                .trim()
+                .trim_end_matches('.');
+            let condition = if after_blocked.is_empty() {
+                None
+            } else {
+                // CR 509.1h: parse_condition handles "as long as " prefix via nom combinator
+                nom_condition::parse_condition(after_blocked)
+                    .ok()
+                    .and_then(|(r, c)| r.trim().is_empty().then_some(c))
+                    .or_else(|| {
+                        Some(StaticCondition::Unrecognized {
+                            text: after_blocked.to_string(),
+                        })
+                    })
+            };
+            let mut def = StaticDefinition::new(StaticMode::CantBeBlocked)
+                .affected(TargetFilter::SelfRef)
+                .description(text.to_string());
+            if let Some(c) = condition {
+                def.condition = Some(c);
+            }
+            return Some(def);
         }
     }
 
@@ -939,6 +1051,15 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                             .controller(ControllerRef::You)
                             .properties(vec![FilterProp::HasColor { color }]),
                     )
+                // CR 205.2a: "artifact creatures" = Creature + Artifact conjunctive type filter
+                } else if let Some(core_tf) =
+                    try_parse_core_type_descriptor(&descriptor.to_lowercase())
+                {
+                    TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .with_type(core_tf)
+                            .controller(ControllerRef::You),
+                    )
                 } else if is_capitalized_words(descriptor) {
                     TargetFilter::Typed(
                         typed_filter_for_subtype(descriptor).controller(ControllerRef::You),
@@ -1012,6 +1133,11 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                             .controller(ControllerRef::You)
                             .properties(vec![FilterProp::HasColor { color }]),
                     )
+                // CR 205.2a: "Artifacts you control" — standalone core type as permanent filter
+                } else if let Some(core_tf) =
+                    try_parse_core_type_descriptor(&descriptor.to_lowercase())
+                {
+                    TargetFilter::Typed(TypedFilter::new(core_tf).controller(ControllerRef::You))
                 } else if is_capitalized_words(descriptor) {
                     // CR 205.3m: Normalize plural subtypes to canonical singular form
                     let subtype_name = parse_subtype(descriptor)
@@ -2095,6 +2221,230 @@ fn parse_named_color(text: &str) -> Option<ManaColor> {
     }
 }
 
+/// CR 613.1d + CR 205.1a: "Enchanted [permanent-type] is a/an [type] [with base P/T N/N]
+/// [in addition to its other types]"
+///
+/// Handles type-changing aura effects like Ensoul Artifact, Imprisoned in the Moon,
+/// and Darksteel Mutation. Reuses nom type-word and P/T combinators.
+fn parse_enchanted_is_type(tp: &TextPair, description: &str) -> Option<StaticDefinition> {
+    // Match "enchanted " prefix
+    let rest_tp = nom_tag_tp(tp, "enchanted ")?;
+
+    // Parse the enchanted permanent type using nom type-word combinator
+    let (after_type, perm_tf) = nom_target::parse_type_filter_word(rest_tp.lower).ok()?;
+    let after_type_lower = after_type.trim_start();
+
+    // Must have " is a " or " is an " or " loses all abilities and is a "
+    let mut modifications = Vec::new();
+    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+
+    let is_rest_lower = if let Ok((r, _)) = alt((
+        tag::<_, _, VE>("loses all abilities and is a "),
+        tag::<_, _, VE>("loses all abilities and is an "),
+    ))
+    .parse(after_type_lower)
+    {
+        modifications.push(ContinuousModification::RemoveAllAbilities);
+        r
+    } else if let Ok((r, _)) =
+        alt((tag::<_, _, VE>("is a "), tag::<_, _, VE>("is an "))).parse(after_type_lower)
+    {
+        r
+    } else {
+        return None;
+    };
+
+    let is_rest_lower = is_rest_lower.trim_end_matches('.');
+
+    // Check for "in addition to its other types" suffix
+    let (type_part, _is_additive) =
+        if let Some(before) = is_rest_lower.strip_suffix(" in addition to its other types") {
+            (before.trim(), true)
+        } else {
+            (is_rest_lower, false)
+        };
+
+    // Try to parse "base power and toughness N/N" suffix
+    let (type_part, base_pt) = if let Some((before_pt, pt_part)) =
+        type_part.rsplit_once(" with base power and toughness ")
+    {
+        if let Some((p, t)) = parse_pt_mod(pt_part) {
+            (before_pt.trim(), Some((p, t)))
+        } else {
+            (type_part, None)
+        }
+    } else {
+        (type_part, None)
+    };
+
+    // Parse "N/N [color] [type] [subtype]" patterns for Darksteel Mutation style
+    // e.g., "0/1 green Insect creature"
+    let (type_part, inline_pt) = if let Some((p, t)) = parse_pt_mod(type_part) {
+        // parse_pt_mod trims and finds the slash — get remainder after P/T
+        let slash_pos = type_part.find('/').unwrap_or(0);
+        let after_slash = &type_part[slash_pos + 1..];
+        let t_end = after_slash
+            .find(|c: char| c.is_whitespace() || c == '.' || c == ',')
+            .unwrap_or(after_slash.len());
+        let rest = after_slash[t_end..].trim();
+        (rest, Some((p, t)))
+    } else {
+        (type_part, None)
+    };
+
+    // Parse optional color
+    let (type_part, opt_color) = if let Ok((rest, color)) = nom_primitives::parse_color(type_part) {
+        (rest.trim(), Some(color))
+    } else if let Ok((rest, _)) = tag::<_, _, VE>("colorless ").parse(type_part) {
+        // "colorless" removes all colors — handled via SetColor([])
+        (rest.trim(), None)
+    } else {
+        (type_part, None)
+    };
+    let is_colorless = is_rest_lower.contains("colorless");
+
+    // Parse the target type(s) — use parse_type_filter_word for the main type.
+    // Handle "[Subtype] [type]" patterns (e.g., "insect creature") by trying the
+    // first word as a subtype and the second as a type if direct parse fails.
+    use crate::types::card_type::CoreType;
+
+    let (parsed_type, subtype_word, remainder) =
+        if let Ok((remainder, target_tf)) = nom_target::parse_type_filter_word(type_part) {
+            (Some(target_tf), None, remainder.trim())
+        } else if let Some(space_pos) = type_part.find(' ') {
+            // First word might be a subtype — try the rest as a type
+            let maybe_subtype = &type_part[..space_pos];
+            let after_subtype = type_part[space_pos..].trim();
+            if let Ok((remainder, target_tf)) = nom_target::parse_type_filter_word(after_subtype) {
+                // Capitalize the subtype for canonical form
+                let capitalized = {
+                    let mut chars = maybe_subtype.chars();
+                    match chars.next() {
+                        Some(first) => {
+                            let mut s = first.to_uppercase().collect::<String>();
+                            s.push_str(chars.as_str());
+                            s
+                        }
+                        None => maybe_subtype.to_string(),
+                    }
+                };
+                (Some(target_tf), Some(capitalized), remainder.trim())
+            } else {
+                (None, None, type_part)
+            }
+        } else {
+            (None, None, type_part)
+        };
+
+    if let Some(target_tf) = parsed_type {
+        // Map TypeFilter → CoreType for AddType modification
+        let core_type = match &target_tf {
+            TypeFilter::Creature => Some(CoreType::Creature),
+            TypeFilter::Artifact => Some(CoreType::Artifact),
+            TypeFilter::Enchantment => Some(CoreType::Enchantment),
+            TypeFilter::Land => Some(CoreType::Land),
+            TypeFilter::Planeswalker => Some(CoreType::Planeswalker),
+            _ => None,
+        };
+
+        if let Some(ct) = core_type {
+            modifications.push(ContinuousModification::AddType { core_type: ct });
+        }
+
+        // Add subtype if parsed from "[Subtype] [type]" pattern
+        if let Some(sub) = subtype_word {
+            modifications.push(ContinuousModification::AddSubtype { subtype: sub });
+        }
+
+        // Parse any additional type words or subtypes from remainder
+        // Handles "Insect artifact creature" where remainder = "creature" after parsing "artifact"
+        let mut extra = remainder;
+        while !extra.is_empty() {
+            if let Ok((rest, extra_tf)) = nom_target::parse_type_filter_word(extra) {
+                let extra_ct = match &extra_tf {
+                    TypeFilter::Creature => Some(CoreType::Creature),
+                    TypeFilter::Artifact => Some(CoreType::Artifact),
+                    TypeFilter::Enchantment => Some(CoreType::Enchantment),
+                    TypeFilter::Land => Some(CoreType::Land),
+                    TypeFilter::Planeswalker => Some(CoreType::Planeswalker),
+                    _ => None,
+                };
+                if let Some(ct) = extra_ct {
+                    modifications.push(ContinuousModification::AddType { core_type: ct });
+                }
+                extra = rest.trim();
+            } else if is_capitalized_words(extra) {
+                modifications.push(ContinuousModification::AddSubtype {
+                    subtype: extra.to_string(),
+                });
+                break;
+            } else {
+                break;
+            }
+        }
+
+        // Add color modification
+        if let Some(color) = opt_color {
+            modifications.push(ContinuousModification::AddColor { color });
+        } else if is_colorless {
+            modifications.push(ContinuousModification::SetColor { colors: vec![] });
+        }
+
+        // Add base P/T from explicit "with base power and toughness" or inline "N/N"
+        if let Some((p, t)) = base_pt.or(inline_pt) {
+            modifications.push(ContinuousModification::SetPower { value: p });
+            modifications.push(ContinuousModification::SetToughness { value: t });
+        }
+
+        if modifications.is_empty() {
+            return None;
+        }
+
+        let affected = TargetFilter::Typed(
+            TypedFilter::new(perm_tf).properties(vec![FilterProp::EnchantedBy]),
+        );
+
+        return Some(
+            StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(modifications)
+                .description(description.to_string()),
+        );
+    }
+
+    None
+}
+
+/// CR 614.1b: Parse a step name from Oracle text using nom combinators.
+fn parse_step_name(input: &str) -> Option<Phase> {
+    use nom_language::error::VerboseError;
+    let result: Result<(&str, Phase), nom::Err<VerboseError<&str>>> = alt((
+        value(Phase::Draw, tag("draw step")),
+        value(Phase::Untap, tag("untap step")),
+        value(Phase::Upkeep, tag("upkeep step")),
+    ))
+    .parse(input);
+    result
+        .ok()
+        .and_then(|(rest, phase)| rest.is_empty().then_some(phase))
+}
+
+/// CR 205.2a: Check if a lowercase descriptor names a core card type that can modify
+/// "creatures" (e.g., "artifact" in "artifact creatures"). Returns the TypeFilter if so.
+/// Delegates to the existing nom type-word combinator for authoritative type recognition.
+fn try_parse_core_type_descriptor(descriptor_lower: &str) -> Option<TypeFilter> {
+    match nom_target::parse_type_filter_word(descriptor_lower) {
+        Ok(("", tf)) => match tf {
+            TypeFilter::Artifact
+            | TypeFilter::Enchantment
+            | TypeFilter::Land
+            | TypeFilter::Planeswalker => Some(tf),
+            _ => None, // "creature", "instant", "sorcery" are not creature modifiers
+        },
+        _ => None,
+    }
+}
+
 /// Check that a string is one or more capitalized words.
 /// Build a TypedFilter for a subtype, using the correct core type.
 /// Uses `infer_core_type_for_subtype` to map artifact/land/enchantment subtypes
@@ -2410,53 +2760,63 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
 
 /// CR 613.4c: Scan text for "get(s) +X/+X" and resolve X via where_x_expression.
 /// Returns AddDynamicPower + AddDynamicToughness modifications if found.
+/// CR 613.4c: Parse a variable P/T modifier pattern like "+x/+x", "-x/-0", "+0/-x".
+/// Returns (power_sign, power_is_x, toughness_sign, toughness_is_x) and remaining text.
+fn parse_variable_pt_pattern(
+    input: &str,
+) -> nom::IResult<&str, (i32, bool, i32, bool), nom_language::error::VerboseError<&str>> {
+    let (rest, p_sign) = alt((value(-1i32, tag("-")), value(1i32, tag("+")))).parse(input)?;
+    let (rest, p_is_x) = alt((value(true, tag("x")), value(false, tag("0")))).parse(rest)?;
+    let (rest, _) = tag("/").parse(rest)?;
+    let (rest, t_sign) = alt((value(-1i32, tag("-")), value(1i32, tag("+")))).parse(rest)?;
+    let (rest, t_is_x) = alt((value(true, tag("x")), value(false, tag("0")))).parse(rest)?;
+    Ok((rest, (p_sign, p_is_x, t_sign, t_is_x)))
+}
+
 fn parse_dynamic_pt_in_text(
     lower: &str,
     where_x_expression: Option<&str>,
 ) -> Option<Vec<ContinuousModification>> {
-    // Look for "get +x/+x" or "gets +x/+x" anywhere in text
-    let pt_pos = lower
-        .find("get +x/+x")
-        .or_else(|| lower.find("gets +x/+x"))
-        .or_else(|| lower.find("get +x/+0"))
-        .or_else(|| lower.find("get +0/+x"))?;
+    // Find "get " or "gets " followed by a variable P/T pattern via nom combinator
+    let gets_pos = lower.find("gets ").or_else(|| lower.find("get "))?;
+    let after_gets = &lower[gets_pos..];
+    let after_verb = nom_tag_lower(after_gets, after_gets, "gets ")
+        .or_else(|| nom_tag_lower(after_gets, after_gets, "get "))?;
 
-    // Resolve the "where X is" expression to a QuantityExpr
-    let quantity = if let Some(expr) = where_x_expression {
-        parse_cda_quantity(expr)?
-    } else {
-        return None;
-    };
+    // CR 613.4c: Parse variable P/T pattern via nom combinator
+    let (_, (p_sign, p_is_x, t_sign, t_is_x)) = parse_variable_pt_pattern(after_verb).ok()?;
 
-    // Check if the pattern is +X/+X (symmetric) or asymmetric
-    let pt_text = &lower[pt_pos..];
-    let after_get = nom_tag_lower(pt_text, pt_text, "gets ")
-        .or_else(|| nom_tag_lower(pt_text, pt_text, "get "))?;
+    if !p_is_x && !t_is_x {
+        return None; // No X variable — not a dynamic P/T pattern
+    }
 
-    // Parse the P/T pattern
-    let slash = after_get.find('/')?;
-    let p_str = after_get[..slash].trim().trim_start_matches('+');
-    let rest = &after_get[slash + 1..];
-    let t_end = rest
-        .find(|c: char| c.is_whitespace() || c == '.' || c == ',')
-        .unwrap_or(rest.len());
-    let t_str = rest[..t_end].trim().trim_start_matches('+');
+    let quantity = parse_cda_quantity(where_x_expression?)?;
 
     let mut mods = Vec::new();
-    if p_str.eq_ignore_ascii_case("x") {
-        mods.push(ContinuousModification::AddDynamicPower {
-            value: quantity.clone(),
-        });
+    if p_is_x {
+        let qty = if p_sign < 0 {
+            QuantityExpr::Multiply {
+                factor: -1,
+                inner: Box::new(quantity.clone()),
+            }
+        } else {
+            quantity.clone()
+        };
+        mods.push(ContinuousModification::AddDynamicPower { value: qty });
     }
-    if t_str.eq_ignore_ascii_case("x") {
-        mods.push(ContinuousModification::AddDynamicToughness { value: quantity });
+    if t_is_x {
+        let qty = if t_sign < 0 {
+            QuantityExpr::Multiply {
+                factor: -1,
+                inner: Box::new(quantity),
+            }
+        } else {
+            quantity
+        };
+        mods.push(ContinuousModification::AddDynamicToughness { value: qty });
     }
 
-    if mods.is_empty() {
-        None
-    } else {
-        Some(mods)
-    }
+    Some(mods)
 }
 
 /// CR 205.1a: Parse "becomes a [Type] in addition to its other creature types"
@@ -6179,5 +6539,228 @@ mod tests {
             }
             _ => panic!("expected Typed filter"),
         }
+    }
+
+    #[test]
+    fn core_type_creature_filter() {
+        // CR 205.2a: "Artifact creatures you control get +1/+1" → Creature + Artifact
+        let def = parse_static_line("Artifact creatures you control get +1/+1.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert!(tf.type_filters.contains(&TypeFilter::Artifact));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            _ => panic!("expected Typed filter with Creature + Artifact"),
+        }
+    }
+
+    #[test]
+    fn other_enchantment_creatures() {
+        // "Other enchantment creatures you control get +1/+1"
+        let def = parse_static_line("Other enchantment creatures you control get +1/+1.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert!(tf.type_filters.contains(&TypeFilter::Enchantment));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.contains(&FilterProp::Another));
+            }
+            _ => panic!("expected Typed filter with Creature + Enchantment + Another"),
+        }
+    }
+
+    #[test]
+    fn creatures_you_control_that_are_enchanted() {
+        // CR 613.1: "Creatures you control that are enchanted get +1/+1"
+        let def = parse_static_line("Creatures you control that are enchanted get +1/+1.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+            }
+            _ => panic!("expected Typed filter with enchanted property"),
+        }
+    }
+
+    #[test]
+    fn negative_dynamic_power() {
+        // CR 613.4c: "gets -X/-0, where X is the number of creatures you control"
+        let def = parse_static_line(
+            "Enchanted creature gets -X/-0, where X is the number of creatures you control.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        // Should have AddDynamicPower with Multiply(-1, ...) but NOT AddDynamicToughness
+        let has_neg_power = def.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddDynamicPower {
+                    value: QuantityExpr::Multiply { factor: -1, .. },
+                }
+            )
+        });
+        assert!(
+            has_neg_power,
+            "Expected negative dynamic power: {:?}",
+            def.modifications
+        );
+        let has_dynamic_toughness = def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. }));
+        assert!(
+            !has_dynamic_toughness,
+            "Should NOT have dynamic toughness for -X/-0"
+        );
+    }
+
+    #[test]
+    fn skip_draw_step() {
+        let def = parse_static_line("Skip your draw step.").unwrap();
+        assert_eq!(def.mode, StaticMode::SkipStep { step: Phase::Draw });
+    }
+
+    #[test]
+    fn skip_untap_step() {
+        let def = parse_static_line("Skip your untap step.").unwrap();
+        assert_eq!(def.mode, StaticMode::SkipStep { step: Phase::Untap });
+    }
+
+    #[test]
+    fn skip_upkeep_step() {
+        let def = parse_static_line("Skip your upkeep step.").unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::SkipStep {
+                step: Phase::Upkeep
+            }
+        );
+    }
+
+    #[test]
+    fn positive_dynamic_pt() {
+        // CR 613.4c: "gets +X/+X, where X is the number of creatures you control"
+        let def = parse_static_line(
+            "Enchanted creature gets +X/+X, where X is the number of creatures you control.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        let has_power = def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddDynamicPower { .. }));
+        let has_toughness = def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. }));
+        assert!(has_power, "Expected dynamic power");
+        assert!(has_toughness, "Expected dynamic toughness");
+    }
+
+    #[test]
+    fn cant_be_blocked_unconditional() {
+        let def = parse_static_line("This creature can't be blocked.").unwrap();
+        assert_eq!(def.mode, StaticMode::CantBeBlocked);
+        assert!(def.condition.is_none());
+    }
+
+    #[test]
+    fn cant_be_blocked_as_long_as_defending_controls() {
+        // CR 509.1a: "can't be blocked as long as defending player controls an artifact"
+        let def = parse_static_line(
+            "This creature can't be blocked as long as defending player controls an artifact.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::CantBeBlocked);
+        assert!(
+            matches!(
+                &def.condition,
+                Some(StaticCondition::DefendingPlayerControls { .. })
+            ),
+            "Expected DefendingPlayerControls condition, got: {:?}",
+            def.condition
+        );
+    }
+
+    #[test]
+    fn cant_be_blocked_attacking_alone() {
+        // CR 506.5: "can't be blocked as long as it's attacking alone"
+        let def =
+            parse_static_line("This creature can't be blocked as long as it's attacking alone.")
+                .unwrap();
+        assert_eq!(def.mode, StaticMode::CantBeBlocked);
+        assert_eq!(def.condition, Some(StaticCondition::SourceAttackingAlone));
+    }
+
+    #[test]
+    fn enchanted_artifact_is_creature_with_base_pt() {
+        // CR 613.1d: Ensoul Artifact pattern
+        let def = parse_static_line(
+            "Enchanted artifact is a creature with base power and toughness 5/5 in addition to its other types.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddType {
+                core_type: crate::types::card_type::CoreType::Creature,
+            }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::SetPower { value: 5 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::SetToughness { value: 5 }));
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Artifact));
+                assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+            }
+            _ => panic!("expected Typed filter"),
+        }
+    }
+
+    #[test]
+    fn enchanted_permanent_loses_abilities_becomes_land() {
+        // CR 613.1d: Imprisoned in the Moon pattern
+        let def =
+            parse_static_line("Enchanted permanent loses all abilities and is a colorless land.")
+                .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::RemoveAllAbilities));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddType {
+                core_type: crate::types::card_type::CoreType::Land,
+            }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::SetColor { colors: vec![] }));
+    }
+
+    #[test]
+    fn enchanted_creature_loses_abilities_becomes_insect() {
+        // CR 613.1d: Darksteel Mutation pattern
+        let def = parse_static_line(
+            "Enchanted creature loses all abilities and is a 0/1 green Insect creature.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::RemoveAllAbilities));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::SetPower { value: 0 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::SetToughness { value: 1 }));
     }
 }

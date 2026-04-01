@@ -45,6 +45,7 @@ pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
         parse_entered_this_turn,
         parse_youve_this_turn,
         parse_event_state_conditions,
+        parse_combat_context_conditions,
     ))
     .parse(input)
 }
@@ -511,6 +512,9 @@ fn parse_youve_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
 /// These are game-state boolean checks expressible as QuantityComparison.
 fn parse_event_state_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
+        // Compound: "you gained and lost life this turn" → And([Gained >= 1, Lost >= 1])
+        // Must precede individual verb handlers to avoid partial match on "you gained".
+        parse_compound_verb_condition,
         // "a creature died this turn" (Morbid) → CreaturesDiedThisTurn >= 1
         value(
             make_quantity_ge(QuantityRef::CreaturesDiedThisTurn, 1),
@@ -560,6 +564,87 @@ fn parse_event_state_conditions(input: &str) -> OracleResult<'_, StaticCondition
         parse_counter_added_this_turn,
     ))
     .parse(input)
+}
+
+/// CR 509.1b + CR 506.5: Parse combat-context conditions.
+///
+/// Handles "defending player controls a/an [type]" and "it's attacking alone".
+fn parse_combat_context_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
+        parse_defending_player_controls,
+        value(
+            StaticCondition::SourceAttackingAlone,
+            tag("it's attacking alone"),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 509.1b: "defending player controls a/an [type]" → DefendingPlayerControls.
+fn parse_defending_player_controls(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("defending player controls ").parse(input)?;
+    let (rest, _) = alt((tag("a "), tag("an "))).parse(rest)?;
+    // parse_type_phrase returns (filter, remaining_str) — bridge to nom remainder
+    let (filter, type_rest) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom_language::error::VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
+            )],
+        }));
+    }
+    let consumed = rest.len() - type_rest.len();
+    Ok((
+        &rest[consumed..],
+        StaticCondition::DefendingPlayerControls { filter },
+    ))
+}
+
+/// Parse compound-verb event conditions: "you [verb1] and [verb2] [object] this turn".
+///
+/// Handles shared-object constructions where two event verbs share a subject ("you")
+/// and an object ("life this turn"). Each verb maps to a QuantityRef, and the result
+/// is `StaticCondition::And { conditions: [lhs >= 1, rhs >= 1] }`.
+///
+/// Example: "you gained and lost life this turn" → And(LifeGainedThisTurn >= 1, LifeLostThisTurn >= 1)
+fn parse_compound_verb_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((tag("you "), tag("you've "))).parse(input)?;
+
+    // Map event verbs to their QuantityRef for the shared "life this turn" object.
+    fn life_verb(v: &str) -> Option<QuantityRef> {
+        match v {
+            "gained" => Some(QuantityRef::LifeGainedThisTurn),
+            "lost" => Some(QuantityRef::LifeLostThisTurn),
+            _ => None,
+        }
+    }
+
+    // Try "[verb1] and [verb2] life this turn"
+    if let Some(and_pos) = rest.find(" and ") {
+        let verb1 = &rest[..and_pos];
+        let after_and = &rest[and_pos + " and ".len()..];
+        // Find the shared object: " life this turn"
+        if let Some(obj_pos) = after_and.find(" life this turn") {
+            let verb2 = &after_and[..obj_pos];
+            if let (Some(lhs), Some(rhs)) = (life_verb(verb1), life_verb(verb2)) {
+                let remainder = &after_and[obj_pos + " life this turn".len()..];
+                return Ok((
+                    remainder,
+                    StaticCondition::And {
+                        conditions: vec![make_quantity_ge(lhs, 1), make_quantity_ge(rhs, 1)],
+                    },
+                ));
+            }
+        }
+    }
+
+    Err(nom::Err::Error(nom_language::error::VerboseError {
+        errors: vec![(
+            input,
+            nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
+        )],
+    }))
 }
 
 /// Parse "you gained [N or more] life this turn".

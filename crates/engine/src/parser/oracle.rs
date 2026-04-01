@@ -1567,8 +1567,8 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "can't cast spells during",
     // CR 117.1a + CR 604.1: Casting only during turn
     "can cast spells only during",
-    // CR 702.127a: Skip draw step
-    "skip your draw step",
+    // CR 614.1b + CR 614.10: Skip step replacement effects (draw/untap/upkeep)
+    "skip your ",
     // CR 102.4: Maximum hand size
     "maximum hand size",
     // CR 613: Life total can't change
