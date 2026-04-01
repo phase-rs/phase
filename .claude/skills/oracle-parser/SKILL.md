@@ -33,6 +33,8 @@ These rules are defined in CLAUDE.md and are enforced without exception. Violati
 - `nom_parse_lower(lower, parser_fn)` — when remainder is unused
 - `scan_at_word_boundaries(text, combinator)` — for multi-position phrase matching
 
+**Nom combinator reference:** See `nom_combinators.md` in this skill directory for the complete list of nom parsers and combinators organized by module. Consult this when choosing which combinator to use.
+
 **The only acceptable uses of `starts_with`/`strip_prefix` in parser code:**
 - `TextPair::strip_prefix` for dual-string case-bridging operations (this is structural, not dispatch)
 - Runtime array loops or char-level scanners
