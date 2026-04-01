@@ -875,10 +875,7 @@ fn parse_damage_target_phrase(
             DamageTargetFilter::CreatureOnly,
             alt((tag("to a creature"), tag("to that creature"))),
         ),
-        value(
-            DamageTargetFilter::OpponentOnly,
-            tag("to an opponent"),
-        ),
+        value(DamageTargetFilter::OpponentOnly, tag("to an opponent")),
         value(
             DamageTargetFilter::PlayerOnly,
             alt((tag("to a player"), tag("to that player"))),

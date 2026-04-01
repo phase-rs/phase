@@ -205,9 +205,7 @@ fn is_modal_header_text(lower: &str) -> bool {
     ))
     .parse(lower)
     .is_ok()
-        || (tag::<_, _, VerboseError<&str>>("if ")
-            .parse(lower)
-            .is_ok()
+        || (tag::<_, _, VerboseError<&str>>("if ").parse(lower).is_ok()
             && lower.contains("choose "))
 }
 
@@ -393,12 +391,18 @@ fn scan_modal_count_override(text: &str) -> Option<(usize, usize)> {
     let mut remaining = text;
     while !remaining.is_empty() {
         if let Ok((_, count)) = alt((
-            value((1, usize::MAX), tag::<_, _, VerboseError<&str>>("choose any number instead")),
+            value(
+                (1, usize::MAX),
+                tag::<_, _, VerboseError<&str>>("choose any number instead"),
+            ),
             value((1, 2), tag("choose both instead")),
             value((1, 2), tag("choose two instead")),
             value((1, 3), tag("choose three instead")),
             value((1, 2), tag("one or both")),
-            value((1, usize::MAX), alt((tag("one or more"), tag("any number")))),
+            value(
+                (1, usize::MAX),
+                alt((tag("one or more"), tag("any number"))),
+            ),
         ))
         .parse(remaining)
         {

@@ -469,10 +469,7 @@ fn scan_mana_production_type(text: &str, count: QuantityExpr) -> Option<ManaProd
                 ManaProduction::ChosenColor {
                     count: count.clone(),
                 },
-                alt((
-                    tag("mana of the chosen color"),
-                    tag("mana of that color"),
-                )),
+                alt((tag("mana of the chosen color"), tag("mana of that color"))),
             ),
         ))
         .parse(remaining)

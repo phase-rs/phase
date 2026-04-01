@@ -440,10 +440,7 @@ fn parse_event_condition(text: &str) -> Option<ParsedCondition> {
         ),
         value(
             (),
-            terminated(
-                tag("you've cast a noncreature spell"),
-                tag(" this turn"),
-            ),
+            terminated(tag("you've cast a noncreature spell"), tag(" this turn")),
         ),
     ))
     .parse(text)
@@ -483,10 +480,7 @@ fn parse_event_condition(text: &str) -> Option<ParsedCondition> {
         ),
         value(
             (),
-            terminated(
-                tag("you've sacrificed an artifact"),
-                tag(" this turn"),
-            ),
+            terminated(tag("you've sacrificed an artifact"), tag(" this turn")),
         ),
     ))
     .parse(text)
@@ -627,11 +621,17 @@ fn parse_source_state_keyword(
     input: &str,
 ) -> nom::IResult<&str, ParsedCondition, VerboseError<&str>> {
     alt((
-        value(ParsedCondition::SourceIsAttackingOrBlocking, tag("attacking or blocking")),
+        value(
+            ParsedCondition::SourceIsAttackingOrBlocking,
+            tag("attacking or blocking"),
+        ),
         value(ParsedCondition::SourceIsAttacking, tag("is attacking")),
         value(ParsedCondition::SourceIsBlocked, tag("is blocked")),
         value(ParsedCondition::SourceIsCreature, tag("is a creature")),
-        value(ParsedCondition::SourceEnteredThisTurn, tag("entered this turn")),
+        value(
+            ParsedCondition::SourceEnteredThisTurn,
+            tag("entered this turn"),
+        ),
         value(
             ParsedCondition::SourceInZone { zone: Zone::Exile },
             tag("suspended"),

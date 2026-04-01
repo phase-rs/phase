@@ -17,14 +17,12 @@ use crate::types::ability::{AbilityCost, AdditionalCost, CastingRestriction, Spe
 /// - General "X or Y" → `Choice(X, Y)` using `parse_single_cost` for each fragment
 pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCost> {
     // Strip the standard additional-cost prefix.
-    let after_prefix = tag::<_, _, VerboseError<&str>>("as an additional cost to cast this spell, ")
-        .parse(lower)
-        .map_or(lower, |(rest, _)| rest);
+    let after_prefix =
+        tag::<_, _, VerboseError<&str>>("as an additional cost to cast this spell, ")
+            .parse(lower)
+            .map_or(lower, |(rest, _)| rest);
     // Use TextPair for case-preserving parallel slicing, then strip trailing period.
-    let tp = TextPair::new(
-        &raw[raw.len() - after_prefix.len()..],
-        after_prefix,
-    );
+    let tp = TextPair::new(&raw[raw.len() - after_prefix.len()..], after_prefix);
     let tp = tp.trim_end_matches('.');
     let body_lower = tp.lower;
     let body_raw = tp.original;
@@ -328,9 +326,7 @@ fn parse_timing_restriction(
 }
 
 /// Sub-dispatch for "during [rest]" — declare steps, opponent/your phases, combat, upkeep.
-fn parse_during_phrase(
-    input: &str,
-) -> nom::IResult<&str, CastingRestriction, VerboseError<&str>> {
+fn parse_during_phrase(input: &str) -> nom::IResult<&str, CastingRestriction, VerboseError<&str>> {
     use nom::sequence::preceded;
     alt((
         // Declare steps (most specific combat sub-phases)
@@ -377,9 +373,7 @@ fn parse_opponent_possessive(input: &str) -> nom::IResult<&str, &str, VerboseErr
 }
 
 /// After "an opponent's", dispatch on the phase keyword.
-fn parse_opponent_phase(
-    input: &str,
-) -> nom::IResult<&str, CastingRestriction, VerboseError<&str>> {
+fn parse_opponent_phase(input: &str) -> nom::IResult<&str, CastingRestriction, VerboseError<&str>> {
     alt((
         value(CastingRestriction::DuringOpponentsUpkeep, tag("upkeep")),
         value(CastingRestriction::DuringOpponentsEndStep, tag("end step")),
@@ -401,9 +395,7 @@ fn parse_opponent_possessive_turn(
 }
 
 /// Sub-dispatch for "before [rest]" — attackers, blockers, combat damage.
-fn parse_before_phrase(
-    input: &str,
-) -> nom::IResult<&str, CastingRestriction, VerboseError<&str>> {
+fn parse_before_phrase(input: &str) -> nom::IResult<&str, CastingRestriction, VerboseError<&str>> {
     alt((
         value(
             CastingRestriction::BeforeAttackersDeclared,
@@ -747,7 +739,10 @@ mod tests {
         let result = parse_additional_cost_line(lower, raw);
         match result {
             Some(AdditionalCost::Choice(
-                AbilityCost::Reveal { count: 1, filter: Some(_) },
+                AbilityCost::Reveal {
+                    count: 1,
+                    filter: Some(_),
+                },
                 AbilityCost::Mana { .. },
             )) => {}
             other => panic!("Expected Choice(Reveal, Mana), got {:?}", other),
