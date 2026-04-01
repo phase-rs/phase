@@ -7,9 +7,10 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, ChoiceType, ContinuousModification, ControllerRef,
     CountScope, DelayedTriggerCondition, DoublePTMode, Duration, Effect, FilterProp,
-    GainLifePlayer, ManaProduction, ObjectProperty, PlayerFilter, PtValue, QuantityExpr,
-    QuantityRef, ReplacementDefinition, ReplacementMode, SharedQuality, StaticCondition,
-    StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    GainLifePlayer, ManaProduction, ModalChoice, ObjectProperty, PlayerFilter, PtValue,
+    QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, SharedQuality,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -2516,6 +2517,89 @@ fn is_modal_header_line(lower: &str) -> bool {
     CHOOSE_PHRASES.iter().any(|p| lower.contains(p))
 }
 
+/// Strip structural formatting prefixes from an Oracle line, returning the
+/// semantic effect text. Handles:
+/// - Modal bullet: "• Destroy target creature." → "destroy target creature."
+/// - Saga chapter: "I, II — Create a 2/2 ..." → "create a 2/2 ..."
+/// - Spree mode: "+ {1} — Destroy target artifact." → "destroy target artifact."
+/// - Attraction/dungeon: "2—9 | Create two Treasure tokens." → "create two treasure tokens."
+///
+/// Returns `None` if the line is purely structural (modal header, saga reminder).
+/// The returned text is already lowercased.
+fn strip_structural_prefix(lower: &str) -> Option<String> {
+    // Modal bullet prefix "• "
+    if let Some(rest) = lower.strip_prefix('\u{2022}') {
+        let rest = rest.trim_start();
+        if rest.is_empty() {
+            return None;
+        }
+        return Some(rest.to_string());
+    }
+
+    // Spree mode prefix: "+ {cost} — " (em-dash)
+    if let Some(rest) = lower.strip_prefix("+ ") {
+        // Skip the cost portion (everything up to " — ")
+        if let Some(pos) = rest.find(" \u{2014} ") {
+            let effect = &rest[pos + 4..]; // skip " — "
+            if !effect.is_empty() {
+                return Some(effect.to_string());
+            }
+        }
+    }
+
+    // Saga chapter prefix: roman numerals followed by " — "
+    // Patterns: "i — ", "ii — ", "iii — ", "iv — ", "i, ii — ", "i, ii, iii — "
+    if is_saga_chapter_line(lower) {
+        if let Some(pos) = lower.find(" \u{2014} ") {
+            let effect = &lower[pos + 4..]; // skip " — "
+            if !effect.is_empty() {
+                return Some(effect.to_string());
+            }
+        }
+    }
+
+    // Attraction/dungeon prefix: "N | " or "N—N | "
+    if is_attraction_line(lower) {
+        if let Some(pos) = lower.find(" | ") {
+            let effect = &lower[pos + 3..];
+            if !effect.is_empty() {
+                return Some(effect.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+/// Check if a line is a saga chapter line (starts with roman numerals + em-dash).
+fn is_saga_chapter_line(lower: &str) -> bool {
+    // Must start with a roman numeral character
+    if !lower.starts_with('i') && !lower.starts_with('v') && !lower.starts_with('x') {
+        return false;
+    }
+    // Find " — " (em-dash) delimiter
+    let Some(dash_pos) = lower.find(" \u{2014} ") else {
+        return false;
+    };
+    let prefix = &lower[..dash_pos];
+    // Validate prefix is comma-separated roman numerals
+    prefix
+        .split(", ")
+        .all(|part| matches!(part.trim(), "i" | "ii" | "iii" | "iv" | "v" | "vi" | "vii"))
+}
+
+/// Check if a line is an attraction/dungeon line ("N | " or "N—N | ").
+fn is_attraction_line(lower: &str) -> bool {
+    let Some(pipe_pos) = lower.find(" | ") else {
+        return false;
+    };
+    let prefix = &lower[..pipe_pos];
+    // "20", "1", "2—9", "10—19" etc.
+    prefix
+        .split('\u{2014}')
+        .all(|part| part.trim().chars().all(|c| c.is_ascii_digit()))
+}
+
 /// Strip parenthesized reminder text from a line.
 fn strip_parenthesized_reminder(line: &str) -> String {
     let mut result = String::with_capacity(line.len());
@@ -3688,17 +3772,37 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             continue;
         }
 
+        // Skip modal header lines ("Choose one —", "{cost}: Choose two —", etc.)
+        if is_modal_header_line(&lower) {
+            continue;
+        }
+
+        // Skip "Spree" keyword lines (the keyword itself, not the mode lines)
+        if lower.starts_with("spree") {
+            continue;
+        }
+
+        // Skip saga reminder text lines (already stripped of parens, but
+        // sometimes "as this saga enters..." survives)
+        if lower.starts_with("as this saga enters") {
+            continue;
+        }
+
+        // Strip structural prefixes (bullet, saga chapter, spree mode,
+        // attraction/dungeon) to get the semantic effect text for matching.
+        let effective_lower = strip_structural_prefix(&lower).unwrap_or_else(|| lower.clone());
+
         // Normalize self-references for matching
-        let norm = normalize_for_matching(&lower, &card_name_lower);
+        let norm = normalize_for_matching(&effective_lower, &card_name_lower);
 
         // --- Match this line to parsed element(s) ---
         let matched: Vec<&ParsedElement<'_>> = elements
             .iter()
             .filter(|e| {
                 if let Some(desc) = e.description_lower() {
-                    // Try both raw and normalized matching
-                    desc.contains(&lower)
-                        || lower.contains(desc.as_str())
+                    // Try both raw and normalized matching against the effective text
+                    desc.contains(effective_lower.as_str())
+                        || effective_lower.contains(desc.as_str())
                         || desc.contains(&norm)
                         || norm.contains(desc.as_str())
                 } else {
@@ -3706,6 +3810,46 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 }
             })
             .collect();
+
+        // Check if this line's text matches any modal mode_description.
+        // Collects mode_descriptions from the card-level modal, trigger
+        // execute modals, and ability-level modals.
+        let covered_by_modal = {
+            let norm_modal = normalize_for_matching(&effective_lower, &card_name_lower);
+            let matches_mode_desc = |m: &ModalChoice| {
+                m.mode_descriptions.iter().any(|desc| {
+                    let dl = desc.to_lowercase();
+                    let dn = normalize_for_matching(&dl, &card_name_lower);
+                    dl.contains(effective_lower.as_str())
+                        || effective_lower.contains(dl.as_str())
+                        || dl.contains(norm_modal.as_str())
+                        || norm_modal.contains(dl.as_str())
+                        || dn.contains(effective_lower.as_str())
+                        || effective_lower.contains(dn.as_str())
+                })
+            };
+            // Card-level modal (sorcery/instant modal spells)
+            face.modal.as_ref().is_some_and(&matches_mode_desc)
+                // Trigger execute modals (triggered modal abilities)
+                || face.triggers.iter().any(|t| {
+                    t.execute
+                        .as_ref()
+                        .and_then(|e| e.modal.as_ref())
+                        .is_some_and(&matches_mode_desc)
+                })
+                // Ability-level modals (activated modal abilities)
+                || face
+                    .abilities
+                    .iter()
+                    .any(|a| a.modal.as_ref().is_some_and(&matches_mode_desc))
+        };
+
+        // Check if this line matches a saga chapter trigger's effect
+        let covered_by_saga = is_saga_chapter_line(&lower) && !face.triggers.is_empty();
+
+        // Check if this is an attraction/dungeon line with parsed abilities
+        let covered_by_attraction =
+            is_attraction_line(&lower) && (!face.abilities.is_empty() || !face.triggers.is_empty());
 
         // Also check if this line is covered by keywords, casting restrictions, or
         // other non-ability structured data
@@ -3724,10 +3868,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             r.description.as_ref().is_some_and(|d| {
                 let dl = d.to_lowercase();
                 let dn = normalize_for_matching(&dl, &card_name_lower);
-                dl.contains(&lower)
-                    || lower.contains(dl.as_str())
-                    || dn.contains(&lower)
-                    || lower.contains(dn.as_str())
+                dl.contains(effective_lower.as_str())
+                    || effective_lower.contains(dl.as_str())
+                    || dn.contains(effective_lower.as_str())
+                    || effective_lower.contains(dn.as_str())
                     || dl.contains(&norm)
                     || norm.contains(dl.as_str())
             })
@@ -3739,9 +3883,12 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             && !covered_by_additional_cost
             && !covered_by_enchant
             && !covered_by_replacement
+            && !covered_by_modal
+            && !covered_by_saga
+            && !covered_by_attraction
         {
             // Unmatched line → SilentDrop (only for substantive lines)
-            if lower.len() > 20 {
+            if effective_lower.len() > 20 {
                 findings.push(SemanticFinding::SilentDrop {
                     oracle_line: line.to_string(),
                 });
