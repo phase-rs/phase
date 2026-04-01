@@ -1263,7 +1263,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::ChangeTargets { .. }
         | Effect::ExchangeControl
         | Effect::Forage
-        | Effect::Learn => {}
+        | Effect::Learn
+        | Effect::SwitchPT { .. }
+        | Effect::Populate
+        | Effect::VentureIntoDungeon
+        | Effect::VentureInto { .. }
+        | Effect::TakeTheInitiative
+        | Effect::Clash => {}
     }
     d
 }
@@ -1399,6 +1405,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
             format!("add color {}", fmt_mana_color_full(color))
         }
         ContinuousModification::AddStaticMode { mode } => format!("{mode}"),
+        ContinuousModification::SwitchPowerToughness => "switch P/T".into(),
         ContinuousModification::AssignDamageFromToughness => "damage from toughness".into(),
         ContinuousModification::ChangeController => "change controller".into(),
         ContinuousModification::SetBasicLandType { land_type } => {
@@ -4128,8 +4135,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 || effective_lower.contains("you may cast this spell for")
                 || effective_lower.contains("you may pay")
                 || effective_lower.contains("you can't spend mana to cast"));
-        let covered_by_additional_cost =
-            face.additional_cost.is_some() && lower.starts_with("as an additional cost ");
+        let covered_by_additional_cost = face.additional_cost.is_some()
+            && (lower.starts_with("as an additional cost ")
+                || effective_lower.starts_with("as an additional cost ")
+                || effective_lower.contains("behold"));
         // Enchant keyword lines ("Enchant creature", "Enchant land you control")
         let covered_by_enchant = lower.starts_with("enchant ");
         // Replacement effects with matching descriptions (enter-tapped, etc.)
@@ -4175,6 +4184,35 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::RaiseCost { .. } => {
                 effective_lower.contains("cost") && effective_lower.contains("more")
             }
+            StaticMode::CantBeCountered => effective_lower.contains("can't be countered"),
+            StaticMode::CantGainLife => effective_lower.contains("can't gain life"),
+            StaticMode::CantLoseLife => effective_lower.contains("can't lose life"),
+            StaticMode::CantLoseTheGame => {
+                effective_lower.contains("don't lose the game")
+                    || effective_lower.contains("can't lose the game")
+            }
+            StaticMode::CantWinTheGame => effective_lower.contains("can't win the game"),
+            StaticMode::NoMaximumHandSize => effective_lower.contains("no maximum hand size"),
+            StaticMode::CantUntap => {
+                effective_lower.contains("doesn't untap") || effective_lower.contains("don't untap")
+            }
+            StaticMode::CantAttack => effective_lower.contains("can't attack"),
+            StaticMode::CantBlock => effective_lower.contains("can't block"),
+            StaticMode::CantAttackOrBlock => effective_lower.contains("can't attack or block"),
+            StaticMode::CastWithFlash => {
+                effective_lower.contains("as though it had flash")
+                    || effective_lower.contains("as though they had flash")
+            }
+            StaticMode::MayChooseNotToUntap => effective_lower.contains("may choose not to untap"),
+            StaticMode::CantDraw => effective_lower.contains("can't draw"),
+            StaticMode::Panharmonicon => {
+                effective_lower.contains("triggers an additional time")
+                    || effective_lower.contains("trigger an additional time")
+            }
+            StaticMode::CantBeBlocked => effective_lower.contains("can't be blocked"),
+            StaticMode::CantBeBlockedExceptBy { .. } => {
+                effective_lower.contains("can't be blocked")
+            }
             _ => false,
         });
 
@@ -4199,18 +4237,54 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         });
 
         // Replacement effects matched by event type when description doesn't align.
-        // Covers "prevent ... damage", "enters with ... counter", and damage redirection.
+        // Covers "prevent ... damage", "enters with ... counter", damage redirection,
+        // and any "would ... instead" replacement effect pattern.
         let covered_by_replacement_event = face.replacements.iter().any(|r| match r.event {
             ReplacementEvent::DamageDone | ReplacementEvent::DealtDamage => {
                 (effective_lower.contains("prevent") && effective_lower.contains("damage"))
                     || (effective_lower.contains("damage") && effective_lower.contains("instead"))
+                    || effective_lower.contains("damage can't be prevented")
             }
-            ReplacementEvent::ChangeZone => {
-                (effective_lower.contains("enters with") || effective_lower.contains("enter with"))
-                    && effective_lower.contains("counter")
+            ReplacementEvent::ChangeZone | ReplacementEvent::Moved => {
+                ((effective_lower.contains("enters with")
+                    || effective_lower.contains("enter with"))
+                    && effective_lower.contains("counter"))
+                    || (effective_lower.contains("would") && effective_lower.contains("instead"))
+                    || (effective_lower.contains("enters tapped"))
             }
-            _ => false,
+            ReplacementEvent::Discard => {
+                effective_lower.contains("discard") && effective_lower.contains("instead")
+            }
+            ReplacementEvent::Draw | ReplacementEvent::DrawCards => {
+                effective_lower.contains("draw") && effective_lower.contains("instead")
+            }
+            ReplacementEvent::Destroy => {
+                effective_lower.contains("destroy") && effective_lower.contains("instead")
+            }
+            ReplacementEvent::GainLife => {
+                effective_lower.contains("gain") && effective_lower.contains("instead")
+            }
+            ReplacementEvent::LoseLife => {
+                effective_lower.contains("lose") && effective_lower.contains("instead")
+            }
+            ReplacementEvent::CreateToken => {
+                effective_lower.contains("token") && effective_lower.contains("instead")
+            }
+            ReplacementEvent::AddCounter => {
+                effective_lower.contains("counter") && effective_lower.contains("instead")
+            }
+            ReplacementEvent::ProduceMana => {
+                effective_lower.contains("tapped for mana") && effective_lower.contains("instead")
+            }
+            _ => {
+                // Generic fallback: any replacement with "would...instead" pattern
+                effective_lower.contains("would") && effective_lower.contains("instead")
+            }
         });
+        // Broad "would...instead" lines with any replacement on the card
+        let covered_by_any_replacement = !face.replacements.is_empty()
+            && effective_lower.contains("would")
+            && effective_lower.contains("instead");
 
         // Lines that are entirely within quotes are granted sub-abilities —
         // they are parsed as part of the parent static/trigger ability.
@@ -4251,6 +4325,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             && !covered_by_enchant
             && !covered_by_replacement
             && !covered_by_replacement_event
+            && !covered_by_any_replacement
             && !covered_by_modal
             && !covered_by_saga
             && !covered_by_attraction
@@ -4337,9 +4412,18 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 .zip(lower_for_pt.find(&format!("{}{}/", if power >= 0 { "+" } else { "" }, power)))
                 .is_some_and(|(quote_pos, pt_pos)| pt_pos > quote_pos);
 
+            // Check if the +N/+M is preceded by "additional" — this is a conditional
+            // addendum to a base pump on the same line, not independently checkable.
+            let pt_is_additional = {
+                let pt_str = format!("{}{}/", if power >= 0 { "+" } else { "" }, power);
+                lower_for_pt
+                    .find(&pt_str)
+                    .is_some_and(|pos| pos >= 11 && lower_for_pt[..pos].contains("additional"))
+            };
+
             if power == 0 && toughness == 0 {
                 // +0/+0 is meaningless, skip
-            } else if pt_in_quotes {
+            } else if pt_in_quotes || pt_is_additional {
                 // +N/+M is inside a quoted sub-ability — not a property of this line's element
             } else if is_counter_reference(&lower_for_pt) {
                 // Skip false positives: counter mentioned in filter, condition, cost,
@@ -4416,6 +4500,21 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
     }
 
     findings
+}
+
+/// Returns true if the condition keyword appears after a sentence boundary (".", ". then "),
+/// indicating it's a resolve-time conditional branch within effect text, not an
+/// ability-gating condition.
+/// E.g., "Draw a card. If you have the city's blessing, draw three cards instead."
+fn is_resolve_time_conditional_branch(lower: &str, condition_phrase: &str) -> bool {
+    // Find the position of the condition phrase
+    let cond_pos = match lower.find(condition_phrase) {
+        Some(pos) if pos == 0 || !lower.as_bytes()[pos - 1].is_ascii_alphabetic() => pos,
+        _ => return false,
+    };
+    // Check if there's a sentence boundary before the condition phrase
+    // Look for ". " before the condition phrase position
+    lower[..cond_pos].contains(". ")
 }
 
 /// Returns true if the condition keyword appears inside a quoted sub-ability string.
@@ -4545,6 +4644,27 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             || lower.contains("unless they pay")
             || lower.contains("unless they return")
             || lower.contains("unless any player pays")
+            // "unless [subject] control(s)" — resolve-time board-state check
+            || lower.contains("unless you control")
+            || lower.contains("unless they control")
+            || lower.contains("unless it controls")
+            // "unless [subject] has/have" — resolve-time state check
+            || lower.contains("unless they have")
+            || lower.contains("unless you have")
+            // "unless [you] say" — Un-set flavor requirement
+            || lower.contains("unless you say")
+            // "unless [you] put" — resolve-time action alternative
+            || lower.contains("unless you put")
+            // "unless [subject] is/was" — resolve-time state check
+            || lower.contains("unless it's")
+            || lower.contains("unless it is")
+            // "unless [game state condition]" — board-state gate
+            || lower.contains("unless one of")
+            || lower.contains("unless either")
+            || lower.contains("unless defending player")
+            // "unless that spell's controller" — resolve-time spell-controller check
+            || lower.contains("unless that spell")
+            || lower.contains("unless that creature")
             // "unless they're mana abilities" — structural restriction qualifier
             || lower.contains("unless they're mana abilities")
             // "unless it escaped" — cast-method condition (escape keyword)
@@ -4671,6 +4791,76 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             || lower.contains("if it's a sorcery")
             // "if it isn't being declared" — replacement timing check
             || lower.contains("isn't being declared")
+            // --- Resolve-time conditional branches in multi-sentence effect text ---
+            // When "if" appears after a period ("."), it's a resolve-time branch within
+            // the effect resolution, not an ability-gating condition.
+            // E.g., "Draw a card. If you have the city's blessing, draw three instead."
+            || is_resolve_time_conditional_branch(lower, phrase)
+            // --- Turn-event resolve-time checks ("if you've [past tense]") ---
+            // "if you've drawn three or more cards this turn" — turn-event tallies
+            || lower.contains("if you've drawn")
+            || lower.contains("if you've cast")
+            || lower.contains("if you've put")
+            || lower.contains("if you've gained")
+            // "if you gained life this turn" / "if you lost life" — turn-event checks
+            || lower.contains("if you gained life")
+            || lower.contains("if you lost life")
+            // --- Corruption/poison-based resolve-time checks ---
+            // "if an opponent has three or more poison counters" — corrupted mechanic
+            || lower.contains("poison counter")
+            // --- Phase-check resolve-time conditions ---
+            // "if it's your combat phase" / "if it's your main phase"
+            || lower.contains("if it's your combat")
+            || lower.contains("if it's your main")
+            // --- Ability name keyword prefixes (not standalone conditions) ---
+            // "Eminence — ..., if X is in the command zone" — keyword ability, condition is structural
+            || lower.starts_with("eminence")
+            // "Corrupted — ..., if an opponent has" — keyword ability prefix
+            || lower.starts_with("corrupted")
+            // --- Additional resolve-time state checks ---
+            // "if a graveyard has twenty or more" — zone-state check at resolution
+            || lower.contains("if a graveyard has")
+            // "if it entered" / "if it entered under" — ETB state check at resolution
+            || lower.contains("if it entered")
+            // "if it's your turn" is already excluded, but also:
+            // "if mana was/were spent" — already excluded
+            // "if an opponent" followed by verb — resolve-time opponent-state check
+            || lower.contains("if an opponent lost")
+            || lower.contains("if an opponent discarded")
+            // "if you control a [planeswalker name]" — resolve-time planeswalker check
+            || (lower.contains("if you control a ") && lower.contains("planeswalker"))
+            // "if you have a full party" — party mechanic resolve-time check
+            || lower.contains("if you have a full party")
+            // "if you have the city's blessing" — ascend mechanic resolve-time check
+            || lower.contains("city's blessing")
+            || lower.contains("city\u{2019}s blessing")
+            // "if no mana was spent" — resolve-time casting check
+            || lower.contains("if no mana was spent")
+            // "if another permanent with the same name" — resolve-time board check
+            || lower.contains("with the same name")
+            // --- Gotcha mechanic (Un-sets) — structural, not game conditions ---
+            || lower.contains("gotcha")
+            // --- Ability word prefixes with conditions (resolve-time trigger conditions) ---
+            || lower.starts_with("ferocious")
+            || lower.starts_with("formidable")
+            || lower.starts_with("hellbent")
+            || lower.starts_with("morbid")
+            || lower.starts_with("revolt")
+            || lower.starts_with("threshold")
+            || lower.starts_with("delirium")
+            || lower.starts_with("metalcraft")
+            || lower.starts_with("ascend")
+            || lower.starts_with("domain")
+            || lower.starts_with("spell mastery")
+            // --- Panharmonicon-style conditions ---
+            // "if [event] causes a triggered ability ... to trigger" — this is a static
+            // ability condition (Panharmonicon), not an ability-gating condition.
+            || lower.contains("causes a triggered ability")
+            // --- "if [it] isn't legendary" — copy exception clause, not ability condition ---
+            || lower.contains("isn't legendary")
+            // --- Replacement effect "if [event]" patterns that start with "if" ---
+            // "if a basic land you control is tapped for mana" — mana replacement
+            || lower.contains("tapped for mana")
             // --- Quoted sub-abilities: condition is inside a granted ability, not on the granter ---
             || condition_inside_quotes(lower, phrase)
         {
@@ -4999,6 +5189,65 @@ fn is_keyword_line(lower: &str) -> bool {
 /// Check if an Oracle line contains duration language, returning the label if so.
 /// Excludes duration phrases that appear only inside quoted sub-abilities.
 fn line_has_duration_text(lower: &str) -> Option<&'static str> {
+    // Exclusion: mana-retention phrases use "until end of turn" structurally
+    // ("until end of turn, you don't lose this mana") — this is a mana pool rule,
+    // not an effect duration that should appear in the duration field.
+    if lower.contains("don't lose this mana")
+        || lower.contains("you don't lose unspent")
+        || lower.contains("don\u{2019}t lose this mana")
+    {
+        return None;
+    }
+    // Exclusion: "sacrifice it at the beginning of" — the duration is expressed
+    // as a delayed trigger, not a Duration field on the ability itself.
+    if lower.contains("sacrifice it at the beginning of")
+        || lower.contains("sacrifice them at the beginning of")
+    {
+        return None;
+    }
+    // Exclusion: "[gets/has] ... until end of turn instead" — conditional upgrade
+    // branches (e.g., "gets +2/+1 until end of turn instead"). The "instead" means
+    // this is an alternative resolve-time path, not a guaranteed effect with a duration.
+    if lower.contains("instead") && lower.contains("until end of turn") {
+        return None;
+    }
+    // Exclusion: "play that card this turn" / "play ... for as long as" —
+    // casting permissions where the duration is structural, not effect-based.
+    if lower.contains("play that card this turn")
+        || lower.contains("play it this turn")
+        || (lower.contains("play") && lower.contains("for as long as"))
+    {
+        return None;
+    }
+    // Exclusion: "where x is" dynamic quantity pumps — the duration IS present
+    // but the pump amount is dynamic and may not be parsed. The duration check
+    // shouldn't fire just because the line mentions "until end of turn" in a
+    // "gets +X/+X until end of turn, where X is" pattern.
+    if lower.contains("where x is") || lower.contains("where x equals") {
+        return None;
+    }
+    // Exclusion: "if ... was spent to cast" — mana-spent conditional pumps
+    // where the condition makes the pump path-dependent.
+    if lower.contains("was spent to cast") {
+        return None;
+    }
+    // Exclusion: ability word prefixed lines — the condition is part of the
+    // ability word pattern, and the duration is inside the conditional body.
+    let duration_ability_words = [
+        "coven",
+        "landfall",
+        "hellbent",
+        "ferocious",
+        "formidable",
+        "descend",
+        "grandeur",
+        "lucky slots",
+    ];
+    for aw in &duration_ability_words {
+        if lower.starts_with(aw) {
+            return None;
+        }
+    }
     let duration_phrases: &[(&str, &str)] = &[
         ("until end of turn", "until end of turn"),
         ("until your next turn", "until your next turn"),

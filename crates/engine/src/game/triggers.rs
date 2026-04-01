@@ -491,6 +491,37 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
             }
         }
 
+        // CR 725.2: At the beginning of the initiative holder's upkeep,
+        // that player ventures into the Undercity. Synthetic game-rule trigger.
+        if let GameEvent::PhaseChanged {
+            phase: Phase::Upkeep,
+        } = event
+        {
+            if let Some(init_holder) = state.initiative {
+                if init_holder == state.active_player {
+                    let venture_effect = Effect::VentureInto {
+                        dungeon: crate::game::dungeon::DungeonId::Undercity,
+                    };
+                    let venture_ability =
+                        ResolvedAbility::new(venture_effect, Vec::new(), ObjectId(0), init_holder);
+                    let trig_def = TriggerDefinition::new(TriggerMode::Phase)
+                        .description("Initiative upkeep venture (CR 725.2)".to_string());
+                    pending.push(PendingTrigger {
+                        source_id: ObjectId(0),
+                        controller: init_holder,
+                        condition: trig_def.condition,
+                        ability: venture_ability,
+                        timestamp: 0,
+                        target_constraints: Vec::new(),
+                        trigger_event: Some(event.clone()),
+                        modal: None,
+                        mode_abilities: vec![],
+                        description: None,
+                    });
+                }
+            }
+        }
+
         // CR 724.2: When a creature deals combat damage to the monarch, its controller
         // becomes the monarch. Synthetic game-rule trigger.
         if let GameEvent::DamageDealt {
@@ -519,6 +550,44 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             controller: new_monarch,
                             condition: trig_def.condition,
                             ability: become_ability,
+                            timestamp: 0,
+                            target_constraints: Vec::new(),
+                            trigger_event: Some(event.clone()),
+                            modal: None,
+                            mode_abilities: vec![],
+                            description: None,
+                        });
+                    }
+                }
+            }
+        }
+
+        // CR 725.2: When a creature deals combat damage to the initiative holder,
+        // its controller takes the initiative. Synthetic game-rule trigger.
+        if let GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Player(target_player),
+            is_combat: true,
+            ..
+        } = event
+        {
+            if state.initiative == Some(*target_player) {
+                if let Some(attacker) = state.objects.get(source_id) {
+                    let new_holder = attacker.controller;
+                    if new_holder != *target_player {
+                        let take_init = ResolvedAbility::new(
+                            Effect::TakeTheInitiative,
+                            Vec::new(),
+                            *source_id,
+                            new_holder,
+                        );
+                        let trig_def = TriggerDefinition::new(TriggerMode::DamageDone)
+                            .description("Initiative steal (CR 725.2)".to_string());
+                        pending.push(PendingTrigger {
+                            source_id: *source_id,
+                            controller: new_holder,
+                            condition: trig_def.condition,
+                            ability: take_init,
                             timestamp: 0,
                             target_constraints: Vec::new(),
                             trigger_event: Some(event.clone()),

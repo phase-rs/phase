@@ -127,6 +127,10 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         // CR 704.5z: A player controlling Start your engines! gets speed 1 if they had none.
         check_start_your_engines(state, events, &mut any_performed);
 
+        // CR 704.5t: If a player's venture marker is on the bottommost room
+        // and no room ability from that dungeon is on the stack, complete the dungeon.
+        check_dungeon_completion(state, events, &mut any_performed);
+
         if !any_performed {
             break;
         }
@@ -680,6 +684,52 @@ fn is_valid_attachment_target(
         .get(&target_id)
         .map(|obj| obj.zone == Zone::Battlefield)
         .unwrap_or(false)
+}
+
+/// CR 704.5t: If a player's venture marker is on the bottommost room of a dungeon card,
+/// and that dungeon card isn't the source of a room ability that has triggered but not yet
+/// left the stack, the dungeon card's owner removes it from the game.
+fn check_dungeon_completion(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+) {
+    use crate::game::dungeon::{dungeon_sentinel_id, is_bottommost};
+
+    // Collect players whose dungeons need completing.
+    let to_complete: Vec<(
+        crate::types::player::PlayerId,
+        crate::game::dungeon::DungeonId,
+    )> = state
+        .dungeon_progress
+        .iter()
+        .filter_map(|(&player, progress)| {
+            let dungeon_id = progress.current_dungeon?;
+            if !is_bottommost(dungeon_id, progress.current_room) {
+                return None;
+            }
+            // Check if any room ability from this dungeon is on the stack.
+            let sentinel = dungeon_sentinel_id(player);
+            let has_room_on_stack = state.stack.iter().any(|entry| entry.source_id == sentinel);
+            if has_room_on_stack {
+                return None;
+            }
+            Some((player, dungeon_id))
+        })
+        .collect();
+
+    for (player, dungeon_id) in to_complete {
+        if let Some(progress) = state.dungeon_progress.get_mut(&player) {
+            progress.current_dungeon = None;
+            progress.current_room = 0;
+            progress.completed.insert(dungeon_id);
+            events.push(GameEvent::DungeonCompleted {
+                player_id: player,
+                dungeon: dungeon_id,
+            });
+            *any_performed = true;
+        }
+    }
 }
 
 #[cfg(test)]

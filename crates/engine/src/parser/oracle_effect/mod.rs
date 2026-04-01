@@ -4565,6 +4565,88 @@ fn try_nom_condition_as_ability_condition(text: &str) -> Option<AbilityCondition
     use super::oracle_nom::condition::parse_inner_condition;
 
     let lower = text.to_lowercase();
+
+    // CR 701.30d: "you win the clash" / "you won the clash" — maps to IfYouDo
+    // because clash::resolve sets optional_effect_performed on win.
+    if tag::<_, _, VerboseError<&str>>("you win the clash")
+        .parse(lower.as_str())
+        .is_ok()
+        || tag::<_, _, VerboseError<&str>>("you won the clash")
+            .parse(lower.as_str())
+            .is_ok()
+    {
+        return Some(AbilityCondition::IfYouDo);
+    }
+
+    // CR 603.4: "this spell was cast from your hand" / "this spell was cast from [zone]"
+    if let Ok((rest, _)) =
+        tag::<_, _, VerboseError<&str>>("this spell was cast from ").parse(lower.as_str())
+    {
+        let zone = match rest.trim() {
+            "your hand" | "hand" => Some(Zone::Hand),
+            "your graveyard" | "a graveyard" => Some(Zone::Graveyard),
+            "exile" => Some(Zone::Exile),
+            _ => None,
+        };
+        if let Some(zone) = zone {
+            return Some(AbilityCondition::CastFromZone { zone });
+        }
+    }
+
+    // CR 608.2c: "it's a [type] card" / "it's not a [type] card" / "that card is a [type] card"
+    {
+        let (negated, rest_after_prefix) = if let Ok((r, _)) =
+            tag::<_, _, VerboseError<&str>>("it's not a ").parse(lower.as_str())
+        {
+            (true, Some(r))
+        } else if let Ok((r, _)) = tag::<_, _, VerboseError<&str>>("it's a ").parse(lower.as_str())
+        {
+            (false, Some(r))
+        } else if let Ok((r, _)) =
+            tag::<_, _, VerboseError<&str>>("that card is a ").parse(lower.as_str())
+        {
+            (false, Some(r))
+        } else if let Ok((r, _)) =
+            tag::<_, _, VerboseError<&str>>("it isn't a ").parse(lower.as_str())
+        {
+            (true, Some(r))
+        } else {
+            (false, None)
+        };
+
+        if let Some(rest) = rest_after_prefix {
+            let rest = rest.trim_end_matches(" card").trim();
+            let card_type = match rest {
+                "creature" => Some(CoreType::Creature),
+                "land" => Some(CoreType::Land),
+                "nonland" => {
+                    return Some(AbilityCondition::RevealedHasCardType {
+                        card_type: CoreType::Land,
+                        negated: !negated,
+                    })
+                }
+                "instant" => Some(CoreType::Instant),
+                "sorcery" => Some(CoreType::Sorcery),
+                "artifact" => Some(CoreType::Artifact),
+                "enchantment" => Some(CoreType::Enchantment),
+                "planeswalker" => Some(CoreType::Planeswalker),
+                "permanent" => {
+                    // "it's a permanent card" — any non-instant non-sorcery
+                    // Map to RevealedHasCardType for creature as a reasonable approximation
+                    // TODO: Add a dedicated PermanentCard variant for full correctness
+                    None
+                }
+                _ => None,
+            };
+            if let Some(ct) = card_type {
+                return Some(AbilityCondition::RevealedHasCardType {
+                    card_type: ct,
+                    negated,
+                });
+            }
+        }
+    }
+
     let (rest, sc) = parse_inner_condition(&lower).ok()?;
     if !rest.trim().is_empty() {
         return None;
@@ -10437,5 +10519,110 @@ mod tests {
             }
             other => panic!("expected Pump, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn otherwise_cast_from_hand_condition() {
+        // "If this spell was cast from your hand, [effect]. Otherwise, [else-effect]"
+        // Should produce condition + else_ability, not Unimplemented
+        let chain = parse_effect_chain(
+            "If this spell was cast from your hand, draw two cards. Otherwise, draw a card.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        let first = &chain;
+        assert!(
+            first.condition.is_some(),
+            "first def should have CastFromZone condition, got: {:?}",
+            first
+        );
+        assert!(
+            first.else_ability.is_some(),
+            "first def should have else_ability for Otherwise clause"
+        );
+    }
+
+    #[test]
+    fn otherwise_revealed_card_type_condition() {
+        // "If it's a creature card, [effect]. Otherwise, [else-effect]"
+        let chain = parse_effect_chain(
+            "If it's a creature card, put it into your hand. Otherwise, put it into your graveyard.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        let first = &chain;
+        assert!(
+            first.condition.is_some(),
+            "should have RevealedHasCardType condition, got: {:?}",
+            first
+        );
+    }
+
+    #[test]
+    fn effect_clash_with_opponent() {
+        let e = parse_effect("clash with an opponent");
+        assert!(matches!(e, Effect::Clash), "expected Clash, got: {e:?}");
+    }
+
+    #[test]
+    fn effect_populate() {
+        let e = parse_effect("populate");
+        assert!(
+            matches!(e, Effect::Populate),
+            "expected Populate, got: {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_pay_energy_double() {
+        let e = parse_effect("pay {e}{e}");
+        assert!(
+            matches!(
+                e,
+                Effect::PayCost {
+                    cost: PaymentCost::Energy {
+                        amount: QuantityExpr::Fixed { value: 2 },
+                    },
+                }
+            ),
+            "expected PayCost Energy(2), got: {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_pay_energy_triple() {
+        let e = parse_effect("pay {e}{e}{e}");
+        assert!(
+            matches!(
+                e,
+                Effect::PayCost {
+                    cost: PaymentCost::Energy {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                    },
+                }
+            ),
+            "expected PayCost Energy(3), got: {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_switch_pt_target_creature() {
+        let e = parse_effect("switch target creature's power and toughness until end of turn");
+        assert!(
+            matches!(e, Effect::SwitchPT { .. }),
+            "expected SwitchPT, got: {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_switch_pt_self() {
+        let e = parse_effect("switch ~'s power and toughness until end of turn");
+        assert!(
+            matches!(
+                e,
+                Effect::SwitchPT {
+                    target: TargetFilter::SelfRef
+                }
+            ),
+            "expected SwitchPT with SelfRef, got: {e:?}"
+        );
     }
 }

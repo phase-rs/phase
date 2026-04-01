@@ -78,6 +78,31 @@ pub fn resolve(
                 state.cost_payment_failed_flag = true;
             }
         }
+        // CR 107.14: A player can pay {E} only if they have enough energy counters.
+        PaymentCost::Energy { amount } => {
+            let amount = resolve_quantity(state, amount, ability.controller, ability.source_id);
+            let amount = u32::try_from(amount.max(0)).unwrap_or(0);
+            let can_pay = state
+                .players
+                .iter()
+                .find(|p| p.id == ability.controller)
+                .is_some_and(|p| p.energy >= amount);
+            if can_pay {
+                if let Some(p) = state
+                    .players
+                    .iter_mut()
+                    .find(|p| p.id == ability.controller)
+                {
+                    p.energy -= amount;
+                    events.push(GameEvent::EnergyChanged {
+                        player: ability.controller,
+                        delta: -(amount as i32),
+                    });
+                }
+            } else {
+                state.cost_payment_failed_flag = true;
+            }
+        }
     }
     Ok(())
 }
@@ -167,5 +192,42 @@ mod tests {
         assert!(result.is_ok());
         assert!(state.cost_payment_failed_flag);
         assert_eq!(state.players[0].life, 2); // No change
+    }
+
+    #[test]
+    fn energy_payment_deducts_energy() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].energy = 3;
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::Energy {
+                amount: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+            },
+        });
+        let mut events = Vec::new();
+        let result = resolve(&mut state, &ability, &mut events);
+        assert!(result.is_ok());
+        assert!(!state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].energy, 1);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::EnergyChanged { player, delta }
+                if *player == PlayerId(0) && *delta == -2
+        )));
+    }
+
+    #[test]
+    fn energy_payment_fails_when_insufficient() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].energy = 1;
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::Energy {
+                amount: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+            },
+        });
+        let mut events = Vec::new();
+        let result = resolve(&mut state, &ability, &mut events);
+        assert!(result.is_ok());
+        assert!(state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].energy, 1); // No change
     }
 }

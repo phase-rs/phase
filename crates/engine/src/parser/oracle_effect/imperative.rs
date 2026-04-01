@@ -839,6 +839,23 @@ pub(super) fn parse_utility_imperative_ast(
             return Some(UtilityImperativeAst::Transform { target });
         }
     }
+    // CR 613.4d: "switch [target]'s power and toughness"
+    if let Some((_, rest)) =
+        nom_on_lower(text, lower, |input| value((), tag("switch ")).parse(input))
+    {
+        let (target, rem) = parse_target(rest);
+        // Consume "'s power and toughness" or " power and toughness" suffix
+        let rem_lower = rem.to_lowercase();
+        if tag::<_, _, VerboseError<&str>>("'s power and toughness")
+            .parse(rem_lower.as_str())
+            .is_ok()
+            || tag::<_, _, VerboseError<&str>>(" power and toughness")
+                .parse(rem_lower.as_str())
+                .is_ok()
+        {
+            return Some(UtilityImperativeAst::SwitchPT { target });
+        }
+    }
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |input| value((), tag("attach ")).parse(input))
     {
@@ -867,6 +884,8 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
         UtilityImperativeAst::Copy { target } => Effect::CopySpell { target },
         UtilityImperativeAst::Transform { target } => Effect::Transform { target },
         UtilityImperativeAst::Attach { target } => Effect::Attach { target },
+        // CR 613.4d: Switch power and toughness.
+        UtilityImperativeAst::SwitchPT { target } => Effect::SwitchPT { target },
     }
 }
 
@@ -1504,6 +1523,32 @@ pub(super) fn parse_cost_resource_ast(
                 });
             }
         }
+        // CR 107.14: "pay {E}", "pay {E}{E}", "pay N {E}" → PaymentCost::Energy
+        if rest.contains("{e}") {
+            let energy_count = rest.matches("{e}").count() as u32;
+            let cleaned = rest.replace("{e}", "").replace(' ', "");
+            if cleaned.is_empty() {
+                // Pure {E} symbols: "pay {e}{e}"
+                return Some(CostResourceImperativeAst::Pay {
+                    cost: PaymentCost::Energy {
+                        amount: QuantityExpr::Fixed {
+                            value: energy_count as i32,
+                        },
+                    },
+                });
+            }
+            // "pay N {e}" / "pay eight {e}" — number prefix + {e} suffix
+            if rest.ends_with("{e}") {
+                let prefix = rest.trim_end_matches("{e}").trim();
+                if let Ok((_, n)) = nom_primitives::parse_number.parse(prefix) {
+                    return Some(CostResourceImperativeAst::Pay {
+                        cost: PaymentCost::Energy {
+                            amount: QuantityExpr::Fixed { value: n as i32 },
+                        },
+                    });
+                }
+            }
+        }
         // "pay {2}{B}" → PaymentCost::Mana (CR 117.1)
         if let Some((mana_cost, _)) = parse_mana_symbols(rest_orig.trim()) {
             return Some(CostResourceImperativeAst::Pay {
@@ -1651,9 +1696,11 @@ pub(super) fn parse_imperative_family_ast(
         "create" => parse_search_and_creation_ast(text, lower)
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(ast))),
 
-        // Utility verbs (CR 615, CR 701.19, CR 701.6)
-        "prevent" | "regenerate" | "copy" | "attach" => parse_utility_imperative_ast(text, lower)
-            .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Utility(ast))),
+        // Utility verbs (CR 615, CR 701.19, CR 701.6, CR 613.4d)
+        "prevent" | "regenerate" | "copy" | "attach" | "switch" => {
+            parse_utility_imperative_ast(text, lower)
+                .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Utility(ast)))
+        }
         "transform" | "transforms" => parse_utility_imperative_ast(text, lower)
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Utility(ast))),
 
@@ -1698,6 +1745,19 @@ pub(super) fn parse_imperative_family_ast(
             }
         }
         "proliferate" => Some(ImperativeFamilyAst::Proliferate),
+        // CR 701.36a: "populate"
+        "populate" => Some(ImperativeFamilyAst::Populate),
+        // CR 701.30: "clash with an opponent"
+        "clash" => {
+            if tag::<_, _, VerboseError<&str>>("clash with an opponent")
+                .parse(lower)
+                .is_ok()
+            {
+                Some(ImperativeFamilyAst::Clash)
+            } else {
+                None
+            }
+        }
         // CR 702.157a: "suspect it" / "suspect target creature"
         "suspect" | "suspects" => {
             let rest = lower[first_word.len()..].trim();
@@ -1786,9 +1846,36 @@ pub(super) fn parse_imperative_family_ast(
                 None
             }
         }
+        // CR 701.49: "venture into the dungeon" / "venture into the Undercity"
+        "venture" => {
+            use nom::bytes::complete::tag;
+            use nom::branch::alt;
+            use nom::combinator::value;
+            use nom::Parser;
+            alt((
+                value(ImperativeFamilyAst::VentureIntoUndercity, tag("venture into the undercity")),
+                value(ImperativeFamilyAst::VentureIntoDungeon, tag("venture into the dungeon")),
+            ))
+            .parse(lower)
+            .ok()
+            .map(|(_, ast)| ast)
+        }
         // CR 500.7: "take an extra turn after this one"
+        // CR 725: "take the initiative"
         "take" | "takes" => {
-            if nom_primitives::scan_contains(lower, "extra turn") {
+            use nom::bytes::complete::tag;
+            use nom::branch::alt;
+            use nom::combinator::value;
+            use nom::Parser;
+            if alt((
+                value((), tag::<_, _, nom::error::Error<&str>>("take the initiative")),
+                value((), tag("takes the initiative")),
+            ))
+            .parse(lower)
+            .is_ok()
+            {
+                Some(ImperativeFamilyAst::TakeTheInitiative)
+            } else if nom_primitives::scan_contains(lower, "extra turn") {
                 Some(ImperativeFamilyAst::GainKeyword(Effect::ExtraTurn {
                     target: TargetFilter::Controller,
                 }))
@@ -2163,7 +2250,16 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::Learn => Effect::Learn,
         ImperativeFamilyAst::ManifestDread => Effect::ManifestDread,
         ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch,
+        ImperativeFamilyAst::VentureIntoDungeon => Effect::VentureIntoDungeon,
+        ImperativeFamilyAst::VentureIntoUndercity => Effect::VentureInto {
+            dungeon: crate::game::dungeon::DungeonId::Undercity,
+        },
+        ImperativeFamilyAst::TakeTheInitiative => Effect::TakeTheInitiative,
         ImperativeFamilyAst::Proliferate => Effect::Proliferate,
+        // CR 701.36a: Populate.
+        ImperativeFamilyAst::Populate => Effect::Populate,
+        // CR 701.30: Clash with an opponent.
+        ImperativeFamilyAst::Clash => Effect::Clash,
         ImperativeFamilyAst::GainKeyword(effect) => effect,
         ImperativeFamilyAst::LoseKeyword(effect) => effect,
         ImperativeFamilyAst::LoseTheGame => Effect::LoseTheGame,

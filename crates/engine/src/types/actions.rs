@@ -120,6 +120,14 @@ pub enum GameAction {
     ChooseRingBearer {
         target: ObjectId,
     },
+    /// CR 701.49a: Choose which dungeon to venture into.
+    ChooseDungeon {
+        dungeon: crate::game::dungeon::DungeonId,
+    },
+    /// CR 309.5a: Choose which room to advance to at a branch point.
+    ChooseDungeonRoom {
+        room_index: u8,
+    },
     /// CR 702.51a: Tap creature/artifact for convoke or waterbend mana.
     /// CR 302.6: Summoning sickness does not apply (convoke doesn't use the tap ability mechanism).
     TapForConvoke {

@@ -645,6 +645,18 @@ pub enum WaitingFor {
         player: PlayerId,
         candidates: Vec<ObjectId>,
     },
+    /// CR 701.49a: Player chooses which dungeon to venture into (no active dungeon).
+    ChooseDungeon {
+        player: PlayerId,
+        options: Vec<crate::game::dungeon::DungeonId>,
+    },
+    /// CR 309.5a: Player at a branching room chooses which room to advance to.
+    ChooseDungeonRoom {
+        player: PlayerId,
+        dungeon: crate::game::dungeon::DungeonId,
+        options: Vec<u8>,
+        option_names: Vec<String>,
+    },
     /// CR 601.2b: Player must choose a card to discard as part of an additional casting cost.
     /// After selection, the card is discarded and casting continues via `pay_and_push`.
     DiscardForCost {
@@ -705,6 +717,20 @@ pub enum WaitingFor {
     TopOrBottomChoice {
         player: PlayerId,
         object_id: ObjectId,
+    },
+    /// CR 701.36a: Choose a creature token you control to create a copy of.
+    PopulateChoice {
+        player: PlayerId,
+        source_id: ObjectId,
+        valid_tokens: Vec<ObjectId>,
+    },
+    /// CR 701.30c: After a clash, each player puts their revealed card on top or
+    /// bottom of their library. Choices are made in APNAP order. `remaining` holds
+    /// the next player/card pairs still awaiting a choice.
+    ClashCardPlacement {
+        player: PlayerId,
+        card: ObjectId,
+        remaining: Vec<(PlayerId, ObjectId)>,
     },
     /// CR 702.139a: Before the game begins, reveal companion from outside the game.
     CompanionReveal {
@@ -851,6 +877,8 @@ impl WaitingFor {
             | WaitingFor::ModalFaceChoice { player, .. }
             | WaitingFor::WarpCostChoice { player, .. }
             | WaitingFor::ChooseRingBearer { player, .. }
+            | WaitingFor::ChooseDungeon { player, .. }
+            | WaitingFor::ChooseDungeonRoom { player, .. }
             | WaitingFor::DiscardForCost { player, .. }
             | WaitingFor::SacrificeForCost { player, .. }
             | WaitingFor::TapCreaturesForManaAbility { player, .. }
@@ -861,6 +889,8 @@ impl WaitingFor {
             | WaitingFor::UnlessPayment { player, .. }
             | WaitingFor::DiscoverChoice { player, .. }
             | WaitingFor::TopOrBottomChoice { player, .. }
+            | WaitingFor::PopulateChoice { player, .. }
+            | WaitingFor::ClashCardPlacement { player, .. }
             | WaitingFor::CompanionReveal { player, .. }
             | WaitingFor::ChooseLegend { player, .. }
             | WaitingFor::ProliferateChoice { player, .. }
@@ -1337,6 +1367,13 @@ pub struct GameState {
     /// CR 701.54: Per-player ring-bearer (the creature the Ring is on).
     #[serde(default)]
     pub ring_bearer: HashMap<PlayerId, Option<ObjectId>>,
+
+    /// CR 309 / CR 701.49: Per-player dungeon venture progress.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub dungeon_progress: HashMap<PlayerId, crate::game::dungeon::DungeonProgress>,
+    /// CR 725: The initiative designation (like monarch — one player at a time).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiative: Option<PlayerId>,
 }
 
 /// A runtime-generated continuous effect stored at state level.
@@ -1477,6 +1514,8 @@ impl GameState {
             pending_cast: None,
             ring_level: HashMap::new(),
             ring_bearer: HashMap::new(),
+            dungeon_progress: HashMap::new(),
+            initiative: None,
             cancelled_casts: Vec::new(),
         }
     }

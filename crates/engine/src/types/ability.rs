@@ -1608,6 +1608,11 @@ pub enum PaymentCost {
     Speed {
         amount: QuantityExpr,
     },
+    /// CR 107.14: Pay energy counters during effect resolution.
+    /// Distinct from `AbilityCost::PayEnergy` (activation cost before the colon).
+    Energy {
+        amount: QuantityExpr,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -2132,6 +2137,15 @@ pub enum Effect {
     /// CR 722: Become the monarch. Sets GameState::monarch to the controller.
     BecomeMonarch,
     Proliferate,
+    /// CR 701.36a: Choose a creature token you control, then create a copy of it.
+    Populate,
+    /// CR 701.30: Clash with an opponent — reveal top cards, compare mana values.
+    Clash,
+    /// CR 613.4d: Switch a creature's power and toughness. Applied in layer 7d.
+    SwitchPT {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
     CopySpell {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
@@ -2448,6 +2462,16 @@ pub enum Effect {
     /// CR 701.54a: The Ring tempts the controller. Increments ring level and prompts
     /// ring-bearer selection if the controller has creatures on the battlefield.
     RingTemptsYou,
+    /// CR 701.49: Venture into the dungeon. Advances the player's venture marker
+    /// or starts a new dungeon if none is active.
+    VentureIntoDungeon,
+    /// CR 701.49d: Venture into a specific dungeon (e.g., "venture into the Undercity").
+    VentureInto {
+        dungeon: crate::game::dungeon::DungeonId,
+    },
+    /// CR 725.2: Take the initiative. Grants initiative designation and triggers
+    /// venture into the Undercity.
+    TakeTheInitiative,
     /// Grant a casting permission to the target object (e.g., "cast from exile for {2}").
     /// Building block for Airbending, Foretell, Suspend, Hideaway, and similar mechanics.
     GrantCastingPermission {
@@ -2808,6 +2832,7 @@ impl Effect {
             | Effect::Attach { target, .. }
             | Effect::Fight { target, .. }
             | Effect::Bounce { target, .. }
+            | Effect::SwitchPT { target, .. }
             | Effect::CopySpell { target, .. }
             | Effect::CopyTokenOf { target, .. }
             | Effect::BecomeCopy { target, .. }
@@ -2867,6 +2892,8 @@ impl Effect {
             | Effect::Investigate
             | Effect::BecomeMonarch
             | Effect::Proliferate
+            | Effect::Populate
+            | Effect::Clash
             | Effect::Cleanup { .. }
             | Effect::Mana { .. }
             | Effect::SearchLibrary { .. }
@@ -2893,6 +2920,9 @@ impl Effect {
             | Effect::FlipCoin { .. }
             | Effect::FlipCoinUntilLose { .. }
             | Effect::RingTemptsYou
+            | Effect::VentureIntoDungeon
+            | Effect::VentureInto { .. }
+            | Effect::TakeTheInitiative
             | Effect::Amass { .. }
             | Effect::Monstrosity { .. }
             | Effect::Bolster { .. }
@@ -2950,6 +2980,9 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Investigate => "Investigate",
         Effect::BecomeMonarch => "BecomeMonarch",
         Effect::Proliferate => "Proliferate",
+        Effect::Populate => "Populate",
+        Effect::Clash => "Clash",
+        Effect::SwitchPT { .. } => "SwitchPT",
         Effect::CopySpell { .. } => "CopySpell",
         Effect::CopyTokenOf { .. } => "CopyTokenOf",
         Effect::BecomeCopy { .. } => "BecomeCopy",
@@ -2991,6 +3024,9 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::FlipCoin { .. } => "FlipCoin",
         Effect::FlipCoinUntilLose { .. } => "FlipCoinUntilLose",
         Effect::RingTemptsYou => "RingTemptsYou",
+        Effect::VentureIntoDungeon => "VentureIntoDungeon",
+        Effect::VentureInto { .. } => "VentureInto",
+        Effect::TakeTheInitiative => "TakeTheInitiative",
         Effect::GrantCastingPermission { .. } => "GrantCastingPermission",
         Effect::ChooseFromZone { .. } => "ChooseFromZone",
         Effect::Exploit { .. } => "Exploit",
@@ -3074,6 +3110,9 @@ pub enum EffectKind {
     Investigate,
     BecomeMonarch,
     Proliferate,
+    Populate,
+    Clash,
+    SwitchPT,
     CopySpell,
     CopyTokenOf,
     BecomeCopy,
@@ -3113,6 +3152,9 @@ pub enum EffectKind {
     FlipCoin,
     FlipCoinUntilLose,
     RingTemptsYou,
+    VentureIntoDungeon,
+    VentureInto,
+    TakeTheInitiative,
     GrantCastingPermission,
     ChooseFromZone,
     Exploit,
@@ -3195,6 +3237,9 @@ impl From<&Effect> for EffectKind {
             Effect::Investigate => EffectKind::Investigate,
             Effect::BecomeMonarch => EffectKind::BecomeMonarch,
             Effect::Proliferate => EffectKind::Proliferate,
+            Effect::Populate => EffectKind::Populate,
+            Effect::Clash => EffectKind::Clash,
+            Effect::SwitchPT { .. } => EffectKind::SwitchPT,
             Effect::CopySpell { .. } => EffectKind::CopySpell,
             Effect::CopyTokenOf { .. } => EffectKind::CopyTokenOf,
             Effect::BecomeCopy { .. } => EffectKind::BecomeCopy,
@@ -3236,6 +3281,9 @@ impl From<&Effect> for EffectKind {
             Effect::FlipCoin { .. } => EffectKind::FlipCoin,
             Effect::FlipCoinUntilLose { .. } => EffectKind::FlipCoinUntilLose,
             Effect::RingTemptsYou => EffectKind::RingTemptsYou,
+            Effect::VentureIntoDungeon => EffectKind::VentureIntoDungeon,
+            Effect::VentureInto { .. } => EffectKind::VentureInto,
+            Effect::TakeTheInitiative => EffectKind::TakeTheInitiative,
             Effect::GrantCastingPermission { .. } => EffectKind::GrantCastingPermission,
             Effect::ChooseFromZone { .. } => EffectKind::ChooseFromZone,
             Effect::Exploit { .. } => EffectKind::Exploit,
@@ -4519,6 +4567,8 @@ pub enum ContinuousModification {
     AddStaticMode {
         mode: StaticMode,
     },
+    /// CR 613.4d: Switch power and toughness. Applied in layer 7d.
+    SwitchPowerToughness,
     /// CR 510.1c: This creature assigns combat damage equal to its toughness
     /// rather than its power.
     AssignDamageFromToughness,

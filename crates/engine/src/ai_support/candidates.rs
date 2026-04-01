@@ -206,7 +206,8 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
             creatures,
             ..
         } => select_cards_variants(*player, creatures, Some(*count)),
-        WaitingFor::TopOrBottomChoice { player, .. } => vec![
+        WaitingFor::TopOrBottomChoice { player, .. }
+        | WaitingFor::ClashCardPlacement { player, .. } => vec![
             candidate(
                 GameAction::ChooseTopOrBottom { top: true },
                 TacticalClass::Selection,
@@ -710,6 +711,30 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        // CR 701.49a: Choose which dungeon to venture into.
+        WaitingFor::ChooseDungeon { player, options } => options
+            .iter()
+            .map(|&dungeon| {
+                candidate(
+                    GameAction::ChooseDungeon { dungeon },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
+        // CR 309.5a: Choose which room to advance to at a branch point.
+        WaitingFor::ChooseDungeonRoom {
+            player, options, ..
+        } => options
+            .iter()
+            .map(|&room_index| {
+                candidate(
+                    GameAction::ChooseDungeonRoom { room_index },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 702.139a: Companion reveal candidates
         WaitingFor::CompanionReveal {
             player,
@@ -765,6 +790,23 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
             }
             actions
         }
+        // CR 701.36a: Populate — choose a creature token to copy.
+        WaitingFor::PopulateChoice {
+            player,
+            valid_tokens,
+            ..
+        } => valid_tokens
+            .iter()
+            .map(|&token_id| {
+                candidate(
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(token_id)),
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 707.10c: Copy retargeting — keep current targets as default.
         WaitingFor::CopyRetarget {
             player,

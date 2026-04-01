@@ -26,6 +26,14 @@ pub enum PlayerActionKind {
     Surveil,
 }
 
+/// CR 701.30d: Result of a clash — whether the controller won, lost, or tied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClashResult {
+    Won,
+    Lost,
+    Tied,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum GameEvent {
@@ -245,6 +253,22 @@ pub enum GameEvent {
     RingTemptsYou {
         player_id: PlayerId,
     },
+    /// CR 309.4c: A player moved their venture marker into a dungeon room.
+    RoomEntered {
+        player_id: PlayerId,
+        dungeon: crate::game::dungeon::DungeonId,
+        room_index: u8,
+        room_name: String,
+    },
+    /// CR 309.7: A player completed a dungeon (removed from game).
+    DungeonCompleted {
+        player_id: PlayerId,
+        dungeon: crate::game::dungeon::DungeonId,
+    },
+    /// CR 725: A player took the initiative.
+    InitiativeTaken {
+        player_id: PlayerId,
+    },
     /// Avatar crossover: A creature with firebending attacked, producing mana.
     Firebend {
         source_id: ObjectId,
@@ -302,6 +326,14 @@ pub enum GameEvent {
         player_id: PlayerId,
         amount_spent: u32,
         new_cumulative: u32,
+    },
+    /// CR 701.30: A clash occurred between two players.
+    Clash {
+        controller: PlayerId,
+        opponent: PlayerId,
+        controller_mana_value: Option<u32>,
+        opponent_mana_value: Option<u32>,
+        result: ClashResult,
     },
     /// Emitted when layer re-evaluation changes a creature's effective power/toughness.
     /// Generic event — not tied to any specific card or effect.

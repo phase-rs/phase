@@ -169,7 +169,11 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::EnergyChanged { .. }
         | GameEvent::PlayerCounterChanged { .. }
         | GameEvent::ManaExpended { .. }
-        | GameEvent::PlayerPerformedAction { .. } => LogCategory::Special,
+        | GameEvent::PlayerPerformedAction { .. }
+        | GameEvent::RoomEntered { .. }
+        | GameEvent::DungeonCompleted { .. }
+        | GameEvent::InitiativeTaken { .. }
+        | GameEvent::Clash { .. } => LogCategory::Special,
     }
 }
 
@@ -718,6 +722,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             }
             segs
         }
+        GameEvent::RoomEntered { .. } => vec![text("Room entered")],
+        GameEvent::DungeonCompleted { .. } => vec![text("Dungeon completed")],
+        GameEvent::InitiativeTaken { .. } => vec![text("Initiative taken")],
+        GameEvent::Clash { .. } => vec![text("Clash")],
     }
 }
 

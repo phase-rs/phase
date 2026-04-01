@@ -194,11 +194,21 @@ pub(super) enum ImperativeFamilyAst {
     /// CR 509.1c: Must be blocked this turn if able.
     MustBeBlocked,
     Investigate,
+    /// CR 701.36a: Populate.
+    Populate,
+    /// CR 701.30: Clash with an opponent.
+    Clash,
     /// CR 701.48a: Learn.
     Learn,
     /// CR 701.62a: Manifest dread.
     ManifestDread,
     BecomeMonarch,
+    /// CR 701.49: "venture into the dungeon"
+    VentureIntoDungeon,
+    /// CR 701.49d: "venture into the Undercity"
+    VentureIntoUndercity,
+    /// CR 725: "take the initiative"
+    TakeTheInitiative,
     Proliferate,
     GainKeyword(Effect),
     LoseKeyword(Effect),
@@ -408,11 +418,25 @@ pub(super) enum SearchCreationImperativeAst {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum UtilityImperativeAst {
-    Prevent { text: String },
-    Regenerate { text: String },
-    Copy { target: TargetFilter },
-    Transform { target: TargetFilter },
-    Attach { target: TargetFilter },
+    Prevent {
+        text: String,
+    },
+    Regenerate {
+        text: String,
+    },
+    Copy {
+        target: TargetFilter,
+    },
+    Transform {
+        target: TargetFilter,
+    },
+    Attach {
+        target: TargetFilter,
+    },
+    /// CR 613.4d: Switch power and toughness.
+    SwitchPT {
+        target: TargetFilter,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

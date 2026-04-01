@@ -84,6 +84,8 @@ impl ContinuousModification {
             ContinuousModification::SetColor { .. }
             | ContinuousModification::AddColor { .. }
             | ContinuousModification::AddChosenColor => Layer::Color,
+            // CR 613.4d: Switch P/T is applied in layer 7d.
+            ContinuousModification::SwitchPowerToughness => Layer::SwitchPT,
             // CR 510.1c: Rule-modification effect processed in Ability layer (layer 6).
             ContinuousModification::AssignDamageFromToughness => Layer::Ability,
             // CR 613.2: Control-changing effects are applied in Layer 2.
@@ -231,6 +233,11 @@ mod tests {
             }
             .layer(),
             Layer::Type
+        );
+        // CR 613.4d: SwitchPowerToughness is layer 7d.
+        assert_eq!(
+            ContinuousModification::SwitchPowerToughness.layer(),
+            Layer::SwitchPT
         );
     }
 }

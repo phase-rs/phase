@@ -1933,6 +1933,70 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             }
             state.waiting_for.clone()
         }
+        // CR 701.36a: Player selects a creature token to copy for populate.
+        (
+            WaitingFor::PopulateChoice {
+                player,
+                valid_tokens,
+                ..
+            },
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(token_id)),
+            },
+        ) => {
+            let p = *player;
+            let tid = token_id;
+            let valid = valid_tokens.clone();
+            if !valid.contains(&tid) {
+                return Err(EngineError::ActionNotAllowed(
+                    "Selected token not in valid populate choices".into(),
+                ));
+            }
+            // Build a minimal ability context for the copy delegation.
+            let source_id = match &state.waiting_for {
+                WaitingFor::PopulateChoice { source_id, .. } => *source_id,
+                _ => unreachable!(),
+            };
+            let dummy_ability = ResolvedAbility::new(Effect::Populate, vec![], source_id, p);
+            let _ = effects::populate::create_token_copy(state, tid, &dummy_ability, &mut events);
+            state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
+            if let Some(cont) = state.pending_continuation.take() {
+                let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
+            }
+            state.waiting_for.clone()
+        }
+        // CR 701.30c: Clash card placement — current player chooses top or bottom,
+        // then advance to the next player in the remaining queue.
+        (
+            WaitingFor::ClashCardPlacement {
+                player,
+                card,
+                remaining,
+            },
+            GameAction::ChooseTopOrBottom { top },
+        ) => {
+            let p = *player;
+            let oid = *card;
+            let remaining = remaining.clone();
+            zones::move_to_library_position(state, oid, top, &mut events);
+            if let Some(((next_player, next_card), rest)) = remaining.split_first() {
+                // More players need to choose — advance to the next.
+                state.waiting_for = WaitingFor::ClashCardPlacement {
+                    player: *next_player,
+                    card: *next_card,
+                    remaining: rest.to_vec(),
+                };
+            } else {
+                // All players have chosen — pop continuation.
+                state.waiting_for = WaitingFor::Priority { player: p };
+                state.priority_player = p;
+                if let Some(cont) = state.pending_continuation.take() {
+                    let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
+                }
+            }
+            state.waiting_for.clone()
+        }
         // CR 701.20e + CR 608.2c: Player selects cards to keep from looked-at cards; rest go elsewhere.
         (
             WaitingFor::DigChoice {
@@ -2522,6 +2586,47 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;
             // Resume pending continuation if present
+            if let Some(cont) = state.pending_continuation.take() {
+                let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
+            }
+            state.waiting_for.clone()
+        }
+        // CR 701.49a: Player chooses which dungeon to venture into.
+        (WaitingFor::ChooseDungeon { player, options }, GameAction::ChooseDungeon { dungeon }) => {
+            if !options.contains(&dungeon) {
+                return Err(EngineError::InvalidAction(
+                    "Invalid dungeon choice".to_string(),
+                ));
+            }
+            let p = *player;
+            effects::venture::handle_choose_dungeon(state, p, dungeon, &mut events);
+            state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
+            if let Some(cont) = state.pending_continuation.take() {
+                let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
+            }
+            state.waiting_for.clone()
+        }
+        // CR 309.5a: Player chooses which room to advance to at a branch point.
+        (
+            WaitingFor::ChooseDungeonRoom {
+                player,
+                dungeon,
+                options,
+                ..
+            },
+            GameAction::ChooseDungeonRoom { room_index },
+        ) => {
+            if !options.contains(&room_index) {
+                return Err(EngineError::InvalidAction(
+                    "Invalid dungeon room choice".to_string(),
+                ));
+            }
+            let p = *player;
+            let d = *dungeon;
+            effects::venture::handle_choose_room(state, p, d, room_index, &mut events);
+            state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
             if let Some(cont) = state.pending_continuation.take() {
                 let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
             }

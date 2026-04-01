@@ -818,6 +818,12 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                     obj.static_definitions.push(def);
                 }
             }
+            // CR 613.4d: Switch power and toughness values.
+            ContinuousModification::SwitchPowerToughness => {
+                let (p, t) = (obj.power, obj.toughness);
+                obj.power = t;
+                obj.toughness = p;
+            }
             // CR 613: Mark creature as assigning combat damage from toughness.
             ContinuousModification::AssignDamageFromToughness => {
                 obj.assigns_damage_from_toughness = true;

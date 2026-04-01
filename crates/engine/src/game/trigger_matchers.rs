@@ -148,6 +148,12 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 701.54: Ring tempts you trigger
     r.insert(TriggerMode::RingTemptsYou, match_ring_tempts_you);
 
+    // CR 309 / CR 701.49: Dungeon triggers
+    r.insert(TriggerMode::DungeonCompleted, match_dungeon_completed);
+    r.insert(TriggerMode::RoomEntered, match_room_entered);
+    // CR 725: Initiative triggers
+    r.insert(TriggerMode::TakesInitiative, match_takes_initiative);
+
     // CR 702.110a: Exploit trigger matcher
     r.insert(TriggerMode::Exploited, match_exploited);
 
@@ -182,7 +188,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::PhaseOut,
         TriggerMode::PhaseOutAll,
         TriggerMode::NewGame,
-        TriggerMode::TakesInitiative,
+        // TriggerMode::TakesInitiative — moved to real matcher above
         TriggerMode::LosesGame,
         TriggerMode::Championed,
         TriggerMode::Exerted,
@@ -193,8 +199,8 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::Adapt,
         TriggerMode::Foretell,
         TriggerMode::Investigated,
-        TriggerMode::DungeonCompleted,
-        TriggerMode::RoomEntered,
+        // TriggerMode::DungeonCompleted — moved to real matcher above
+        // TriggerMode::RoomEntered — moved to real matcher above
         TriggerMode::PlanarDice,
         TriggerMode::PlaneswalkedFrom,
         TriggerMode::PlaneswalkedTo,
@@ -1572,6 +1578,48 @@ pub(super) fn match_ring_tempts_you(
             .map(|obj| obj.controller)
             .unwrap_or(PlayerId(255));
         *player_id == source_controller
+    } else {
+        false
+    }
+}
+
+/// CR 309.7: Match dungeon completion events.
+pub(super) fn match_dungeon_completed(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::DungeonCompleted { player_id, .. } = event {
+        valid_player_matches(trigger, state, *player_id, source_id)
+    } else {
+        false
+    }
+}
+
+/// CR 309.4c: Match room entry events.
+pub(super) fn match_room_entered(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::RoomEntered { player_id, .. } = event {
+        valid_player_matches(trigger, state, *player_id, source_id)
+    } else {
+        false
+    }
+}
+
+/// CR 725.2: Match "takes the initiative" events.
+pub(super) fn match_takes_initiative(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::InitiativeTaken { player_id } = event {
+        valid_player_matches(trigger, state, *player_id, source_id)
     } else {
         false
     }

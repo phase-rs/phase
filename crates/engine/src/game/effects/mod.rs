@@ -28,6 +28,7 @@ pub mod change_zone;
 pub mod choose;
 pub mod choose_card;
 pub mod choose_from_zone;
+pub mod clash;
 pub mod cleanup;
 pub mod connive;
 pub mod copy_spell;
@@ -67,6 +68,7 @@ pub mod monstrosity;
 pub mod pay;
 pub mod phase_out;
 pub mod player_counter;
+pub mod populate;
 pub mod prevent_damage;
 pub mod proliferate;
 pub mod pump;
@@ -87,10 +89,12 @@ pub mod solve_case;
 pub mod speed_effects;
 pub mod surveil;
 pub mod suspect;
+pub mod switch_pt;
 pub mod tap_untap;
 pub mod token;
 pub mod token_copy;
 pub mod transform_effect;
+pub mod venture;
 pub mod win_lose;
 
 /// CR 601.2c: Extract SharesQuality filter properties from an effect's target filter.
@@ -163,6 +167,9 @@ pub fn resolve_effect(
         Effect::Investigate => investigate::resolve(state, ability, events),
         Effect::BecomeMonarch => become_monarch::resolve(state, ability, events),
         Effect::Proliferate => proliferate::resolve(state, ability, events),
+        Effect::Populate => populate::resolve(state, ability, events),
+        Effect::Clash => clash::resolve(state, ability, events),
+        Effect::SwitchPT { .. } => switch_pt::resolve(state, ability, events),
         Effect::CopySpell { .. } => copy_spell::resolve(state, ability, events),
         Effect::CopyTokenOf { .. } => token_copy::resolve(state, ability, events),
         Effect::BecomeCopy { .. } => become_copy::resolve(state, ability, events),
@@ -241,6 +248,11 @@ pub fn resolve_effect(
             Ok(())
         }
         Effect::GiveControl { .. } => gain_control::resolve_give(state, ability, events),
+        Effect::VentureIntoDungeon => venture::resolve(state, ability, events),
+        Effect::VentureInto { dungeon } => {
+            venture::resolve_venture_into(state, ability, *dungeon, events)
+        }
+        Effect::TakeTheInitiative => venture::resolve_take_initiative(state, ability, events),
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);
@@ -836,6 +848,12 @@ pub fn resolve_ability_chain(
                 }
             }
         }
+        // If the effect resolver already set up a pending_continuation (e.g., clash
+        // injects modified context for optional_effect_performed), the sub_ability
+        // chain is already accounted for — skip to avoid double execution.
+        if state.pending_continuation.is_some() {
+            return Ok(());
+        }
         // If resolve_effect just entered a player-choice state (Scry/Dig/Surveil),
         // save the sub-ability as a continuation to execute after the player responds,
         // rather than immediately processing it (which would bypass the UI).
@@ -862,6 +880,7 @@ pub fn resolve_ability_chain(
                 | WaitingFor::ManifestDreadChoice { .. }
                 | WaitingFor::DiscardChoice { .. }
                 | WaitingFor::LearnChoice { .. }
+                | WaitingFor::PopulateChoice { .. }
         ) {
             let mut sub_clone = sub.as_ref().clone();
             if sub_clone.targets.is_empty() && !ability.targets.is_empty() {
