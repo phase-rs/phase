@@ -598,7 +598,7 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
     }
 
     // CR 122.1: "you get {E}{E}" — gain energy counters.
-    if tp.contains("{e}")
+    if scan_contains_phrase(tp.lower, "{e}")
         && alt((tag::<_, _, VerboseError<&str>>("you get "), tag("get ")))
             .parse(tp.lower)
             .is_ok()
@@ -1547,7 +1547,7 @@ fn try_parse_verb_and_target<'a>(
         let rest_lower = &lower[lower.len() - rest.len()..];
         let (parsed_target, rem) = parse_target(rest);
         // CR 701.5a: "exile all spells" must constrain to the stack.
-        let target = if rest_lower.contains("spell") {
+        let target = if scan_contains_phrase(rest_lower, "spell") {
             constrain_filter_to_stack(parsed_target)
         } else {
             parsed_target
@@ -1567,7 +1567,7 @@ fn try_parse_verb_and_target<'a>(
         let (parsed_target, rem) = parse_target(rest);
         // CR 701.5a: "exile target spell" must constrain targeting to the stack,
         // mirroring the counter-spell parser at line 1036-1037.
-        let target = if rest_lower.contains("spell") {
+        let target = if scan_contains_phrase(rest_lower, "spell") {
             constrain_filter_to_stack(parsed_target)
         } else {
             parsed_target
@@ -1587,12 +1587,12 @@ fn try_parse_verb_and_target<'a>(
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("counter ")).parse(i)) {
         let rest_lower = &lower[lower.len() - rest.len()..];
         let (parsed_target, rem) = parse_target(rest);
-        let target = if rest_lower.contains("activated or triggered ability") {
+        let target = if scan_contains_phrase(rest_lower, "activated or triggered ability") {
             // CR 701.5a: "activated or triggered ability" is a special-case target
             // that maps to StackAbility. We still use parse_target's remainder to
             // preserve the compound-detection contract.
             TargetFilter::StackAbility
-        } else if rest_lower.contains("spell") {
+        } else if scan_contains_phrase(rest_lower, "spell") {
             constrain_filter_to_stack(parsed_target)
         } else {
             parsed_target
@@ -1638,7 +1638,9 @@ fn try_parse_verb_and_target<'a>(
     }
 
     // Put counter: use refactored try_parse_put_counter that returns remainder
-    if tag::<_, _, VerboseError<&str>>("put ").parse(lower).is_ok() && lower.contains("counter") {
+    if tag::<_, _, VerboseError<&str>>("put ").parse(lower).is_ok()
+        && scan_contains_phrase(lower, "counter")
+    {
         if let Some((
             Effect::PutCounter {
                 counter_type,
@@ -1680,8 +1682,8 @@ fn try_parse_verb_and_target<'a>(
 fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
 
-    // Quick bail: no " and " means no compound connector possible
-    if !lower.contains(" and ") {
+    // Quick bail: no "and" means no compound connector possible
+    if !scan_contains_phrase(&lower, "and") {
         return None;
     }
 
@@ -1788,7 +1790,7 @@ fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedE
 /// because `parse_target` consumes them as part of the target filter.
 fn try_split_damage_compound(text: &str, ctx: &ParseContext) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
-    if !lower.contains(" and ") {
+    if !scan_contains_phrase(&lower, "and") {
         return None;
     }
 
@@ -1847,12 +1849,13 @@ fn try_split_damage_compound(text: &str, ctx: &ParseContext) -> Option<ParsedEff
 ///   "~ and target creature with a stun counter on it into their owners' libraries"
 ///   → (SelfRef, Typed(Creature+CountersGE(Stun,1)), "into their owners' libraries")
 fn try_split_compound_subject(text: &str) -> Option<(TargetFilter, TargetFilter, &str)> {
-    let lower = text.to_lowercase();
-
     // Find " and " that separates subjects
-    let and_pos = lower.find(" and ")?;
-    let first_text = text[..and_pos].trim();
-    let after_and = text[and_pos + 5..].trim(); // skip " and "
+    let (after_and_raw, (before_and, _)) =
+        (take_until::<_, _, VerboseError<&str>>(" and "), tag(" and "))
+            .parse(text)
+            .ok()?;
+    let first_text = before_and.trim();
+    let after_and = after_and_raw.trim();
 
     // Parse first subject
     let first_filter = if first_text == "~"
@@ -1871,6 +1874,8 @@ fn try_split_compound_subject(text: &str) -> Option<(TargetFilter, TargetFilter,
     // Parse second subject — consume until we hit a preposition that starts the verb phrase
     // Look for "into " or "from " as the boundary between the second subject and remainder
     let after_and_lower = after_and.to_lowercase();
+    // Positional find for preposition boundary — position used to slice both
+    // original-case and lowercase strings, so find() is kept for dual-string slicing.
     let remainder_start = after_and_lower
         .find(" into ")
         .or_else(|| after_and_lower.find(" from "))
@@ -1917,11 +1922,11 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
 
     // The remainder must indicate library destination
     let remainder_lower = remainder.to_lowercase();
-    let is_owner_library = remainder_lower.contains("owner")
-        || remainder_lower.contains("their")
-        || remainder_lower.contains("its");
+    let is_owner_library = scan_contains_phrase(&remainder_lower, "owner")
+        || scan_contains_phrase(&remainder_lower, "their")
+        || scan_contains_phrase(&remainder_lower, "its");
 
-    if !remainder_lower.contains("librar") {
+    if !scan_contains_phrase(&remainder_lower, "librar") {
         return None;
     }
 
@@ -2511,7 +2516,10 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
 /// This must come AFTER all specific patterns in try_parse_named_choice to avoid
 /// accidentally matching "choose left or right" against targeting patterns.
 fn try_parse_binary_choice(rest: &str) -> Option<Vec<String>> {
-    let (left, right) = rest.split_once(" or ")?;
+    let (right, left) = (take_until::<_, _, VerboseError<&str>>(" or "), tag(" or "))
+        .parse(rest)
+        .ok()
+        .map(|(rem, (before, _))| (rem, before))?;
     let left = left.trim();
     let right = right.trim();
 
@@ -2520,7 +2528,7 @@ fn try_parse_binary_choice(rest: &str) -> Option<Vec<String>> {
         return None;
     }
     // Reject known non-choice patterns
-    if left.contains("target") || right.contains("target") {
+    if scan_contains_phrase(left, "target") || scan_contains_phrase(right, "target") {
         return None;
     }
     if right == "more" || left == "both" || right == "both" {
@@ -2584,12 +2592,15 @@ fn type_str_to_target_filter(s: &str) -> Option<TargetFilter> {
 /// Extract card type filter from a sub-ability sentence containing "card from it/among".
 /// Handles forms like "exile a nonland card from it", "discard a creature card from it".
 fn parse_choose_filter_from_sentence(lower: &str) -> TargetFilter {
-    let card_pos = match lower.find("card from") {
-        Some(pos) => pos,
+    let before_card = match take_until::<_, _, VerboseError<&str>>("card from")
+        .parse(lower)
+        .ok()
+    {
+        Some((_, before)) => before,
         None => return TargetFilter::Any,
     };
     // The word immediately before "card from" is the type descriptor
-    let word = lower[..card_pos].trim().rsplit(' ').next().unwrap_or("");
+    let word = before_card.trim().rsplit(' ').next().unwrap_or("");
     if let Some(negated) = word.strip_prefix("non") {
         if let Some(TargetFilter::Typed(tf)) = type_str_to_target_filter(negated) {
             if let Some(primary) = tf.get_primary_type().cloned() {
@@ -3681,9 +3692,11 @@ fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCondition>, S
         .parse(lower.as_str())
         .is_ok()
     {
-        if let Some((_, rest)) = lower
-            .split_once(" wasn't kicked, ")
-            .or_else(|| lower.split_once(" wasn't bargained, "))
+        if let Some(rest) = (take_until::<_, _, VerboseError<&str>>(" wasn't kicked, "), tag(" wasn't kicked, "))
+            .parse(lower.as_str())
+            .or_else(|_: nom::Err<VerboseError<&str>>| (take_until::<_, _, VerboseError<&str>>(" wasn't bargained, "), tag(" wasn't bargained, ")).parse(lower.as_str()))
+            .ok()
+            .map(|(rest, _)| rest)
         {
             let offset = text.len() - rest.len();
             return (
@@ -3714,10 +3727,11 @@ fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCondition>, S
         .parse(lower.as_str())
         .is_ok()
     {
-        lower
-            .split_once(" was kicked, ")
-            .or_else(|| lower.split_once(" was bargained, "))
-            .map(|(_, rest)| {
+        (take_until::<_, _, VerboseError<&str>>(" was kicked, "), tag(" was kicked, "))
+            .parse(lower.as_str())
+            .or_else(|_: nom::Err<VerboseError<&str>>| (take_until::<_, _, VerboseError<&str>>(" was bargained, "), tag(" was bargained, ")).parse(lower.as_str()))
+            .ok()
+            .map(|(rest, _)| {
                 let offset = text.len() - rest.len();
                 text[offset..].to_string()
             })
@@ -4783,7 +4797,7 @@ fn parse_for_as_long_as_condition(condition: &str) -> Option<Duration> {
     }
 
     // "~ remains tapped" / "it remains tapped" / "this creature remains tapped"
-    if condition.ends_with("remains tapped") {
+    if scan_contains_phrase(condition, "remains tapped") {
         return Some(Duration::ForAsLongAs {
             condition: StaticCondition::SourceIsTapped,
         });
@@ -4798,12 +4812,12 @@ fn parse_for_as_long_as_condition(condition: &str) -> Option<Duration> {
     }
 
     // "~ remains on the battlefield" / "it remains on the battlefield"
-    if condition.ends_with("remains on the battlefield") {
+    if scan_contains_phrase(condition, "remains on the battlefield") {
         return Some(Duration::UntilHostLeavesPlay);
     }
 
     // "it has a {type} counter on it" / "~ has a {type} counter on it"
-    if condition.contains(" has a ") && condition.contains(" counter on it") {
+    if scan_contains_phrase(condition, "has a") && scan_contains_phrase(condition, "counter on it") {
         if let Some(after_has) = strip_after(condition, " has a ") {
             if let Some(counter_end) = after_has.find(" counter") {
                 let counter_type = after_has[..counter_end].trim().to_string();
@@ -5267,11 +5281,11 @@ fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<ParsedEffectCl
     // Detect distribution keywords.
     // CR 601.2d: "divided as you choose among" / "distributed among" → player chooses.
     // "divided evenly, rounded down, among" → auto-computed even split.
-    let distribute_kind = if rest_tp.contains("divided as you choose among")
-        || rest_tp.contains("distributed among")
+    let distribute_kind = if scan_contains_phrase(rest_tp.lower, "divided as you choose among")
+        || scan_contains_phrase(rest_tp.lower, "distributed among")
     {
         DistributionUnit::Damage
-    } else if rest_tp.contains("divided evenly") {
+    } else if scan_contains_phrase(rest_tp.lower, "divided evenly") {
         DistributionUnit::EvenSplitDamage
     } else {
         return None;
@@ -5465,7 +5479,9 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &str) -> Option<(Ef
         // Used by: "deals damage to itself equal to its power",
         //          "deals damage to each player equal to the number of ...",
         //          "deals damage to that player equal to the number of ..."
-        if let Some((target_phrase, amount_phrase)) = rest.split_once(" equal to ") {
+        if let Ok((amount_phrase, (target_phrase, _))) =
+            (take_until::<_, _, VerboseError<&str>>(" equal to "), tag(" equal to ")).parse(rest)
+        {
             let amount_phrase = amount_phrase
                 .trim_end_matches('.')
                 .trim_end_matches(',')
@@ -5501,8 +5517,10 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &str) -> Option<(Ef
                 {
                     // "each player" → DamageEachPlayer (per-player varying damage)
                     // "each creature" → DamageAll (uniform damage to objects)
-                    if target_phrase.contains("player") || target_phrase.contains("opponent") {
-                        let player_filter = if target_phrase.contains("opponent") {
+                    if scan_contains_phrase(target_phrase, "player")
+                        || scan_contains_phrase(target_phrase, "opponent")
+                    {
+                        let player_filter = if scan_contains_phrase(target_phrase, "opponent") {
                             PlayerFilter::Opponent
                         } else {
                             PlayerFilter::All
@@ -5553,15 +5571,18 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &str) -> Option<(Ef
     {
         let consumed = after_lower.len() - rem.len();
         let amount_text = &after[consumed..];
-        let to_pos = amount_text.to_lowercase().find(" to ")?;
-        let qty_text = amount_text[..to_pos].trim();
+        let amount_lower = amount_text.to_lowercase();
+        let (_, before_to) = take_until::<_, _, VerboseError<&str>>(" to ")
+            .parse(amount_lower.as_str())
+            .ok()?;
+        let qty_text = amount_text[..before_to.len()].trim();
         let qty = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
             .unwrap_or_else(|| QuantityExpr::Ref {
                 qty: QuantityRef::Variable {
                     name: qty_text.to_string(),
                 },
             });
-        (qty, &amount_text[to_pos + 4..])
+        (qty, &amount_text[before_to.len() + 4..])
     } else {
         return None;
     };
@@ -5924,7 +5945,8 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
             }
             let (target, _) = parse_target(target_text);
             // CR 110.2: "under your control" overrides the entering object's controller.
-            let under_your_control = after_put_tp.contains("under your control");
+            let under_your_control =
+                scan_contains_phrase(after_put_tp.lower, "under your control");
             return Some(Effect::ChangeZone {
                 origin: infer_origin_zone(after_put_tp.lower),
                 destination,
@@ -5979,11 +6001,11 @@ fn parse_where_x_is(text: &str) -> Option<QuantityExpr> {
     let (rest, _) = tag::<_, _, VerboseError<&str>>("where x is ")
         .parse(trimmed)
         .ok()?;
-    if rest.contains("power") {
+    if scan_contains_phrase(rest, "power") {
         Some(QuantityExpr::Ref {
             qty: QuantityRef::SelfPower,
         })
-    } else if rest.contains("toughness") {
+    } else if scan_contains_phrase(rest, "toughness") {
         Some(QuantityExpr::Ref {
             qty: QuantityRef::SelfToughness,
         })
@@ -5993,15 +6015,17 @@ fn parse_where_x_is(text: &str) -> Option<QuantityExpr> {
 }
 
 fn infer_origin_zone(lower: &str) -> Option<Zone> {
-    if contains_possessive(lower, "from", "graveyard") || lower.contains("from a graveyard") {
+    if contains_possessive(lower, "from", "graveyard")
+        || scan_contains_phrase(lower, "from a graveyard")
+    {
         Some(Zone::Graveyard)
-    } else if lower.contains("from exile") {
+    } else if scan_contains_phrase(lower, "from exile") {
         Some(Zone::Exile)
     } else if contains_possessive(lower, "from", "hand") {
         Some(Zone::Hand)
     } else if contains_possessive(lower, "from", "library") {
         Some(Zone::Library)
-    } else if lower.contains("graveyard") && !lower.contains("from") {
+    } else if scan_contains_phrase(lower, "graveyard") && !scan_contains_phrase(lower, "from") {
         // CR 404.1: Possessive graveyard references without "from" — e.g.,
         // "exile each opponent's graveyard", "exile target player's graveyard"
         Some(Zone::Graveyard)
@@ -6072,16 +6096,19 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
     .ok()?;
 
     // Split off trailing "to [target]" — forced retarget destination.
-    let (spell_phrase, forced_to) = if let Some((before, after)) = rest.split_once(" to ") {
-        let (filter, _) = parse_target(after);
-        (before, Some(filter))
-    } else {
-        (rest, None)
-    };
+    let (spell_phrase, forced_to) =
+        if let Ok((after, (before, _))) =
+            (take_until::<_, _, VerboseError<&str>>(" to "), tag(" to ")).parse(rest)
+        {
+            let (filter, _) = parse_target(after);
+            (before, Some(filter))
+        } else {
+            (rest, None)
+        };
 
     // CR 115.7: Parse the spell phrase to extract a stack-entry filter.
     // Strip "with a single target" qualifier before parsing the type.
-    let has_single_target = spell_phrase.contains("with a single target");
+    let has_single_target = scan_contains_phrase(spell_phrase, "with a single target");
     // CR 115.9c: "that targets only [X]" is handled by parse_that_clause_suffix via
     // parse_type_phrase, producing FilterProp::TargetsOnly — no manual stripping needed.
     let spell_phrase_clean = spell_phrase.replace(" with a single target", "");
@@ -6089,18 +6116,18 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
 
     // Handle "spell or ability" specially since "ability" is not a card type in parse_target.
     // CR 115.7: "spell or ability" matches any spell or any activated/triggered ability on the stack.
-    let mut target = if spell_phrase_clean.contains("spell or ability")
-        || spell_phrase_clean.contains("spell and/or ability")
+    let mut target = if scan_contains_phrase(&spell_phrase_clean, "spell or ability")
+        || scan_contains_phrase(&spell_phrase_clean, "spell and/or ability")
     {
         // Both spells and abilities on the stack
         TargetFilter::Or {
             filters: vec![TargetFilter::StackSpell, TargetFilter::StackAbility],
         }
-    } else if spell_phrase_clean.contains("activated or triggered ability")
-        || spell_phrase_clean.contains("activated ability")
+    } else if scan_contains_phrase(&spell_phrase_clean, "activated or triggered ability")
+        || scan_contains_phrase(&spell_phrase_clean, "activated ability")
     {
         TargetFilter::StackAbility
-    } else if spell_phrase_clean.contains("spell") {
+    } else if scan_contains_phrase(&spell_phrase_clean, "spell") {
         // Parse with parse_target for type-specific spells (e.g. "instant or sorcery spell")
         let (parsed, _) = parse_target(spell_phrase_clean);
         constrain_filter_to_stack(parsed)

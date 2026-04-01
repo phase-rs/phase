@@ -1,5 +1,5 @@
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take_until};
 use nom::combinator::value;
 use nom::Parser;
 use nom_language::error::VerboseError;
@@ -114,11 +114,12 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     // CR 608.2c: Preserve targeted compound actions so the effect
                     // parser can retarget continuation clauses like
                     // "tap target creature ... and put a stun counter on it".
-                    let targeted_compound_continuation = before_lower.contains("target ")
-                        && tag::<_, _, VerboseError<&str>>("put ")
-                            .parse(remainder_trimmed)
-                            .is_ok();
-                    let suppress = before_lower.contains("from among")
+                    let targeted_compound_continuation =
+                        nom_primitives::scan_contains(&before_lower, "target")
+                            && tag::<_, _, VerboseError<&str>>("put ")
+                                .parse(remainder_trimmed)
+                                .is_ok();
+                    let suppress = nom_primitives::scan_contains(&before_lower, "from among")
                         || is_inside_temporal_prefix(&before_lower)
                         || targeted_compound_continuation;
                     if !suppress && starts_bare_and_clause(remainder_trimmed) {
@@ -388,8 +389,11 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
 /// Used by `starts_bare_and_clause` to split patterns like
 /// "sacrifice ~ and it deals 3 damage to target player".
 fn starts_with_damage_clause(lower: &str) -> bool {
-    if let Some(pos) = lower.find("deals ").or_else(|| lower.find("deal ")) {
-        let subject = lower[..pos].trim();
+    if let Ok((_, before)) = take_until::<_, _, VerboseError<&str>>("deals ")
+        .parse(lower)
+        .or_else(|_| take_until::<_, _, VerboseError<&str>>("deal ").parse(lower))
+    {
+        let subject = before.trim();
         subject.is_empty() // bare "deals N damage"
             || subject == "it" // "it deals N damage"
             || subject == "~" // "~ deals N damage"
@@ -712,8 +716,10 @@ fn parse_dig_from_among(lower: &str, _original: &str) -> Option<ContinuationAst>
 
     // "put N of them into your hand [and the rest on the bottom]" — no filter, count explicit.
     // Must be checked BEFORE the "from among" path since "of them" appears in both forms.
-    if let Some(of_them_pos) = lower.find(" of them") {
-        let before_of = lower[..of_them_pos].trim();
+    if let Ok((_, before_of)) =
+        take_until::<_, _, VerboseError<&str>>(" of them").parse(lower)
+    {
+        let before_of = before_of.trim();
         let after_put = alt((tag::<_, _, VerboseError<&str>>("you may put "), tag("put ")))
             .parse(before_of)
             .map(|(rest, _)| rest)
@@ -745,8 +751,11 @@ fn parse_dig_from_among(lower: &str, _original: &str) -> Option<ContinuationAst>
     }
 
     // Find "from among" to split the text into count+filter vs destination
-    let from_among_pos = lower.find("from among")?;
-    let before_from = &lower[..from_among_pos].trim();
+    let (_, before_from) =
+        take_until::<_, _, VerboseError<&str>>("from among")
+            .parse(lower)
+            .ok()?;
+    let before_from = &before_from.trim();
 
     // Strip leading "put " or "you may reveal " using nom combinators.
     let after_put = alt((
@@ -809,7 +818,9 @@ fn parse_dig_from_among(lower: &str, _original: &str) -> Option<ContinuationAst>
 /// Extract rest_destination from "put N of them into your hand and the rest on the bottom/graveyard".
 /// Returns None if no "and the rest" clause is present.
 fn parse_of_them_rest_destination(lower: &str) -> Option<Zone> {
-    let after_rest = lower.split_once(" and the rest")?.1;
+    let (after_rest, _) = (take_until::<_, _, VerboseError<&str>>(" and the rest"), tag(" and the rest"))
+        .parse(lower)
+        .ok()?;
     if contains_possessive(after_rest, "into", "graveyard") {
         Some(Zone::Graveyard)
     } else if contains_possessive(after_rest, "into", "hand") {

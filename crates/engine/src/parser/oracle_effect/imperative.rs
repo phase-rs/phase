@@ -1,5 +1,5 @@
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take_until};
 use nom::combinator::value;
 use nom::Parser;
 use nom_language::error::VerboseError;
@@ -125,8 +125,10 @@ pub(super) fn parse_numeric_imperative_ast(
             }
         }
         // Extract count before "life": "lose 3 life", "you lose X life", etc.
-        let amount = if let Some(life_pos) = lower.find("life") {
-            let before_life = lower[..life_pos].trim();
+        let amount = if let Ok((_, before_life)) =
+            take_until::<_, _, VerboseError<&str>>("life").parse(lower)
+        {
+            let before_life = before_life.trim();
             let last_word = before_life.split_whitespace().next_back().unwrap_or("");
             parse_count_expr(last_word)
                 .map(|(q, _)| q)
@@ -318,7 +320,7 @@ pub(super) fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<Targe
     {
         let after_discard = &lower[lower.len() - after_discard_orig.len()..];
         // CR 701.9a: Detect "at random" suffix for random discard effects.
-        let random = after_discard.contains(" at random");
+        let random = nom_primitives::scan_contains(after_discard, "at random");
         // CR 701.9b: Detect "up to" prefix for optional partial discard.
         let (after_discard, up_to) =
             match tag::<_, _, VerboseError<&str>>("up to ").parse(after_discard) {
@@ -685,8 +687,9 @@ pub(super) fn parse_hand_reveal_ast(text: &str, lower: &str) -> Option<HandRevea
         && nom_primitives::scan_contains(lower, "librar")
     {
         // Delegate to nom combinator (input already lowercase from lower).
-        let count = if let Some(pos) = lower.find("the top ") {
-            let after_top = &lower[pos + 8..];
+        let count = if let Ok((after_top, _)) =
+            (take_until::<_, _, VerboseError<&str>>("the top "), tag("the top ")).parse(lower)
+        {
             nom_primitives::parse_number
                 .parse(after_top)
                 .map(|(_, n)| n)
@@ -703,8 +706,9 @@ pub(super) fn parse_hand_reveal_ast(text: &str, lower: &str) -> Option<HandRevea
 
     // Fallback: reveal from top of library without explicit "library" mention
     // Delegate to nom combinator (input already lowercase from lower).
-    let count = if let Some(pos) = lower.find("the top ") {
-        let after_top = &lower[pos + 8..];
+    let count = if let Ok((after_top, _)) =
+        (take_until::<_, _, VerboseError<&str>>("the top "), tag("the top ")).parse(lower)
+    {
         nom_primitives::parse_number
             .parse(after_top)
             .map(|(_, n)| n)
@@ -761,7 +765,7 @@ pub(super) fn parse_choose_ast(text: &str, lower: &str) -> Option<ChooseImperati
     }
 
     if nom_on_lower(text, lower, |input| value((), tag("choose ")).parse(input)).is_some()
-        && lower.contains("card from it")
+        && nom_primitives::scan_contains(lower, "card from it")
     {
         return Some(ChooseImperativeAst::RevealHandFilter {
             card_filter: super::parse_choose_filter(lower),
@@ -916,7 +920,10 @@ fn parse_prevent_effect(text: &str) -> Effect {
     {
         // Extract the target from the text
         let tp = TextPair::new(text, &lower);
-        if let Some(from_target) = tp.find("target ").map(|pos| tp.split_at(pos).1) {
+        if let Ok((_, before)) =
+            take_until::<_, _, VerboseError<&str>>("target ").parse(tp.lower)
+        {
+            let (_, from_target) = tp.split_at(before.len());
             let (t, _) = parse_target(from_target.original);
             t
         } else {
@@ -988,7 +995,7 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
     tag::<_, _, VerboseError<&str>>("put ").parse(lower).ok()?;
 
     if let Ok((after, _)) = tag::<_, _, VerboseError<&str>>("put the top ").parse(lower) {
-        if lower.contains("graveyard") {
+        if nom_primitives::scan_contains(lower, "graveyard") {
             let count = nom_primitives::parse_number
                 .parse(after)
                 .map(|(_, n)| n)
@@ -1036,10 +1043,12 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
 
     // CR 701.24g: "put X into Y's library Nth from the top" —
     // specific positional placement (God-Eternals, Approach, Bury in Books).
-    if nom_primitives::scan_contains(lower, "from the top") {
-        if let Some(pos) = lower.find("from the top") {
+    if let Ok((_, before_from)) =
+        take_until::<_, _, VerboseError<&str>>("from the top").parse(lower)
+    {
+        {
             // Look backwards from "from the top" to find the ordinal
-            let before = lower[..pos].trim_end();
+            let before = before_from.trim_end();
             if let Some(last_space) = before.rfind(' ') {
                 let ordinal_word = &before[last_space + 1..];
                 if let Some((n, _)) = parse_ordinal(ordinal_word) {
@@ -1186,7 +1195,9 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
     }
     // "shuffle the rest into your library" — the "rest" are already in the library
     // from a preceding dig/reveal effect; this is just a shuffle.
-    if lower.contains("shuffle the rest") || lower.contains("shuffle them") {
+    if nom_primitives::scan_contains(lower, "shuffle the rest")
+        || nom_primitives::scan_contains(lower, "shuffle them")
+    {
         return Some(ShuffleImperativeAst::ShuffleLibrary {
             target: TargetFilter::Controller,
         });
@@ -1199,7 +1210,7 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
     if tag::<_, _, VerboseError<&str>>("shuffle")
         .parse(lower)
         .is_err()
-        || !lower.contains("library")
+        || !nom_primitives::scan_contains(lower, "library")
     {
         return None;
     }
@@ -1241,13 +1252,16 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
     if let Some((_, after_shuffle)) =
         nom_on_lower(text, lower, |input| value((), tag("shuffle ")).parse(input))
     {
-        if lower.contains(" into ") && lower.contains("library") && lower.contains(" from ") {
+        if nom_primitives::scan_contains(lower, "into")
+            && nom_primitives::scan_contains(lower, "library")
+            && nom_primitives::scan_contains(lower, "from")
+        {
             let (target, _) = parse_target(after_shuffle);
-            let origin = if lower.contains("graveyard") {
+            let origin = if nom_primitives::scan_contains(lower, "graveyard") {
                 Some(Zone::Graveyard)
-            } else if lower.contains("from your hand") {
+            } else if nom_primitives::scan_contains(lower, "from your hand") {
                 Some(Zone::Hand)
-            } else if lower.contains("from exile") {
+            } else if nom_primitives::scan_contains(lower, "from exile") {
                 Some(Zone::Exile)
             } else {
                 None
@@ -1381,7 +1395,7 @@ pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImpe
         #[cfg(debug_assertions)]
         super::types::assert_no_compound_remainder(_rem, text);
         // CR 701.5a: "exile all spells" must constrain to the stack.
-        let target = if rest_lower.contains("spell") {
+        let target = if nom_primitives::scan_contains(rest_lower, "spell") {
             super::constrain_filter_to_stack(parsed_target)
         } else {
             parsed_target
@@ -1419,7 +1433,7 @@ pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImpe
     super::types::assert_no_compound_remainder(_rem, text);
     // CR 701.5a: "exile target spell" must constrain targeting to the stack,
     // mirroring parse_counter_ast at line 1218-1219.
-    let target = if rest_lower.contains("spell") {
+    let target = if nom_primitives::scan_contains(rest_lower, "spell") {
         super::constrain_filter_to_stack(parsed_target)
     } else {
         parsed_target
@@ -1439,7 +1453,7 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
         let rest_lower = &lower[lower.len() - rest_orig.len()..];
         (rest_orig, rest_lower)
     };
-    if rest.contains("activated or triggered ability") {
+    if nom_primitives::scan_contains(rest, "activated or triggered ability") {
         // CR 118.12: Parse "unless pays" even for ability counters.
         let unless_payment = super::parse_unless_payment(rest);
         return Some(ZoneCounterImperativeAst::Counter {
@@ -1452,7 +1466,7 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
     let (target, _rem) = parse_target(rest_orig);
     #[cfg(debug_assertions)]
     super::types::assert_no_compound_remainder(_rem, text);
-    let target = if rest.contains("spell") {
+    let target = if nom_primitives::scan_contains(rest, "spell") {
         super::constrain_filter_to_stack(target)
     } else {
         target
@@ -1825,7 +1839,9 @@ pub(super) fn parse_imperative_family_ast(
         // Handles: "block this turn if able", "blocks ~ this turn if able",
         // "blocks it this combat if able", "blocks this creature this turn if able"
         "block" | "blocks" => {
-            if lower.ends_with("this turn if able") || lower.ends_with("this combat if able") {
+            if nom_primitives::scan_contains(lower, "this turn if able")
+                || nom_primitives::scan_contains(lower, "this combat if able")
+            {
                 Some(ImperativeFamilyAst::ForceBlock)
             } else {
                 None
@@ -2069,9 +2085,12 @@ pub(crate) fn try_parse_die_result_line(text: &str) -> Option<(u8, u8, &str)> {
     let trimmed = text.trim();
 
     // Find the pipe separator: "N—M | effect" or "N | effect"
-    let pipe_idx = trimmed.find(" | ")?;
-    let range_part = trimmed[..pipe_idx].trim();
-    let effect_text = trimmed[pipe_idx + 3..].trim();
+    let (effect_text, (range_part, _)) =
+        (take_until::<_, _, VerboseError<&str>>(" | "), tag(" | "))
+            .parse(trimmed)
+            .ok()?;
+    let range_part = range_part.trim();
+    let effect_text = effect_text.trim();
 
     // Parse range: "1—9" (em dash U+2014), "10—19", "20" (single value)
     let (min, max) = if let Some(dash_idx) = range_part.find('\u{2014}') {
@@ -2195,7 +2214,9 @@ pub(super) fn parse_zone_counter_ast(
     if let Some(ast) = parse_counter_ast(text, lower) {
         return Some(ast);
     }
-    if tag::<_, _, VerboseError<&str>>("put ").parse(lower).is_ok() && lower.contains("counter") {
+    if tag::<_, _, VerboseError<&str>>("put ").parse(lower).is_ok()
+        && nom_primitives::scan_contains(lower, "counter")
+    {
         // Try move-counters first ("put its counters on ...")
         if let Some((
             Effect::MoveCounters {
@@ -2214,10 +2235,10 @@ pub(super) fn parse_zone_counter_ast(
         }
         // Then fixed-count put ("put N counter(s) on ...")
         // Detect "each"/"all" to route to PutCounterAll (mass placement without targeting).
-        let is_all = lower.contains("counter on each ")
-            || lower.contains("counters on each ")
-            || lower.contains("counter on all ")
-            || lower.contains("counters on all ");
+        let is_all = nom_primitives::scan_contains(lower, "counter on each")
+            || nom_primitives::scan_contains(lower, "counters on each")
+            || nom_primitives::scan_contains(lower, "counter on all")
+            || nom_primitives::scan_contains(lower, "counters on all");
         return match try_parse_put_counter(lower, text, ctx) {
             Some((
                 Effect::PutCounter {
@@ -2248,7 +2269,7 @@ pub(super) fn parse_zone_counter_ast(
     if tag::<_, _, VerboseError<&str>>("remove ")
         .parse(lower)
         .is_ok()
-        && lower.contains("counter")
+        && nom_primitives::scan_contains(lower, "counter")
     {
         return match try_parse_remove_counter(lower, ctx) {
             Some(Effect::RemoveCounter {
