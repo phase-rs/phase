@@ -4045,6 +4045,18 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
     findings
 }
 
+/// Returns true if the condition keyword appears inside a quoted sub-ability string.
+/// E.g. `enchanted creature has "... if you control a Swamp ..."` — the "if" is inside
+/// the granted ability's text, not a condition on the granting ability itself.
+fn condition_inside_quotes(lower: &str, condition_phrase: &str) -> bool {
+    if let Some(quote_pos) = lower.find('"') {
+        if let Some(cond_pos) = lower.find(condition_phrase) {
+            return cond_pos > quote_pos;
+        }
+    }
+    false
+}
+
 /// Check if an Oracle line contains condition language, returning the label if so.
 /// Applies exclusion filters for patterns that aren't true ability conditions.
 fn line_has_condition_text(lower: &str) -> Option<&'static str> {
@@ -4077,6 +4089,62 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             || (lower.contains("if you search") && lower.contains("shuffle"))
             || lower.contains("if a land is tapped for mana")
             || lower.contains("if a player would begin")
+            // --- Conditional effect branches (resolve-time checks, not ability conditions) ---
+            // "if it's a creature card" / "if it is a land" — reveal-and-check patterns
+            || lower.contains("if it's a ")
+            || lower.contains("if it is a ")
+            || lower.contains("if it isn't a ")
+            || lower.contains("if it's not a ")
+            // "if that creature/card/player" — resolve-time state checks on a referenced object
+            || lower.contains("if that creature")
+            || lower.contains("if that card")
+            || lower.contains("if that player")
+            // "if they do" / "if they don't" — opponent/player action results
+            || lower.contains("if they do")
+            || lower.contains("if they don't")
+            // "if you can't" — failure path, not a gating condition
+            || lower.contains("if you can't")
+            // "if you chose" / "if you choose" — modal choice results
+            || lower.contains("if you chose")
+            || lower.contains("if you choose")
+            // --- Replacement/prevention patterns (not ability conditions) ---
+            // "if damage would be dealt" / "if noncombat damage would" — damage replacement
+            || lower.contains("would be dealt")
+            || lower.contains("would deal ")
+            // "prevent that damage" with "if" — prevention replacement clause
+            || (lower.contains("prevent that damage") && lower.contains("if "))
+            // --- Mana/casting condition patterns (casting-time, not board-state conditions) ---
+            // "if {U} was spent to cast" — mana-spent conditions
+            || (lower.contains("was spent") && lower.contains("if "))
+            // "if you cast" / "if it was cast" / "if he was cast" — casting conditions
+            || lower.contains("if you cast")
+            || lower.contains("if it was cast")
+            || lower.contains("if he was cast")
+            || lower.contains("if she was cast")
+            // --- Duration patterns (audited by DroppedDuration, not DroppedCondition) ---
+            // "for as long as" is a duration, not a condition
+            || lower.contains("for as long as")
+            // --- Resolve-time property checks (not gating conditions on the ability) ---
+            // "if it has flying" / "if it has a counter" — state check on result object
+            || lower.contains("if it has ")
+            // "if its mana value" / "if its power" / "if its toughness"
+            || lower.contains("if its mana value")
+            || lower.contains("if its power")
+            || lower.contains("if its toughness")
+            // "if there's" / "if there is" / "if there are" — board state checks at resolution
+            || lower.contains("if there's ")
+            || lower.contains("if there is ")
+            || lower.contains("if there are ")
+            // --- Unless-pay patterns (cost alternatives, not ability conditions) ---
+            || lower.contains("unless you pay")
+            || lower.contains("unless a player")
+            || lower.contains("unless its controller")
+            || lower.contains("unless that player")
+            // --- Reminder text in parentheses (not part of the ability's condition) ---
+            || lower.contains("(if ")
+            || lower.contains("(unless ")
+            // --- Quoted sub-abilities: condition is inside a granted ability, not on the granter ---
+            || condition_inside_quotes(lower, phrase)
         {
             continue;
         }
