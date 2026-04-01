@@ -1396,6 +1396,10 @@ pub enum StaticCondition {
     },
     /// CR 506.5: True when the source creature is the only attacking creature.
     SourceAttackingAlone,
+    /// CR 724.1: True when the controller is the monarch.
+    IsMonarch,
+    /// CR 702.131a: True when the controller has the city's blessing (Ascend).
+    HasCityBlessing,
     /// Condition text that the parser could not yet decompose into a typed variant.
     /// Evaluated permissively (always true) so the static effect still applies.
     Unrecognized {
@@ -3788,6 +3792,14 @@ pub enum TriggerCondition {
     /// CR 702.178a: The trigger functions only while its controller has max speed.
     HasMaxSpeed,
 
+    /// CR 724.1: "if you're the monarch" — true when the controller is the monarch.
+    IsMonarch,
+    /// CR 702.131a: "if you have the city's blessing" — true when the controller has Ascend.
+    HasCityBlessing,
+    /// CR 611.2b: "if this [permanent] is tapped" — true when the trigger source is tapped.
+    SourceIsTapped,
+    /// CR 113.6b: "if this card is in [zone]" — true when the trigger source is in the given zone.
+    SourceInZone { zone: crate::types::zones::Zone },
     /// CR 122.1: "if you put a counter on a permanent this turn" — true when the controller
     /// added any counter to any permanent this turn.
     CounterAddedThisTurn,
@@ -3799,6 +3811,17 @@ pub enum TriggerCondition {
     /// CR 509.1a + CR 603.4: "if defending player controls no [type]" — true when the
     /// defending player in the current combat controls no permanents matching the filter.
     DefendingPlayerControlsNone { filter: TargetFilter },
+
+    /// CR 702.104a: "if tribute wasn't paid" — Tribute mechanic intervening-if.
+    TributeNotPaid,
+    /// CR 207.2c: "if you cast this spell during your main phase" — Addendum ability word.
+    CastDuringMainPhase,
+    /// CR 207.2c: "if at least N mana of [color] was spent to cast this spell" — Adamant.
+    ManaColorSpent { color: ManaColor, minimum: u32 },
+    /// CR 601.2b: "if no mana was spent to cast it" / "if mana from a [source] was spent"
+    ManaSpentCondition { text: String },
+    /// CR 400.7: "if it had a +1/+1 counter on it" / "if it had counters on it"
+    HadCounters { counter_type: Option<String> },
 
     // -- Combinators --
     /// All conditions must be true ("if you gained and lost life this turn")

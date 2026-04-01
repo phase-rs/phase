@@ -4371,6 +4371,8 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
         | StaticCondition::SourceInZone { .. }
         | StaticCondition::DefendingPlayerControls { .. }
         | StaticCondition::SourceAttackingAlone
+        | StaticCondition::IsMonarch
+        | StaticCondition::HasCityBlessing
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::And { .. }
         | StaticCondition::Or { .. }

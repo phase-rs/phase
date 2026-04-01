@@ -1150,6 +1150,38 @@ pub(crate) fn check_trigger_condition(
                 false
             }
         }
+        // CR 724.1: True when the controller is the monarch.
+        TriggerCondition::IsMonarch => state.monarch == Some(controller),
+        // CR 702.131a: True when the controller has the city's blessing.
+        TriggerCondition::HasCityBlessing => false, // TODO: city_blessing tracking
+        // CR 611.2b: True when the trigger source is tapped.
+        TriggerCondition::SourceIsTapped => source_id
+            .and_then(|id| state.objects.get(&id))
+            .is_some_and(|obj| obj.tapped),
+        // CR 113.6b: True when the trigger source is in the specified zone.
+        TriggerCondition::SourceInZone { zone } => source_id
+            .and_then(|id| state.objects.get(&id))
+            .is_some_and(|obj| obj.zone == *zone),
+        // CR 702.104b: Tribute — the opponent didn't add counters.
+        TriggerCondition::TributeNotPaid => {
+            // TODO: Track tribute payment via replacement effect. Stub: always true
+            // (conservative — the trigger fires, but its effect may not apply correctly).
+            true
+        }
+        // CR 207.2c: Addendum — cast during main phase.
+        TriggerCondition::CastDuringMainPhase => {
+            matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
+        }
+        // CR 207.2c: Adamant — at least N mana of a specific color was spent.
+        TriggerCondition::ManaColorSpent { .. } => {
+            // TODO: Track mana color spending during casting. Stub: false.
+            false
+        }
+        // CR 601.2b: General mana spending condition (text-based fallback).
+        TriggerCondition::ManaSpentCondition { .. } => false,
+        // CR 400.7: "if it had counters on it" — check LKI for counters.
+        // TODO: Add counter snapshot to LKISnapshot to enable counter checks.
+        TriggerCondition::HadCounters { .. } => false,
         TriggerCondition::And { conditions } => conditions
             .iter()
             .all(|c| check_trigger_condition(state, c, controller, source_id)),

@@ -207,7 +207,10 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
 
     // Parse payer + payment verb as a single combinator: "(payer) pay(s) " → (TargetFilter, &str).
     let payer_result: Result<(&str, TargetFilter), _> = alt((
-        value(TargetFilter::Controller, tag::<_, _, VerboseError<&str>>("you pay ")),
+        value(
+            TargetFilter::Controller,
+            tag::<_, _, VerboseError<&str>>("you pay "),
+        ),
         value(
             TargetFilter::TriggeringPlayer,
             nom::sequence::pair(
@@ -450,10 +453,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                 TriggerCondition::LostLifeLastTurn,
             ),
             // CR 702.104b: Tribute mechanic — "if tribute wasn't paid"
-            (
-                "if tribute wasn't paid",
-                TriggerCondition::TributeNotPaid,
-            ),
+            ("if tribute wasn't paid", TriggerCondition::TributeNotPaid),
             // CR 207.2c: Addendum — "if you cast this spell during your main phase"
             (
                 "if you cast this spell during your main phase",
@@ -614,9 +614,12 @@ fn try_extract_had_counter_condition(
     let pos = tp.find(prefix)?;
     let after = &lower[pos + prefix.len()..];
     // Parse: "[counter_type] counter on it"
-    let (rest, counter_type_text) =
-        take_until::<_, _, VerboseError<&str>>(" counter on it").parse(after).ok()?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(" counter on it").parse(rest).ok()?;
+    let (rest, counter_type_text) = take_until::<_, _, VerboseError<&str>>(" counter on it")
+        .parse(after)
+        .ok()?;
+    let (rest, _) = tag::<_, _, VerboseError<&str>>(" counter on it")
+        .parse(rest)
+        .ok()?;
     let clause_len = prefix.len() + (after.len() - rest.len());
     Some((
         strip_condition_clause(text, pos, clause_len),
@@ -661,10 +664,7 @@ fn try_extract_adamant_condition(
     let clause_len = prefix.len() + (after.len() - rest.len());
     Some((
         strip_condition_clause(text, pos, clause_len),
-        Some(TriggerCondition::ManaColorSpent {
-            color,
-            minimum: n,
-        }),
+        Some(TriggerCondition::ManaColorSpent { color, minimum: n }),
     ))
 }
 
@@ -3112,7 +3112,10 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
     {
         return Some(TriggerConstraint::OnlyDuringOpponentsTurn);
     }
-    if tag::<_, _, VerboseError<&str>>("your ").parse(phase_text).is_ok() {
+    if tag::<_, _, VerboseError<&str>>("your ")
+        .parse(phase_text)
+        .is_ok()
+    {
         return Some(TriggerConstraint::OnlyDuringYourTurn);
     }
     // Suffix-based: "combat on your turn", "each combat on your turn"
@@ -6320,9 +6323,8 @@ mod tests {
 
     #[test]
     fn extract_addendum_main_phase() {
-        let (cleaned, cond) = extract_if_condition(
-            "draw a card if you cast this spell during your main phase",
-        );
+        let (cleaned, cond) =
+            extract_if_condition("draw a card if you cast this spell during your main phase");
         assert_eq!(cleaned, "draw a card");
         assert_eq!(cond.unwrap(), TriggerCondition::CastDuringMainPhase);
     }
@@ -6357,8 +6359,7 @@ mod tests {
 
     #[test]
     fn extract_had_counters_untyped() {
-        let (cleaned, cond) =
-            extract_if_condition("draw a card if it had counters on it");
+        let (cleaned, cond) = extract_if_condition("draw a card if it had counters on it");
         assert_eq!(cleaned, "draw a card");
         assert_eq!(
             cond.unwrap(),
@@ -6368,8 +6369,7 @@ mod tests {
 
     #[test]
     fn bridge_monarch_from_trigger_text() {
-        let (cleaned, cond) =
-            extract_if_condition("draw a card if you're the monarch");
+        let (cleaned, cond) = extract_if_condition("draw a card if you're the monarch");
         assert_eq!(cleaned, "draw a card");
         assert_eq!(cond.unwrap(), TriggerCondition::IsMonarch);
     }

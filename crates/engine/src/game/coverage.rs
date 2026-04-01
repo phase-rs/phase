@@ -3372,10 +3372,8 @@ fn pump_matches_oracle(
         }
         Effect::GenericEffect {
             static_abilities, ..
-        } => {
-            if static_has_pump_modification(static_abilities, expected_power, expected_toughness) {
-                return true;
-            }
+        } if static_has_pump_modification(static_abilities, expected_power, expected_toughness) => {
+            return true;
         }
         _ => {}
     }
@@ -3869,15 +3867,12 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             || lower.contains("if it's your turn")
             || lower.contains("if no other ")
             || lower.contains("if no creatures ")
-            // Replacement effect patterns (not ability conditions)
+            // Replacement effect patterns (not ability conditions):
+            // "if X would Y, Z instead" is the canonical CR 614.1a replacement structure.
+            || (lower.contains(" would ") && lower.contains(" instead"))
             || (lower.contains("if you search") && lower.contains("shuffle"))
-            || lower.contains("if that spell would be put into")
-            || lower.contains("would die this turn, exile")
-            || (lower.contains("if one or more ") && lower.contains(" would be "))
-            || lower.contains("if damage would be dealt")
             || lower.contains("if a land is tapped for mana")
             || lower.contains("if a player would begin")
-            || lower.contains("if a card or token would be put into")
         {
             continue;
         }

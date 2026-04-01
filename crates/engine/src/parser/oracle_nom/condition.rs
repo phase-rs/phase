@@ -37,6 +37,7 @@ pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         parse_turn_conditions,
         parse_source_state_conditions,
+        parse_player_state_conditions,
         parse_you_have_conditions,
         parse_control_conditions,
         parse_life_conditions,
@@ -68,33 +69,60 @@ fn parse_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     .parse(input)
 }
 
+/// CR 724.1 / CR 702.131a: Parse player-state conditions.
+///
+/// Handles "you're the monarch" and "you have the city's blessing".
+fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
+        // CR 724.1: Monarch status
+        value(
+            StaticCondition::IsMonarch,
+            alt((tag("you're the monarch"), tag("you are the monarch"))),
+        ),
+        // CR 702.131a: Ascend / City's Blessing
+        value(
+            StaticCondition::HasCityBlessing,
+            tag("you have the city's blessing"),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 611.2b: Compose subject × predicate for tapped/untapped.
+///
+/// Subject: "~ is ", "this creature is ", "this permanent is ", "this land is ",
+/// "this artifact is ", "equipped creature is ", "enchanted creature is "
+/// Predicate: "tapped" → SourceIsTapped, "untapped" → Not(SourceIsTapped)
+fn parse_tapped_untapped(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((
+        tag("~ is "),
+        tag("this creature is "),
+        tag("this permanent is "),
+        tag("this land is "),
+        tag("this artifact is "),
+        tag("this enchantment is "),
+        tag("equipped creature is "),
+        tag("enchanted creature is "),
+    ))
+    .parse(input)?;
+    alt((
+        value(StaticCondition::SourceIsTapped, tag("tapped")),
+        value(
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::SourceIsTapped),
+            },
+            tag("untapped"),
+        ),
+    ))
+    .parse(rest)
+}
+
 /// CR 611.2b: Parse source-state conditions (tapped, untapped, entered this turn).
 fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
-        // CR 611.2b: Tapped state
-        value(
-            StaticCondition::SourceIsTapped,
-            alt((
-                tag("~ is tapped"),
-                tag("this creature is tapped"),
-                tag("this permanent is tapped"),
-                tag("equipped creature is tapped"),
-                tag("enchanted creature is tapped"),
-            )),
-        ),
-        // CR 611.2b: Untapped state → Not(SourceIsTapped)
-        map(
-            alt((
-                tag("~ is untapped"),
-                tag("this creature is untapped"),
-                tag("this permanent is untapped"),
-                tag("equipped creature is untapped"),
-                tag("enchanted creature is untapped"),
-            )),
-            |_| StaticCondition::Not {
-                condition: Box::new(StaticCondition::SourceIsTapped),
-            },
-        ),
+        // CR 611.2b: Tapped/untapped — composed as subject × predicate.
+        // Parse subject ("~ is", "this creature is", etc.) then branch on "tapped"/"untapped".
+        parse_tapped_untapped,
         // CR 400.7: Entered this turn
         value(
             StaticCondition::SourceEnteredThisTurn,
@@ -149,8 +177,8 @@ fn parse_this_type_entered_this_turn(input: &str) -> OracleResult<'_, StaticCond
 /// Parse "you have" quantity conditions: hand size, graveyard size, life.
 ///
 /// Composable: "you have " + threshold/absence + quantity suffix.
-/// Handles "you have no cards in hand", "you have N or more cards in hand",
-/// "you have N or more cards in your graveyard", "you have N or more life".
+/// Handles "you have no cards in hand", "you have N or more/fewer cards in hand",
+/// "you have N or more cards in your graveyard", "you have N or more/less life".
 fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you have ").parse(input)?;
 
@@ -189,6 +217,24 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         tag::<_, _, nom_language::error::VerboseError<&str>>(" or more life").parse(rest)
     {
         return Ok((rest, make_quantity_ge(QuantityRef::LifeTotal, n)));
+    }
+    // "you have N or less life" → LifeTotal LE N
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>(" or less life").parse(rest)
+    {
+        return Ok((
+            rest,
+            make_quantity_comparison(QuantityRef::LifeTotal, Comparator::LE, n),
+        ));
+    }
+    // "you have N or fewer cards in hand" → HandSize LE N
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>(" or fewer cards in hand").parse(rest)
+    {
+        return Ok((
+            rest,
+            make_quantity_comparison(QuantityRef::HandSize, Comparator::LE, n),
+        ));
     }
 
     Err(nom::Err::Error(nom_language::error::VerboseError {
@@ -1297,5 +1343,64 @@ mod tests {
         let (rest, c) = parse_inner_condition("this permanent is a creature").unwrap();
         assert_eq!(rest, "");
         assert!(matches!(c, StaticCondition::SourceMatchesFilter { .. }));
+    }
+
+    // -- Player-state conditions --
+
+    #[test]
+    fn test_youre_the_monarch() {
+        let (rest, c) = parse_inner_condition("you're the monarch").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::IsMonarch);
+    }
+
+    #[test]
+    fn test_you_are_the_monarch() {
+        let (rest, c) = parse_inner_condition("you are the monarch").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::IsMonarch);
+    }
+
+    #[test]
+    fn test_city_blessing() {
+        let (rest, c) = parse_inner_condition("you have the city's blessing").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::HasCityBlessing);
+    }
+
+    // -- "you have N or less" conditions --
+
+    #[test]
+    fn test_you_have_5_or_less_life() {
+        let (rest, c) = parse_inner_condition("you have five or less life").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal,
+                    },
+                comparator: Comparator::LE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            } => {}
+            other => panic!("expected LifeTotal LE 5, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_you_have_fewer_cards_in_hand() {
+        let (rest, c) = parse_inner_condition("you have two or fewer cards in hand").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize,
+                    },
+                comparator: Comparator::LE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            } => {}
+            other => panic!("expected HandSize LE 2, got {other:?}"),
+        }
     }
 }

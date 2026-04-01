@@ -229,6 +229,11 @@ pub(crate) fn evaluate_condition(
                     .first()
                     .is_some_and(|a| a.object_id == source_id)
         }),
+        // CR 724.1: True when the controller is the monarch.
+        StaticCondition::IsMonarch => state.monarch == Some(controller),
+        // CR 702.131a: True when the controller has the city's blessing.
+        // TODO: Add city_blessing tracking to GameState when Ascend is fully implemented.
+        StaticCondition::HasCityBlessing => false,
         StaticCondition::None => true,
     }
 }
