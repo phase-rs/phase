@@ -2273,8 +2273,19 @@ fn parse_cumulative_upkeep_keyword(line: &str) -> Option<Keyword> {
     let lower = line.to_lowercase();
 
     // Try em-dash format first: "Cumulative upkeep—Pay 2 life. (reminder)"
-    if let Some((_, after_dash)) = line.split_once('\u{2014}') {
-        let cost_text = super::oracle_util::strip_reminder_text(after_dash)
+    // CR 702.24a: Cumulative upkeep keyword with cost parameter.
+    let em_dash_rest = nom_on_lower(line, &lower, |i| {
+        value(
+            (),
+            nom::sequence::pair(
+                tag::<_, _, VerboseError<&str>>("cumulative upkeep"),
+                tag("\u{2014}"),
+            ),
+        )
+        .parse(i)
+    });
+    if let Some(((), rest)) = em_dash_rest {
+        let cost_text = super::oracle_util::strip_reminder_text(rest)
             .trim()
             .trim_end_matches('.')
             .to_string();

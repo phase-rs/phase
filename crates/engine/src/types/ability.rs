@@ -1117,9 +1117,9 @@ pub enum QuantityRef {
     CountersOnTarget { counter_type: String },
     /// A variable reference (e.g. "X") resolved from spell payment or "that much" from prior effect.
     Variable { name: String },
-    /// CR 208.3: The current power of the source object (post-layer).
+    /// CR 208.1: The current power of the source object (post-layer).
     SelfPower,
-    /// CR 208.3: The current toughness of the source object (post-layer).
+    /// CR 208.1: The current toughness of the source object (post-layer).
     SelfToughness,
     /// CR 107.3e: Aggregate query (max/min/sum) over a property of battlefield objects.
     Aggregate {
@@ -1207,10 +1207,10 @@ pub enum QuantityRef {
     OpponentLifeLostThisTurn,
     /// CR 122.1: Whether the controller added any counter to any permanent this turn.
     CounterAddedThisTurn,
-    /// CR 119.3: Maximum life total among the controller's opponents.
+    /// CR 119: Maximum life total among the controller's opponents.
     /// Used for "an opponent has more life than you" cross-player comparisons.
     OpponentLifeTotal,
-    /// CR 402.1: Maximum hand size among the controller's opponents.
+    /// CR 402: Maximum hand count among the controller's opponents.
     /// Used for "an opponent has more cards in hand than you" cross-player comparisons.
     OpponentHandSize,
 }

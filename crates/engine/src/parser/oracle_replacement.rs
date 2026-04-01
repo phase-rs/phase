@@ -1,5 +1,5 @@
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take_until};
 use nom::combinator::value;
 use nom::Parser;
 use nom_language::error::VerboseError;
@@ -561,7 +561,10 @@ fn parse_enters_with_counters(
     let (kicker_condition, work_text) = extract_kicker_enters_condition(norm_lower);
 
     // CR 702.138c: "escapes with" is semantically "enters with" gated on escape.
-    let is_escape = work_text.contains("escapes with");
+    // Use nom take_until to scan for the "escapes with" phrase at word boundaries.
+    let is_escape = take_until::<_, _, VerboseError<&str>>("escapes with")
+        .parse(work_text)
+        .is_ok();
 
     // Find "with [N] [type] counter" to extract count and counter type.
     // For escape, the "with" follows "escapes"; for enters, it follows "enters".
@@ -652,50 +655,55 @@ fn parse_enters_with_counters(
 /// conditional prefix stripped (just "it enters with..." or the original text if no prefix).
 /// CR 702.33d
 fn extract_kicker_enters_condition(norm_lower: &str) -> (Option<ReplacementCondition>, &str) {
-    // Match "if ~ was kicked" or "if this creature was kicked"
-    let after_if = match tag::<_, _, VerboseError<&str>>("if ")
-        .parse(norm_lower)
-        .ok()
-    {
-        Some((rest, _)) => rest,
-        None => return (None, norm_lower),
+    // CR 702.33d: Parse "if ~ was kicked [with its {cost} kicker], it enters with..."
+    // using nom combinators for structured dispatch.
+    let after_if = match tag::<_, _, VerboseError<&str>>("if ").parse(norm_lower) {
+        Ok((rest, _)) => rest,
+        Err(_) => return (None, norm_lower),
     };
 
-    // Find "was kicked" — subject can be "~", "it", "this creature", etc.
-    let after_kicked = if let Some(pos) = after_if.find("was kicked") {
-        &after_if[pos + "was kicked".len()..]
-    } else {
-        return (None, norm_lower);
+    // Subject can be "~", "it", "this creature", etc. — scan to "was kicked".
+    let after_kicked = match take_until::<_, _, VerboseError<&str>>("was kicked")
+        .parse(after_if)
+        .and_then(|(rest, _)| tag::<_, _, VerboseError<&str>>("was kicked").parse(rest))
+    {
+        Ok((rest, _)) => rest,
+        Err(_) => return (None, norm_lower),
     };
 
     // Optional "with its {cost} kicker" variant specification
     let (cost_text, after_kicker_clause) =
-        if let Some(rest) = after_kicked.strip_prefix(" with its ") {
-            // Extract cost text up to " kicker"
-            if let Some(kicker_pos) = rest.find(" kicker") {
-                let cost = rest[..kicker_pos].trim().to_string();
-                (Some(cost), &rest[kicker_pos + " kicker".len()..])
-            } else {
-                (None, after_kicked)
+        match tag::<_, _, VerboseError<&str>>(" with its ").parse(after_kicked) {
+            Ok((rest, _)) => {
+                match take_until::<_, _, VerboseError<&str>>(" kicker").parse(rest) {
+                    Ok((rest2, cost_str)) => {
+                        // Consume " kicker" tag
+                        match tag::<_, _, VerboseError<&str>>(" kicker").parse(rest2) {
+                            Ok((rest3, _)) => (Some(cost_str.trim().to_string()), rest3),
+                            Err(_) => (None, after_kicked),
+                        }
+                    }
+                    Err(_) => (None, after_kicked),
+                }
             }
-        } else {
-            (None, after_kicked)
+            Err(_) => (None, after_kicked),
         };
 
     // Expect ", it enters with" or ", it enters the battlefield with"
-    let body = after_kicker_clause
-        .strip_prefix(", it enters with")
-        .or_else(|| after_kicker_clause.strip_prefix(", it enters the battlefield with"));
+    let enters_result = alt((
+        tag::<_, _, VerboseError<&str>>(", it enters with"),
+        tag(", it enters the battlefield with"),
+    ))
+    .parse(after_kicker_clause);
 
-    match body {
-        Some(_) => {
+    match enters_result {
+        Ok(_) => {
             // Reconstruct the enters-with text for downstream parsing.
-            // "it enters with..." is what parse_enters_with_counters needs.
             let enters_start = norm_lower.len() - after_kicker_clause.len() + 2; // skip ", "
             let condition = ReplacementCondition::CastViaKicker { cost_text };
             (Some(condition), &norm_lower[enters_start..])
         }
-        None => (None, norm_lower),
+        Err(_) => (None, norm_lower),
     }
 }
 

@@ -177,7 +177,7 @@ fn parse_this_type_entered_this_turn(input: &str) -> OracleResult<'_, StaticCond
     Ok((rest, StaticCondition::SourceEnteredThisTurn))
 }
 
-/// CR 208.3: Parse source power/toughness comparison conditions.
+/// CR 208.1: Parse source power/toughness comparison conditions.
 ///
 /// Handles "its power is N or less/greater", "~ has power N or greater",
 /// and equivalent enchanted/equipped creature patterns.
@@ -986,7 +986,7 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
     }))
 }
 
-/// CR 118.12: Parse "[player] pays {cost}" → UnlessPay { cost }.
+/// CR 118.12a: Parse "[player] pays {cost}" → UnlessPay { cost }.
 ///
 /// Handles "you pay {N}", "their controller pays {N}", "its controller pays {N}".
 /// Used inside "unless" conditions for tax effects (Ghostly Prison, Propaganda, etc.).
