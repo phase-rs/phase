@@ -169,6 +169,7 @@ export const useGameStore = create<GameStore>()(
           waitingFor: newState.waiting_for,
           legalActions: legalResult.actions,
           autoPassRecommended: legalResult.autoPassRecommended,
+          spellCosts: legalResult.spellCosts ?? {},
           stateHistory: newHistory,
         };
       });

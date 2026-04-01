@@ -345,7 +345,7 @@ function CardImagePreview({
           draggable={false}
         />
         {obj?.mana_cost && (
-          <ManaCostPips cost={obj.mana_cost} size="lg" className="absolute right-[3.75%] top-[4.5%] z-10" />
+          <ManaCostPips cost={obj.mana_cost} size="lg" className="absolute right-[7.00%] top-[5.25%] z-10" />
         )}
         {classLevel != null && (
           <div className="absolute bottom-3 left-3 z-10">
