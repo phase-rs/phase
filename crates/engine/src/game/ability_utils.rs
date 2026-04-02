@@ -64,11 +64,25 @@ pub fn build_chained_resolved(
             .get(idx)
             .ok_or_else(|| EngineError::InvalidAction(format!("Mode index {idx} out of range")))?;
         let mut resolved = build_resolved_from_def(def, source_id, controller);
-        resolved.sub_ability = result.map(Box::new);
+        // CR 700.2d: When chaining multiple modes, append subsequent modes after
+        // the current mode's own sub_ability chain (e.g., Cathartic Pyre mode 2's
+        // "discard, then draw that many" must preserve the draw sub_ability).
+        if let Some(next_mode) = result {
+            append_to_sub_chain(&mut resolved, next_mode);
+        }
         result = Some(resolved);
     }
 
     result.ok_or_else(|| EngineError::InvalidAction("No modes selected".to_string()))
+}
+
+/// Append `next` to the tail of `ability`'s sub_ability chain.
+pub(crate) fn append_to_sub_chain(ability: &mut ResolvedAbility, next: ResolvedAbility) {
+    let mut node = ability;
+    while node.sub_ability.is_some() {
+        node = node.sub_ability.as_mut().unwrap().as_mut();
+    }
+    node.sub_ability = Some(Box::new(next));
 }
 
 pub fn find_first_target_filter_in_chain(ability: &ResolvedAbility) -> Option<&TargetFilter> {
@@ -917,12 +931,77 @@ fn build_mode_sequences(
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityKind, Effect, ModalChoice, ModalSelectionConstraint, QuantityExpr, TargetFilter,
-        TypedFilter,
+        AbilityKind, Effect, ModalChoice, ModalSelectionConstraint, QuantityExpr, QuantityRef,
+        TargetFilter, TypedFilter,
     };
     use crate::types::game_state::{GameState, TargetSelectionConstraint, TargetSelectionSlot};
     use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn build_chained_resolved_preserves_mode_sub_abilities() {
+        // CR 700.2d: Cathartic Pyre mode 2 has "Discard up to two, then draw that many"
+        // — the draw sub_ability must not be clobbered when chaining modes.
+        let mode1 = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+        );
+        let mut mode2 = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                random: false,
+                up_to: true,
+                unless_filter: None,
+            },
+        );
+        mode2.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            },
+        )));
+
+        let abilities = vec![mode1, mode2];
+
+        // Single mode: mode 2 only
+        let resolved = build_chained_resolved(&abilities, &[1], ObjectId(1), PlayerId(0)).unwrap();
+        assert!(
+            matches!(resolved.effect, Effect::Discard { .. }),
+            "Root should be Discard"
+        );
+        let sub = resolved
+            .sub_ability
+            .as_ref()
+            .expect("Draw sub_ability must be preserved");
+        assert!(
+            matches!(sub.effect, Effect::Draw { .. }),
+            "Sub_ability should be Draw, got {:?}",
+            sub.effect
+        );
+
+        // Both modes: mode 1 then mode 2 — mode 2's internal chain must survive
+        let resolved =
+            build_chained_resolved(&abilities, &[0, 1], ObjectId(1), PlayerId(0)).unwrap();
+        assert!(matches!(resolved.effect, Effect::Destroy { .. }));
+        let mode2_node = resolved
+            .sub_ability
+            .as_ref()
+            .expect("mode 2 should follow mode 1");
+        assert!(matches!(mode2_node.effect, Effect::Discard { .. }));
+        let draw_node = mode2_node
+            .sub_ability
+            .as_ref()
+            .expect("Draw sub must survive multi-mode chaining");
+        assert!(matches!(draw_node.effect, Effect::Draw { .. }));
+    }
 
     #[test]
     fn build_resolved_copies_optional_targeting() {
