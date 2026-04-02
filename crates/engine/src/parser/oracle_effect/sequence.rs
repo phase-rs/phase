@@ -453,6 +453,7 @@ pub(super) fn apply_clause_continuation(
                     under_your_control: false,
                     enter_tapped,
                     enters_attacking: false,
+                    up_to: false,
                 },
             );
             // CR 303.4f: "attached to [source]" — forward the moved card to an Attach sub_ability

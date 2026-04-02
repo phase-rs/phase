@@ -97,6 +97,70 @@ pub mod transform_effect;
 pub mod venture;
 pub mod win_lose;
 
+fn matches_player_scope(
+    state: &GameState,
+    player: PlayerId,
+    scope: &PlayerFilter,
+    controller: PlayerId,
+) -> bool {
+    state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .is_some_and(|p| {
+            !p.is_eliminated
+                && match scope {
+                    PlayerFilter::Controller => p.id == controller,
+                    PlayerFilter::All => true,
+                    PlayerFilter::Opponent => p.id != controller,
+                    PlayerFilter::OpponentLostLife => {
+                        p.id != controller && p.life_lost_this_turn > 0
+                    }
+                    PlayerFilter::OpponentGainedLife => {
+                        p.id != controller && p.life_gained_this_turn > 0
+                    }
+                    PlayerFilter::HighestSpeed => {
+                        let highest_speed = state
+                            .players
+                            .iter()
+                            .filter(|player| !player.is_eliminated)
+                            .map(|player| player.speed.unwrap_or(0))
+                            .max()
+                            .unwrap_or(0);
+                        p.speed.unwrap_or(0) == highest_speed
+                    }
+                    PlayerFilter::ZoneChangedThisWay => state
+                        .last_zone_changed_ids
+                        .iter()
+                        .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == p.id)),
+                }
+        })
+}
+
+fn append_to_pending_continuation(state: &mut GameState, tail: Option<Box<ResolvedAbility>>) {
+    let Some(tail) = tail else {
+        return;
+    };
+
+    if let Some(existing) = state.pending_continuation.as_mut() {
+        let mut cursor = existing.as_mut();
+        let tail = Some(tail);
+        loop {
+            if cursor.sub_ability.is_none() {
+                cursor.sub_ability = tail;
+                break;
+            }
+            cursor = cursor
+                .sub_ability
+                .as_mut()
+                .expect("sub_ability checked above")
+                .as_mut();
+        }
+    } else {
+        state.pending_continuation = Some(tail);
+    }
+}
+
 /// CR 601.2c: Extract SharesQuality filter properties from an effect's target filter.
 /// Returns the typed qualities that require group validation.
 fn extract_shares_quality_props(filter: &TargetFilter) -> Vec<&SharedQuality> {
@@ -544,47 +608,45 @@ pub fn resolve_ability_chain(
     // Draw, Mill target the correct player.
     if let Some(ref scope) = ability.player_scope {
         let controller = ability.controller;
-        let matching_players: Vec<crate::types::player::PlayerId> = state
-            .players
-            .iter()
-            .filter(|p| {
-                !p.is_eliminated
-                    && match scope {
-                        PlayerFilter::Controller => p.id == controller,
-                        PlayerFilter::All => true,
-                        PlayerFilter::Opponent => p.id != controller,
-                        PlayerFilter::OpponentLostLife => {
-                            p.id != controller && p.life_lost_this_turn > 0
-                        }
-                        PlayerFilter::OpponentGainedLife => {
-                            p.id != controller && p.life_gained_this_turn > 0
-                        }
-                        PlayerFilter::HighestSpeed => {
-                            let highest_speed = state
-                                .players
-                                .iter()
-                                .filter(|player| !player.is_eliminated)
-                                .map(|player| player.speed.unwrap_or(0))
-                                .max()
-                                .unwrap_or(0);
-                            p.speed.unwrap_or(0) == highest_speed
-                        }
-                        // CR 608.2c: "each player who [verb]ed this way" — scope to
-                        // owners of objects that changed zones in the preceding effect.
-                        PlayerFilter::ZoneChangedThisWay => state
-                            .last_zone_changed_ids
-                            .iter()
-                            .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == p.id)),
-                    }
-            })
-            .map(|p| p.id)
+        let matching_players: Vec<PlayerId> = crate::game::players::apnap_order(state)
+            .into_iter()
+            .filter(|pid| matches_player_scope(state, *pid, scope, controller))
             .collect();
 
-        for pid in matching_players {
+        let initial_waiting_for = state.waiting_for.clone();
+        for (i, pid) in matching_players.iter().enumerate() {
             let mut scoped = ability.clone();
             scoped.player_scope = None; // prevent re-entry
-            scoped.controller = pid;
+            scoped.controller = *pid;
             resolve_ability_chain(state, &scoped, events, depth + 1)?;
+
+            // CR 608.2e: Break if inner effect entered a player-choice state —
+            // remaining players resume after the choice resolves via continuation.
+            if state.waiting_for != initial_waiting_for {
+                let remaining = &matching_players[i + 1..];
+                if !remaining.is_empty() {
+                    // Build continuation chain for remaining players in APNAP order.
+                    // Each remaining player gets a full clone (including sub_ability)
+                    // so their own chained effects resolve naturally when resumed.
+                    let mut tail: Option<Box<ResolvedAbility>> = None;
+                    for &remaining_pid in remaining.iter().rev() {
+                        let mut remaining_scoped = ability.clone();
+                        remaining_scoped.player_scope = None;
+                        remaining_scoped.controller = remaining_pid;
+                        // Append the previous tail after this player's sub_ability chain
+                        if let Some(prev) = tail {
+                            let mut node = &mut remaining_scoped;
+                            while node.sub_ability.is_some() {
+                                node = node.sub_ability.as_mut().unwrap().as_mut();
+                            }
+                            node.sub_ability = Some(prev);
+                        }
+                        tail = Some(Box::new(remaining_scoped));
+                    }
+                    append_to_pending_continuation(state, tail);
+                }
+                break;
+            }
         }
         return Ok(());
     }
@@ -776,7 +838,18 @@ pub fn resolve_ability_chain(
                         resolved.targets = ability.targets.clone();
                     }
                     resolved.context = ability.context.clone();
-                    resolve_ability_chain(state, &resolved, events, depth + 1)?;
+                    // If the parent effect entered an interactive state (e.g.,
+                    // SearchChoice), stash the else chain as a continuation so it
+                    // runs after the player responds — not immediately.
+                    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                        debug_assert!(
+                            state.pending_continuation.is_none(),
+                            "pending_continuation overwritten before consumption — else_ability chain will be lost"
+                        );
+                        state.pending_continuation = Some(Box::new(resolved));
+                    } else {
+                        resolve_ability_chain(state, &resolved, events, depth + 1)?;
+                    }
                 }
                 return Ok(());
             }
@@ -887,6 +960,7 @@ pub fn resolve_ability_chain(
                 | WaitingFor::ChooseFromZoneChoice { .. }
                 | WaitingFor::ManifestDreadChoice { .. }
                 | WaitingFor::DiscardChoice { .. }
+                | WaitingFor::EffectZoneChoice { .. }
                 | WaitingFor::LearnChoice { .. }
                 | WaitingFor::PopulateChoice { .. }
         ) {
@@ -1352,6 +1426,7 @@ mod tests {
                         under_your_control: false,
                         enter_tapped: false,
                         enters_attacking: false,
+                        up_to: false,
                     },
                 )),
                 uses_tracked_set: true,
@@ -1370,6 +1445,7 @@ mod tests {
                 under_your_control: false,
                 enter_tapped: false,
                 enters_attacking: false,
+                up_to: false,
             },
             vec![TargetRef::Object(obj1), TargetRef::Object(obj2)],
             ObjectId(100),
@@ -1417,6 +1493,7 @@ mod tests {
                         under_your_control: false,
                         enter_tapped: false,
                         enters_attacking: false,
+                        up_to: false,
                     },
                 )),
                 uses_tracked_set: false,
@@ -1435,6 +1512,7 @@ mod tests {
                 under_your_control: false,
                 enter_tapped: false,
                 enters_attacking: false,
+                up_to: false,
             },
             vec![TargetRef::Object(obj)],
             ObjectId(100),
@@ -1472,6 +1550,7 @@ mod tests {
                         under_your_control: false,
                         enter_tapped: false,
                         enters_attacking: false,
+                        up_to: false,
                     },
                 )),
                 uses_tracked_set: true,
@@ -1490,6 +1569,7 @@ mod tests {
                 under_your_control: false,
                 enter_tapped: false,
                 enters_attacking: false,
+                up_to: false,
             },
             vec![], // no targets
             ObjectId(100),

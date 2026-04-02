@@ -2241,7 +2241,10 @@ fn parse_per_turn_draw_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
     let rest = rest.trim_start();
     let rest_lower = rest.to_lowercase();
     alt((
-        value((), tag::<&str, &str, (&str, nom::error::ErrorKind)>("card each turn")),
+        value(
+            (),
+            tag::<&str, &str, (&str, nom::error::ErrorKind)>("card each turn"),
+        ),
         value((), tag("cards each turn")),
     ))
     .parse(rest_lower.as_str())

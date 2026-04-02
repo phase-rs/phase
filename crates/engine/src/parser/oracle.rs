@@ -683,6 +683,7 @@ pub fn parse_oracle_text(
                         under_your_control: false,
                         enter_tapped: false,
                         enters_attacking: false,
+                        up_to: false,
                     },
                 )
                 .description(line.to_string()),

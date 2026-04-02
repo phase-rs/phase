@@ -288,6 +288,37 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        WaitingFor::EffectZoneChoice {
+            player,
+            cards,
+            count,
+            up_to,
+            ..
+        } => {
+            if *up_to {
+                (0..=*count)
+                    .flat_map(|size| combinations(cards, size))
+                    .map(|combo| {
+                        candidate(
+                            GameAction::SelectCards { cards: combo },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            } else {
+                combinations(cards, *count)
+                    .into_iter()
+                    .map(|combo| {
+                        candidate(
+                            GameAction::SelectCards { cards: combo },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            }
+        }
         WaitingFor::BetweenGamesSideboard { player, .. } => sideboard_actions(state, *player),
         WaitingFor::BetweenGamesChoosePlayDraw { player, .. } => vec![
             candidate(

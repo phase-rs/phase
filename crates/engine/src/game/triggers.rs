@@ -2115,6 +2115,7 @@ pub mod tests {
                                 under_your_control: false,
                                 enter_tapped: false,
                                 enters_attacking: false,
+                                up_to: false,
                             },
                         )
                         .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -2195,6 +2196,7 @@ pub mod tests {
                                 under_your_control: false,
                                 enter_tapped: false,
                                 enters_attacking: false,
+                                up_to: false,
                             },
                         )
                         .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -2265,6 +2267,7 @@ pub mod tests {
                             under_your_control: false,
                             enter_tapped: false,
                             enters_attacking: false,
+                            up_to: false,
                         },
                     ))
                     .valid_card(TargetFilter::SelfRef)
@@ -2321,6 +2324,7 @@ pub mod tests {
                             under_your_control: false,
                             enter_tapped: false,
                             enters_attacking: false,
+                            up_to: false,
                         },
                     ))
                     .valid_card(TargetFilter::SelfRef)
@@ -2460,6 +2464,7 @@ pub mod tests {
                     under_your_control: false,
                     enter_tapped: false,
                     enters_attacking: false,
+                    up_to: false,
                 },
             )));
             obj.trigger_definitions.push(trigger);
@@ -2692,6 +2697,7 @@ pub mod tests {
                                     under_your_control: false,
                                     enter_tapped: false,
                                     enters_attacking: false,
+                                    up_to: false,
                                 },
                             )
                             .duration(crate::types::ability::Duration::UntilHostLeavesPlay),

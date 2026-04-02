@@ -452,7 +452,10 @@ fn translate_sacrifice(params: &ForgeParams) -> Result<Effect, ForgeTranslateErr
         .or_else(|| params.get("ValidTgts"))
         .and_then(|s| translate_filter(s).ok())
         .unwrap_or(TargetFilter::Any);
-    Ok(Effect::Sacrifice { target })
+    Ok(Effect::Sacrifice {
+        target,
+        up_to: false,
+    })
 }
 
 // CR 701.13a: Mill cards.

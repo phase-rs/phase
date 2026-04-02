@@ -188,6 +188,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         under_your_control: false,
                         enter_tapped: false,
                         enters_attacking: false,
+                        up_to: false,
                     },
                 )
                 .sub_ability(AbilityDefinition::new(

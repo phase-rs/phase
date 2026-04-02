@@ -456,6 +456,32 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unless_filter: Option<crate::types::ability::TargetFilter>,
     },
+    /// CR 608.2d: Player chooses object(s) from a zone during effect resolution.
+    /// Generalizes the DiscardChoice pattern to sacrifice-from-battlefield and hand-to-battlefield.
+    EffectZoneChoice {
+        player: PlayerId,
+        cards: Vec<ObjectId>,
+        count: usize,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        up_to: bool,
+        source_id: ObjectId,
+        effect_kind: crate::types::ability::EffectKind,
+        /// Source zone of eligible objects (Battlefield for sacrifice, Hand for put-onto-BF).
+        zone: Zone,
+        /// Destination zone for ChangeZone effects. None for Sacrifice.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination: Option<Zone>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        enter_tapped: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        enter_transformed: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        under_your_control: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        enters_attacking: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        owner_library: bool,
+    },
     /// CR 701.48a: Learn — player chooses to rummage (discard→draw) or skip.
     /// `hand_cards` lists cards eligible for discard.
     LearnChoice {
@@ -863,6 +889,7 @@ impl WaitingFor {
             | WaitingFor::ChooseFromZoneChoice { player, .. }
             | WaitingFor::LearnChoice { player, .. }
             | WaitingFor::ManifestDreadChoice { player, .. }
+            | WaitingFor::EffectZoneChoice { player, .. }
             | WaitingFor::TriggerTargetSelection { player, .. }
             | WaitingFor::BetweenGamesSideboard { player, .. }
             | WaitingFor::BetweenGamesChoosePlayDraw { player, .. }
@@ -1928,13 +1955,28 @@ mod tests {
             up_to: false,
             unless_filter: None,
         }));
+        variants.push(Box::new(WaitingFor::EffectZoneChoice {
+            player: PlayerId(0),
+            cards: vec![ObjectId(1)],
+            count: 1,
+            up_to: false,
+            source_id: ObjectId(100),
+            effect_kind: crate::types::ability::EffectKind::Sacrifice,
+            zone: Zone::Battlefield,
+            destination: None,
+            enter_tapped: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enters_attacking: false,
+            owner_library: false,
+        }));
         variants.push(Box::new(WaitingFor::DefilerPayment {
             player: PlayerId(0),
             life_cost: 2,
             mana_reduction: ManaCost::zero(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 25);
+        assert_eq!(variants.len(), 26);
     }
 
     #[test]
@@ -2045,6 +2087,29 @@ mod tests {
         assert_eq!(wf, deserialized);
         // Verify tag format
         assert!(json.contains("\"TriggerTargetSelection\""));
+    }
+
+    #[test]
+    fn effect_zone_choice_roundtrips() {
+        let wf = WaitingFor::EffectZoneChoice {
+            player: PlayerId(0),
+            cards: vec![ObjectId(1), ObjectId(2)],
+            count: 1,
+            up_to: true,
+            source_id: ObjectId(10),
+            effect_kind: crate::types::ability::EffectKind::ChangeZone,
+            zone: Zone::Hand,
+            destination: Some(Zone::Battlefield),
+            enter_tapped: true,
+            enter_transformed: false,
+            under_your_control: true,
+            enters_attacking: false,
+            owner_library: false,
+        };
+        let json = serde_json::to_string(&wf).unwrap();
+        let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();
+        assert_eq!(wf, deserialized);
+        assert!(json.contains("\"EffectZoneChoice\""));
     }
 
     #[test]

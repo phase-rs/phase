@@ -7,7 +7,7 @@ use crate::types::ability::{
     TypedFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{ExileLink, GameState};
+use crate::types::game_state::{ExileLink, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
@@ -164,6 +164,7 @@ pub fn resolve(
         under_your_control,
         effect_enter_tapped,
         effect_enters_attacking,
+        up_to,
     ) = match &ability.effect {
         Effect::ChangeZone {
             origin,
@@ -173,6 +174,7 @@ pub fn resolve(
             under_your_control,
             enter_tapped,
             enters_attacking,
+            up_to,
             ..
         } => (
             *origin,
@@ -182,6 +184,7 @@ pub fn resolve(
             *under_your_control,
             *enter_tapped,
             *enters_attacking,
+            *up_to,
         ),
         _ => return Err(EffectError::MissingParam("Destination".to_string())),
     };
@@ -205,6 +208,108 @@ pub fn resolve(
     } else {
         &self_ref_targets
     };
+
+    if effective_targets.is_empty() && origin == Some(Zone::Hand) {
+        let eligible: Vec<ObjectId> = state
+            .players
+            .iter()
+            .find(|p| p.id == ability.controller)
+            .map(|player| {
+                player
+                    .hand
+                    .iter()
+                    .copied()
+                    .filter(|id| {
+                        crate::game::filter::matches_target_filter_controlled(
+                            state,
+                            *id,
+                            target_filter,
+                            ability.source_id,
+                            ability.controller,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if eligible.is_empty() {
+            if !up_to {
+                state.cost_payment_failed_flag = true;
+            }
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+            });
+            return Ok(());
+        }
+
+        if eligible.len() == 1 && !up_to {
+            let ctrl_override = if under_your_control {
+                Some(ability.controller)
+            } else {
+                None
+            };
+            match execute_zone_move(
+                state,
+                eligible[0],
+                Zone::Hand,
+                dest_zone,
+                ability.source_id,
+                ability.duration.as_ref(),
+                effect_enter_transformed,
+                effect_enter_tapped,
+                ctrl_override,
+                events,
+            ) {
+                ZoneMoveResult::Done => {
+                    state.last_effect_count = Some(1);
+                    if effect_enters_attacking && dest_zone == Zone::Battlefield {
+                        let controller = state
+                            .objects
+                            .get(&eligible[0])
+                            .map(|obj| obj.controller)
+                            .unwrap_or(ability.controller);
+                        crate::game::combat::enter_attacking(
+                            state,
+                            eligible[0],
+                            ability.source_id,
+                            controller,
+                        );
+                    }
+                }
+                ZoneMoveResult::NeedsChoice(player) => {
+                    state.waiting_for =
+                        crate::game::replacement::replacement_choice_waiting_for(player, state);
+                    return Ok(());
+                }
+            }
+
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+            });
+            return Ok(());
+        }
+
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            player: ability.controller,
+            cards: eligible,
+            count: 1,
+            up_to,
+            source_id: ability.source_id,
+            effect_kind: EffectKind::ChangeZone,
+            zone: Zone::Hand,
+            destination: Some(dest_zone),
+            enter_tapped: effect_enter_tapped,
+            enter_transformed: effect_enter_transformed,
+            under_your_control,
+            enters_attacking: effect_enters_attacking,
+            owner_library,
+        };
+        // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses
+        // (matching the DiscardChoice pattern — single authority for the event).
+        return Ok(());
+    }
 
     for target in effective_targets {
         if let TargetRef::Object(obj_id) = target {
@@ -380,6 +485,25 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
+    fn make_hand_choice_ability(up_to: bool) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+    }
+
     #[test]
     fn move_from_hand_to_battlefield() {
         let mut state = GameState::new_two_player(42);
@@ -400,6 +524,7 @@ mod tests {
                 under_your_control: false,
                 enter_tapped: false,
                 enters_attacking: false,
+                up_to: false,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -433,6 +558,7 @@ mod tests {
                 under_your_control: false,
                 enter_tapped: false,
                 enters_attacking: false,
+                up_to: false,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -466,6 +592,7 @@ mod tests {
                 under_your_control: false,
                 enter_tapped: false,
                 enters_attacking: false,
+                up_to: false,
             },
             vec![TargetRef::Object(target_id)],
             source_id,
@@ -504,6 +631,7 @@ mod tests {
                 under_your_control: false,
                 enter_tapped: false,
                 enters_attacking: false,
+                up_to: false,
             },
             vec![TargetRef::Object(target_id)],
             ObjectId(100),
@@ -553,6 +681,7 @@ mod tests {
                 under_your_control: false,
                 enter_tapped: false,
                 enters_attacking: false,
+                up_to: false,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -595,6 +724,7 @@ mod tests {
                 under_your_control: false,
                 enter_tapped: false,
                 enters_attacking: false,
+                up_to: false,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -637,6 +767,7 @@ mod tests {
                 under_your_control: false,
                 enter_tapped: false,
                 enters_attacking: false,
+                up_to: false,
             },
             vec![], // empty targets — SelfRef means source_id
             source_id,
@@ -923,6 +1054,7 @@ mod tests {
                 under_your_control: true,
                 enter_tapped: false,
                 enters_attacking: false,
+                up_to: false,
             },
             vec![TargetRef::Object(obj_id)],
             source_id,
@@ -975,6 +1107,7 @@ mod tests {
                 under_your_control: true,
                 enter_tapped: false,
                 enters_attacking: true,
+                up_to: false,
             },
             vec![TargetRef::Object(obj_id)],
             source_id,
@@ -1021,6 +1154,7 @@ mod tests {
                 under_your_control: false,
                 enter_tapped: false,
                 enters_attacking: false,
+                up_to: false,
             },
             vec![],
             obj_id,
@@ -1046,5 +1180,103 @@ mod tests {
                 .any(|e| matches!(e, crate::types::events::GameEvent::ZoneChanged { .. })),
             "no ZoneChanged event should fire for origin mismatch"
         );
+    }
+
+    #[test]
+    fn empty_targets_from_hand_sets_effect_zone_choice_and_preserves_flags() {
+        let mut state = GameState::new_two_player(42);
+        let a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hand A".to_string(),
+            Zone::Hand,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Hand B".to_string(),
+            Zone::Hand,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: true,
+                under_your_control: true,
+                enter_tapped: true,
+                enters_attacking: false,
+                up_to: true,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                up_to,
+                effect_kind,
+                zone,
+                destination,
+                enter_tapped,
+                enter_transformed,
+                under_your_control,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 1);
+                assert!(*up_to);
+                assert_eq!(*effect_kind, EffectKind::ChangeZone);
+                assert_eq!(*zone, Zone::Hand);
+                assert_eq!(*destination, Some(Zone::Battlefield));
+                assert!(cards.contains(&a));
+                assert!(cards.contains(&b));
+                assert!(*enter_tapped);
+                assert!(*enter_transformed);
+                assert!(*under_your_control);
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_targets_from_hand_with_single_card_auto_moves_and_records_count() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Only Hand Card".to_string(),
+            Zone::Hand,
+        );
+        let ability = make_hand_choice_ability(false);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.battlefield.contains(&obj_id));
+        assert!(!state.players[0].hand.contains(&obj_id));
+        assert_eq!(state.last_effect_count, Some(1));
+    }
+
+    #[test]
+    fn mandatory_empty_target_hand_move_without_cards_sets_failure_flag() {
+        let mut state = GameState::new_two_player(42);
+        let ability = make_hand_choice_ability(false);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.cost_payment_failed_flag);
     }
 }

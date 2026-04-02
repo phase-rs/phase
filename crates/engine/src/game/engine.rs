@@ -74,6 +74,19 @@ fn sync_waiting_for(state: &mut GameState, waiting_for: &WaitingFor) {
     }
 }
 
+fn resume_pending_continuation_if_priority(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        if let Some(continuation) = state.pending_continuation.take() {
+            effects::resolve_ability_chain(state, &continuation, events, 0)
+                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+        }
+    }
+    Ok(())
+}
+
 /// Auto-pass loop: when a player has an auto-pass flag and receives priority,
 /// automatically pass for them until the goal condition is met or interrupted.
 fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
@@ -714,10 +727,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 }
             }
             // Resume with pending continuation if one was stashed (from resolve_ability_chain).
-            if let Some(continuation) = state.pending_continuation.take() {
-                effects::resolve_ability_chain(state, &continuation, &mut events, 0)
-                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-            }
+            resume_pending_continuation_if_priority(state, &mut events)?;
             state.waiting_for.clone()
         }
         // CR 608.2d: Opponent decided on "any opponent may" effect.
@@ -742,7 +752,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                     // CR 608.2d: Determine if the inner effect requires the opponent
                     // to select a target from their own permanents (sacrifice/tap).
                     let target_selection = match &ability.effect {
-                        Effect::Sacrifice { ref target } | Effect::Tap { ref target } => {
+                        Effect::Sacrifice { ref target, .. } | Effect::Tap { ref target } => {
                             let require_untapped = matches!(ability.effect, Effect::Tap { .. });
                             // CR 701.21a: Opponent chooses from THEIR permanents.
                             let legal: Vec<ObjectId> = state
@@ -855,10 +865,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 }
             }
             // Resume pending continuation (for non-MultiTargetSelection paths).
-            if let Some(continuation) = state.pending_continuation.take() {
-                effects::resolve_ability_chain(state, &continuation, &mut events, 0)
-                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-            }
+            resume_pending_continuation_if_priority(state, &mut events)?;
             state.waiting_for.clone()
         }
         // CR 118.12: Player decided whether to pay an "unless pays" cost.
@@ -972,15 +979,16 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 effects::resolve_ability_chain(state, &ability, &mut events, 0)
                     .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
             }
-            // Resume with pending continuation if one was stashed.
-            if let Some(continuation) = state.pending_continuation.take() {
-                effects::resolve_ability_chain(state, &continuation, &mut events, 0)
-                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+            // CR 117.3b: Return to priority only if the effect did not enter another
+            // interactive wait state while resolving.
+            if matches!(state.waiting_for, WaitingFor::UnlessPayment { .. }) {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                state.priority_player = state.active_player;
             }
-            // CR 117.3b: After resolving, return to priority.
-            WaitingFor::Priority {
-                player: state.active_player,
-            }
+            resume_pending_continuation_if_priority(state, &mut events)?;
+            state.waiting_for.clone()
         }
         // Allow mana abilities during unless-payment choice (CR 118.12)
         (
@@ -2496,6 +2504,168 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             }
             state.waiting_for.clone()
         }
+        (
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards: legal_cards,
+                count,
+                up_to,
+                source_id,
+                effect_kind,
+                zone,
+                destination,
+                enter_tapped,
+                enter_transformed,
+                under_your_control,
+                enters_attacking,
+                owner_library: _,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            let p = *player;
+            let expected = *count;
+            let is_up_to = *up_to;
+            let legal = legal_cards.clone();
+            let src = *source_id;
+            let kind = *effect_kind;
+            let from_zone = *zone;
+
+            if is_up_to {
+                if chosen.len() > expected {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Must select at most {} card(s), got {}",
+                        expected,
+                        chosen.len()
+                    )));
+                }
+            } else if chosen.len() != expected {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must select exactly {} card(s), got {}",
+                    expected,
+                    chosen.len()
+                )));
+            }
+
+            for card_id in &chosen {
+                if !legal.contains(card_id) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected card not in eligible set".to_string(),
+                    ));
+                }
+                if state.objects.get(card_id).map(|obj| obj.zone) != Some(from_zone) {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Selected card is no longer in {:?}",
+                        from_zone
+                    )));
+                }
+            }
+
+            if chosen.is_empty() {
+                state.last_effect_count = Some(0);
+                events.push(GameEvent::EffectResolved {
+                    kind,
+                    source_id: src,
+                });
+                state.waiting_for = WaitingFor::Priority { player: p };
+                state.priority_player = p;
+                resume_pending_continuation_if_priority(state, &mut events)?;
+                return Ok(ActionResult {
+                    events,
+                    waiting_for: state.waiting_for.clone(),
+                    log_entries: vec![],
+                });
+            }
+
+            match kind {
+                EffectKind::Sacrifice => {
+                    for &card_id in &chosen {
+                        match super::sacrifice::sacrifice_permanent(state, card_id, p, &mut events)
+                        {
+                            Ok(super::sacrifice::SacrificeOutcome::Complete) => {}
+                            Ok(super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(
+                                choice_player,
+                            )) => {
+                                state.waiting_for =
+                                    super::replacement::replacement_choice_waiting_for(
+                                        choice_player,
+                                        state,
+                                    );
+                                return Ok(ActionResult {
+                                    events,
+                                    waiting_for: state.waiting_for.clone(),
+                                    log_entries: vec![],
+                                });
+                            }
+                            Err(err) => {
+                                return Err(EngineError::InvalidAction(err.to_string()));
+                            }
+                        }
+                    }
+                }
+                EffectKind::ChangeZone => {
+                    let dest_zone = destination.ok_or_else(|| {
+                        EngineError::InvalidAction(
+                            "EffectZoneChoice missing destination for ChangeZone".to_string(),
+                        )
+                    })?;
+                    for &card_id in &chosen {
+                        let controller_override = if *under_your_control { Some(p) } else { None };
+                        match super::effects::change_zone::execute_zone_move(
+                            state,
+                            card_id,
+                            from_zone,
+                            dest_zone,
+                            src,
+                            None,
+                            *enter_transformed,
+                            *enter_tapped,
+                            controller_override,
+                            &mut events,
+                        ) {
+                            super::effects::change_zone::ZoneMoveResult::Done => {
+                                if *enters_attacking && dest_zone == Zone::Battlefield {
+                                    let controller = state
+                                        .objects
+                                        .get(&card_id)
+                                        .map(|obj| obj.controller)
+                                        .unwrap_or(p);
+                                    super::combat::enter_attacking(state, card_id, src, controller);
+                                }
+                            }
+                            super::effects::change_zone::ZoneMoveResult::NeedsChoice(
+                                choice_player,
+                            ) => {
+                                state.waiting_for =
+                                    super::replacement::replacement_choice_waiting_for(
+                                        choice_player,
+                                        state,
+                                    );
+                                return Ok(ActionResult {
+                                    events,
+                                    waiting_for: state.waiting_for.clone(),
+                                    log_entries: vec![],
+                                });
+                            }
+                        }
+                    }
+                }
+                other => {
+                    return Err(EngineError::InvalidAction(format!(
+                        "EffectZoneChoice unsupported for {other:?}"
+                    )));
+                }
+            }
+
+            state.last_effect_count = Some(chosen.len() as i32);
+            events.push(GameEvent::EffectResolved {
+                kind,
+                source_id: src,
+            });
+            state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
+            resume_pending_continuation_if_priority(state, &mut events)?;
+            state.waiting_for.clone()
+        }
         // NamedChoice: player selects from a set of named options (creature type, color, etc.).
         // Stores the chosen value in last_named_choice and resumes any pending continuation.
         (
@@ -3010,9 +3180,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             state.priority_player = p;
             let _ = effects::resolve_ability_chain(state, &ability, &mut events, 0);
 
-            if let Some(cont) = state.pending_continuation.take() {
-                let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
-            }
+            resume_pending_continuation_if_priority(state, &mut events)?;
 
             state.waiting_for.clone()
         }
@@ -4511,7 +4679,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility,
-        TargetFilter,
+        TargetFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -5448,7 +5616,7 @@ mod tests {
 
     // === Phase 04 Plan 03 Integration Tests ===
 
-    use crate::types::ability::{TargetRef, TypedFilter};
+    use crate::types::ability::TargetRef;
     use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 
     fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usize) {
@@ -6947,6 +7115,7 @@ mod trigger_target_tests {
                 under_your_control: false,
                 enter_tapped: false,
                 enters_attacking: false,
+                up_to: false,
             },
             Vec::new(),
             trigger_creature,
@@ -7041,6 +7210,7 @@ mod trigger_target_tests {
                     under_your_control: false,
                     enter_tapped: false,
                     enters_attacking: false,
+                    up_to: false,
                 },
                 vec![],
                 ObjectId(1),
@@ -7891,8 +8061,9 @@ mod phase_trigger_regression_tests {
     use crate::game::combat::AttackTarget;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, Effect, FilterProp, GainLifePlayer,
-        QuantityExpr, TargetFilter, TriggerConstraint, TriggerDefinition, TypedFilter,
+        AbilityCondition, AbilityDefinition, AbilityKind, ControllerRef, Effect, FilterProp,
+        GainLifePlayer, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter,
+        TargetRef, TriggerConstraint, TriggerDefinition, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
@@ -7900,6 +8071,53 @@ mod phase_trigger_regression_tests {
     use crate::types::player::PlayerId;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    fn setup_game_at_main_phase() -> GameState {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state
+    }
+
+    fn draw_that_many(source_id: ObjectId, controller: PlayerId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            },
+            vec![],
+            source_id,
+            controller,
+        )
+    }
+
+    fn hand_to_battlefield_choice_ability(
+        source_id: ObjectId,
+        controller: PlayerId,
+    ) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+            },
+            vec![],
+            source_id,
+            controller,
+        )
+    }
 
     /// Verify that combat is skipped when there are no attackers and no triggers.
     /// With no BeginCombat triggers and no potential attackers, auto_advance()
@@ -8653,6 +8871,367 @@ mod phase_trigger_regression_tests {
             },
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn optional_effect_choice_accept_preserves_nested_effect_zone_choice_continuation() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = ObjectId(100);
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Perm A".to_string(),
+            Zone::Battlefield,
+        );
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Perm B".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::Any,
+                up_to: false,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut draw = draw_that_many(source_id, PlayerId(0));
+        draw.condition = Some(AbilityCondition::IfYouDo);
+        ability.sub_ability = Some(Box::new(draw));
+
+        state.pending_optional_effect = Some(Box::new(ability));
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: PlayerId(0),
+            source_id,
+            description: None,
+        };
+
+        let result = apply(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::EffectZoneChoice {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        assert!(state.pending_continuation.is_some());
+    }
+
+    #[test]
+    fn opponent_may_choice_accept_preserves_nested_effect_zone_choice_continuation() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = ObjectId(100);
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Hand A".to_string(),
+            Zone::Hand,
+        );
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Hand B".to_string(),
+            Zone::Hand,
+        );
+
+        let mut ability = hand_to_battlefield_choice_ability(source_id, PlayerId(1));
+        ability.sub_ability = Some(Box::new(draw_that_many(source_id, PlayerId(1))));
+
+        state.pending_optional_effect = Some(Box::new(ability));
+        state.waiting_for = WaitingFor::OpponentMayChoice {
+            player: PlayerId(1),
+            remaining: vec![],
+            source_id,
+            description: None,
+        };
+
+        let result = apply(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::EffectZoneChoice {
+                player: PlayerId(1),
+                ..
+            }
+        ));
+        assert!(state.pending_continuation.is_some());
+    }
+
+    #[test]
+    fn unless_payment_decline_preserves_nested_effect_zone_choice_continuation() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = ObjectId(100);
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hand A".to_string(),
+            Zone::Hand,
+        );
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Hand B".to_string(),
+            Zone::Hand,
+        );
+
+        let mut ability = hand_to_battlefield_choice_ability(source_id, PlayerId(0));
+        ability.sub_ability = Some(Box::new(draw_that_many(source_id, PlayerId(0))));
+
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: UnlessCost::PayLife { amount: 2 },
+            pending_effect: Box::new(ability),
+            effect_description: None,
+        };
+
+        let result = apply(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
+
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::EffectZoneChoice {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        assert!(state.pending_continuation.is_some());
+    }
+
+    #[test]
+    fn multi_target_selection_preserves_nested_effect_zone_choice_continuation() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = ObjectId(100);
+        let target_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tap Target".to_string(),
+            Zone::Battlefield,
+        );
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Hand A".to_string(),
+            Zone::Hand,
+        );
+        create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Hand B".to_string(),
+            Zone::Hand,
+        );
+
+        create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Sac A".to_string(),
+            Zone::Battlefield,
+        );
+        create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Sac B".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut pending_ability = ResolvedAbility::new(
+            Effect::Tap {
+                target: TargetFilter::Any,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut sacrifice_ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::Any,
+                up_to: false,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            source_id,
+            PlayerId(0),
+        );
+        sacrifice_ability.sub_ability = Some(Box::new(draw_that_many(source_id, PlayerId(0))));
+        pending_ability.sub_ability = Some(Box::new(sacrifice_ability));
+
+        state.waiting_for = WaitingFor::MultiTargetSelection {
+            player: PlayerId(0),
+            legal_targets: vec![target_id],
+            min_targets: 1,
+            max_targets: 1,
+            pending_ability: Box::new(pending_ability),
+        };
+
+        let result = apply(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![target_id],
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::EffectZoneChoice {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        assert!(state.pending_continuation.is_some());
+        assert!(state.objects[&target_id].tapped);
+    }
+
+    #[test]
+    fn effect_zone_choice_handler_resolves_sacrifice_and_continuation() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = ObjectId(100);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Chosen Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            player: PlayerId(0),
+            cards: vec![obj_id],
+            count: 1,
+            up_to: false,
+            source_id,
+            effect_kind: EffectKind::Sacrifice,
+            zone: Zone::Battlefield,
+            destination: None,
+            enter_tapped: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enters_attacking: false,
+            owner_library: false,
+        };
+        state.pending_continuation = Some(Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: crate::types::ability::GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        )));
+
+        let result = apply(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![obj_id],
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.players[0].graveyard.contains(&obj_id));
+        assert_eq!(state.players[0].life, 22);
+        assert_eq!(state.last_effect_count, Some(1));
+    }
+
+    #[test]
+    fn player_scope_all_uses_apnap_order_and_resumes_remaining_players() {
+        let mut state = setup_game_at_main_phase();
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+
+        let source_id = ObjectId(100);
+        let p0_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "P0 A".to_string(),
+            Zone::Battlefield,
+        );
+        let p0_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "P0 B".to_string(),
+            Zone::Battlefield,
+        );
+        let p1_a = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "P1 A".to_string(),
+            Zone::Battlefield,
+        );
+        let p1_b = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "P1 B".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [p0_a, p0_b, p1_a, p1_b] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                up_to: false,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::All);
+
+        let mut events = Vec::new();
+        effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::EffectZoneChoice {
+                player: PlayerId(1),
+                ..
+            }
+        ));
+
+        let result = apply(&mut state, GameAction::SelectCards { cards: vec![p1_a] }).unwrap();
+
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::EffectZoneChoice {
+                player: PlayerId(0),
+                ..
+            }
+        ));
     }
 
     #[test]

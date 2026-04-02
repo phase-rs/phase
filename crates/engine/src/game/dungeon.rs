@@ -151,9 +151,9 @@ pub fn dungeon_sentinel_id(player: PlayerId) -> crate::types::identifiers::Objec
 // ─── Room Effects ───────────────────────────────────────────────────────────
 
 use crate::types::ability::{
-    CastingPermission, ContinuousModification, ControllerRef, Duration, Effect, FilterProp,
-    PlayerFilter, PtValue, QuantityExpr, ResolvedAbility, StaticDefinition, TargetFilter,
-    TypeFilter, TypedFilter,
+    AbilityCondition, CastingPermission, ContinuousModification, ControllerRef, Duration, Effect,
+    FilterProp, PlayerFilter, PtValue, QuantityExpr, ResolvedAbility, StaticDefinition,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::game_state::TargetSelectionConstraint;
@@ -384,6 +384,7 @@ pub fn room_effects(
             let mut ability = simple(
                 Effect::Sacrifice {
                     target: TargetFilter::Typed(TypedFilter::creature()),
+                    up_to: false,
                 },
                 source_id,
                 controller,
@@ -564,36 +565,48 @@ pub fn room_effects(
             vec![],
         ),
         // 4: Defiled Temple — "You may sacrifice a permanent. If you do, draw a card."
-        // Deferred: Effect::Sacrifice with no pre-resolved targets is a no-op — the sacrifice
-        // resolver iterates ability.targets which is empty for room triggers. Needs effect-time
-        // permanent selection (WaitingFor state for choosing a permanent to sacrifice).
-        (DungeonId::BaldursGateWilderness, 4) => (
-            simple(
-                Effect::Unimplemented {
-                    name: "Room: Defiled Temple".to_string(),
-                    description: Some(
-                        "You may sacrifice a permanent. If you do, draw a card.".to_string(),
-                    ),
+        (DungeonId::BaldursGateWilderness, 4) => {
+            let mut ability = simple(
+                Effect::Sacrifice {
+                    target: TargetFilter::Any,
+                    up_to: false,
                 },
                 source_id,
                 controller,
-            ),
-            vec![],
-        ),
+            );
+            ability.optional = true;
+
+            let mut draw = ResolvedAbility::new(
+                Effect::Draw { count: fixed(1) },
+                vec![],
+                source_id,
+                controller,
+            );
+            draw.condition = Some(AbilityCondition::IfYouDo);
+            ability.sub_ability = Some(Box::new(draw));
+
+            (ability, vec![])
+        }
         // 5: Mountain Pass — "You may put a land card from your hand onto the battlefield."
-        (DungeonId::BaldursGateWilderness, 5) => (
-            simple(
-                Effect::Unimplemented {
-                    name: "Room: Mountain Pass".to_string(),
-                    description: Some(
-                        "You may put a land card from your hand onto the battlefield.".to_string(),
-                    ),
+        (DungeonId::BaldursGateWilderness, 5) => {
+            let mut ability = simple(
+                Effect::ChangeZone {
+                    origin: Some(Zone::Hand),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::Typed(TypedFilter::land()),
+                    owner_library: false,
+                    enter_transformed: false,
+                    under_your_control: false,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
                 },
                 source_id,
                 controller,
-            ),
-            vec![],
-        ),
+            );
+            ability.optional = true;
+            (ability, vec![])
+        }
         // 6: Ebonlake Grotto — "Create two 1/1 blue Faerie Dragon creature tokens with flying"
         (DungeonId::BaldursGateWilderness, 6) => (
             simple(
@@ -887,6 +900,7 @@ fn search_basic_land(source_id: ObjectId, controller: PlayerId) -> ResolvedAbili
             under_your_control: false,
             enter_tapped: false,
             enters_attacking: false,
+            up_to: false,
         },
         source_id,
         controller,
@@ -1356,7 +1370,7 @@ mod tests {
 
     #[test]
     fn room_effects_bgw_implemented_rooms() {
-        let implemented = [0, 1, 2, 3, 6, 9, 12, 15, 16, 18];
+        let implemented = [0, 1, 2, 3, 4, 5, 6, 9, 12, 15, 16, 18];
         for room in implemented {
             let ability = bgw_effect(room);
             assert!(
@@ -1369,7 +1383,7 @@ mod tests {
 
     #[test]
     fn room_effects_bgw_deferred_rooms() {
-        let deferred = [4, 5, 7, 8, 10, 11, 13, 14, 17];
+        let deferred = [7, 8, 10, 11, 13, 14, 17];
         for room in deferred {
             let ability = bgw_effect(room);
             assert!(

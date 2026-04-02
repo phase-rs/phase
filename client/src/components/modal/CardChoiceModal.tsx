@@ -20,6 +20,7 @@ type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
 type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
 type SearchChoice = Extract<WaitingFor, { type: "SearchChoice" }>;
 type ChooseFromZoneChoice = Extract<WaitingFor, { type: "ChooseFromZoneChoice" }>;
+type EffectZoneChoice = Extract<WaitingFor, { type: "EffectZoneChoice" }>;
 type DiscardToHandSize = Extract<WaitingFor, { type: "DiscardToHandSize" }>;
 type SacrificeForCost = Extract<WaitingFor, { type: "SacrificeForCost" }>;
 type ExileFromGraveyardForCost = Extract<WaitingFor, { type: "ExileFromGraveyardForCost" }>;
@@ -59,6 +60,9 @@ export function CardChoiceModal() {
     case "ChooseFromZoneChoice":
       if (waitingFor.data.player !== playerId) return null;
       return <ChooseFromZoneModal data={waitingFor.data} />;
+    case "EffectZoneChoice":
+      if (waitingFor.data.player !== playerId) return null;
+      return <EffectZoneModal data={waitingFor.data} />;
     case "NamedChoice":
       if (waitingFor.data.player !== playerId) return null;
       return <NamedChoiceModal data={waitingFor.data} />;
@@ -616,6 +620,102 @@ function ChooseFromZoneModal({
                 <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
                   <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
                     Choose
+                  </span>
+                </div>
+              )}
+            </motion.button>
+          );
+        })}
+      </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
+function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const inspectObject = useUiStore((s) => s.inspectObject);
+  const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
+  const isSacrifice = data.zone === "Battlefield";
+  const isUpTo = data.up_to === true;
+
+  const toggleSelect = useCallback(
+    (id: ObjectId) => {
+      setSelected((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) {
+          next.delete(id);
+        } else if (next.size < data.count) {
+          next.add(id);
+        }
+        return next;
+      });
+    },
+    [data.count],
+  );
+
+  const handleConfirm = useCallback(() => {
+    dispatch({
+      type: "SelectCards",
+      data: { cards: Array.from(selected) },
+    });
+  }, [dispatch, selected]);
+
+  if (!objects) return null;
+
+  const isReady = isUpTo ? selected.size <= data.count : selected.size === data.count;
+  const title = isSacrifice ? "Sacrifice" : "Put onto Battlefield";
+  const subtitle = isSacrifice
+    ? isUpTo
+      ? `Choose up to ${data.count} permanent${data.count > 1 ? "s" : ""} to sacrifice`
+      : `Choose ${data.count} permanent${data.count > 1 ? "s" : ""} to sacrifice`
+    : isUpTo
+      ? `Choose up to ${data.count} card${data.count > 1 ? "s" : ""} to put onto the battlefield`
+      : `Choose ${data.count} card${data.count > 1 ? "s" : ""} to put onto the battlefield`;
+  const actionLabel = selected.size === 0 && isUpTo
+    ? (isSacrifice ? "Skip" : "Decline")
+    : `${isSacrifice ? "Confirm" : "Put"} (${selected.size}/${data.count})`;
+  const ringClass = isSacrifice ? "ring-red-400/80" : "ring-emerald-400/80";
+  const overlayClass = isSacrifice ? "bg-red-500/20" : "bg-emerald-500/20";
+  const badgeClass = isSacrifice ? "bg-red-500/90" : "bg-emerald-500/90";
+  const badgeLabel = isSacrifice ? "Sacrifice" : "Put";
+
+  return (
+    <ChoiceOverlay
+      title={title}
+      subtitle={subtitle}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={actionLabel} />}
+    >
+      <ScrollableCardStrip>
+        {data.cards.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          const isSelected = selected.has(id);
+          return (
+            <motion.button
+              key={id}
+              className={`relative rounded-lg transition ${
+                isSelected
+                  ? `z-10 ring-2 ${ringClass}`
+                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+              }`}
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6 }}
+              onClick={() => toggleSelect(id)}
+              onMouseEnter={() => inspectObject(id)}
+              onMouseLeave={() => inspectObject(null)}
+            >
+              <CardImage
+                cardName={obj.name}
+                size="normal"
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
+              {isSelected && (
+                <div className={`absolute inset-0 flex items-center justify-center rounded-lg ${overlayClass}`}>
+                  <span className={`rounded-full px-3 py-1 text-xs font-bold text-white ${badgeClass}`}>
+                    {badgeLabel}
                   </span>
                 </div>
               )}

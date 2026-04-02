@@ -5813,7 +5813,7 @@ mod tests {
         );
         let exec = def.execute.as_ref().expect("should have execute");
         match &*exec.effect {
-            Effect::Sacrifice { target } => {
+            Effect::Sacrifice { target, .. } => {
                 assert_eq!(*target, TargetFilter::SelfRef, "~ should always be SelfRef");
             }
             other => panic!("Expected Sacrifice, got {:?}", other),

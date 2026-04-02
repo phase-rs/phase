@@ -497,6 +497,7 @@ pub fn resolve(
                             ability: ResolvedAbility::new(
                                 Effect::Sacrifice {
                                     target: TargetFilter::Any,
+                                    up_to: false,
                                 },
                                 vec![TargetRef::Object(obj_id)],
                                 ability.source_id,

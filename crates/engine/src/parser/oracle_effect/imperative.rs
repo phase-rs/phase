@@ -469,7 +469,10 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         TargetedImperativeAst::Untap { target } => Effect::Untap { target },
         TargetedImperativeAst::TapAll { target } => Effect::TapAll { target },
         TargetedImperativeAst::UntapAll { target } => Effect::UntapAll { target },
-        TargetedImperativeAst::Sacrifice { target } => Effect::Sacrifice { target },
+        TargetedImperativeAst::Sacrifice { target } => Effect::Sacrifice {
+            target,
+            up_to: false,
+        },
         TargetedImperativeAst::Discard {
             count,
             random,
@@ -503,6 +506,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             under_your_control,
             enter_tapped,
             enters_attacking: false,
+            up_to: false,
         },
         // CR 400.6: Return to a non-hand, non-battlefield zone (graveyard, library).
         TargetedImperativeAst::ReturnToZone {
@@ -517,6 +521,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             under_your_control: false,
             enter_tapped: false,
             enters_attacking: false,
+            up_to: false,
         },
         TargetedImperativeAst::Fight { target } => Effect::Fight {
             target,
@@ -1155,6 +1160,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     under_your_control,
                     enter_tapped,
                     enters_attacking: false,
+                    up_to: false,
                 }
             }
         }
@@ -1333,6 +1339,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 under_your_control: false,
                 enter_tapped: false,
                 enters_attacking: false,
+                up_to: false,
             };
             with_shuffle_sub_ability(effect)
         }
@@ -1355,6 +1362,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 under_your_control: false,
                 enter_tapped: false,
                 enters_attacking: false,
+                up_to: false,
             };
             with_shuffle_sub_ability(effect)
         }
@@ -2433,6 +2441,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     under_your_control: false,
                     enter_tapped: false,
                     enters_attacking: false,
+                    up_to: false,
                 }
             }
         }

@@ -168,6 +168,7 @@ mod tests {
                 under_your_control: false,
                 enter_tapped: false,
                 enters_attacking: false,
+                up_to: false,
             },
             vec![crate::types::ability::TargetRef::Object(emblem_id)],
             ObjectId(200),
@@ -208,6 +209,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Any,
+                up_to: false,
             },
             vec![crate::types::ability::TargetRef::Object(emblem_id)],
             ObjectId(200),

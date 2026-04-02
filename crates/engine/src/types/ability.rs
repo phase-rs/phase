@@ -2027,6 +2027,10 @@ pub enum Effect {
     Sacrifice {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        /// CR 608.2d: When true, the player may select fewer than the required count
+        /// ("sacrifice up to N"). Distinct from `optional: true` on the ability ("you may sacrifice").
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        up_to: bool,
     },
     DiscardCard {
         #[serde(default = "default_one")]
@@ -2101,6 +2105,10 @@ pub enum Effect {
         /// Not "declared as an attacker" — attack triggers do not fire.
         #[serde(default)]
         enters_attacking: bool,
+        /// CR 608.2d: When true, the player may choose not to move
+        /// ("put up to one land ...").
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        up_to: bool,
     },
     ChangeZoneAll {
         #[serde(default)]
@@ -5359,6 +5367,7 @@ mod tests {
                 under_your_control: false,
                 enter_tapped: false,
                 enters_attacking: false,
+                up_to: false,
             },
             vec![TargetRef::Object(ObjectId(10))],
             ObjectId(1),
@@ -5390,6 +5399,7 @@ mod tests {
             under_your_control: false,
             enter_tapped: false,
             enters_attacking: false,
+            up_to: false,
         };
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();

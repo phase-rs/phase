@@ -62,6 +62,18 @@ pub fn filter_state_for_player(state: &GameState, viewer: PlayerId) -> GameState
         )
     };
 
+    let effect_zone_hand_cards: std::collections::HashSet<ObjectId> =
+        if let WaitingFor::EffectZoneChoice {
+            zone: engine::types::zones::Zone::Hand,
+            ref cards,
+            ..
+        } = filtered.waiting_for
+        {
+            cards.iter().copied().collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+
     // Hide library contents for ALL players (no one should see card details in libraries)
     let all_library_ids: Vec<ObjectId> = filtered
         .players
@@ -78,7 +90,7 @@ pub fn filter_state_for_player(state: &GameState, viewer: PlayerId) -> GameState
             || (state.revealed_cards.contains(&obj_id)
                 && !manifest_dread_cards.contains(&obj_id)
                 && !dig_cards.contains(&obj_id));
-        if !visible {
+        if !visible && !effect_zone_hand_cards.contains(&obj_id) {
             hide_card(&mut filtered, obj_id);
         }
     }
@@ -131,6 +143,41 @@ pub fn filter_state_for_player(state: &GameState, viewer: PlayerId) -> GameState
             filtered.waiting_for = WaitingFor::LearnChoice {
                 player,
                 hand_cards: hand_cards.iter().map(|_| ObjectId(0)).collect(),
+            };
+        }
+    }
+
+    if let WaitingFor::EffectZoneChoice {
+        player,
+        ref cards,
+        count,
+        up_to,
+        source_id,
+        effect_kind,
+        zone,
+        destination,
+        enter_tapped,
+        enter_transformed,
+        under_your_control,
+        enters_attacking,
+        owner_library,
+    } = state.waiting_for
+    {
+        if player != viewer && zone == engine::types::zones::Zone::Hand {
+            filtered.waiting_for = WaitingFor::EffectZoneChoice {
+                player,
+                cards: cards.iter().map(|_| ObjectId(0)).collect(),
+                count,
+                up_to,
+                source_id,
+                effect_kind,
+                zone,
+                destination,
+                enter_tapped,
+                enter_transformed,
+                under_your_control,
+                enters_attacking,
+                owner_library,
             };
         }
     }
@@ -449,6 +496,53 @@ mod tests {
         // Library cards should be hidden for opponent
         let obj_a_opp = &filtered_p1.objects[&card_a];
         assert_eq!(obj_a_opp.name, "Hidden Card");
+    }
+
+    #[test]
+    fn effect_zone_choice_from_hand_redacts_cards_for_opponent() {
+        let mut state = GameState::new_two_player(42);
+        let card_a = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Hand,
+        );
+        let card_b = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Hand,
+        );
+
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            player: PlayerId(0),
+            cards: vec![card_a, card_b],
+            count: 1,
+            up_to: true,
+            source_id: ObjectId(100),
+            effect_kind: engine::types::ability::EffectKind::ChangeZone,
+            zone: Zone::Hand,
+            destination: Some(Zone::Battlefield),
+            enter_tapped: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enters_attacking: false,
+            owner_library: false,
+        };
+
+        let filtered = filter_state_for_player(&state, PlayerId(1));
+
+        match filtered.waiting_for {
+            WaitingFor::EffectZoneChoice { cards, .. } => {
+                assert_eq!(cards, vec![ObjectId(0), ObjectId(0)]);
+            }
+            other => panic!("Expected EffectZoneChoice, got {:?}", other),
+        }
+
+        assert_eq!(filtered.objects[&card_a].name, "Hidden Card");
+        assert_eq!(filtered.objects[&card_b].name, "Hidden Card");
     }
 
     proptest! {

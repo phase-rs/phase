@@ -436,6 +436,21 @@ export type WaitingFor =
   | { type: "AssignCombatDamage"; data: { player: PlayerId; attacker_id: ObjectId; total_damage: number; blockers: { blocker_id: ObjectId; lethal_minimum: number }[]; trample: TrampleKind | null; defending_player: PlayerId; attack_target: AttackTarget; pw_loyalty?: number; pw_controller?: PlayerId } }
   | { type: "DistributeAmong"; data: { player: PlayerId; total: number; targets: TargetRef[]; unit: DistributionUnit } }
   | { type: "ChooseFromZoneChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; source_id: ObjectId } }
+  | { type: "EffectZoneChoice"; data: {
+      player: PlayerId;
+      cards: ObjectId[];
+      count: number;
+      up_to?: boolean;
+      source_id: ObjectId;
+      effect_kind: string;
+      zone: Zone;
+      destination?: Zone | null;
+      enter_tapped?: boolean;
+      enter_transformed?: boolean;
+      under_your_control?: boolean;
+      enters_attacking?: boolean;
+      owner_library?: boolean;
+    } }
   | { type: "RetargetChoice"; data: { player: PlayerId; stack_entry_index: number; scope: RetargetScope; current_targets: TargetRef[]; legal_new_targets: TargetRef[] } }
   | { type: "ConniveDiscard"; data: { player: PlayerId; conniver_id: ObjectId; source_id: ObjectId; cards: ObjectId[]; count: number } }
   | { type: "DiscardChoice"; data: { player: PlayerId; count: number; cards: ObjectId[]; source_id: ObjectId; effect_kind: string; up_to?: boolean; unless_filter?: TargetFilter } }

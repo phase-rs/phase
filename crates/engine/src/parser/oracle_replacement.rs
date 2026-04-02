@@ -790,6 +790,7 @@ fn parse_graveyard_exile_replacement(
                 under_your_control: false,
                 enter_tapped: false,
                 enters_attacking: false,
+                up_to: false,
             },
         ))
         .destination_zone(Zone::Graveyard)

@@ -452,6 +452,7 @@ fn try_parse_self_name_exile(tp: TextPair<'_>, ctx: &ParseContext) -> Option<Par
             under_your_control: false,
             enter_tapped: false,
             enters_attacking: false,
+            up_to: false,
         }));
     }
     None
@@ -514,6 +515,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             under_your_control: false,
             enter_tapped: false,
             enters_attacking: false,
+            up_to: false,
         }
     };
 
@@ -1962,6 +1964,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         under_your_control: false,
         enter_tapped: false,
         enters_attacking: false,
+        up_to: false,
     };
     let mut sub_def = AbilityDefinition::new(AbilityKind::Spell, sub_effect);
     sub_def.sub_ability = Some(Box::new(shuffle_def));
@@ -1976,6 +1979,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         under_your_control: false,
         enter_tapped: false,
         enters_attacking: false,
+        up_to: false,
     };
 
     Some(ParsedEffectClause {
@@ -2023,7 +2027,7 @@ fn replace_target_with_parent(effect: &mut Effect) {
         Effect::Tap { target }
         | Effect::Untap { target }
         | Effect::Destroy { target, .. }
-        | Effect::Sacrifice { target }
+        | Effect::Sacrifice { target, .. }
         | Effect::GainControl { target }
         | Effect::Fight { target, .. }
         | Effect::Bounce { target, .. }
@@ -6047,6 +6051,7 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
                 enter_tapped: destination == Zone::Battlefield
                     && scan_contains_phrase(after_put_tp.lower, "battlefield tapped"),
                 enters_attacking: false,
+                up_to: false,
             });
         }
     }
@@ -9646,7 +9651,7 @@ mod tests {
             def.effect
         );
         // Target should be Typed(Creature), not Any
-        if let Effect::Sacrifice { ref target } = *def.effect {
+        if let Effect::Sacrifice { ref target, .. } = *def.effect {
             match target {
                 TargetFilter::Typed(tf) => {
                     assert!(

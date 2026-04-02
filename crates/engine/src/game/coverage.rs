@@ -754,7 +754,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Destroy { target, .. }
         | Effect::Tap { target }
         | Effect::Untap { target }
-        | Effect::Sacrifice { target }
+        | Effect::Sacrifice { target, .. }
         | Effect::GainControl { target }
         | Effect::Attach { target }
         | Effect::Fight { target, .. }
