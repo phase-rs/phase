@@ -444,6 +444,31 @@ pub fn graveyard_lands_playable_by_permission(
     results
 }
 
+/// CR 601.2b + CR 118.9a: Check whether a spell being cast from hand has a
+/// matching `CastFromHandFree` static permission on the controller's battlefield.
+fn has_hand_cast_free_permission(
+    state: &GameState,
+    player: PlayerId,
+    obj: &crate::game::game_object::GameObject,
+) -> bool {
+    state.battlefield.iter().any(|&src_id| {
+        let Some(src_obj) = state.objects.get(&src_id) else {
+            return false;
+        };
+        if src_obj.controller != player {
+            return false;
+        }
+        src_obj.static_definitions.iter().any(|s| {
+            s.mode == StaticMode::CastFromHandFree
+                && s.affected.as_ref().is_some_and(|filter| {
+                    super::filter::matches_target_filter_controlled(
+                        state, obj.id, filter, src_id, player,
+                    )
+                })
+        })
+    })
+}
+
 /// Returns the effective mana cost for casting a spell, after all modifiers
 /// (alt costs, commander tax, battlefield reducers, affinity).
 /// Returns `None` if the object cannot be cast.
@@ -630,8 +655,12 @@ fn prepare_spell_cast(
     } else {
         CastingVariant::Normal
     };
+    // CR 601.2b + CR 118.9a: CastFromHandFree — static permission grants free casting from hand.
+    let hand_cast_free =
+        obj.zone == Zone::Hand && has_hand_cast_free_permission(state, player, obj);
+
     // CR 118.9: Energy replaces mana cost entirely when casting with ExileWithEnergyCost.
-    let mut mana_cost = if energy_cost_from_exile {
+    let mut mana_cost = if energy_cost_from_exile || hand_cast_free {
         crate::types::mana::ManaCost::NoCost
     } else {
         escape_cost

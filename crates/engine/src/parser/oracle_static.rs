@@ -91,6 +91,11 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         return Some(result);
     }
 
+    // CR 601.2b + CR 118.9a: "You may cast spells from your hand without paying their mana costs."
+    if let Some(result) = try_parse_hand_cast_free_permission(&text, &lower) {
+        return Some(result);
+    }
+
     if nom_tag_tp(&tp, "you may choose not to untap ").is_some()
         && tp.lower.contains(" during your untap step")
     {
@@ -3357,6 +3362,50 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
     )
 }
 
+/// CR 601.2b + CR 118.9a: Parse "you may cast spells from your hand without paying their mana costs."
+/// This is a continuous static ability (Omniscience, Tamiyo emblem) — not a one-shot effect.
+fn try_parse_hand_cast_free_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
+    let rest = nom_tag_lower(lower, lower, "you may cast ")?;
+    // Must contain "from your hand" and "without paying"
+    let hand_idx = rest.find(" from your hand")?;
+    // "without paying" must follow "from your hand" — reject unusual word orders
+    if !rest[hand_idx..].contains("without paying") {
+        return None;
+    }
+
+    let filter_text = &rest[..hand_idx];
+
+    // "spells" with no qualifier → Any filter (Omniscience)
+    if filter_text == "spells" {
+        return Some(
+            StaticDefinition::new(StaticMode::CastFromHandFree)
+                .affected(TargetFilter::Any)
+                .description(text.to_string()),
+        );
+    }
+
+    // Strip "a "/"an " article and " spell"/" spells" suffix for type parsing
+    let filter_text = nom_tag_lower(filter_text, filter_text, "a ")
+        .or_else(|| nom_tag_lower(filter_text, filter_text, "an "))
+        .unwrap_or(filter_text);
+
+    let cleaned: Cow<str> = if filter_text.contains(" spells") {
+        Cow::Owned(filter_text.replacen(" spells", "", 1))
+    } else if filter_text.contains(" spell") {
+        Cow::Owned(filter_text.replacen(" spell", "", 1))
+    } else {
+        Cow::Borrowed(filter_text)
+    };
+
+    let (filter, _) = parse_type_phrase(&cleaned);
+
+    Some(
+        StaticDefinition::new(StaticMode::CastFromHandFree)
+            .affected(filter)
+            .description(text.to_string()),
+    )
+}
+
 fn parse_first_qualified_spell_filter(lower: &str) -> Option<TargetFilter> {
     let after_prefix = nom_tag_lower(lower, lower, "the first ")?;
     let qualifier = after_prefix
@@ -5472,6 +5521,24 @@ mod tests {
                 def.affected
             );
         }
+    }
+
+    // --- Hand cast free permission tests (Omniscience) ---
+
+    #[test]
+    fn hand_cast_free_omniscience() {
+        let text = "You may cast spells from your hand without paying their mana costs.";
+        let def = parse_static_line(text).expect("should parse Omniscience text");
+        assert_eq!(def.mode, StaticMode::CastFromHandFree);
+        assert_eq!(def.affected, Some(TargetFilter::Any));
+    }
+
+    #[test]
+    fn hand_cast_free_rejects_without_free() {
+        // "you may cast ... from your hand" without "without paying" is not a free-cast static
+        let text = "You may cast a spell from your hand.";
+        let lower = text.to_lowercase();
+        assert!(try_parse_hand_cast_free_permission(text, &lower).is_none());
     }
 
     // ── Fix 1: Irregular plural subtype normalization ──

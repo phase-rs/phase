@@ -195,7 +195,8 @@ fn is_static_compound_pattern(lower: &str) -> bool {
     ))
     .parse(lower)
     .is_ok()
-        && lower.contains("from your graveyard")
+        && (lower.contains("from your graveyard")
+            || (lower.contains("from your hand") && lower.contains("without paying")))
     {
         return true;
     }

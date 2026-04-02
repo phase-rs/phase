@@ -143,6 +143,9 @@ pub enum StaticMode {
         /// Play (lands+spells) vs Cast (spells only)
         play_mode: CardPlayMode,
     },
+    /// CR 601.2b + CR 118.9a: Static ability granting permission to cast
+    /// matching spells from hand without paying their mana costs (Omniscience).
+    CastFromHandFree,
     /// CR 101.2: This spell/permanent can't be countered.
     CantBeCountered,
     /// CR 604.3: Cards in specified zones can't enter the battlefield.
@@ -326,6 +329,7 @@ impl fmt::Display for StaticMode {
                 once_per_turn,
                 play_mode,
             } => write!(f, "GraveyardCastPermission({play_mode},{once_per_turn})"),
+            StaticMode::CastFromHandFree => write!(f, "CastFromHandFree"),
             StaticMode::CantBeCountered => write!(f, "CantBeCountered"),
             StaticMode::CantEnterBattlefieldFrom => write!(f, "CantEnterBattlefieldFrom"),
             StaticMode::CantCastFrom => write!(f, "CantCastFrom"),
@@ -469,6 +473,7 @@ impl FromStr for StaticMode {
                     }
                 }
             }
+            "CastFromHandFree" => StaticMode::CastFromHandFree,
             "CantBeCountered" => StaticMode::CantBeCountered,
             "CantEnterBattlefieldFrom" => StaticMode::CantEnterBattlefieldFrom,
             "CantCastFrom" => StaticMode::CantCastFrom,
