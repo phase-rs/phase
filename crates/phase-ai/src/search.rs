@@ -792,6 +792,7 @@ mod tests {
             player: PlayerId(0),
             cards: vec![titan, land],
             count: 1,
+            reveal: false,
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
