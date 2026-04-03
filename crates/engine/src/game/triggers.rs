@@ -455,6 +455,53 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
             }
         }
 
+        // CR 603.10a: Leaves-the-battlefield abilities look back in time. Objects that
+        // just left the battlefield (e.g., sacrificed, destroyed, exiled) are scanned with
+        // zone_filter=Battlefield so their battlefield-zone triggers can still fire. This
+        // covers "dies," "leaves the battlefield," and "exiled from battlefield" triggers.
+        // We use the ZoneChanged event itself to identify which objects left, then scan
+        // them as if they were still on the battlefield (last-known-information).
+        if let GameEvent::ZoneChanged {
+            object_id: moved_id,
+            from: Zone::Battlefield,
+            ..
+        } = event
+        {
+            // Only scan if the object wasn't already found by the battlefield scan
+            // (it won't be — it has already moved out — but guard against double-fire).
+            if state
+                .objects
+                .get(moved_id)
+                .is_some_and(|o| o.zone != Zone::Battlefield)
+            {
+                let matched_triggers = {
+                    let obj = &state.objects[moved_id];
+                    collect_matching_triggers(
+                        state,
+                        event,
+                        *moved_id,
+                        obj.controller,
+                        &obj.trigger_definitions,
+                        obj.entered_battlefield_turn.unwrap_or(0),
+                        Some(Zone::Battlefield),
+                        &mut batched_this_pass,
+                    )
+                };
+                for matched in matched_triggers {
+                    record_trigger_fired(
+                        state,
+                        matched.constraint.as_ref(),
+                        *moved_id,
+                        matched.trig_idx,
+                    );
+                    if matched.batched {
+                        batched_this_pass.insert((*moved_id, matched.trig_idx));
+                    }
+                    pending.push(matched.pending);
+                }
+            }
+        }
+
         // CR 113.6k: Non-battlefield trigger zones are opt-in via trigger_zones.
         for zone in [Zone::Graveyard, Zone::Exile, Zone::Stack] {
             for obj_id in trigger_source_ids_for_zone(state, zone) {
@@ -1438,10 +1485,31 @@ fn build_triggered_ability(
 /// Returns None for effects with no targeting (Draw, GainLife, etc.) or
 /// effects targeting self/controller (which don't need player selection).
 ///
+/// CR 115.1: Only objects on the battlefield, stack, graveyard, exile, and
+/// command zone can be targeted. Selections from private zones (hand, library)
+/// are resolution-time choices, not targeting. ChangeZone effects with a
+/// hand or library origin are therefore excluded — the resolution path
+/// handles them via WaitingFor::EffectZoneChoice.
+///
 /// Note: TriggeringSpellController, TriggeringSpellOwner, TriggeringPlayer,
 /// and TriggeringSource auto-resolve from event context at resolution time
 /// (via `state.current_trigger_event`), so they do not require player selection.
 pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilter> {
+    // CR 115.1: ChangeZone from private zones (hand/library) uses resolution-time
+    // selection, not stack-push-time targeting.
+    if let Effect::ChangeZone { origin, target, .. } = effect {
+        if matches!(origin, Some(Zone::Hand) | Some(Zone::Library)) {
+            return None;
+        }
+        // Also check InZone property when origin is None but the filter specifies a private zone
+        if origin.is_none() {
+            if let Some(zone) = target.extract_in_zone() {
+                if matches!(zone, Zone::Hand | Zone::Library) {
+                    return None;
+                }
+            }
+        }
+    }
     effect.target_filter().filter(|t| !t.is_context_ref())
 }
 // ---------------------------------------------------------------------------
@@ -1454,9 +1522,9 @@ pub mod tests {
     use crate::game::filter::matches_target_filter;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Comparator, ControllerRef, GainLifePlayer, QuantityExpr,
-        QuantityRef, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
-        TypedFilter,
+        AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, FilterProp,
+        GainLifePlayer, QuantityExpr, QuantityRef, TargetFilter, TriggerCondition,
+        TriggerConstraint, TriggerDefinition, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
@@ -1464,6 +1532,7 @@ pub mod tests {
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
+    use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -3203,5 +3272,170 @@ pub mod tests {
         let mut events = Vec::new();
         crate::game::turns::start_next_turn(&mut state, &mut events);
         assert!(state.damage_dealt_this_turn.is_empty());
+    }
+
+    // === CR 603.10a: Leaves-the-battlefield trigger LKI tests ===
+
+    #[test]
+    fn dies_trigger_fires_after_sacrifice_as_cost() {
+        // CR 603.10a: "When this creature dies" triggers should fire even when the
+        // creature was sacrificed as a cost (already in graveyard when triggers check).
+
+        let mut state = setup();
+        state.turn_number = 3;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+
+        // Create a creature with a "dies" trigger (like Haywire Mite)
+        let mite_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Haywire Mite".to_string(),
+            Zone::Graveyard, // Already in graveyard (sacrificed as cost)
+        );
+        {
+            let mite = state.objects.get_mut(&mite_id).unwrap();
+            mite.controller = PlayerId(0);
+            mite.card_types.core_types.push(CoreType::Creature);
+            mite.card_types.core_types.push(CoreType::Artifact);
+            // Dies trigger: "When this creature dies, you gain 2 life"
+            mite.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .valid_card(TargetFilter::SelfRef)
+                    .origin(Zone::Battlefield)
+                    .destination(Zone::Graveyard)
+                    .trigger_zones(vec![Zone::Battlefield])
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 2 },
+                            player: GainLifePlayer::Controller,
+                        },
+                    ))
+                    .description("When this creature dies, you gain 2 life.".to_string()),
+            );
+        }
+
+        // Simulate the ZoneChanged event from sacrifice
+        let events = vec![GameEvent::ZoneChanged {
+            object_id: mite_id,
+            from: Zone::Battlefield,
+            to: Zone::Graveyard,
+        }];
+
+        process_triggers(&mut state, &events);
+
+        // The dies trigger should have been pushed to the stack (GainLife has no targeting)
+        assert!(
+            !state.stack.is_empty(),
+            "Dies trigger should fire via LKI even when creature is already in graveyard"
+        );
+        assert_eq!(state.stack.len(), 1);
+        let entry = &state.stack[0];
+        assert_eq!(entry.source_id, mite_id);
+        if let crate::types::game_state::StackEntryKind::TriggeredAbility { ability, .. } =
+            &entry.kind
+        {
+            assert!(
+                matches!(ability.effect, Effect::GainLife { .. }),
+                "Triggered ability should be GainLife"
+            );
+        } else {
+            panic!("Expected TriggeredAbility on stack");
+        }
+    }
+
+    #[test]
+    fn lki_trigger_does_not_fire_for_non_battlefield_origin() {
+        // A creature in graveyard with a battlefield-zone trigger should NOT fire
+        // for zone changes that aren't from the battlefield.
+        let mut state = setup();
+        state.turn_number = 3;
+        state.active_player = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+
+        let obj_id = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Test Card".to_string(),
+            Zone::Exile, // In exile, not graveyard
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.controller = PlayerId(0);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .valid_card(TargetFilter::SelfRef)
+                    .origin(Zone::Battlefield)
+                    .destination(Zone::Graveyard)
+                    .trigger_zones(vec![Zone::Battlefield]),
+            );
+        }
+
+        // Event is from graveyard to exile, not from battlefield
+        let events = vec![GameEvent::ZoneChanged {
+            object_id: obj_id,
+            from: Zone::Graveyard,
+            to: Zone::Exile,
+        }];
+
+        process_triggers(&mut state, &events);
+        assert!(
+            state.stack.is_empty(),
+            "Trigger should not fire for non-battlefield origin zone changes"
+        );
+    }
+
+    // === extract_target_filter_from_effect private zone tests ===
+
+    #[test]
+    fn extract_target_skips_change_zone_from_hand() {
+        // CR 115.1: "Put a land from your hand" doesn't target — selection at resolution.
+
+        let effect = Effect::ChangeZone {
+            origin: Some(Zone::Hand),
+            destination: Zone::Battlefield,
+            target: TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(crate::types::ability::TypeFilter::Land)
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+            ),
+            owner_library: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enter_tapped: true,
+            enters_attacking: false,
+            up_to: false,
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "ChangeZone from Hand should not extract a target (resolution-time selection)"
+        );
+    }
+
+    #[test]
+    fn extract_target_keeps_change_zone_from_battlefield() {
+        // "Exile target creature" should still extract the target filter
+
+        let effect = Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Exile,
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            owner_library: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enter_tapped: false,
+            enters_attacking: false,
+            up_to: false,
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_some(),
+            "ChangeZone from battlefield should still extract target for stack-time targeting"
+        );
     }
 }

@@ -353,24 +353,25 @@ body {
   background: transparent;
 }
 
-/* Always-visible scrollbar for card choice strips */
+/* Always-visible scrollbar for card choice strips — large grab target */
 .card-choice-strip {
   overflow-x: scroll;
-  scrollbar-color: rgba(255, 255, 255, 0.35) rgba(255, 255, 255, 0.08);
+  scrollbar-color: rgba(255, 255, 255, 0.55) rgba(255, 255, 255, 0.12);
 }
 .card-choice-strip::-webkit-scrollbar {
-  height: 10px;
+  height: 18px;
 }
 .card-choice-strip::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.35);
-  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.55);
+  border-radius: 9px;
+  border: 3px solid rgba(255, 255, 255, 0.12);
 }
 .card-choice-strip::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.75);
 }
 .card-choice-strip::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.08);
-  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 9px;
 }
 
 /* Class level bookmark — notched bottom edge */
