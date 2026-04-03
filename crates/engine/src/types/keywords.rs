@@ -7,6 +7,33 @@ use serde::{Deserialize, Serialize};
 use super::ability::{ControllerRef, FilterProp, QuantityExpr, TargetFilter, TypedFilter};
 use super::mana::{ManaColor, ManaCost};
 
+/// Keywords that accept a dynamic numeric parameter via "where X is [quantity]".
+/// Used by `ContinuousModification::AddDynamicKeyword` to construct the runtime keyword.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum DynamicKeywordKind {
+    Annihilator,
+    Modular,
+}
+
+impl DynamicKeywordKind {
+    /// Construct the concrete `Keyword` from a resolved parameter value.
+    pub fn with_value(&self, value: u32) -> Keyword {
+        match self {
+            Self::Annihilator => Keyword::Annihilator(value),
+            Self::Modular => Keyword::Modular(value),
+        }
+    }
+
+    /// Parse a keyword name into a `DynamicKeywordKind`, if it supports dynamic parameters.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "annihilator" => Some(Self::Annihilator),
+            "modular" => Some(Self::Modular),
+            _ => None,
+        }
+    }
+}
+
 /// CR 702.124: Partner variant keywords for co-commander deckbuilding.
 /// Each variant specifies which other partner types it can legally pair with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -98,7 +125,11 @@ pub enum WardCost {
     Mana(ManaCost),
     PayLife(i32),
     DiscardCard,
-    SacrificeAPermanent,
+    /// CR 702.21a: Sacrifice N permanents matching a filter as ward cost.
+    Sacrifice {
+        count: u32,
+        filter: crate::types::ability::TargetFilter,
+    },
     /// CR 702.21a: Ward cost paid via waterbend — tap artifacts/creatures to help pay.
     /// Distinct from Mana because waterbend has unique payment semantics (CR 701.67).
     Waterbend(ManaCost),

@@ -7,6 +7,7 @@ use nom::Parser;
 use nom_language::error::VerboseError;
 
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_target::parse_type_phrase;
 use crate::types::keywords::{Keyword, WardCost};
 
 /// CR 702.16 + CR 702.11f: Expand compound "X from A and from B" keyword lines.
@@ -198,12 +199,19 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
         return Some(WardCost::DiscardCard);
     }
 
-    // "sacrifice a permanent" / "sacrifice a creature" / etc.
-    if tag::<_, _, VerboseError<&str>>("sacrifice")
-        .parse(lower)
-        .is_ok()
-    {
-        return Some(WardCost::SacrificeAPermanent);
+    // "sacrifice [N] permanent(s)/creature(s)/etc." — extract count and filter
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("sacrifice ").parse(lower) {
+        let (count, after_count) = nom_primitives::parse_number
+            .parse(rest)
+            .map(|(rem, n)| (n as u32, rem.trim_start()))
+            .unwrap_or((
+                1,
+                rest.strip_prefix("a ")
+                    .or(rest.strip_prefix("an "))
+                    .unwrap_or(rest),
+            ));
+        let (filter, _) = parse_type_phrase(after_count);
+        return Some(WardCost::Sacrifice { count, filter });
     }
 
     // CR 702.21a + CR 701.67: "waterbend {N}" — ward cost paid via waterbend mechanic.

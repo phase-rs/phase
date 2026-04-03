@@ -69,7 +69,10 @@ fn ward_cost_to_unless_cost(ward_cost: &WardCost) -> UnlessCost {
         },
         WardCost::PayLife(amount) => UnlessCost::PayLife { amount: *amount },
         WardCost::DiscardCard => UnlessCost::DiscardCard,
-        WardCost::SacrificeAPermanent => UnlessCost::SacrificeAPermanent,
+        WardCost::Sacrifice { count, filter } => UnlessCost::Sacrifice {
+            count: *count,
+            filter: filter.clone(),
+        },
         // CR 702.21a + CR 701.67: Waterbend ward cost maps to mana payment.
         // Full tap-to-help semantics deferred to waterbend cost integration.
         WardCost::Waterbend(mana_cost) => UnlessCost::Fixed {
@@ -3141,9 +3144,12 @@ pub mod tests {
         assert!(matches!(result, UnlessCost::DiscardCard));
 
         // Sacrifice
-        let sacrifice = WardCost::SacrificeAPermanent;
+        let sacrifice = WardCost::Sacrifice {
+            count: 1,
+            filter: TargetFilter::Any,
+        };
         let result = ward_cost_to_unless_cost(&sacrifice);
-        assert!(matches!(result, UnlessCost::SacrificeAPermanent));
+        assert!(matches!(result, UnlessCost::Sacrifice { count: 1, .. }));
 
         // Waterbend
         let waterbend = WardCost::Waterbend(ManaCost::generic(4));

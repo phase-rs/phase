@@ -917,7 +917,7 @@ function WardSacrificeModal({ data }: { data: WardSacrificeChoice["data"] }) {
 
   return (
     <ChoiceOverlay
-      title="Ward \u2014 Sacrifice a permanent"
+      title={data.remaining > 1 ? `Ward \u2014 Sacrifice ${data.remaining} permanents` : "Ward \u2014 Sacrifice a permanent"}
       subtitle="Choose a permanent to sacrifice"
       footer={<ConfirmButton onClick={handleConfirm} disabled={selected == null} label="Sacrifice" />}
     >

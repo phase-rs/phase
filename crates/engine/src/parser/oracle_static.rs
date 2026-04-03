@@ -2,8 +2,10 @@ use std::borrow::Cow;
 use std::str::FromStr;
 
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, tag_no_case};
+use nom::character::complete::{alpha1, space1};
 use nom::combinator::value;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::oracle_cost::parse_oracle_cost;
@@ -2837,7 +2839,33 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         }
     } else if let Some(keyword_text) = extract_keyword_clause(text_stripped) {
         for part in split_keyword_list(keyword_text.trim().trim_end_matches('.')) {
-            if let Some(kw) = map_keyword(part.trim().trim_end_matches('.')) {
+            let part_trimmed = part.trim().trim_end_matches('.');
+            let part_lower = part_trimmed.to_lowercase();
+            // CR 702: Check for dynamic "keyword X" with "where X is [qty]"
+            if let Some(ref where_expr) = where_x_expression {
+                if let Ok((_, kw_name)) = terminated(
+                    alpha1::<_, nom_language::error::VerboseError<&str>>,
+                    preceded(space1, tag_no_case("x")),
+                )
+                .parse(part_lower.as_str())
+                {
+                    if let Some(kind) =
+                        crate::types::keywords::DynamicKeywordKind::from_name(kw_name)
+                    {
+                        if let Some(qty_ref) =
+                            crate::parser::oracle_quantity::parse_quantity_ref(where_expr)
+                        {
+                            modifications.push(ContinuousModification::AddDynamicKeyword {
+                                kind,
+                                value: QuantityExpr::Ref { qty: qty_ref },
+                            });
+                            continue;
+                        }
+                    }
+                }
+            }
+            // Fall through to normal AddKeyword
+            if let Some(kw) = map_keyword(part_trimmed) {
                 modifications.push(ContinuousModification::AddKeyword { keyword: kw });
             }
         }
@@ -6824,6 +6852,30 @@ mod tests {
             .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. }));
         assert!(has_power, "Expected dynamic power");
         assert!(has_toughness, "Expected dynamic toughness");
+    }
+
+    #[test]
+    fn dynamic_keyword_annihilator_x() {
+        // "~ has annihilator X, where X is the number of +1/+1 counters on it."
+        let def = parse_static_line(
+            "~ has annihilator X, where X is the number of +1/+1 counters on it.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        let has_dynamic_keyword = def.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddDynamicKeyword {
+                    kind: crate::types::keywords::DynamicKeywordKind::Annihilator,
+                    ..
+                }
+            )
+        });
+        assert!(
+            has_dynamic_keyword,
+            "Expected AddDynamicKeyword(Annihilator), got {:?}",
+            def.modifications
+        );
     }
 
     #[test]

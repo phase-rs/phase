@@ -148,7 +148,11 @@ function formatWard(val: unknown): string {
   if (w.type === "Mana") return formatKeywordManaCost(w.data);
   if (w.type === "PayLife") return `pay ${w.data} life`;
   if (w.type === "DiscardCard") return "discard a card";
-  if (w.type === "SacrificeAPermanent") return "sacrifice a permanent";
+  if (w.type === "Sacrifice") {
+    const d = w.data as { count: number } | undefined;
+    const n = d?.count ?? 1;
+    return n > 1 ? `sacrifice ${n} permanents` : "sacrifice a permanent";
+  }
   if (w.type === "Waterbend") return `waterbend ${formatKeywordManaCost(w.data)}`;
   return "";
 }

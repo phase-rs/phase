@@ -713,7 +713,8 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
         ContinuousModification::SetDynamicPower { value }
         | ContinuousModification::SetDynamicToughness { value }
         | ContinuousModification::AddDynamicPower { value }
-        | ContinuousModification::AddDynamicToughness { value } => {
+        | ContinuousModification::AddDynamicToughness { value }
+        | ContinuousModification::AddDynamicKeyword { value, .. } => {
             let controller = state
                 .objects
                 .get(&effect.source_id)
@@ -840,6 +841,18 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             ContinuousModification::AddDynamicToughness { .. } => {
                 if let (Some(ref mut t), Some(val)) = (&mut obj.toughness, dynamic_pt) {
                     *t += val;
+                }
+            }
+            ContinuousModification::AddDynamicKeyword { kind, .. } => {
+                if let Some(val) = dynamic_pt {
+                    let keyword = kind.with_value(val.max(0) as u32);
+                    if !obj
+                        .keywords
+                        .iter()
+                        .any(|k| std::mem::discriminant(k) == std::mem::discriminant(&keyword))
+                    {
+                        obj.keywords.push(keyword);
+                    }
                 }
             }
             ContinuousModification::GrantAbility { definition } => {

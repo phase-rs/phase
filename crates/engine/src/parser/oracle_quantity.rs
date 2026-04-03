@@ -755,6 +755,28 @@ mod tests {
     }
 
     #[test]
+    fn cda_quantity_greatest_mana_value_in_exile() {
+        let qty = parse_cda_quantity("the greatest mana value among cards in exile").unwrap();
+        match &qty {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::Aggregate {
+                        function: AggregateFunction::Max,
+                        property: ObjectProperty::ManaValue,
+                        filter,
+                    },
+            } => {
+                // Filter should contain InZone(Exile), not be Any
+                assert!(
+                    !matches!(filter, TargetFilter::Any),
+                    "expected non-Any filter for 'cards in exile', got {filter:?}"
+                );
+            }
+            other => panic!("Expected Aggregate(Max, ManaValue), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn cda_quantity_total_power() {
         let qty = parse_cda_quantity("the total power of creatures you control").unwrap();
         assert!(matches!(

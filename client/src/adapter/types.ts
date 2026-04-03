@@ -131,7 +131,7 @@ export type UnlessCost =
   | { type: "DynamicGeneric"; quantity: unknown }
   | { type: "PayLife"; amount: number }
   | { type: "DiscardCard" }
-  | { type: "SacrificeAPermanent" };
+  | { type: "Sacrifice"; count: number; filter: TargetFilter };
 
 // ── Card Types ───────────────────────────────────────────────────────────
 
@@ -428,7 +428,7 @@ export type WaitingFor =
   | { type: "OpponentMayChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; remaining: PlayerId[] } }
   | { type: "UnlessPayment"; data: { player: PlayerId; cost: UnlessCost; pending_effect: unknown; effect_description?: string } }
   | { type: "WardDiscardChoice"; data: { player: PlayerId; cards: ObjectId[]; pending_effect: unknown } }
-  | { type: "WardSacrificeChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown } }
+  | { type: "WardSacrificeChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
   | { type: "ChooseRingBearer"; data: { player: PlayerId; candidates: ObjectId[] } }
   | { type: "DiscoverChoice"; data: { player: PlayerId; hit_card: ObjectId; exiled_misses: ObjectId[] } }
   | { type: "TopOrBottomChoice"; data: { player: PlayerId; object_id: ObjectId } }

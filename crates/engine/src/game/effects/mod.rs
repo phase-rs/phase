@@ -520,12 +520,12 @@ pub fn resolve_ability_chain(
     // CR 118.12: "Effect unless [player] pays {cost}" — tax trigger modifier.
     if let Some(ref unless_pay) = ability.unless_pay {
         if let Some(payer) = resolve_unless_payer(state, &unless_pay.payer) {
-            // CR 702.21a: Non-mana costs (PayLife, DiscardCard, SacrificeAPermanent) bypass
+            // CR 702.21a: Non-mana costs (PayLife, DiscardCard, Sacrifice) bypass
             // mana resolution — pass through to UnlessPayment directly.
             match &unless_pay.cost {
                 UnlessCost::PayLife { .. }
                 | UnlessCost::DiscardCard
-                | UnlessCost::SacrificeAPermanent => {
+                | UnlessCost::Sacrifice { .. } => {
                     let mut pending = ability.clone();
                     pending.unless_pay = None;
                     state.waiting_for = WaitingFor::UnlessPayment {
@@ -552,7 +552,7 @@ pub fn resolve_ability_chain(
                 // Non-mana costs handled above.
                 UnlessCost::PayLife { .. }
                 | UnlessCost::DiscardCard
-                | UnlessCost::SacrificeAPermanent => unreachable!(),
+                | UnlessCost::Sacrifice { .. } => unreachable!(),
             };
             // CR 118.5: If the cost is {0}, the player is considered to have paid.
             if resolved_cost != ManaCost::zero() {

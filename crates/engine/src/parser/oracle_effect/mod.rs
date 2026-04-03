@@ -31,8 +31,8 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChoiceType,
     ContinuousModification, DamageSource, DelayedTriggerCondition, Duration, Effect, FilterProp,
     GameRestriction, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
-    RestrictionExpiry, RestrictionPlayerScope, StaticCondition, StaticDefinition, TargetFilter,
-    TypeFilter, TypedFilter, UnlessCost,
+    RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
+    TargetFilter, TypeFilter, TypedFilter, UnlessCost, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{DistributionUnit, RetargetScope};
@@ -1450,6 +1450,18 @@ fn lower_imperative_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause
     if matches!(clause.effect, Effect::PutCounter { .. }) && clause.multi_target.is_none() {
         clause.multi_target = extract_put_counter_multi_target(text);
     }
+    // Post-parse fixup for "exile N target" multi_target (same pattern as PutCounter above).
+    // "exile two target permanents" → strip "exile " → "two target permanents" → (2, ...)
+    if matches!(
+        clause.effect,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        }
+    ) && clause.multi_target.is_none()
+    {
+        clause.multi_target = extract_exile_multi_target(text);
+    }
     clause
 }
 
@@ -2162,6 +2174,44 @@ fn lower_subject_predicate_ast(
                     1
                 };
                 return parsed_clause(Effect::RevealTop {
+                    player: subject.affected,
+                    count,
+                });
+            }
+            // CR 701.10a: "<player> exiles the top [N] card(s) of their library"
+            if alt((tag::<_, _, VerboseError<&str>>("exile "), tag("exiles ")))
+                .parse(pred_lower.as_str())
+                .is_ok()
+                && scan_contains_phrase(&pred_lower, "top")
+                && scan_contains_phrase(&pred_lower, "library")
+            {
+                let count = if let Some(after_top) = strip_after(&pred_lower, "top ") {
+                    // CR 107.2: "half of their library, rounded up/down"
+                    if let Ok((_, _)) = tag::<_, _, VerboseError<&str>>("half ").parse(after_top) {
+                        let rounding = if scan_contains_phrase(&pred_lower, "rounded up") {
+                            RoundingMode::Up
+                        } else {
+                            RoundingMode::Down
+                        };
+                        QuantityExpr::HalfRounded {
+                            inner: Box::new(QuantityExpr::Ref {
+                                qty: QuantityRef::TargetZoneCardCount {
+                                    zone: ZoneRef::Library,
+                                },
+                            }),
+                            rounding,
+                        }
+                    } else {
+                        let n = nom_primitives::parse_number
+                            .parse(after_top)
+                            .map(|(_, n)| n as i32)
+                            .unwrap_or(1);
+                        QuantityExpr::Fixed { value: n }
+                    }
+                } else {
+                    QuantityExpr::Fixed { value: 1 }
+                };
+                return parsed_clause(Effect::ExileTop {
                     player: subject.affected,
                     count,
                 });
@@ -3685,6 +3735,20 @@ fn extract_put_counter_multi_target(text: &str) -> Option<MultiTargetSpec> {
     Some(MultiTargetSpec {
         min: 0,
         max: Some(n as usize),
+    })
+}
+
+/// Post-parse fixup for "exile N target" multi_target.
+/// Strips "exile " verb via nom tag, then delegates to `strip_numeric_target_prefix`.
+fn extract_exile_multi_target(text: &str) -> Option<MultiTargetSpec> {
+    let lower = text.to_lowercase();
+    let (after_verb, _) = tag::<_, _, VerboseError<&str>>("exile ")
+        .parse(lower.as_str())
+        .ok()?;
+    let (count, _) = strip_numeric_target_prefix(after_verb)?;
+    Some(MultiTargetSpec {
+        min: count,
+        max: Some(count),
     })
 }
 
@@ -7494,6 +7558,30 @@ mod tests {
     }
 
     #[test]
+    fn exile_two_target_permanents_multi_target() {
+        let def = parse_effect_chain("exile two target permanents", AbilityKind::Spell);
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            ),
+            "Expected ChangeZone to Exile, got {:?}",
+            def.effect
+        );
+        assert_eq!(
+            def.multi_target,
+            Some(MultiTargetSpec {
+                min: 2,
+                max: Some(2),
+            }),
+            "Expected multi_target with min=2, max=2"
+        );
+    }
+
+    #[test]
     fn parse_gift_wasnt_promised_condition() {
         // "Destroy target creature. If the gift wasn't promised, you lose 2 life."
         let def = parse_effect_chain(
@@ -7535,6 +7623,52 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn defending_player_exiles_top_twenty_cards() {
+        let def = parse_effect_chain(
+            "defending player exiles the top twenty cards of their library",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ExileTop {
+                    player: TargetFilter::DefendingPlayer,
+                    count: QuantityExpr::Fixed { value: 20 },
+                }
+            ),
+            "Expected ExileTop(DefendingPlayer, 20), got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn target_opponent_exiles_top_half_library() {
+        let def = parse_effect_chain(
+            "target opponent exiles the top half of their library, rounded up",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::ExileTop { player, count } => {
+                assert!(
+                    matches!(player, TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::Opponent)),
+                    "Expected opponent target, got {player:?}"
+                );
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::HalfRounded {
+                            rounding: RoundingMode::Up,
+                            ..
+                        }
+                    ),
+                    "Expected HalfRounded(Up), got {count:?}"
+                );
+            }
+            other => panic!("Expected ExileTop, got {other:?}"),
+        }
     }
 
     #[test]

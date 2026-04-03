@@ -180,13 +180,19 @@ fn resolve_ref(
                     .and_then(|lki| lki.toughness)
             })
             .unwrap_or(0),
-        // CR 107.3e: Aggregate queries over battlefield objects.
+        // CR 107.3e: Aggregate queries over game objects.
+        // Uses extract_in_zone() to support non-battlefield zones (exile, graveyard, etc.),
+        // same pattern as ObjectCount above.
         QuantityRef::Aggregate {
             function,
             property,
             filter,
         } => {
-            let values = state.battlefield.iter().filter_map(|&id| {
+            let zone = filter
+                .extract_in_zone()
+                .unwrap_or(crate::types::zones::Zone::Battlefield);
+            let zone_ids = crate::game::targeting::zone_object_ids(state, zone);
+            let values = zone_ids.iter().filter_map(|&id| {
                 if matches_target_filter_controlled(state, id, filter, source_id, controller) {
                     state.objects.get(&id).map(|obj| match property {
                         ObjectProperty::Power => obj.power.unwrap_or(0),
@@ -248,6 +254,32 @@ fn resolve_ref(
                     }
                 })
                 .map_or(0, |p| p.life)
+        }
+        QuantityRef::TargetZoneCardCount { zone } => {
+            let target_player = targets.iter().find_map(|t| {
+                if let TargetRef::Player(pid) = t {
+                    Some(*pid)
+                } else {
+                    None
+                }
+            });
+            if let Some(pid) = target_player {
+                state
+                    .players
+                    .iter()
+                    .find(|p| p.id == pid)
+                    .map_or(0, |p| match zone {
+                        ZoneRef::Library => p.library.len() as i32,
+                        ZoneRef::Graveyard => p.graveyard.len() as i32,
+                        ZoneRef::Exile => state
+                            .exile
+                            .iter()
+                            .filter(|&&id| state.objects.get(&id).map_or(false, |o| o.owner == pid))
+                            .count() as i32,
+                    })
+            } else {
+                0
+            }
         }
         // CR 604.3: Count distinct card types (CoreType) across graveyards.
         QuantityRef::CardTypesInGraveyards { scope } => {
@@ -1075,6 +1107,47 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 10);
+    }
+
+    #[test]
+    fn resolve_aggregate_max_mana_value_in_exile() {
+        use crate::types::ability::AggregateFunction;
+        use crate::types::ability::ObjectProperty;
+
+        let mut state = GameState::new_two_player(42);
+        // Create cards in exile with mana values 3, 7, 2
+        for (i, mv) in [3u32, 7, 2].iter().enumerate() {
+            let id = create_object(
+                &mut state,
+                CardId(i as u64 + 1),
+                PlayerId(0),
+                format!("Exiled Card {i}"),
+                Zone::Exile,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.mana_cost = crate::types::mana::ManaCost::generic(*mv);
+        }
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        // Filter: "cards in exile" — InZone(Exile) property, no controller constraint
+        let filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![],
+            controller: None,
+            properties: vec![crate::types::ability::FilterProp::InZone { zone: Zone::Exile }],
+        });
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::Aggregate {
+                function: AggregateFunction::Max,
+                property: ObjectProperty::ManaValue,
+                filter,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 7);
     }
 
     #[test]

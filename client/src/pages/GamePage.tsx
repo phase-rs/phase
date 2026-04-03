@@ -1711,8 +1711,10 @@ function formatUnlessCost(cost: { type: string; cost?: { type: string; shards?: 
       return `${cost.amount ?? 0} life`;
     case "DiscardCard":
       return "discard a card";
-    case "SacrificeAPermanent":
-      return "sacrifice a permanent";
+    case "Sacrifice": {
+      const n = (cost as { count?: number }).count ?? 1;
+      return n > 1 ? `sacrifice ${n} permanents` : "sacrifice a permanent";
+    }
     default:
       return "a cost";
   }

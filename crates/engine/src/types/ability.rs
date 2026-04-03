@@ -1139,6 +1139,10 @@ pub enum QuantityRef {
     TargetPower,
     /// CR 119.3 + CR 107.2: The life total of the targeted player.
     TargetLifeTotal,
+    /// Card count in a specific zone of the first targeted player.
+    /// Generalized for library, graveyard, exile, etc.
+    /// Used for "half of target player's library" and similar patterns.
+    TargetZoneCardCount { zone: ZoneRef },
     /// CR 700.5: Devotion to one or more colors.
     Devotion { colors: Vec<ManaColor> },
     /// CR 604.3: Count distinct card types (CoreType) across graveyards.
@@ -1851,8 +1855,8 @@ pub enum UnlessCost {
     PayLife { amount: i32 },
     /// CR 702.21a: Discard a card as ward cost (e.g., "Ward—Discard a card")
     DiscardCard,
-    /// CR 702.21a: Sacrifice a permanent as ward cost (e.g., "Ward—Sacrifice a permanent")
-    SacrificeAPermanent,
+    /// CR 702.21a: Sacrifice N permanents matching a filter as ward cost.
+    Sacrifice { count: u32, filter: TargetFilter },
 }
 
 /// CR 118.12: "Effect unless [player] pays {cost}"
@@ -4604,6 +4608,12 @@ pub enum ContinuousModification {
     },
     /// CR 613.4c: Add dynamic +X to toughness (layer 7c), where X is computed at application time.
     AddDynamicToughness {
+        value: QuantityExpr,
+    },
+    /// CR 702: Dynamic keyword where the parameter is computed at layer evaluation time.
+    /// Used for "has annihilator X, where X is [quantity]".
+    AddDynamicKeyword {
+        kind: crate::types::keywords::DynamicKeywordKind,
         value: QuantityExpr,
     },
     /// Grants every creature type (Changeling CDA). Expanded at runtime

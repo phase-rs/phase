@@ -1,4 +1,4 @@
-use crate::game::quantity::resolve_quantity;
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zones;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
@@ -12,7 +12,9 @@ pub fn resolve(
 ) -> Result<(), EffectError> {
     let count = match &ability.effect {
         Effect::ExileTop { count, .. } => {
-            resolve_quantity(state, count, ability.controller, ability.source_id) as usize
+            // Use resolve_quantity_with_targets so that TargetZoneCardCount (and
+            // HalfRounded wrapping it) can resolve against the targeted player.
+            resolve_quantity_with_targets(state, count, ability) as usize
         }
         _ => return Err(EffectError::MissingParam("ExileTop count".to_string())),
     };

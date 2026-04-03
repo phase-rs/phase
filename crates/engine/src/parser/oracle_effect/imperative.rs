@@ -1418,7 +1418,9 @@ pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImpe
         {
             return Some(ZoneCounterImperativeAst::ExileTop {
                 player: TargetFilter::Controller,
-                count,
+                count: QuantityExpr::Fixed {
+                    value: count as i32,
+                },
             });
         }
     }
@@ -2437,12 +2439,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                 }
             }
         }
-        ZoneCounterImperativeAst::ExileTop { player, count } => Effect::ExileTop {
-            player,
-            count: QuantityExpr::Fixed {
-                value: count as i32,
-            },
-        },
+        ZoneCounterImperativeAst::ExileTop { player, count } => Effect::ExileTop { player, count },
         ZoneCounterImperativeAst::Counter {
             target,
             source_static,

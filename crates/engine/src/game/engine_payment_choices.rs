@@ -208,7 +208,8 @@ pub(super) fn handle_unless_payment(
                     return Ok(action_result(events, state.waiting_for.clone()));
                 }
             }
-            UnlessCost::SacrificeAPermanent => {
+            UnlessCost::Sacrifice { count, ref filter } => {
+                let sac_source = pending_effect.source_id;
                 let eligible: Vec<ObjectId> = state
                     .battlefield
                     .iter()
@@ -216,18 +217,25 @@ pub(super) fn handle_unless_payment(
                         state
                             .objects
                             .get(id)
-                            .map(|obj| obj.controller == player && !obj.is_emblem)
+                            .map(|obj| {
+                                obj.controller == player
+                                    && !obj.is_emblem
+                                    && crate::game::filter::matches_target_filter_controlled(
+                                        state, **id, filter, sac_source, player,
+                                    )
+                            })
                             .unwrap_or(false)
                     })
                     .copied()
                     .collect();
-                if eligible.is_empty() {
+                if eligible.len() < count as usize {
                     payment_failed = true;
                 } else {
                     state.waiting_for = WaitingFor::WardSacrificeChoice {
                         player,
                         permanents: eligible,
                         pending_effect: pending_effect.clone(),
+                        remaining: count,
                     };
                     return Ok(action_result(events, state.waiting_for.clone()));
                 }
@@ -420,6 +428,7 @@ pub(super) fn handle_ward_sacrifice_choice(
         player,
         permanents,
         pending_effect,
+        remaining,
     } = waiting_for
     else {
         return Err(EngineError::InvalidAction(
@@ -434,6 +443,22 @@ pub(super) fn handle_ward_sacrifice_choice(
     }
 
     crate::game::sacrifice::sacrifice_permanent(state, chosen[0], player, events)?;
+
+    // If more sacrifices remain, re-prompt with updated eligible permanents
+    if remaining > 1 {
+        let eligible: Vec<ObjectId> = permanents
+            .into_iter()
+            .filter(|&id| id != chosen[0] && state.objects.get(&id).is_some())
+            .collect();
+        state.waiting_for = WaitingFor::WardSacrificeChoice {
+            player,
+            permanents: eligible,
+            pending_effect,
+            remaining: remaining - 1,
+        };
+        return Ok(state.waiting_for.clone());
+    }
+
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&pending_effect.effect),
         source_id: pending_effect.source_id,

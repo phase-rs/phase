@@ -222,7 +222,7 @@ fn apply_source_static(
 /// CR 118.12: Resolve an `UnlessCost` to a concrete cost.
 /// For `Fixed`, returns as-is. For `DynamicGeneric`, evaluates the quantity
 /// expression against current game state and returns `Fixed`.
-/// Non-mana costs (`PayLife`, `DiscardCard`, `SacrificeAPermanent`) pass through unchanged.
+/// Non-mana costs (`PayLife`, `DiscardCard`, `Sacrifice`) pass through unchanged.
 pub(crate) fn resolve_unless_cost(
     cost: &UnlessCost,
     state: &GameState,

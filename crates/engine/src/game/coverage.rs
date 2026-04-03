@@ -530,6 +530,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::OpponentLifeTotal => "opponent life total".into(),
         QuantityRef::OpponentHandSize => "opponent hand size".into(),
         QuantityRef::DungeonsCompleted => "dungeons completed".into(),
+        QuantityRef::TargetZoneCardCount { .. } => "target zone card count".into(),
     }
 }
 
@@ -1405,6 +1406,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::SetDynamicToughness { .. } => "dynamic toughness".into(),
         ContinuousModification::AddDynamicPower { .. } => "add dynamic power".into(),
         ContinuousModification::AddDynamicToughness { .. } => "add dynamic toughness".into(),
+        ContinuousModification::AddDynamicKeyword { kind, .. } => {
+            format!("dynamic keyword {kind:?}")
+        }
         ContinuousModification::AddAllCreatureTypes => "all creature types".into(),
         ContinuousModification::AddAllBasicLandTypes => "all basic land types".into(),
         ContinuousModification::AddChosenSubtype { .. } => "add chosen subtype".into(),
@@ -3191,6 +3195,7 @@ fn quantity_ref_variant_name(qref: &QuantityRef) -> &'static str {
         QuantityRef::OpponentLifeTotal => "OpponentLifeTotal",
         QuantityRef::OpponentHandSize => "OpponentHandSize",
         QuantityRef::DungeonsCompleted => "DungeonsCompleted",
+        QuantityRef::TargetZoneCardCount { .. } => "TargetZoneCardCount",
     }
 }
 

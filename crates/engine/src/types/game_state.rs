@@ -36,6 +36,10 @@ fn default_game_number() -> u8 {
     1
 }
 
+fn default_remaining_one() -> u32 {
+    1
+}
+
 /// Serde module for `HashMap<(ObjectId, usize), u32>` — JSON requires string keys,
 /// so we serialize the tuple as `"objectId_index"` (e.g. `"42_0"`).
 mod tuple_key_map {
@@ -717,6 +721,9 @@ pub enum WaitingFor {
         permanents: Vec<ObjectId>,
         /// The counter effect to prevent if the sacrifice succeeds.
         pending_effect: Box<ResolvedAbility>,
+        /// Number of permanents remaining to sacrifice (for "sacrifice two permanents" etc.)
+        #[serde(default = "default_remaining_one")]
+        remaining: u32,
     },
     /// CR 701.54: Player must choose which creature becomes their ring-bearer.
     ChooseRingBearer {

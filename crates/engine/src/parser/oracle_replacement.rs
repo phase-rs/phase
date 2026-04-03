@@ -577,9 +577,15 @@ fn parse_enters_with_counters(
     ))
     .parse(after_with)
     .map_or(after_with, |(rest, _)| rest);
+    // Detect dynamic count: "a number of [type] counters ... equal to [qty]"
+    let (dynamic_remainder, after_prefix) =
+        match tag::<_, _, VerboseError<&str>>("a number of ").parse(after_additional) {
+            Ok((rest, _)) => (Some(after_additional), rest),
+            Err(_) => (None, after_additional),
+        };
     // Uses oracle_util::parse_number (not nom directly) because it handles "X" → 0
     // for X-cost cards like Endless One, Walking Ballista, Hangarback Walker, etc.
-    let (count, rest) = parse_number(after_additional).unwrap_or((1, after_additional));
+    let (count, rest) = parse_number(after_prefix).unwrap_or((1, after_prefix));
     // Next word(s) before "counter" are the counter type
     let counter_pos = rest.find("counter")?;
     let counter_type_raw = rest[..counter_pos].trim();
@@ -589,13 +595,27 @@ fn parse_enters_with_counters(
         other => other.to_uppercase(),
     };
 
+    // Initialize count with fixed fallback, then override for dynamic "equal to" pattern
+    let mut count_expr = QuantityExpr::Fixed {
+        value: count as i32,
+    };
+    // CR 122.6: For "a number of counters equal to [quantity]", parse the dynamic expression
+    if dynamic_remainder.is_some() {
+        if let Ok((_, (_, qty_text))) = nom_primitives::split_once_on(work_text, "equal to ") {
+            let trimmed = qty_text.trim().trim_end_matches('.');
+            if let Some(qty_ref) = crate::parser::oracle_quantity::parse_quantity_ref(trimmed) {
+                count_expr = QuantityExpr::Ref { qty: qty_ref };
+            } else if let Some(qty) = crate::parser::oracle_quantity::parse_cda_quantity(trimmed) {
+                count_expr = qty;
+            }
+        }
+    }
+
     let put_counter = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::PutCounter {
             counter_type,
-            count: QuantityExpr::Fixed {
-                value: count as i32,
-            },
+            count: count_expr,
             target: TargetFilter::SelfRef,
         },
     );
@@ -1769,6 +1789,35 @@ mod tests {
                 ..
             } if counter_type == "P1P1"
         ));
+    }
+
+    #[test]
+    fn enters_with_dynamic_counters_equal_to_quantity() {
+        let def = parse_replacement_line(
+            "Ulamog enters with a number of +1/+1 counters on it equal to the greatest mana value among cards in exile.",
+            "Ulamog",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        match &*def.execute.as_ref().unwrap().effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                ..
+            } => {
+                assert_eq!(counter_type, "P1P1", "counter type should be P1P1");
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::Aggregate { .. }
+                        }
+                    ),
+                    "count should be Aggregate quantity, got {count:?}"
+                );
+            }
+            other => panic!("Expected PutCounter, got {other:?}"),
+        }
     }
 
     #[test]

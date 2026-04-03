@@ -77,7 +77,8 @@ describe("getKeywordDetail", () => {
     expect(getKeywordDetail({ Ward: { type: "Mana", data: { Cost: { shards: [], generic: 2 } } } })).toBe("{2}");
     expect(getKeywordDetail({ Ward: { type: "PayLife", data: 3 } })).toBe("pay 3 life");
     expect(getKeywordDetail({ Ward: { type: "DiscardCard" } })).toBe("discard a card");
-    expect(getKeywordDetail({ Ward: { type: "SacrificeAPermanent" } })).toBe("sacrifice a permanent");
+    expect(getKeywordDetail({ Ward: { type: "Sacrifice", data: { count: 1, filter: { type: "Any" } } } })).toBe("sacrifice a permanent");
+    expect(getKeywordDetail({ Ward: { type: "Sacrifice", data: { count: 2, filter: { type: "Any" } } } })).toBe("sacrifice 2 permanents");
     expect(getKeywordDetail({ Ward: { type: "Waterbend", data: { Cost: { shards: [], generic: 4 } } } })).toBe("waterbend {4}");
   });
 

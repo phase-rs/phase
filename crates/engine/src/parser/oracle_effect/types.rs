@@ -559,7 +559,7 @@ pub(super) enum ZoneCounterImperativeAst {
     },
     ExileTop {
         player: TargetFilter,
-        count: u32,
+        count: QuantityExpr,
     },
     Counter {
         target: TargetFilter,

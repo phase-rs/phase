@@ -352,7 +352,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                         WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
                         WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
                         WardCost::DiscardCard => 1.5,
-                        WardCost::SacrificeAPermanent => 2.0,
+                        WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                         WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
                         // CR 702.21a: Compound costs sum severity of components.
                         WardCost::Compound(costs) => costs
@@ -361,7 +361,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                                 WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
                                 WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
                                 WardCost::DiscardCard => 1.5,
-                                WardCost::SacrificeAPermanent => 2.0,
+                                WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                                 WardCost::Waterbend(cost) => {
                                     (cost.mana_value() as f64 / 2.0).min(2.0)
                                 }
