@@ -52,4 +52,3 @@ panic = 'unwind'
 inherits = "dev"
 opt-level = 1
 codegen-backend = "llvm"
-incremental = false

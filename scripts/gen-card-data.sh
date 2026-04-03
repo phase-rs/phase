@@ -36,9 +36,26 @@ if [ -n "${PHASE_FORGE_PATH:-}" ] || [ -d "$DATA_DIR/forge-cardsfolder" ]; then
   echo "Forge bridge enabled"
 fi
 
-cargo run --profile tool --bin oracle-gen --features "$FEATURES" -- "$DATA_DIR" --stats --names-out "$NAMES_OUTPUT" > "$OUTPUT"
+run_tool_with_recovery() {
+  local output_file="$1"
+  shift
+
+  if "$@" > "$output_file"; then
+    return 0
+  fi
+
+  echo "Tool profile build failed; clearing target/tool and retrying once..." >&2
+  rm -rf target/tool
+  "$@" > "$output_file"
+}
+
+run_tool_with_recovery \
+  "$OUTPUT" \
+  cargo run --profile tool --bin oracle-gen --features "$FEATURES" -- "$DATA_DIR" --stats --names-out "$NAMES_OUTPUT"
 echo "Generating card coverage data..."
-cargo run --profile tool --bin coverage-report -- "$DATA_DIR" --all > "$COVERAGE_OUTPUT"
+run_tool_with_recovery \
+  "$COVERAGE_OUTPUT" \
+  cargo run --profile tool --bin coverage-report -- "$DATA_DIR" --all
 jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' "$COVERAGE_OUTPUT" > "$COVERAGE_SUMMARY"
 
 # Generate metadata sidecar with generation timestamp and parser commit
