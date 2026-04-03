@@ -785,6 +785,7 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
         | StaticCondition::SourceAttackingAlone
         | StaticCondition::IsMonarch
         | StaticCondition::HasCityBlessing
+        | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::And { .. }

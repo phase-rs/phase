@@ -1,6 +1,3 @@
-use petgraph::algo::toposort;
-use petgraph::graph::DiGraph;
-
 use crate::game::devotion::count_devotion;
 use crate::game::filter::matches_target_filter;
 use crate::game::speed::{effective_speed, has_max_speed};
@@ -233,6 +230,11 @@ pub(crate) fn evaluate_condition(
         StaticCondition::IsMonarch => state.monarch == Some(controller),
         // CR 702.131a: True when the controller has the city's blessing.
         StaticCondition::HasCityBlessing => state.city_blessing.contains(&controller),
+        StaticCondition::OpponentPoisonAtLeast { count } => state
+            .players
+            .iter()
+            .filter(|player| player.id != controller)
+            .any(|player| player.poison_counters >= *count),
         // CR 118.12: "unless pays" conditions evaluate as false (restriction active)
         // until the cost payment system is fully wired for attack/block tax costs.
         // TODO: Wire into the attack/block cost payment flow.
@@ -387,95 +389,115 @@ fn gather_active_continuous_effects(
         .map(|&layer| (layer, Vec::new()))
         .collect();
 
+    for effect in collect_shared_active_continuous_effects(state) {
+        push_effect(&mut effects, effect.layer, effect);
+    }
+
+    effects
+}
+
+pub(crate) fn collect_shared_active_continuous_effects(
+    state: &GameState,
+) -> Vec<ActiveContinuousEffect> {
+    let mut effects = Vec::new();
+
     for &id in &state.battlefield {
-        let obj = match state.objects.get(&id) {
-            Some(o) => o,
-            None => continue,
-        };
-
-        for (def_idx, def) in obj.static_definitions.iter().enumerate() {
-            if def.mode != StaticMode::Continuous {
-                continue;
-            }
-
-            // Evaluate condition if present
-            if let Some(ref condition) = def.condition {
-                if !evaluate_condition(state, condition, obj.controller, id) {
-                    continue;
-                }
-            }
-
-            let affected_filter = def.affected.clone().unwrap_or(TargetFilter::Any);
-
-            // Each modification becomes its own ActiveContinuousEffect with the correct layer
-            for modification in &def.modifications {
-                push_effect(
-                    &mut effects,
-                    modification.layer(),
-                    ActiveContinuousEffect {
-                        source_id: id,
-                        def_index: Some(def_idx),
-                        layer: modification.layer(),
-                        timestamp: obj.timestamp,
-                        modification: modification.clone(),
-                        affected_filter: affected_filter.clone(),
-                        mode: def.mode.clone(),
-                        characteristic_defining: def.characteristic_defining,
-                    },
-                );
-            }
-        }
+        effects.extend(active_continuous_effects_from_source_id(state, id));
     }
 
-    // CR 114.3: Emblems in the command zone have static abilities that affect the game
+    // CR 114.3: Emblems in the command zone have static abilities that affect the game.
     for &id in &state.command_zone {
-        let obj = match state.objects.get(&id) {
-            Some(o) if o.is_emblem => o,
-            _ => continue,
+        let Some(obj) = state.objects.get(&id) else {
+            continue;
         };
-
-        for (def_idx, def) in obj.static_definitions.iter().enumerate() {
-            if def.mode != StaticMode::Continuous {
-                continue;
-            }
-
-            if let Some(ref condition) = def.condition {
-                if !evaluate_condition(state, condition, obj.controller, id) {
-                    continue;
-                }
-            }
-
-            let affected_filter = def.affected.clone().unwrap_or(TargetFilter::Any);
-
-            for modification in &def.modifications {
-                push_effect(
-                    &mut effects,
-                    modification.layer(),
-                    ActiveContinuousEffect {
-                        source_id: id,
-                        def_index: Some(def_idx),
-                        layer: modification.layer(),
-                        timestamp: obj.timestamp,
-                        modification: modification.clone(),
-                        affected_filter: affected_filter.clone(),
-                        mode: def.mode.clone(),
-                        characteristic_defining: def.characteristic_defining,
-                    },
-                );
-            }
+        if obj.is_emblem {
+            effects.extend(active_continuous_effects_from_static_source(state, obj));
         }
     }
 
-    // Gather transient continuous effects from state-level storage
     gather_transient_continuous_effects(state, &mut effects);
+    effects
+}
+
+pub(crate) fn active_continuous_effects_from_source_id(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Vec<ActiveContinuousEffect> {
+    state
+        .objects
+        .get(&source_id)
+        .map(|obj| active_continuous_effects_from_static_source(state, obj))
+        .unwrap_or_default()
+}
+
+pub(crate) fn active_continuous_effects_from_static_source(
+    state: &GameState,
+    source: &crate::game::game_object::GameObject,
+) -> Vec<ActiveContinuousEffect> {
+    active_continuous_effects_from_static_definitions(
+        state,
+        source.id,
+        source.controller,
+        source.timestamp,
+        &source.static_definitions,
+    )
+}
+
+pub(crate) fn active_continuous_effects_from_base_static_source(
+    state: &GameState,
+    source: &crate::game::game_object::GameObject,
+) -> Vec<ActiveContinuousEffect> {
+    active_continuous_effects_from_static_definitions(
+        state,
+        source.id,
+        source.controller,
+        source.timestamp,
+        &source.base_static_definitions,
+    )
+}
+
+fn active_continuous_effects_from_static_definitions(
+    state: &GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+    timestamp: u64,
+    static_definitions: &[StaticDefinition],
+) -> Vec<ActiveContinuousEffect> {
+    let mut effects = Vec::new();
+    for (def_idx, def) in static_definitions.iter().enumerate() {
+        if def.mode != StaticMode::Continuous {
+            continue;
+        }
+
+        if let Some(ref condition) = def.condition {
+            if !evaluate_condition(state, condition, controller, source_id) {
+                continue;
+            }
+        }
+
+        let affected_filter = def.affected.clone().unwrap_or(TargetFilter::Any);
+        for modification in &def.modifications {
+            effects.push(ActiveContinuousEffect {
+                source_id,
+                controller,
+                def_index: Some(def_idx),
+                layer: modification.layer(),
+                timestamp,
+                modification: modification.clone(),
+                affected_filter: affected_filter.clone(),
+                mode: def.mode.clone(),
+                characteristic_defining: def.characteristic_defining,
+            });
+        }
+    }
 
     effects
 }
 
 /// Collect active transient effects, filtering out expired host-bound effects.
-fn gather_transient_continuous_effects(
+pub(crate) fn gather_transient_continuous_effects(
     state: &GameState,
-    effects: &mut Vec<(Layer, Vec<ActiveContinuousEffect>)>,
+    effects: &mut Vec<ActiveContinuousEffect>,
 ) {
     for tce in &state.transient_continuous_effects {
         // UntilHostLeavesPlay: skip if source is no longer on the battlefield
@@ -503,20 +525,17 @@ fn gather_transient_continuous_effects(
         }
 
         for modification in &tce.modifications {
-            push_effect(
-                effects,
-                modification.layer(),
-                ActiveContinuousEffect {
-                    source_id: tce.source_id,
-                    def_index: None,
-                    layer: modification.layer(),
-                    timestamp: tce.timestamp,
-                    modification: modification.clone(),
-                    affected_filter: tce.affected.clone(),
-                    mode: StaticMode::Continuous,
-                    characteristic_defining: false,
-                },
-            );
+            effects.push(ActiveContinuousEffect {
+                source_id: tce.source_id,
+                controller: tce.controller,
+                def_index: None,
+                layer: modification.layer(),
+                timestamp: tce.timestamp,
+                modification: modification.clone(),
+                affected_filter: tce.affected.clone(),
+                mode: StaticMode::Continuous,
+                characteristic_defining: false,
+            });
         }
     }
 }
@@ -559,31 +578,50 @@ fn order_with_dependencies(
         )
     });
 
-    let mut graph = DiGraph::<usize, ()>::new();
-    let nodes: Vec<_> = (0..sorted.len()).map(|i| graph.add_node(i)).collect();
-
-    // Check dependencies between each pair
+    let mut dependencies: Vec<Vec<usize>> = vec![Vec::new(); sorted.len()];
+    let mut in_degree = vec![0usize; sorted.len()];
     for i in 0..sorted.len() {
         for j in 0..sorted.len() {
             if i == j {
                 continue;
             }
             if depends_on(sorted[i], sorted[j], state) {
-                // i depends on j, so j must come first: edge j -> i
-                graph.add_edge(nodes[j], nodes[i], ());
+                dependencies[j].push(i);
+                in_degree[i] += 1;
             }
         }
     }
 
-    match toposort(&graph, None) {
-        Ok(order) => order
-            .into_iter()
-            .map(|node_idx| sorted[graph[node_idx]].clone())
-            .collect(),
-        Err(_) => {
+    let mut ordered = Vec::with_capacity(sorted.len());
+    let mut processed = vec![false; sorted.len()];
+
+    while ordered.len() < sorted.len() {
+        let Some(next) = (0..sorted.len()).find(|&idx| !processed[idx] && in_degree[idx] == 0)
+        else {
             // CR 613.8b: Dependency cycle — fall back to timestamp ordering.
-            sorted.iter().map(|e| (*e).clone()).collect()
+            return sorted.iter().map(|effect| (*effect).clone()).collect();
+        };
+
+        processed[next] = true;
+        ordered.push(sorted[next].clone());
+        for &dependent in &dependencies[next] {
+            in_degree[dependent] = in_degree[dependent].saturating_sub(1);
         }
+    }
+
+    ordered
+}
+
+pub(crate) fn order_active_continuous_effects(
+    layer: Layer,
+    effects: &[ActiveContinuousEffect],
+    state: &GameState,
+) -> Vec<ActiveContinuousEffect> {
+    let effect_refs: Vec<&ActiveContinuousEffect> = effects.iter().collect();
+    if layer.has_dependency_ordering() {
+        order_with_dependencies(&effect_refs, state)
+    } else {
+        order_by_timestamp(&effect_refs)
     }
 }
 
@@ -610,7 +648,10 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
     // If b adds/removes abilities and a's filter checks for abilities
     let b_changes_abilities = matches!(
         &b.modification,
-        ContinuousModification::GrantAbility { .. }
+        ContinuousModification::AddKeyword { .. }
+            | ContinuousModification::RemoveKeyword { .. }
+            | ContinuousModification::AddDynamicKeyword { .. }
+            | ContinuousModification::GrantAbility { .. }
             | ContinuousModification::GrantTrigger { .. }
             | ContinuousModification::RemoveAllAbilities
             | ContinuousModification::AddStaticMode { .. }
@@ -642,7 +683,9 @@ fn filter_references_ability(filter: &TargetFilter) -> bool {
             matches!(
                 p,
                 crate::types::ability::FilterProp::WithKeyword { .. }
+                    | crate::types::ability::FilterProp::HasKeywordKind { .. }
                     | crate::types::ability::FilterProp::WithoutKeyword { .. }
+                    | crate::types::ability::FilterProp::WithoutKeywordKind { .. }
             )
         }),
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {

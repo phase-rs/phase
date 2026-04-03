@@ -11,7 +11,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::Supertype;
 use crate::types::identifiers::TrackedSetId;
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
@@ -587,34 +587,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
 
     // CR 108.3 + CR 110.2: Ownership and control are distinct; "you own and control" satisfies both.
     let mut controller = None;
-    let own_ctrl = lower[pos..].trim_start();
-    let own_ctrl_offset = lower[pos..].len() - own_ctrl.len();
-    if tag::<_, _, nom_language::error::VerboseError<&str>>("you own and control")
-        .parse(own_ctrl)
-        .is_ok()
-    {
-        controller = Some(ControllerRef::You);
-        properties.push(FilterProp::Owned {
-            controller: ControllerRef::You,
-        });
-        pos += own_ctrl_offset + "you own and control".len();
-    } else if tag::<_, _, nom_language::error::VerboseError<&str>>("you own")
-        .parse(own_ctrl)
-        .is_ok()
-        && tag::<_, _, nom_language::error::VerboseError<&str>>("you own and")
-            .parse(own_ctrl)
-            .is_err()
-    {
-        properties.push(FilterProp::Owned {
-            controller: ControllerRef::You,
-        });
-        pos += own_ctrl_offset + "you own".len();
-    } else {
-        let (ctrl, ctrl_len) =
-            parse_controller_suffix(&lower[pos..]).map_or((None, 0), |(c, len)| (Some(c), len));
-        controller = ctrl;
-        pos += ctrl_len;
-    }
+    pos += parse_ownership_or_controller_suffix(&lower[pos..], &mut properties, &mut controller);
 
     // Check "with power N or less/greater" suffix
     if let Some((prop, consumed)) = parse_mana_value_suffix(&lower[pos..]) {
@@ -640,6 +613,15 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     } else if let Some((keyword_props, consumed)) = parse_keyword_suffix(&lower[pos..]) {
         properties.extend(keyword_props);
         pos += consumed;
+    }
+
+    if controller.is_none()
+        && !properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::Owned { .. }))
+    {
+        pos +=
+            parse_ownership_or_controller_suffix(&lower[pos..], &mut properties, &mut controller);
     }
 
     // CR 700.5: "that share(s) a creature type" / "that has/have [keyword]" relative clause.
@@ -1270,10 +1252,15 @@ fn parse_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     let mut consumed = leading_ws + "with ".len();
     let mut properties = Vec::new();
 
-    while let Some((keyword_str, keyword_len)) = parse_leading_keyword(remaining) {
-        let keyword =
-            Keyword::from_str(keyword_str).unwrap_or(Keyword::Unknown(keyword_str.to_string()));
-        properties.push(FilterProp::WithKeyword { value: keyword });
+    while let Some((keyword_match, keyword_len)) = parse_leading_keyword_match(remaining) {
+        match keyword_match {
+            KeywordMatch::Concrete(keyword) => {
+                properties.push(FilterProp::WithKeyword { value: keyword });
+            }
+            KeywordMatch::Kind(kind) => {
+                properties.push(FilterProp::HasKeywordKind { value: kind });
+            }
+        }
         consumed += keyword_len;
         remaining = &remaining[keyword_len..];
 
@@ -1314,10 +1301,15 @@ fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> 
     let mut consumed = leading_ws + "without ".len();
     let mut properties = Vec::new();
 
-    while let Some((keyword_str, keyword_len)) = parse_leading_keyword(remaining) {
-        let keyword =
-            Keyword::from_str(keyword_str).unwrap_or(Keyword::Unknown(keyword_str.to_string()));
-        properties.push(FilterProp::WithoutKeyword { value: keyword });
+    while let Some((keyword_match, keyword_len)) = parse_leading_keyword_match(remaining) {
+        match keyword_match {
+            KeywordMatch::Concrete(keyword) => {
+                properties.push(FilterProp::WithoutKeyword { value: keyword });
+            }
+            KeywordMatch::Kind(kind) => {
+                properties.push(FilterProp::WithoutKeywordKind { value: kind });
+            }
+        }
         consumed += keyword_len;
         remaining = &remaining[keyword_len..];
 
@@ -1345,7 +1337,50 @@ fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> 
     }
 }
 
-fn parse_leading_keyword(text: &str) -> Option<(&str, usize)> {
+fn parse_ownership_or_controller_suffix(
+    text: &str,
+    properties: &mut Vec<FilterProp>,
+    controller: &mut Option<ControllerRef>,
+) -> usize {
+    let own_ctrl = text.trim_start();
+    let own_ctrl_offset = text.len() - own_ctrl.len();
+    if tag::<_, _, nom_language::error::VerboseError<&str>>("you own and control")
+        .parse(own_ctrl)
+        .is_ok()
+    {
+        *controller = Some(ControllerRef::You);
+        properties.push(FilterProp::Owned {
+            controller: ControllerRef::You,
+        });
+        return own_ctrl_offset + "you own and control".len();
+    }
+    if tag::<_, _, nom_language::error::VerboseError<&str>>("you own")
+        .parse(own_ctrl)
+        .is_ok()
+        && tag::<_, _, nom_language::error::VerboseError<&str>>("you own and")
+            .parse(own_ctrl)
+            .is_err()
+    {
+        properties.push(FilterProp::Owned {
+            controller: ControllerRef::You,
+        });
+        return own_ctrl_offset + "you own".len();
+    }
+
+    let (ctrl, ctrl_len) =
+        parse_controller_suffix(text).map_or((None, 0), |(ctrl, len)| (Some(ctrl), len));
+    if ctrl.is_some() {
+        *controller = ctrl;
+    }
+    ctrl_len
+}
+
+enum KeywordMatch {
+    Concrete(Keyword),
+    Kind(KeywordKind),
+}
+
+fn parse_leading_keyword_match(text: &str) -> Option<(KeywordMatch, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
     let mut candidate_ends = vec![trimmed.len()];
@@ -1361,22 +1396,43 @@ fn parse_leading_keyword(text: &str) -> Option<(&str, usize)> {
 
     for end in candidate_ends.into_iter().rev() {
         let candidate = trimmed[..end].trim();
-        if is_recognized_keyword(candidate) {
-            return Some((candidate, leading_ws + end));
+        if let Some(keyword) = parse_keyword_match(candidate) {
+            return Some((keyword, leading_ws + end));
         }
     }
 
     None
 }
 
-fn is_recognized_keyword(text: &str) -> bool {
-    matches!(
-        Keyword::from_str(text),
-        Ok(keyword) if !matches!(keyword, Keyword::Unknown(_))
-    ) || matches!(
+fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
+    if matches!(
         text,
-        "plainswalk" | "islandwalk" | "swampwalk" | "mountainwalk" | "forestwalk"
-    )
+        "flashback" | "cycling" | "escape" | "embalm" | "eternalize" | "harmonize" | "unearth"
+    ) {
+        let kind = match text {
+            "flashback" => KeywordKind::Flashback,
+            "cycling" => KeywordKind::Cycling,
+            "escape" => KeywordKind::Escape,
+            "embalm" => KeywordKind::Embalm,
+            "eternalize" => KeywordKind::Eternalize,
+            "harmonize" => KeywordKind::Harmonize,
+            "unearth" => KeywordKind::Unearth,
+            _ => unreachable!(),
+        };
+        return Some(KeywordMatch::Kind(kind));
+    }
+
+    let keyword = Keyword::from_str(text).ok()?;
+    if matches!(keyword, Keyword::Unknown(_))
+        && !matches!(
+            text,
+            "plainswalk" | "islandwalk" | "swampwalk" | "mountainwalk" | "forestwalk"
+        )
+    {
+        return None;
+    }
+
+    Some(KeywordMatch::Concrete(keyword))
 }
 
 /// Parse "that [verb phrase]" relative clause suffix on target noun phrases.
@@ -2144,6 +2200,36 @@ mod tests {
             TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InZone {
                 zone: Zone::Graveyard
             }]))
+        );
+    }
+
+    #[test]
+    fn card_with_flashback_uses_keyword_kind_filter() {
+        let (f, _) = parse_type_phrase("card with flashback");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::HasKeywordKind {
+                    value: KeywordKind::Flashback,
+                },])
+            )
+        );
+    }
+
+    #[test]
+    fn cards_with_flashback_you_own_in_exile() {
+        let (f, _) = parse_type_phrase("cards with flashback you own in exile");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::HasKeywordKind {
+                    value: KeywordKind::Flashback,
+                },
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                },
+                FilterProp::InZone { zone: Zone::Exile },
+            ]))
         );
     }
 

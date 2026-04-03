@@ -11,7 +11,7 @@ use crate::types::card::{LayoutKind, PrintedCardRef};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::identifiers::{CardId, ObjectId};
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -308,6 +308,10 @@ impl GameObject {
     /// Check if this object has a specific keyword, using discriminant-based matching.
     pub fn has_keyword(&self, keyword: &Keyword) -> bool {
         super::keywords::has_keyword(self, keyword)
+    }
+
+    pub fn has_keyword_kind(&self, kind: KeywordKind) -> bool {
+        super::keywords::has_keyword_kind(self, kind)
     }
 
     /// Check if this object uses any mechanics the engine cannot handle.

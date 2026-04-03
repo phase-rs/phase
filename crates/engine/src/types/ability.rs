@@ -8,7 +8,7 @@ use super::card_type::{CoreType, Supertype};
 use super::counter::CounterType;
 use super::game_state::{DistributionUnit, RetargetScope};
 use super::identifiers::ObjectId;
-use super::keywords::Keyword;
+use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost};
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
@@ -582,6 +582,10 @@ pub enum ManaSpendRestriction {
     /// "Spend this mana only on costs that include {X}."
     /// Only permits spending on spells or abilities with {X} in their cost.
     XCostOnly,
+    /// "Spend this mana only to cast spells with flashback."
+    SpellWithKeywordKind(KeywordKind),
+    /// "Spend this mana only to cast spells with flashback from a graveyard."
+    SpellWithKeywordKindFromZone { kind: KeywordKind, zone: Zone },
 }
 
 /// Duration for temporary effects.
@@ -796,10 +800,16 @@ pub enum FilterProp {
     WithKeyword {
         value: Keyword,
     },
+    HasKeywordKind {
+        value: KeywordKind,
+    },
     /// CR 702: Matches objects that do NOT have a given keyword ability.
     /// Used for "without flying", "without first strike", etc.
     WithoutKeyword {
         value: Keyword,
+    },
+    WithoutKeywordKind {
+        value: KeywordKind,
     },
     CountersGE {
         counter_type: CounterType,
@@ -1426,6 +1436,10 @@ pub enum StaticCondition {
     /// CR 309.7: True when the controller has completed at least one dungeon.
     /// Used by "as long as you've completed a dungeon" statics (Nadaar, etc.).
     CompletedADungeon,
+    /// CR 701.27: True when any opponent has at least this many poison counters.
+    OpponentPoisonAtLeast {
+        count: u32,
+    },
     /// CR 118.12: "unless [player] pays [cost]" — a mana tax condition.
     /// Used for Ghostly Prison, Propaganda, etc. The restriction applies unless the
     /// relevant player pays the specified cost. Evaluated as false (restriction active)
@@ -5327,8 +5341,14 @@ mod tests {
             FilterProp::WithKeyword {
                 value: Keyword::Flying,
             },
+            FilterProp::HasKeywordKind {
+                value: KeywordKind::Flashback,
+            },
             FilterProp::WithoutKeyword {
                 value: Keyword::Flying,
+            },
+            FilterProp::WithoutKeywordKind {
+                value: KeywordKind::Cycling,
             },
             FilterProp::CountersGE {
                 counter_type: CounterType::Plus1Plus1,

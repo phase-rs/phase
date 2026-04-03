@@ -134,6 +134,8 @@ pub(super) enum ContinuationAst {
     },
     /// "create a ... token and suspect it" → chain Suspect { target: LastCreated }
     SuspectLastCreated,
+    /// "The flashback cost is equal to its mana cost." after a flashback grant.
+    FlashbackCostEqualsManaCost,
     /// CR 701.19c: "It can't be regenerated" / "They can't be regenerated" — sets
     /// `cant_regenerate: true` on the preceding Destroy/DestroyAll effect.
     CantRegenerate,

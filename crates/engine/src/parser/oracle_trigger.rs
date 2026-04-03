@@ -407,6 +407,7 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         | StaticCondition::SourceMatchesFilter { .. }
         | StaticCondition::DefendingPlayerControls { .. }
         | StaticCondition::SourceAttackingAlone
+        | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::None => None,

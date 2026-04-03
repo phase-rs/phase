@@ -8,7 +8,7 @@ use crate::types::ability::{AbilityCost, NinjutsuVariant};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{CardId, ObjectId};
-use crate::types::keywords::{Keyword, ProtectionTarget};
+use crate::types::keywords::{Keyword, KeywordKind, ProtectionTarget};
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -21,6 +21,61 @@ pub fn has_keyword(obj: &GameObject, keyword: &Keyword) -> bool {
     obj.keywords
         .iter()
         .any(|k| std::mem::discriminant(k) == std::mem::discriminant(keyword))
+}
+
+pub fn has_keyword_kind(obj: &GameObject, kind: KeywordKind) -> bool {
+    obj.keywords.iter().any(|keyword| keyword.kind() == kind)
+}
+
+pub fn object_has_effective_keyword_kind(
+    state: &GameState,
+    object_id: ObjectId,
+    kind: KeywordKind,
+) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    if obj.zone == Zone::Battlefield {
+        return obj.keywords.iter().any(|keyword| keyword.kind() == kind);
+    }
+
+    crate::game::off_zone_characteristics::off_zone_has_keyword_kind(state, object_id, kind)
+}
+
+pub fn effective_flashback_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
+    let keyword = effective_keyword_for_object(state, object_id, KeywordKind::Flashback)?;
+    match keyword {
+        Keyword::Flashback(cost) => Some(resolve_keyword_mana_cost(state, object_id, &cost)),
+        _ => None,
+    }
+}
+
+fn effective_keyword_for_object(
+    state: &GameState,
+    object_id: ObjectId,
+    kind: KeywordKind,
+) -> Option<Keyword> {
+    let obj = state.objects.get(&object_id)?;
+    if obj.zone == Zone::Battlefield {
+        return obj
+            .keywords
+            .iter()
+            .find(|keyword| keyword.kind() == kind)
+            .cloned();
+    }
+
+    crate::game::off_zone_characteristics::effective_off_zone_keyword(state, object_id, kind)
+}
+
+fn resolve_keyword_mana_cost(state: &GameState, object_id: ObjectId, cost: &ManaCost) -> ManaCost {
+    match cost {
+        ManaCost::SelfManaCost => state
+            .objects
+            .get(&object_id)
+            .map(|obj| obj.mana_cost.clone())
+            .unwrap_or(ManaCost::NoCost),
+        _ => cost.clone(),
+    }
 }
 
 /// Convenience: check for Flying.

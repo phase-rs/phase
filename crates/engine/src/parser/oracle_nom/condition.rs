@@ -40,6 +40,7 @@ pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
         parse_player_state_conditions,
         parse_you_have_conditions,
         parse_control_conditions,
+        parse_opponent_poison_conditions,
         parse_opponent_comparison_conditions,
         parse_life_conditions,
         parse_zone_conditions,
@@ -93,6 +94,18 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         ),
     ))
     .parse(input)
+}
+
+fn parse_opponent_poison_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("an opponent has ").parse(input)?;
+    let (rest, count) = parse_number(rest)?;
+    let (rest, _) = tag(" or more poison counters").parse(rest)?;
+    Ok((
+        rest,
+        StaticCondition::OpponentPoisonAtLeast {
+            count: count as u32,
+        },
+    ))
 }
 
 /// CR 611.2b: Compose subject × predicate for tapped/untapped.

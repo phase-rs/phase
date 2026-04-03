@@ -97,6 +97,12 @@ fn resolve_restrictions(
             }
             ManaSpendRestriction::ActivateOnly => Some(ManaRestriction::OnlyForActivation),
             ManaSpendRestriction::XCostOnly => Some(ManaRestriction::OnlyForXCosts),
+            ManaSpendRestriction::SpellWithKeywordKind(kind) => {
+                Some(ManaRestriction::OnlyForSpellWithKeywordKind(*kind))
+            }
+            ManaSpendRestriction::SpellWithKeywordKindFromZone { kind, zone } => Some(
+                ManaRestriction::OnlyForSpellWithKeywordKindFromZone(*kind, *zone),
+            ),
         })
         .collect()
 }

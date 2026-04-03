@@ -7,6 +7,7 @@ use crate::parser::oracle_nom::error::OracleResult;
 use crate::types::ability::{
     Effect, ManaProduction, ManaSpendRestriction, QuantityExpr, QuantityRef,
 };
+use crate::types::keywords::KeywordKind;
 use crate::types::mana::ManaColor;
 
 use super::super::oracle_quantity::parse_cda_quantity;
@@ -524,6 +525,31 @@ pub(crate) fn parse_mana_spend_restriction(lower: &str) -> Option<ManaSpendRestr
 
     // Strip trailing ", and that spell can't be countered" or similar trailing clauses
     let rest = rest.split(", and ").next().unwrap_or(rest).trim();
+    if matches!(rest, "spells with flashback" | "a spell with flashback") {
+        return Some(ManaSpendRestriction::SpellWithKeywordKind(
+            KeywordKind::Flashback,
+        ));
+    }
+
+    if matches!(
+        rest,
+        "spells with flashback from a graveyard" | "a spell with flashback from a graveyard"
+    ) {
+        return Some(ManaSpendRestriction::SpellWithKeywordKindFromZone {
+            kind: KeywordKind::Flashback,
+            zone: crate::types::zones::Zone::Graveyard,
+        });
+    }
+
+    if matches!(
+        rest,
+        "spells with flashback from your graveyard" | "a spell with flashback from your graveyard"
+    ) {
+        return Some(ManaSpendRestriction::SpellWithKeywordKindFromZone {
+            kind: KeywordKind::Flashback,
+            zone: crate::types::zones::Zone::Graveyard,
+        });
+    }
 
     // CR 106.12: Check for "or activate abilities of [type]" suffix.
     // If present, emit a combined SpellTypeOrAbilityActivation restriction.

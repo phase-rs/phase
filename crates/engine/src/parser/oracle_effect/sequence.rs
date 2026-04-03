@@ -518,6 +518,7 @@ pub(super) fn apply_clause_continuation(
                 },
             ));
         }
+        ContinuationAst::FlashbackCostEqualsManaCost => {}
         ContinuationAst::CantRegenerate => {
             let Some(previous) = defs.last_mut() else {
                 return;
@@ -636,6 +637,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::ManaRestriction { .. } | ContinuationAst::CounterSourceStatic { .. } => {
             true
         }
+        ContinuationAst::FlashbackCostEqualsManaCost => true,
         ContinuationAst::SearchDestination { .. } => false,
         ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
         ContinuationAst::CantRegenerate => true,
@@ -870,6 +872,22 @@ pub(super) fn parse_followup_continuation_ast(
         }
         Effect::Mana { .. } => super::mana::parse_mana_spend_restriction(&lower)
             .map(|restriction| ContinuationAst::ManaRestriction { restriction }),
+        Effect::GenericEffect {
+            static_abilities, ..
+        } if lower == "the flashback cost is equal to its mana cost"
+            && static_abilities.iter().any(|def| {
+                def.modifications.iter().any(|modification| {
+                    matches!(
+                        modification,
+                        crate::types::ability::ContinuousModification::AddKeyword {
+                            keyword: crate::types::keywords::Keyword::Flashback(_)
+                        }
+                    )
+                })
+            }) =>
+        {
+            Some(ContinuationAst::FlashbackCostEqualsManaCost)
+        }
         Effect::Counter { .. }
             if nom_primitives::scan_contains(&lower, "countered this way")
                 && nom_primitives::scan_contains(&lower, "loses all abilities") =>

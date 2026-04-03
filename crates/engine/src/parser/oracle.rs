@@ -10,7 +10,7 @@ use crate::types::ability::{
     AdditionalCost, CastingRestriction, Comparator, Effect, ModalChoice, ReplacementDefinition,
     SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition, TypedFilter,
 };
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
 use crate::types::zones::Zone;
 
@@ -80,6 +80,75 @@ pub struct ParsedAbilities {
     /// "This spell costs {X} more to cast for each target beyond the first."
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strive_cost: Option<ManaCost>,
+}
+
+fn definition_grants_flashback(def: &AbilityDefinition) -> bool {
+    let grants_here = match &*def.effect {
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => static_abilities.iter().any(|static_def| {
+            static_def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    crate::types::ability::ContinuousModification::AddKeyword { keyword }
+                        if keyword.kind() == KeywordKind::Flashback
+                )
+            })
+        }),
+        _ => false,
+    };
+
+    grants_here
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(definition_grants_flashback)
+}
+
+fn parsed_result_recently_granted_flashback(result: &ParsedAbilities) -> bool {
+    result
+        .abilities
+        .last()
+        .is_some_and(definition_grants_flashback)
+        || result.triggers.last().is_some_and(|trigger| {
+            trigger
+                .execute
+                .as_deref()
+                .is_some_and(definition_grants_flashback)
+        })
+        || result.statics.last().is_some_and(|static_def| {
+            static_def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    crate::types::ability::ContinuousModification::AddKeyword { keyword }
+                        if keyword.kind() == KeywordKind::Flashback
+                )
+            })
+        })
+}
+
+fn parse_static_line_with_flashback_continuation(line: &str) -> Option<StaticDefinition> {
+    if let Some(static_def) = parse_static_line(line) {
+        return Some(static_def);
+    }
+
+    let (prefix, continuation) = line.split_once(". ")?;
+    if !is_flashback_equal_mana_cost(&continuation.to_lowercase()) {
+        return None;
+    }
+
+    let static_def = parse_static_line(&format!("{prefix}."))?;
+    static_def
+        .modifications
+        .iter()
+        .any(|modification| {
+            matches!(
+                modification,
+                crate::types::ability::ContinuousModification::AddKeyword { keyword }
+                    if keyword.kind() == KeywordKind::Flashback
+            )
+        })
+        .then_some(static_def)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -370,7 +439,7 @@ pub fn parse_oracle_text(
         if lower == "your speed can increase beyond 4."
             || lower == "your speed can increase beyond 4"
         {
-            if let Some(static_def) = parse_static_line(&static_line) {
+            if let Some(static_def) = parse_static_line_with_flashback_continuation(&static_line) {
                 result.statics.push(static_def);
                 i += 1;
                 continue;
@@ -421,7 +490,8 @@ pub fn parse_oracle_text(
                     let trimmed = clause.trim().trim_end_matches('.');
                     if !trimmed.is_empty() {
                         let clause_dot = format!("{trimmed}.");
-                        if let Some(sd) = parse_static_line(&clause_dot) {
+                        if let Some(sd) = parse_static_line_with_flashback_continuation(&clause_dot)
+                        {
                             result.statics.push(sd);
                         }
                     }
@@ -429,7 +499,7 @@ pub fn parse_oracle_text(
                 i += 1;
                 continue;
             }
-            if let Some(static_def) = parse_static_line(&static_line) {
+            if let Some(static_def) = parse_static_line_with_flashback_continuation(&static_line) {
                 result.statics.push(static_def);
                 i += 1;
                 continue;
@@ -611,7 +681,9 @@ pub fn parse_oracle_text(
                 // otherwise consume the line before Priority 14 for instants/sorceries.
                 if let Some((aw_name, effect_text)) = strip_ability_word_with_name(&line) {
                     let effect_static = normalize_self_refs_for_static(&effect_text, card_name);
-                    if let Some(mut static_def) = parse_static_line(&effect_static) {
+                    if let Some(mut static_def) =
+                        parse_static_line_with_flashback_continuation(&effect_static)
+                    {
                         if static_def.condition.is_none() {
                             if let Some(cond) = ability_word_to_condition(&aw_name) {
                                 static_def.condition = Some(cond);
@@ -631,7 +703,9 @@ pub fn parse_oracle_text(
                         let trimmed = clause.trim().trim_end_matches('.');
                         if !trimmed.is_empty() {
                             let clause_dot = format!("{trimmed}.");
-                            if let Some(sd) = parse_static_line(&clause_dot) {
+                            if let Some(sd) =
+                                parse_static_line_with_flashback_continuation(&clause_dot)
+                            {
                                 result.statics.push(sd);
                             }
                         }
@@ -648,11 +722,20 @@ pub fn parse_oracle_text(
                         let trimmed = clause.trim().trim_end_matches('.');
                         if !trimmed.is_empty() {
                             let clause_dot = format!("{trimmed}.");
-                            if let Some(sd) = parse_static_line(&clause_dot) {
+                            if let Some(sd) =
+                                parse_static_line_with_flashback_continuation(&clause_dot)
+                            {
                                 result.statics.push(sd);
                             }
                         }
                     }
+                    i += 1;
+                    continue;
+                }
+                if let Some(static_def) =
+                    parse_static_line_with_flashback_continuation(&static_line)
+                {
+                    result.statics.push(static_def);
                     i += 1;
                     continue;
                 }
@@ -842,6 +925,10 @@ pub fn parse_oracle_text(
 
         // "The flashback cost is equal to its mana cost" → extract Flashback keyword
         if is_flashback_equal_mana_cost(&lower) {
+            if parsed_result_recently_granted_flashback(&result) {
+                i += 1;
+                continue;
+            }
             result.extracted_keywords.push(Keyword::Flashback(
                 crate::types::mana::ManaCost::SelfManaCost,
             ));
@@ -932,7 +1019,9 @@ pub fn parse_oracle_text(
             // Try as static
             if is_static_pattern(&effect_lower) {
                 let effect_static = normalize_self_refs_for_static(&effect_text, card_name);
-                if let Some(mut static_def) = parse_static_line(&effect_static) {
+                if let Some(mut static_def) =
+                    parse_static_line_with_flashback_continuation(&effect_static)
+                {
                     // B7: Attach ability word condition to static definition
                     if static_def.condition.is_none() {
                         if let Some(cond) = aw_condition.clone() {
@@ -1510,8 +1599,10 @@ pub(super) fn has_unimplemented(def: &AbilityDefinition) -> bool {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        ModalSelectionConstraint, QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+        ContinuousModification, FilterProp, ManaSpendRestriction, ModalSelectionConstraint,
+        QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
     };
+    use crate::types::keywords::KeywordKind;
     use crate::types::mana::ManaCost;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::StaticMode;
@@ -4224,6 +4315,134 @@ mod tests {
             Some(ManaSpendRestriction::SpellType(
                 "Instant or Sorcery".to_string()
             ))
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_flashback_spells() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        let result =
+            parse_mana_spend_restriction("spend this mana only to cast spells with flashback");
+        assert_eq!(
+            result,
+            Some(ManaSpendRestriction::SpellWithKeywordKind(
+                KeywordKind::Flashback,
+            ))
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_flashback_spells_from_graveyard() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast spells with flashback from a graveyard",
+        );
+        assert_eq!(
+            result,
+            Some(ManaSpendRestriction::SpellWithKeywordKindFromZone {
+                kind: KeywordKind::Flashback,
+                zone: Zone::Graveyard,
+            })
+        );
+    }
+
+    #[test]
+    fn top_level_static_flashback_grant_stays_on_graveyard_cards() {
+        let result = parse(
+            "Each instant and sorcery card in your graveyard has flashback.\nThe flashback cost is equal to that card's mana cost.",
+            "Lier, Disciple of the Drowned",
+            &[],
+            &["Creature"],
+            &["Human", "Wizard"],
+        );
+        assert!(result.extracted_keywords.is_empty());
+        assert_eq!(result.statics.len(), 1);
+        let static_def = &result.statics[0];
+        match static_def.affected.as_ref() {
+            Some(TargetFilter::Or { filters }) => {
+                assert_eq!(filters.len(), 2);
+                for filter in filters {
+                    let TargetFilter::Typed(tf) = filter else {
+                        panic!("expected typed branch, got {:?}", filter);
+                    };
+                    assert_eq!(
+                        tf.controller,
+                        Some(crate::types::ability::ControllerRef::You)
+                    );
+                    assert!(
+                        tf.properties.contains(&FilterProp::InZone {
+                            zone: Zone::Graveyard
+                        }),
+                        "missing graveyard filter: {:?}",
+                        tf.properties
+                    );
+                    assert!(
+                        tf.type_filters.contains(&TypeFilter::Instant)
+                            || tf.type_filters.contains(&TypeFilter::Sorcery)
+                    );
+                }
+            }
+            other => panic!("expected typed affected filter, got {:?}", other),
+        }
+        assert!(
+            static_def
+                .modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flashback(ManaCost::SelfManaCost),
+                }),
+            "missing flashback grant: {:?}",
+            static_def.modifications
+        );
+    }
+
+    #[test]
+    fn same_line_static_flashback_grant_stays_on_graveyard_cards() {
+        let result = parse(
+            "Spells can't be countered.\nEach instant and sorcery card in your graveyard has flashback. The flashback cost is equal to that card's mana cost.",
+            "Lier, Disciple of the Drowned",
+            &[],
+            &["Creature"],
+            &["Human", "Wizard"],
+        );
+        assert!(result.extracted_keywords.is_empty());
+        assert_eq!(result.statics.len(), 2);
+        assert!(result.statics.iter().any(|static_def| {
+            static_def
+                .modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flashback(ManaCost::SelfManaCost),
+                })
+        }));
+    }
+
+    #[test]
+    fn viral_spawning_corrupted_line_parses_as_conditional_flashback_static() {
+        let result = parse(
+            "Create a 3/3 green Phyrexian Beast creature token with toxic 1. (Players dealt combat damage by it also get a poison counter.)\nCorrupted — As long as an opponent has three or more poison counters and this card is in your graveyard, it has flashback {2}{G}. (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
+            "Viral Spawning",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(result.statics.len(), 1);
+        let static_def = &result.statics[0];
+        assert_eq!(static_def.affected, Some(TargetFilter::SelfRef));
+        assert!(
+            static_def
+                .modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flashback(ManaCost::Cost {
+                        generic: 2,
+                        shards: vec![crate::types::mana::ManaCostShard::Green],
+                    }),
+                }),
+            "missing flashback keyword: {:?}",
+            static_def.modifications
+        );
+        assert!(
+            matches!(static_def.condition, Some(StaticCondition::And { .. })),
+            "expected conjunctive static condition, got {:?}",
+            static_def.condition
         );
     }
 

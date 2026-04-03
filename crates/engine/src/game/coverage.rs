@@ -232,7 +232,13 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Tapped => parts.push("tapped".into()),
             FilterProp::Untapped => parts.push("untapped".into()),
             FilterProp::WithKeyword { value } => parts.push(format!("with {value:?}")),
+            FilterProp::HasKeywordKind { value } => {
+                parts.push(format!("with {value:?}").to_lowercase())
+            }
             FilterProp::WithoutKeyword { value } => parts.push(format!("without {value:?}")),
+            FilterProp::WithoutKeywordKind { value } => {
+                parts.push(format!("without {value:?}").to_lowercase())
+            }
             FilterProp::CountersGE {
                 counter_type,
                 count,

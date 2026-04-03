@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ability::{ContinuousModification, TargetFilter};
 use super::identifiers::ObjectId;
+use super::player::PlayerId;
 use super::statics::StaticMode;
 
 /// The seven layers of continuous effect evaluation per CR 613.
@@ -110,6 +111,7 @@ impl ContinuousModification {
 #[derive(Debug, Clone)]
 pub struct ActiveContinuousEffect {
     pub source_id: ObjectId,
+    pub controller: PlayerId,
     /// Index into the source object's `static_definitions` array, or `None` for
     /// transient effects that have no backing static definition on any object.
     pub def_index: Option<usize>,

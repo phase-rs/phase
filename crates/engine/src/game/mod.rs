@@ -36,6 +36,7 @@ pub mod mana_sources;
 pub mod match_flow;
 pub mod morph;
 pub mod mulligan;
+pub(crate) mod off_zone_characteristics;
 pub mod planeswalker;
 pub mod players;
 pub mod printed_cards;

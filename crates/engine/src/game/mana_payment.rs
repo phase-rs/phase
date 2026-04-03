@@ -166,11 +166,12 @@ pub fn can_pay_for_spell(pool: &ManaPool, cost: &ManaCost, spell: Option<&SpellM
                     // CR 107.4e: Monocolored hybrid {2/C} — pay 1 colored or 2 generic.
                     ShardRequirement::TwoGenericHybrid(color) => {
                         if spend_eligible(&mut sim, color, spell).is_none() {
-                            if sim.total() < 2 {
+                            if spend_any_eligible(&mut sim, spell).is_none() {
                                 return false;
                             }
-                            spend_any(&mut sim);
-                            spend_any(&mut sim);
+                            if spend_any_eligible(&mut sim, spell).is_none() {
+                                return false;
+                            }
                         }
                     }
                     // CR 107.4h: Snow mana {S} — paid with mana from a snow source.
@@ -195,7 +196,7 @@ pub fn can_pay_for_spell(pool: &ManaPool, cost: &ManaCost, spell: Option<&SpellM
             }
             // Pay generic
             for _ in 0..*generic {
-                if !spend_any(&mut sim) {
+                if spend_any_eligible(&mut sim, spell).is_none() {
                     return false;
                 }
             }
@@ -264,8 +265,8 @@ pub fn pay_cost_with_demand(
                             spent.push(unit);
                         } else {
                             for _ in 0..2 {
-                                let unit =
-                                    spend_any_unit(pool).ok_or(PaymentError::InsufficientMana)?;
+                                let unit = spend_any_eligible(pool, spell)
+                                    .ok_or(PaymentError::InsufficientMana)?;
                                 spent.push(unit);
                             }
                         }
@@ -305,7 +306,7 @@ pub fn pay_cost_with_demand(
             // CR 107.4b: Generic mana can be paid with any type of mana.
             // Prefer colorless first, then least-available color to preserve flexibility.
             for _ in 0..*generic {
-                let unit = spend_any_unit(pool).ok_or(PaymentError::InsufficientMana)?;
+                let unit = spend_any_eligible(pool, spell).ok_or(PaymentError::InsufficientMana)?;
                 spent.push(unit);
             }
 
@@ -471,8 +472,41 @@ pub(crate) fn shard_to_mana_type(shard: ManaCostShard) -> ShardRequirement {
     }
 }
 
-fn spend_any(pool: &mut ManaPool) -> bool {
-    spend_any_unit(pool).is_some()
+fn spend_any_eligible(pool: &mut ManaPool, spell: Option<&SpellMeta>) -> Option<ManaUnit> {
+    match spell {
+        Some(meta) => {
+            if let Some(unit) = pool.spend_for(ManaType::Colorless, meta) {
+                return Some(unit);
+            }
+
+            let colors = [
+                ManaType::White,
+                ManaType::Blue,
+                ManaType::Black,
+                ManaType::Red,
+                ManaType::Green,
+            ];
+            let mut best: Option<(ManaType, usize)> = None;
+            for &color in &colors {
+                let count = pool
+                    .mana
+                    .iter()
+                    .filter(|m| {
+                        m.color == color && m.restrictions.iter().all(|r| r.allows_spell(meta))
+                    })
+                    .count();
+                if count > 0 {
+                    match best {
+                        None => best = Some((color, count)),
+                        Some((_, best_count)) if count < best_count => best = Some((color, count)),
+                        _ => {}
+                    }
+                }
+            }
+            best.and_then(|(color, _)| pool.spend_for(color, meta))
+        }
+        None => spend_any_unit(pool),
+    }
 }
 
 fn spend_any_unit(pool: &mut ManaPool) -> Option<ManaUnit> {
@@ -840,6 +874,8 @@ mod tests {
         let elf = SpellMeta {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Elf".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
         };
         assert!(can_pay_for_spell(&pool, &cost, Some(&elf)));
 
@@ -847,7 +883,88 @@ mod tests {
         let goblin = SpellMeta {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Goblin".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
         };
         assert!(!can_pay_for_spell(&pool, &cost, Some(&goblin)));
+    }
+
+    #[test]
+    fn can_pay_for_spell_respects_flashback_keyword_restriction() {
+        let mut pool = ManaPool::default();
+        pool.add(ManaUnit {
+            color: ManaType::Colorless,
+            source_id: ObjectId(1),
+            snow: false,
+            restrictions: vec![ManaRestriction::OnlyForSpellWithKeywordKind(
+                crate::types::keywords::KeywordKind::Flashback,
+            )],
+            expiry: None,
+        });
+
+        let cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        };
+
+        let flashback_spell = SpellMeta {
+            types: vec!["Instant".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![crate::types::keywords::KeywordKind::Flashback],
+            cast_from_zone: Some(crate::types::zones::Zone::Graveyard),
+        };
+        assert!(can_pay_for_spell(&pool, &cost, Some(&flashback_spell)));
+
+        let normal_spell = SpellMeta {
+            types: vec!["Instant".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: Some(crate::types::zones::Zone::Hand),
+        };
+        assert!(!can_pay_for_spell(&pool, &cost, Some(&normal_spell)));
+    }
+
+    #[test]
+    fn can_pay_for_spell_respects_flashback_zone_restriction() {
+        let mut pool = ManaPool::default();
+        pool.add(ManaUnit {
+            color: ManaType::Colorless,
+            source_id: ObjectId(1),
+            snow: false,
+            restrictions: vec![ManaRestriction::OnlyForSpellWithKeywordKindFromZone(
+                crate::types::keywords::KeywordKind::Flashback,
+                crate::types::zones::Zone::Graveyard,
+            )],
+            expiry: None,
+        });
+
+        let cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        };
+
+        let graveyard_flashback_spell = SpellMeta {
+            types: vec!["Instant".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![crate::types::keywords::KeywordKind::Flashback],
+            cast_from_zone: Some(crate::types::zones::Zone::Graveyard),
+        };
+        assert!(can_pay_for_spell(
+            &pool,
+            &cost,
+            Some(&graveyard_flashback_spell)
+        ));
+
+        let hand_flashback_spell = SpellMeta {
+            types: vec!["Instant".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![crate::types::keywords::KeywordKind::Flashback],
+            cast_from_zone: Some(crate::types::zones::Zone::Hand),
+        };
+        assert!(!can_pay_for_spell(
+            &pool,
+            &cost,
+            Some(&hand_flashback_spell)
+        ));
     }
 }

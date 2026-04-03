@@ -1697,6 +1697,11 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
         return Some(filter);
     }
 
+    let (filter, rest) = parse_type_phrase(trimmed);
+    if rest.trim().is_empty() {
+        return Some(filter);
+    }
+
     parse_rule_static_subject_filter(trimmed)
 }
 
@@ -3228,6 +3233,9 @@ fn map_keyword(text: &str) -> Option<Keyword> {
     let word = text.trim().trim_end_matches('.').trim();
     if word.is_empty() {
         return None;
+    }
+    if word.eq_ignore_ascii_case("flashback") {
+        return Some(Keyword::Flashback(ManaCost::SelfManaCost));
     }
     // CR 702.73a: "all creature types" is the Changeling CDA effect.
     // Granting Changeling keyword triggers layer system post-fixup to add all types.

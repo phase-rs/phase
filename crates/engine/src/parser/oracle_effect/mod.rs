@@ -5026,10 +5026,11 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        Comparator, ContinuousModification, ControllerRef, DoublePTMode, GainLifePlayer,
-        ManaProduction, NinjutsuVariant, PaymentCost, TypeFilter,
+        Comparator, ContinuousModification, ControllerRef, DoublePTMode, Duration, FilterProp,
+        GainLifePlayer, ManaProduction, NinjutsuVariant, PaymentCost, TypeFilter,
     };
     use crate::types::mana::ManaColor;
+    use crate::types::zones::Zone;
 
     #[test]
     fn effect_lightning_bolt() {
@@ -6382,6 +6383,59 @@ mod tests {
             }
             other => panic!("Expected GenericEffect, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn effect_target_graveyard_spell_gains_flashback_until_end_of_turn() {
+        let def = parse_effect_chain(
+            "target instant or sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::GenericEffect {
+                target: Some(TargetFilter::Or { filters }),
+                static_abilities,
+                duration,
+            } => {
+                assert_eq!(filters.len(), 2);
+                for filter in filters {
+                    let TargetFilter::Typed(tf) = filter else {
+                        panic!("expected typed branch, got {:?}", filter);
+                    };
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                    assert!(
+                        tf.properties.contains(&FilterProp::InZone {
+                            zone: Zone::Graveyard
+                        }),
+                        "missing graveyard filter: {:?}",
+                        tf.properties
+                    );
+                    assert!(
+                        tf.type_filters.contains(&TypeFilter::Instant)
+                            || tf.type_filters.contains(&TypeFilter::Sorcery)
+                    );
+                }
+                assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+                assert!(
+                    static_abilities
+                        .iter()
+                        .any(|static_def| static_def.modifications.contains(
+                            &ContinuousModification::AddKeyword {
+                                keyword: crate::types::keywords::Keyword::Flashback(
+                                    ManaCost::SelfManaCost,
+                                ),
+                            }
+                        )),
+                    "missing flashback grant: {:?}",
+                    static_abilities
+                );
+            }
+            other => panic!("Expected GenericEffect, got {:?}", other),
+        }
+        assert!(
+            def.sub_ability.is_none(),
+            "flashback cost continuation should be absorbed into the grant"
+        );
     }
 
     #[test]

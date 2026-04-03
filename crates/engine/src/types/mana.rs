@@ -4,6 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::identifiers::ObjectId;
+use super::keywords::KeywordKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub enum ManaColor {
@@ -58,6 +59,10 @@ pub struct SpellMeta {
     pub types: Vec<String>,
     /// Subtypes (e.g., "Elf", "Goblin") — case-insensitive matching.
     pub subtypes: Vec<String>,
+    /// Effective keyword classes on the spell while being cast.
+    pub keyword_kinds: Vec<KeywordKind>,
+    /// Zone the spell is being cast from.
+    pub cast_from_zone: Option<crate::types::zones::Zone>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +82,10 @@ pub enum ManaRestriction {
     /// "Spend this mana only on costs that include {X}."
     /// Only permits spending on spells or abilities with {X} in their cost.
     OnlyForXCosts,
+    /// "Spend this mana only to cast spells with flashback."
+    OnlyForSpellWithKeywordKind(KeywordKind),
+    /// "Spend this mana only to cast spells with flashback from a graveyard."
+    OnlyForSpellWithKeywordKindFromZone(KeywordKind, crate::types::zones::Zone),
 }
 
 impl ManaRestriction {
@@ -109,6 +118,16 @@ impl ManaRestriction {
             // CR 106.12: X-cost restriction — conservatively disallow for spells.
             // Full X-cost detection requires ManaCost inspection at the call site.
             ManaRestriction::OnlyForXCosts => false,
+            ManaRestriction::OnlyForSpellWithKeywordKind(required_keyword) => {
+                meta.keyword_kinds.contains(required_keyword)
+            }
+            ManaRestriction::OnlyForSpellWithKeywordKindFromZone(
+                required_keyword,
+                required_zone,
+            ) => {
+                meta.keyword_kinds.contains(required_keyword)
+                    && meta.cast_from_zone == Some(*required_zone)
+            }
         }
     }
 
@@ -118,7 +137,10 @@ impl ManaRestriction {
     pub fn allows_activation(&self, source_types: &[String]) -> bool {
         match self {
             // Spell-only restrictions don't permit ability activation.
-            ManaRestriction::OnlyForSpellType(_) | ManaRestriction::OnlyForCreatureType(_) => false,
+            ManaRestriction::OnlyForSpellType(_)
+            | ManaRestriction::OnlyForCreatureType(_)
+            | ManaRestriction::OnlyForSpellWithKeywordKind(_)
+            | ManaRestriction::OnlyForSpellWithKeywordKindFromZone(_, _) => false,
             // CR 106.6: The ability-activation half of the OR.
             ManaRestriction::OnlyForTypeSpellsOrAbilities(required_type) => source_types
                 .iter()
@@ -696,10 +718,14 @@ mod tests {
         let creature_spell = SpellMeta {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Elf".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
         };
         let instant_spell = SpellMeta {
             types: vec!["Instant".to_string()],
             subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
         };
         assert!(restriction.allows_spell(&creature_spell));
         assert!(!restriction.allows_spell(&instant_spell));
@@ -711,14 +737,20 @@ mod tests {
         let elf_creature = SpellMeta {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Elf".to_string(), "Warrior".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
         };
         let goblin_creature = SpellMeta {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Goblin".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
         };
         let elf_instant = SpellMeta {
             types: vec!["Instant".to_string()],
             subtypes: vec!["Elf".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
         };
         assert!(restriction.allows_spell(&elf_creature));
         assert!(!restriction.allows_spell(&goblin_creature));
@@ -741,6 +773,8 @@ mod tests {
         let spell = SpellMeta {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Elf".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
         };
         let spent = pool.spend_for(ManaType::Green, &spell).unwrap();
         // Should prefer unrestricted mana first
@@ -762,6 +796,8 @@ mod tests {
         let elf_spell = SpellMeta {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Elf".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
         };
         assert!(pool.spend_for(ManaType::Green, &elf_spell).is_some());
     }
@@ -820,9 +856,30 @@ mod tests {
         let goblin_spell = SpellMeta {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Goblin".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
         };
         assert!(pool.spend_for(ManaType::Green, &goblin_spell).is_none());
         assert_eq!(pool.total(), 1, "Restricted mana should remain in pool");
+    }
+
+    #[test]
+    fn restriction_allows_matching_keyword_kind() {
+        let restriction = ManaRestriction::OnlyForSpellWithKeywordKind(KeywordKind::Flashback);
+        let flashback_spell = SpellMeta {
+            types: vec!["Instant".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![KeywordKind::Flashback],
+            cast_from_zone: None,
+        };
+        let normal_spell = SpellMeta {
+            types: vec!["Instant".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+        };
+        assert!(restriction.allows_spell(&flashback_spell));
+        assert!(!restriction.allows_spell(&normal_spell));
     }
 
     #[test]

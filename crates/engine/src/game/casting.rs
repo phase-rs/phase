@@ -8,7 +8,7 @@ use crate::types::game_state::{
     StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaCost, SpellMeta};
 use crate::types::player::PlayerId;
 use crate::types::statics::{CastingProhibitionCondition, CastingProhibitionScope, StaticMode};
@@ -203,9 +203,9 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
     objects.extend(player_data.graveyard.iter().filter(|&&obj_id| {
         state.objects.get(&obj_id).is_some_and(|obj| {
             obj.owner == player
-                && has_graveyard_cast_keyword(obj)
+                && has_effective_graveyard_cast_keyword(state, obj_id, obj)
                 && (has_harmonize_keyword(obj)
-                    || has_flashback_keyword(obj)
+                    || has_flashback_keyword(state, obj_id)
                     || graveyard_has_enough_for_escape(state, player, obj_id))
         })
     }));
@@ -272,23 +272,63 @@ fn has_harmonize_keyword(obj: &crate::game::game_object::GameObject) -> bool {
 }
 
 /// CR 702.34: Check if an object has the Flashback keyword.
-fn has_flashback_keyword(obj: &crate::game::game_object::GameObject) -> bool {
-    obj.keywords
-        .iter()
-        .any(|k| matches!(k, crate::types::keywords::Keyword::Flashback(_)))
+fn has_flashback_keyword(state: &GameState, object_id: ObjectId) -> bool {
+    super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Flashback)
 }
 
-/// CR 702.34 / CR 702.138 / CR 702.180: Check if an object has any keyword
-/// allowing it to be cast from graveyard (Escape, Harmonize, or Flashback).
-fn has_graveyard_cast_keyword(obj: &crate::game::game_object::GameObject) -> bool {
+fn has_effective_graveyard_cast_keyword(
+    state: &GameState,
+    object_id: ObjectId,
+    obj: &crate::game::game_object::GameObject,
+) -> bool {
     obj.keywords.iter().any(|k| {
         matches!(
             k,
             crate::types::keywords::Keyword::Escape { .. }
                 | crate::types::keywords::Keyword::Harmonize(_)
-                | crate::types::keywords::Keyword::Flashback(_)
         )
+    }) || has_flashback_keyword(state, object_id)
+}
+
+fn build_spell_meta(state: &GameState, object_id: ObjectId) -> Option<SpellMeta> {
+    state.objects.get(&object_id).map(|obj| SpellMeta {
+        types: obj
+            .card_types
+            .core_types
+            .iter()
+            .map(|ct| format!("{ct:?}"))
+            .collect(),
+        subtypes: obj.card_types.subtypes.clone(),
+        keyword_kinds: effective_spell_keyword_kinds(state, object_id),
+        cast_from_zone: Some(obj.zone),
     })
+}
+
+fn effective_spell_keyword_kinds(state: &GameState, object_id: ObjectId) -> Vec<KeywordKind> {
+    let mut kinds = Vec::new();
+    let Some(obj) = state.objects.get(&object_id) else {
+        return kinds;
+    };
+
+    for keyword in &obj.keywords {
+        let kind = keyword.kind();
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+
+    if obj.zone != Zone::Battlefield {
+        if super::keywords::object_has_effective_keyword_kind(
+            state,
+            object_id,
+            KeywordKind::Flashback,
+        ) && !kinds.contains(&KeywordKind::Flashback)
+        {
+            kinds.push(KeywordKind::Flashback);
+        }
+    }
+
+    kinds
 }
 
 /// Check if an object has any permission allowing it to be cast from exile.
@@ -506,7 +546,13 @@ fn prepare_spell_cast(
     let has_exile_permission =
         obj.zone == Zone::Exile && has_exile_cast_permission(obj, state.turn_number);
     // CR 702.34 / CR 702.138 / CR 702.180: Cards in graveyard with graveyard-cast keywords.
-    let has_escape = obj.zone == Zone::Graveyard && has_graveyard_cast_keyword(obj);
+    let has_escape = obj.zone == Zone::Graveyard
+        && obj
+            .keywords
+            .iter()
+            .any(|k| matches!(k, crate::types::keywords::Keyword::Escape { .. }));
+    let has_graveyard_cast_keyword =
+        obj.zone == Zone::Graveyard && has_effective_graveyard_cast_keyword(state, object_id, obj);
     // CR 601.2a + CR 117.1c: Graveyard cast via static permission (Lurrus, etc.).
     let graveyard_permission_src = if obj.zone == Zone::Graveyard && state.active_player == player {
         graveyard_permission_source(state, player, object_id)
@@ -526,7 +572,7 @@ fn prepare_spell_cast(
                     && obj.zone == Zone::Command
                     && obj.is_commander)
                 || has_exile_permission
-                || has_escape
+                || has_graveyard_cast_keyword
                 || has_graveyard_permission));
     if !castable_zone {
         return Err(EngineError::InvalidAction(
@@ -650,10 +696,7 @@ fn prepare_spell_cast(
 
     // CR 702.34a: Flashback — use flashback cost when casting from graveyard.
     let flashback_cost = if obj.zone == Zone::Graveyard {
-        obj.keywords.iter().find_map(|k| match k {
-            crate::types::keywords::Keyword::Flashback(cost) => Some(cost.clone()),
-            _ => None,
-        })
+        super::keywords::effective_flashback_cost(state, object_id)
     } else {
         None
     };
@@ -1496,15 +1539,7 @@ pub fn can_pay_cost_after_auto_tap(
     if simulated.layers_dirty {
         super::layers::evaluate_layers(&mut simulated);
     }
-    let spell_meta = simulated.objects.get(&source_id).map(|obj| SpellMeta {
-        types: obj
-            .card_types
-            .core_types
-            .iter()
-            .map(|ct| format!("{ct:?}"))
-            .collect(),
-        subtypes: obj.card_types.subtypes.clone(),
-    });
+    let spell_meta = build_spell_meta(&simulated, source_id);
 
     super::casting_costs::auto_tap_mana_sources(
         &mut simulated,
@@ -1554,15 +1589,7 @@ pub(super) fn pay_mana_cost(
         super::layers::evaluate_layers(state);
     }
 
-    let spell_meta = state.objects.get(&source_id).map(|obj| SpellMeta {
-        types: obj
-            .card_types
-            .core_types
-            .iter()
-            .map(|ct| format!("{ct:?}"))
-            .collect(),
-        subtypes: obj.card_types.subtypes.clone(),
-    });
+    let spell_meta = build_spell_meta(state, source_id);
 
     auto_tap_mana_sources(state, player, cost, events, Some(source_id));
 
@@ -5160,7 +5187,9 @@ mod tests {
         obj.card_types.core_types.push(CoreType::Instant);
         obj.base_card_types = obj.card_types.clone();
         obj.mana_cost = mana_cost;
-        obj.keywords.push(Keyword::Flashback(flashback_cost));
+        obj.base_keywords
+            .push(Keyword::Flashback(flashback_cost.clone()));
+        obj.keywords = obj.base_keywords.clone();
         // Give it a simple draw effect so it has an ability to cast
         let ability = crate::types::ability::AbilityDefinition::new(
             crate::types::ability::AbilityKind::Spell,
@@ -5248,7 +5277,9 @@ mod tests {
         obj.card_types.core_types.push(CoreType::Instant);
         obj.base_card_types = obj.card_types.clone();
         obj.mana_cost = card_cost.clone();
-        obj.keywords.push(Keyword::Flashback(flashback_cost));
+        obj.base_keywords
+            .push(Keyword::Flashback(flashback_cost.clone()));
+        obj.keywords = obj.base_keywords.clone();
         let ability = crate::types::ability::AbilityDefinition::new(
             crate::types::ability::AbilityKind::Spell,
             crate::types::ability::Effect::Draw {
@@ -5267,6 +5298,154 @@ mod tests {
         assert_eq!(
             prepared.mana_cost, card_cost,
             "Should use card's mana cost when cast from hand"
+        );
+    }
+
+    #[test]
+    fn transient_flashback_grant_in_graveyard_is_castable_until_cleanup() {
+        let mut state = setup_game_at_main_phase();
+        let card_cost = ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Red],
+        };
+        let obj_id = add_flashback_instant_to_graveyard(
+            &mut state,
+            PlayerId(0),
+            ManaCost::NoCost,
+            card_cost.clone(),
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.base_keywords.clear();
+        obj.keywords.clear();
+
+        state.add_transient_continuous_effect(
+            obj_id,
+            PlayerId(0),
+            crate::types::ability::Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: obj_id },
+            vec![crate::types::ability::ContinuousModification::AddKeyword {
+                keyword: Keyword::Flashback(ManaCost::SelfManaCost),
+            }],
+            None,
+        );
+
+        let prepared = prepare_spell_cast(&state, PlayerId(0), obj_id).unwrap();
+        assert_eq!(prepared.casting_variant, CastingVariant::Flashback);
+        assert_eq!(prepared.mana_cost, card_cost);
+
+        super::super::layers::prune_end_of_turn_effects(&mut state);
+        assert!(
+            !spell_objects_available_to_cast(&state, PlayerId(0)).contains(&obj_id),
+            "Temporary flashback grant should expire at cleanup"
+        );
+    }
+
+    #[test]
+    fn static_graveyard_flashback_grant_makes_spell_castable() {
+        let mut state = setup_game_at_main_phase();
+        let card_cost = ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Blue],
+        };
+        let obj_id = add_flashback_instant_to_graveyard(
+            &mut state,
+            PlayerId(0),
+            ManaCost::NoCost,
+            card_cost.clone(),
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.base_keywords.clear();
+        obj.keywords.clear();
+
+        let source_id = create_object(
+            &mut state,
+            CardId(999),
+            PlayerId(0),
+            "Lier".to_string(),
+            Zone::Battlefield,
+        );
+        let source = state.objects.get_mut(&source_id).unwrap();
+        source.card_types.core_types.push(CoreType::Creature);
+        source.base_card_types = source.card_types.clone();
+        source.static_definitions.push(
+            crate::types::ability::StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::new(TypeFilter::AnyOf(vec![
+                        TypeFilter::Instant,
+                        TypeFilter::Sorcery,
+                    ]))
+                    .controller(crate::types::ability::ControllerRef::You)
+                    .properties(vec![
+                        crate::types::ability::FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        },
+                    ]),
+                ))
+                .modifications(vec![
+                    crate::types::ability::ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flashback(ManaCost::SelfManaCost),
+                    },
+                ]),
+        );
+        source.base_static_definitions = source.static_definitions.clone();
+
+        let available = spell_objects_available_to_cast(&state, PlayerId(0));
+        assert!(available.contains(&obj_id));
+
+        let prepared = prepare_spell_cast(&state, PlayerId(0), obj_id).unwrap();
+        assert_eq!(prepared.casting_variant, CastingVariant::Flashback);
+        assert_eq!(prepared.mana_cost, card_cost);
+    }
+
+    #[test]
+    fn self_graveyard_static_flashback_grant_is_castable() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = add_flashback_instant_to_graveyard(
+            &mut state,
+            PlayerId(0),
+            ManaCost::NoCost,
+            ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::Green],
+            },
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.base_keywords.clear();
+        obj.keywords.clear();
+        obj.static_definitions.push(
+            crate::types::ability::StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .condition(crate::types::ability::StaticCondition::And {
+                    conditions: vec![
+                        crate::types::ability::StaticCondition::OpponentPoisonAtLeast { count: 3 },
+                        crate::types::ability::StaticCondition::SourceInZone {
+                            zone: Zone::Graveyard,
+                        },
+                    ],
+                })
+                .modifications(vec![
+                    crate::types::ability::ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flashback(ManaCost::Cost {
+                            generic: 2,
+                            shards: vec![ManaCostShard::Green],
+                        }),
+                    },
+                ]),
+        );
+        obj.base_static_definitions = obj.static_definitions.clone();
+        state.players[1].poison_counters = 3;
+
+        let available = spell_objects_available_to_cast(&state, PlayerId(0));
+        assert!(available.contains(&obj_id));
+
+        let prepared = prepare_spell_cast(&state, PlayerId(0), obj_id).unwrap();
+        assert_eq!(prepared.casting_variant, CastingVariant::Flashback);
+        assert_eq!(
+            prepared.mana_cost,
+            ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Green],
+            }
         );
     }
 }
