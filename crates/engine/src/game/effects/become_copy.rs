@@ -64,7 +64,7 @@ mod tests {
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
-    use crate::types::mana::{ManaCost, ManaColor, ManaCostShard};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -77,7 +77,13 @@ mod tests {
         power: i32,
         toughness: i32,
     ) -> crate::types::identifiers::ObjectId {
-        let id = create_object(state, CardId(card_id), player, name.to_string(), Zone::Battlefield);
+        let id = create_object(
+            state,
+            CardId(card_id),
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
         let obj = state.objects.get_mut(&id).unwrap();
         obj.base_name = name.to_string();
         obj.base_power = Some(power);
@@ -317,7 +323,10 @@ mod tests {
         {
             let obj = state.objects.get_mut(&id).unwrap();
             obj.base_color = vec![ManaColor::Green];
-            obj.base_mana_cost = ManaCost::Cost { shards: vec![ManaCostShard::Green], generic: 1 };
+            obj.base_mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1,
+            };
             // Set computed fields to different values (as if layer effects applied)
             obj.name = "Pumped Bear".to_string();
             obj.power = Some(5);
@@ -327,10 +336,17 @@ mod tests {
         let values = intrinsic_copiable_values(state.objects.get(&id).unwrap());
         assert_eq!(values.name, "Bear", "should use base_name, not name");
         assert_eq!(values.power, Some(2), "should use base_power, not power");
-        assert_eq!(values.color, vec![ManaColor::Green], "should use base_color");
+        assert_eq!(
+            values.color,
+            vec![ManaColor::Green],
+            "should use base_color"
+        );
         assert_eq!(
             values.mana_cost,
-            ManaCost::Cost { shards: vec![ManaCostShard::Green], generic: 1 },
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1
+            },
             "should capture base_mana_cost"
         );
     }
@@ -342,7 +358,10 @@ mod tests {
         let id = create_creature(&mut state, 1, PlayerId(0), "Bear", 2, 2);
         {
             let obj = state.objects.get_mut(&id).unwrap();
-            obj.base_mana_cost = ManaCost::Cost { shards: vec![ManaCostShard::Green], generic: 1 };
+            obj.base_mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1,
+            };
             obj.base_loyalty = Some(3);
             // Simulate stale computed values from a previous layer evaluation
             obj.name = "Stale Name".to_string();
@@ -356,7 +375,10 @@ mod tests {
         assert_eq!(obj.name, "Bear", "name must reset to base_name");
         assert_eq!(
             obj.mana_cost,
-            ManaCost::Cost { shards: vec![ManaCostShard::Green], generic: 1 },
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1
+            },
             "mana_cost must reset to base_mana_cost"
         );
         assert_eq!(obj.loyalty, Some(3), "loyalty must reset to base_loyalty");
@@ -441,7 +463,11 @@ mod tests {
         let mut events = Vec::new();
         execute_cleanup(&mut state, &mut events);
         evaluate_layers(&mut state);
-        assert_eq!(state.objects[&id].power, Some(2), "pump expired after cleanup");
+        assert_eq!(
+            state.objects[&id].power,
+            Some(2),
+            "pump expired after cleanup"
+        );
     }
 
     // ── Plan test 13: Token copy of copied permanent ──────────────────────
@@ -536,7 +562,10 @@ mod tests {
         assert_eq!(obj.base_toughness, Some(4));
         assert_eq!(obj.base_color, vec![ManaColor::Red]);
         assert!(obj.transformed);
-        assert!(obj.back_face.is_some(), "front face stored for reverse transform");
+        assert!(
+            obj.back_face.is_some(),
+            "front face stored for reverse transform"
+        );
 
         // Transform back
         transform_permanent(&mut state, id, &mut events).unwrap();
@@ -566,17 +595,19 @@ mod tests {
 
         let mut state = GameState::new_two_player(42);
         let target = create_creature(&mut state, 1, PlayerId(0), "Flyer", 2, 2);
-        state.objects.get_mut(&target).unwrap().base_abilities =
-            vec![AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::Draw { count: crate::types::ability::QuantityExpr::Fixed { value: 1 } },
-            )];
+        state.objects.get_mut(&target).unwrap().base_abilities = vec![AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+            },
+        )];
 
         // Source has no abilities
         let source = create_creature(&mut state, 2, PlayerId(0), "Vanilla", 1, 1);
 
         let mut events = Vec::new();
-        let ability = make_copy_ability(target, source, PlayerId(0), Some(Duration::UntilEndOfTurn));
+        let ability =
+            make_copy_ability(target, source, PlayerId(0), Some(Duration::UntilEndOfTurn));
         resolve(&mut state, &ability, &mut events).unwrap();
         evaluate_layers(&mut state);
         assert_eq!(state.objects[&source].abilities.len(), 1, "copied ability");
