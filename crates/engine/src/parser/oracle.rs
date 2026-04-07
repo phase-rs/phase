@@ -502,6 +502,18 @@ pub fn parse_oracle_text(
                 i += 1;
                 continue;
             }
+            // CR 602.5: Compound "can't attack/block, and ... activated abilities
+            // can't be activated" — route through multi to get both statics.
+            if lower.contains("activated abilities can't be activated")
+                && (lower.contains("can't attack") || lower.contains("can't block"))
+            {
+                let multi = parse_static_line_multi(&static_line);
+                if !multi.is_empty() {
+                    result.statics.extend(multi);
+                    i += 1;
+                    continue;
+                }
+            }
             if let Some(static_def) = parse_static_line_with_flashback_continuation(&static_line) {
                 result.statics.push(static_def);
                 i += 1;
@@ -715,6 +727,18 @@ pub fn parse_oracle_text(
                     }
                     i += 1;
                     continue;
+                }
+                // CR 602.5: Compound "can't attack/block, and its activated abilities
+                // can't be activated" → produces multiple statics (CantAttackOrBlock + CantBeActivated).
+                if lower.contains("activated abilities can't be activated")
+                    && (lower.contains("can't attack") || lower.contains("can't block"))
+                {
+                    let multi = parse_static_line_multi(&static_line);
+                    if !multi.is_empty() {
+                        result.statics.extend(multi);
+                        i += 1;
+                        continue;
+                    }
                 }
                 // Compound clause: casting time restriction + per-turn limit joined by " and "
                 // E.g., Fires of Invention: "You can cast spells only during your turn and

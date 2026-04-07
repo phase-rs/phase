@@ -772,6 +772,11 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
         return clause;
     }
 
+    // CR 614.10: "you skip your next turn" / "skip your next turn" — temporal penalty.
+    if let Some(clause) = try_parse_skip_next_turn(tp) {
+        return clause;
+    }
+
     // CR 601.2d: "deal N damage divided as you choose among [targets]" /
     // "distributed among" / "divided evenly" → DealDamage with distribute.
     if scan_contains_phrase(&lower, "divided as you choose among")
@@ -993,16 +998,31 @@ fn try_parse_mass_forced_block(tp: TextPair) -> Option<ParsedEffectClause> {
 }
 
 fn try_parse_still_a_type(tp: TextPair) -> Option<ParsedEffectClause> {
-    // Match "it's still a/an [type]" or "that's still a/an [type]"
-    let ((), rest_orig) = nom_on_lower(tp.original, tp.lower, |input| {
-        value((), alt((tag("it's still "), tag("that's still ")))).parse(input)
+    // Match singular "it's still a/an [type]" / "that's still a/an [type]"
+    // or plural "they're still [type]s" — CR 205.1a type retention after animation.
+    let (is_plural, rest_orig) = nom_on_lower(tp.original, tp.lower, |input| {
+        alt((
+            value(false, alt((tag("it's still "), tag("that's still ")))),
+            value(true, tag("they're still ")),
+        ))
+        .parse(input)
     })?;
     let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
-    let ((), type_name_orig) = nom_on_lower(rest_orig, rest_lower, |input| {
-        nom_primitives::parse_article(input)
-    })?;
-    let type_name_lower = &rest_lower[rest_lower.len() - type_name_orig.len()..];
-    let core_type = CoreType::from_str(&capitalize(type_name_lower)).ok()?;
+
+    let type_name_lower = if is_plural {
+        // Plural: "they're still lands" — no article, strip trailing 's'
+        rest_lower
+    } else {
+        // Singular: strip article "a " / "an "
+        let ((), after_article) = nom_on_lower(rest_orig, rest_lower, |input| {
+            nom_primitives::parse_article(input)
+        })?;
+        &rest_lower[rest_lower.len() - after_article.len()..]
+    };
+
+    // Strip plural 's' if present (e.g., "lands" → "land", "creatures" → "creature")
+    let singular = type_name_lower.strip_suffix('s').unwrap_or(type_name_lower);
+    let core_type = CoreType::from_str(&capitalize(singular)).ok()?;
 
     Some(ParsedEffectClause {
         effect: Effect::GenericEffect {
@@ -1019,6 +1039,21 @@ fn try_parse_still_a_type(tp: TextPair) -> Option<ParsedEffectClause> {
         multi_target: None,
         condition: None,
     })
+}
+
+/// CR 614.10: Parse "you skip your next turn" / "skip your next turn" — temporal penalty effect.
+fn try_parse_skip_next_turn(tp: TextPair) -> Option<ParsedEffectClause> {
+    let _ = nom_on_lower(tp.original, tp.lower, |input| {
+        alt((
+            value((), tag("you skip your next turn")),
+            value((), tag("skip your next turn")),
+        ))
+        .parse(input)
+    })?;
+
+    Some(parsed_clause(Effect::SkipNextTurn {
+        target: TargetFilter::Controller,
+    }))
 }
 
 /// Parse "{verb} cards equal to {quantity_ref}" patterns (CR 121.6).
@@ -3568,6 +3603,15 @@ fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _kind: Abili
                 };
                 defs.drain(i + 1..j);
             }
+        }
+
+        // CR 705: Consolidate FlipCoinUntilLose with its following effect clause.
+        // The next def becomes the win_effect that is executed per win.
+        if matches!(&*defs[i].effect, Effect::FlipCoinUntilLose { .. }) && i + 1 < defs.len() {
+            let next = defs.remove(i + 1);
+            *defs[i].effect = Effect::FlipCoinUntilLose {
+                win_effect: Box::new(next),
+            };
         }
 
         i += 1;

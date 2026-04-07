@@ -109,6 +109,15 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         state.active_player = super::players::next_player(state, state.active_player);
     }
 
+    // CR 614.10: If the would-be active player has turns to skip, decrement the
+    // counter and advance to the next turn without executing any steps or phases.
+    let idx = state.active_player.0 as usize;
+    if idx < state.turns_to_skip.len() && state.turns_to_skip[idx] > 0 {
+        state.turns_to_skip[idx] -= 1;
+        // Recursively start the next turn (skipping this one entirely).
+        return start_next_turn(state, events);
+    }
+
     // CR 500: Track per-player turn count for "your Nth turn of the game" conditions.
     state.players[state.active_player.0 as usize].turns_taken += 1;
 

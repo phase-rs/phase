@@ -2669,6 +2669,13 @@ pub enum Effect {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
     },
+    /// CR 614.10: "Skip your next turn." — the affected player's next turn is skipped entirely.
+    /// Stored as a per-player counter in `GameState.turns_to_skip`; decremented during turn
+    /// transition in `start_next_turn`. The target determines who skips (usually Controller).
+    SkipNextTurn {
+        #[serde(default = "default_target_filter_controller")]
+        target: TargetFilter,
+    },
     /// CR 500.8: Add an additional combat phase (and optionally an additional main phase)
     /// after the current phase. Uses a LIFO stack on GameState.extra_phases.
     /// CR 500.10a: Only adds phases to the controller's own turn.
@@ -2973,6 +2980,7 @@ impl Effect {
             | Effect::PutOnTopOrBottom { target, .. }
             | Effect::Goad { target, .. }
             | Effect::ExtraTurn { target, .. }
+            | Effect::SkipNextTurn { target, .. }
             | Effect::AdditionalCombatPhase { target, .. }
             | Effect::Double { target, .. }
             | Effect::BlightEffect { target, .. }
@@ -3173,6 +3181,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Manifest { .. } => "Manifest",
         Effect::ManifestDread => "ManifestDread",
         Effect::ExtraTurn { .. } => "ExtraTurn",
+        Effect::SkipNextTurn { .. } => "SkipNextTurn",
         Effect::AdditionalCombatPhase { .. } => "AdditionalCombatPhase",
         Effect::Double { .. } => "Double",
         Effect::RuntimeHandled { handler } => match handler {
@@ -3308,6 +3317,7 @@ pub enum EffectKind {
     Manifest,
     ManifestDread,
     ExtraTurn,
+    SkipNextTurn,
     AdditionalCombatPhase,
     Double,
     RuntimeHandled,
@@ -3444,6 +3454,7 @@ impl From<&Effect> for EffectKind {
             Effect::Manifest { .. } => EffectKind::Manifest,
             Effect::ManifestDread => EffectKind::ManifestDread,
             Effect::ExtraTurn { .. } => EffectKind::ExtraTurn,
+            Effect::SkipNextTurn { .. } => EffectKind::SkipNextTurn,
             Effect::AdditionalCombatPhase { .. } => EffectKind::AdditionalCombatPhase,
             Effect::Double { .. } => EffectKind::Double,
             Effect::RuntimeHandled { .. } => EffectKind::RuntimeHandled,

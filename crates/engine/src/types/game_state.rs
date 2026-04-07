@@ -1242,6 +1242,11 @@ pub struct GameState {
     /// Most recently created extra turn is taken first (pop from end).
     #[serde(default)]
     pub extra_turns: Vec<PlayerId>,
+
+    /// CR 614.10: Per-player count of turns to skip. When a player would begin their
+    /// turn with a non-zero counter, the turn is skipped and the counter is decremented.
+    #[serde(default)]
+    pub turns_to_skip: Vec<u32>,
     #[serde(default)]
     pub scheduled_turn_controls: Vec<ScheduledTurnControl>,
 
@@ -1583,6 +1588,7 @@ impl GameState {
             next_tracked_set_id: 1,
             commander_cast_count: HashMap::new(),
             extra_turns: Vec::new(),
+            turns_to_skip: vec![0; player_count as usize],
             scheduled_turn_controls: Vec::new(),
             extra_phases: Vec::new(),
             seat_order,
@@ -1734,6 +1740,7 @@ impl PartialEq for GameState {
             && self.next_tracked_set_id == other.next_tracked_set_id
             && self.commander_cast_count == other.commander_cast_count
             && self.extra_turns == other.extra_turns
+            && self.turns_to_skip == other.turns_to_skip
             && self.scheduled_turn_controls == other.scheduled_turn_controls
             && self.extra_phases == other.extra_phases
             && self.seat_order == other.seat_order
