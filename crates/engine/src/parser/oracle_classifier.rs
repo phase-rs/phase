@@ -157,6 +157,7 @@ const STATIC_PREFIX_PATTERNS: &[&str] = &[
     "each land is a ",
     "all lands are ",
     "lands you control are ",
+    "you may spend mana as though",
 ];
 
 pub(crate) fn is_static_pattern(lower: &str) -> bool {

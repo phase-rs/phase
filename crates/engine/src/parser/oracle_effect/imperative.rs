@@ -14,8 +14,9 @@ use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_static::parse_continuous_modifications;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Duration, Effect,
-    GainLifePlayer, LibraryPosition, PaymentCost, PreventionAmount, PreventionScope, PtValue,
-    QuantityExpr, QuantityRef, RoundingMode, StaticDefinition, TargetFilter, TypedFilter,
+    GainLifePlayer, LibraryPosition, MultiTargetSpec, PaymentCost, PreventionAmount,
+    PreventionScope, PtValue, QuantityExpr, QuantityRef, RoundingMode, StaticDefinition,
+    TargetFilter, TypedFilter,
 };
 use crate::types::player::PlayerCounterKind;
 use crate::types::statics::StaticMode;
@@ -1958,6 +1959,22 @@ pub(super) fn parse_imperative_family_ast(
         "adapt" => try_parse_adapt(lower).map(ImperativeFamilyAst::GainKeyword),
         // CR 701.39a: "bolster N"
         "bolster" => try_parse_bolster(lower).map(ImperativeFamilyAst::GainKeyword),
+        // CR 701.41a: "support N"
+        "support" => {
+            let (rest, _) = tag::<_, _, VerboseError<&str>>("support ")
+                .parse(lower)
+                .ok()?;
+            let rest = rest.trim().trim_end_matches('.');
+            let count = nom_primitives::parse_number
+                .parse(rest)
+                .map(|(_, n)| n)
+                .unwrap_or(1);
+            // CR 701.41a: On a permanent, Support targets "other" creatures.
+            // On an instant/sorcery, it targets any creatures. When parsing within
+            // a trigger effect (subject is Some), the card is a permanent.
+            let is_other = ctx.subject.is_some();
+            Some(ImperativeFamilyAst::Support { count, is_other })
+        }
         // CR 509.1b / CR 508.1d: "can't be blocked [this turn]", "can't attack", etc.
         // These appear as subjectless clauses in compound effects (e.g., "gets +2/+0 and can't be blocked this turn").
         "can't" | "cannot" => try_parse_subjectless_cant(lower),
@@ -2332,6 +2349,31 @@ pub(crate) fn try_parse_coin_flip_branch(text: &str) -> Option<(bool, &str)> {
 pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEffectClause {
     match ast {
         ImperativeFamilyAst::Shuffle(ast) => lower_shuffle_ast(ast),
+        // CR 701.41a: Support N → PutCounter with multi-target "up to N".
+        // On permanents (is_other=true): "up to N other target creatures"
+        // On instants/sorceries (is_other=false): "up to N target creatures"
+        ImperativeFamilyAst::Support { count, is_other } => {
+            let properties = if is_other {
+                vec![crate::types::ability::FilterProp::Another]
+            } else {
+                vec![]
+            };
+            let target = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![crate::types::ability::TypeFilter::Creature],
+                properties,
+                ..Default::default()
+            });
+            let mut clause = parsed_clause(Effect::PutCounter {
+                counter_type: "P1P1".to_string(),
+                count: QuantityExpr::Fixed { value: 1 },
+                target,
+            });
+            clause.multi_target = Some(MultiTargetSpec {
+                min: 0,
+                max: Some(count as usize),
+            });
+            clause
+        }
         // All other arms produce a bare Effect with no sub_ability chain.
         other => parsed_clause(lower_imperative_family_effect(other)),
     }
@@ -2412,8 +2454,8 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         },
         // CR 506.4: Remove from combat.
         ImperativeFamilyAst::RemoveFromCombat(target) => Effect::RemoveFromCombat { target },
-        // Shuffle is handled in `lower_imperative_family_ast` directly.
-        ImperativeFamilyAst::Shuffle(_) => unreachable!(),
+        // Shuffle and Support are handled in `lower_imperative_family_ast` directly.
+        ImperativeFamilyAst::Shuffle(_) | ImperativeFamilyAst::Support { .. } => unreachable!(),
     }
 }
 
@@ -3221,5 +3263,95 @@ mod tests {
             }
             other => panic!("Expected Discard with unless_filter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_support_on_spell() {
+        // CR 701.41a: Support N on an instant/sorcery — "up to N target creatures"
+        let text = "support 2";
+        let lower = text.to_lowercase();
+        let ctx = ParseContext::default(); // No subject = spell context
+        let ast = parse_imperative_family_ast(text, &lower, &ctx);
+        assert!(
+            matches!(
+                &ast,
+                Some(ImperativeFamilyAst::Support {
+                    count: 2,
+                    is_other: false
+                })
+            ),
+            "Expected Support {{ count: 2, is_other: false }}, got {ast:?}"
+        );
+        let clause = lower_imperative_family_ast(ast.unwrap());
+        assert!(
+            matches!(
+                &clause.effect,
+                Effect::PutCounter { counter_type, count: QuantityExpr::Fixed { value: 1 }, .. }
+                if counter_type == "P1P1"
+            ),
+            "Expected PutCounter P1P1, got {:?}",
+            clause.effect
+        );
+        assert_eq!(
+            clause.multi_target,
+            Some(MultiTargetSpec {
+                min: 0,
+                max: Some(2)
+            })
+        );
+        // Spell support should NOT have Another property
+        if let Effect::PutCounter {
+            target: TargetFilter::Typed(tf),
+            ..
+        } = &clause.effect
+        {
+            assert!(
+                !tf.properties
+                    .contains(&crate::types::ability::FilterProp::Another),
+                "Spell support should not use 'other'"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_support_on_permanent() {
+        // CR 701.41a: Support N on a permanent — "up to N other target creatures"
+        let text = "support 3";
+        let lower = text.to_lowercase();
+        let ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..Default::default()
+        };
+        let ast = parse_imperative_family_ast(text, &lower, &ctx);
+        assert!(
+            matches!(
+                &ast,
+                Some(ImperativeFamilyAst::Support {
+                    count: 3,
+                    is_other: true
+                })
+            ),
+            "Expected Support {{ count: 3, is_other: true }}, got {ast:?}"
+        );
+        let clause = lower_imperative_family_ast(ast.unwrap());
+        // Permanent support should have Another property
+        if let Effect::PutCounter {
+            target: TargetFilter::Typed(tf),
+            ..
+        } = &clause.effect
+        {
+            assert!(
+                tf.properties
+                    .contains(&crate::types::ability::FilterProp::Another),
+                "Permanent support should use 'other'"
+            );
+        }
+        assert_eq!(
+            clause.multi_target,
+            Some(MultiTargetSpec {
+                min: 0,
+                max: Some(3)
+            })
+        );
     }
 }

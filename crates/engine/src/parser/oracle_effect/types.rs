@@ -264,6 +264,12 @@ pub(super) enum ImperativeFamilyAst {
         counter_kind: PlayerCounterKind,
         count: QuantityExpr,
     },
+    /// CR 701.41a: Support N — put a +1/+1 counter on each of up to N target creatures.
+    /// `is_other` is true on permanents (targets "other" creatures), false on spells.
+    Support {
+        count: u32,
+        is_other: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

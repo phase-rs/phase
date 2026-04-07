@@ -40,6 +40,7 @@ const IMPERATIVE_EXTRA_VERBS: &[&str] = &[
     "earthbend",
     "airbend",
     "bounce",
+    "support",
     "equip",
     "remove",
     "switch",

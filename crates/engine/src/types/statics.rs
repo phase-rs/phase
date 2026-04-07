@@ -269,6 +269,9 @@ pub enum StaticMode {
     SkipStep {
         step: Phase,
     },
+    /// CR 609.4b: "You may spend mana as though it were mana of any color."
+    /// Allows the controller to pay colored mana costs with mana of any color.
+    SpendManaAsAnyColor,
     /// Fallback for unrecognized static mode strings.
     Other(String),
 }
@@ -405,6 +408,7 @@ impl fmt::Display for StaticMode {
                 write!(f, "DefilerCostReduction({color:?})")
             }
             StaticMode::SkipStep { step } => write!(f, "SkipStep({step:?})"),
+            StaticMode::SpendManaAsAnyColor => write!(f, "SpendManaAsAnyColor"),
             // Fallback
             StaticMode::Other(s) => write!(f, "{s}"),
         }

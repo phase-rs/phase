@@ -112,6 +112,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::CantWinTheGame, handle_rule_mod);
     // CR 702.179e: Card-specific rule modification allowing speed to exceed 4.
     registry.insert(StaticMode::SpeedCanIncreaseBeyondFour, handle_rule_mod);
+    // CR 609.4b: "You may spend mana as though it were mana of any color."
+    // Runtime enforcement is in mana_payment.rs via player_can_spend_as_any_color().
+    registry.insert(StaticMode::SpendManaAsAnyColor, handle_rule_mod);
 
     // CR 614.1d: Zone-based restriction handlers.
     // Enforcement happens in zones.rs (CantEnterBattlefieldFrom) and casting.rs (CantCastFrom),
@@ -406,6 +409,20 @@ pub fn check_static_ability(
     }
 
     false
+}
+
+/// CR 609.4b: Check if a player has the "spend mana as any color" static active.
+/// Scans battlefield and command zone for `StaticMode::SpendManaAsAnyColor`
+/// whose affected filter matches the given player.
+pub fn player_can_spend_as_any_color(state: &GameState, player_id: PlayerId) -> bool {
+    check_static_ability(
+        state,
+        StaticMode::SpendManaAsAnyColor,
+        &StaticCheckContext {
+            player_id: Some(player_id),
+            ..Default::default()
+        },
+    )
 }
 
 /// Check if a static ability's affected filter matches the check context.

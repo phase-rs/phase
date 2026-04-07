@@ -98,6 +98,15 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         return Some(result);
     }
 
+    // CR 609.4b: "You may spend mana as though it were mana of any color."
+    if tp.lower.trim_end_matches('.') == "you may spend mana as though it were mana of any color" {
+        return Some(
+            StaticDefinition::new(StaticMode::SpendManaAsAnyColor)
+                .affected(TargetFilter::Player)
+                .description(text.to_string()),
+        );
+    }
+
     if nom_tag_tp(&tp, "you may choose not to untap ").is_some()
         && tp.lower.contains(" during your untap step")
     {

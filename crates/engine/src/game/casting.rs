@@ -1554,12 +1554,18 @@ pub fn can_pay_cost_after_auto_tap(
         Some(source_id),
     );
 
+    let any_color = super::static_abilities::player_can_spend_as_any_color(&simulated, player);
     simulated
         .players
         .iter()
         .find(|p| p.id == player)
         .is_some_and(|player_data| {
-            mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, spell_meta.as_ref())
+            mana_payment::can_pay_for_spell(
+                &player_data.mana_pool,
+                cost,
+                spell_meta.as_ref(),
+                any_color,
+            )
         })
 }
 
@@ -1604,13 +1610,20 @@ pub(super) fn pay_mana_cost(
             .iter()
             .find(|p| p.id == player)
             .expect("player exists");
-        if !mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, spell_meta.as_ref()) {
+        let any_color = super::static_abilities::player_can_spend_as_any_color(state, player);
+        if !mana_payment::can_pay_for_spell(
+            &player_data.mana_pool,
+            cost,
+            spell_meta.as_ref(),
+            any_color,
+        ) {
             return Err(EngineError::ActionNotAllowed(
                 "Cannot pay mana cost".to_string(),
             ));
         }
     }
 
+    let any_color = super::static_abilities::player_can_spend_as_any_color(state, player);
     let hand_demand = mana_payment::compute_hand_color_demand(state, player, source_id);
     let player_data = state
         .players
@@ -1622,6 +1635,7 @@ pub(super) fn pay_mana_cost(
         cost,
         Some(&hand_demand),
         spell_meta.as_ref(),
+        any_color,
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
 

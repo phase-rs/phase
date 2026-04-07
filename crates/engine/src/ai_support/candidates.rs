@@ -1294,7 +1294,11 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                 let can_afford = keywords::ninjutsu_family_cost_for_card(state, player, *card_id)
                     .is_some_and(|cost| {
                         let pool = &state.players[player.0 as usize].mana_pool;
-                        crate::game::mana_payment::can_pay_for_spell(pool, &cost, None)
+                        let any_color =
+                            crate::game::static_abilities::player_can_spend_as_any_color(
+                                state, player,
+                            );
+                        crate::game::mana_payment::can_pay_for_spell(pool, &cost, None, any_color)
                     });
                 if !can_afford {
                     continue;
