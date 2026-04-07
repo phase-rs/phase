@@ -225,7 +225,7 @@ export interface GameObject {
   dealt_deathtouch_damage: boolean;
   attached_to: ObjectId | null;
   attachments: ObjectId[];
-  counters: Record<CounterType, number>;
+  counters: Partial<Record<CounterType, number>>;
   name: string;
   power: number | null;
   toughness: number | null;

@@ -65,13 +65,25 @@ jobs:
           cargo run --release --bin coverage-report -- data/ --write-stats data/coverage-stats.json > /dev/null
           ./scripts/update-badges.sh data/coverage-stats.json
 
-      - name: Commit updated stats and badges
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/coverage-stats.json README.md
-          git diff --cached --quiet || git commit -m "chore: update coverage stats and badges [skip ci]"
-          git push || true
+      - name: Create PR for updated stats and badges
+        id: badge-pr
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.CI_PAT }}
+          add-paths: |
+            data/coverage-stats.json
+            README.md
+          commit-message: "chore: update coverage stats and badges"
+          branch: chore/update-coverage-badges
+          title: "chore: update coverage stats and badges"
+          body: "Automated update of README coverage badges from latest card data."
+          delete-branch: true
+
+      - name: Enable auto-merge
+        if: steps.badge-pr.outputs.pull-request-number
+        run: gh pr merge ${{ steps.badge-pr.outputs.pull-request-number }} --squash --auto
+        env:
+          GH_TOKEN: ${{ secrets.CI_PAT }}
 
       - name: Upload card data to R2 (staging)
         uses: cloudflare/wrangler-action@v3
