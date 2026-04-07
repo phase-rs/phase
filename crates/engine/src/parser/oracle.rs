@@ -373,6 +373,8 @@ pub fn parse_oracle_text(
         }
 
         let line = strip_reminder_text(raw_line);
+        // Strip "X can't be 0." casting constraint suffix — annotation only, not an ability.
+        let line = strip_x_cant_be_zero_suffix(&line);
         if line.is_empty() {
             // Priority 14: entirely parenthesized reminder text
             i += 1;
@@ -997,6 +999,15 @@ pub fn parse_oracle_text(
             continue;
         }
 
+        // Priority 13e: "X can't be 0." — casting constraint annotation, not an ability.
+        // These appear as standalone lines on X-cost spells. The engine does not yet
+        // enforce X-minimum restrictions, but recognizing this pattern prevents
+        // Unimplemented fallback.
+        if lower.trim_end_matches('.') == "x can't be 0" {
+            i += 1;
+            continue;
+        }
+
         // Priority 14: Ability word — strip prefix and re-classify effect.
         // B7: Known ability words (Threshold, Metalcraft, Delirium, Spell mastery, Revolt)
         // are mapped to typed conditions and attached to the resulting definition.
@@ -1568,6 +1579,29 @@ fn strip_once_per_turn_suffix(
             .to_string();
         restrictions.push(ActivationRestriction::OnlyOnce);
     }
+}
+
+/// Strip trailing "X can't be 0." / " X can't be 0." constraint annotations from Oracle text.
+/// These are casting restrictions that annotate X-cost spells but are not themselves abilities.
+fn strip_x_cant_be_zero_suffix(line: &str) -> String {
+    let lower = line.to_lowercase();
+    let trimmed = lower.trim_end_matches('.');
+    // Standalone case: entire line is "X can't be 0"
+    if trimmed == "x can't be 0" {
+        return String::new();
+    }
+    // Suffix case: "... X can't be 0." at end of line
+    for suffix in [". x can't be 0", " x can't be 0"] {
+        if let Some(pos) = trimmed.rfind(suffix) {
+            let mut result = line[..pos].to_string();
+            // Preserve trailing period if we stripped at a sentence boundary
+            if suffix.starts_with('.') {
+                result.push('.');
+            }
+            return result.trim_end().to_string();
+        }
+    }
+    line.to_string()
 }
 
 /// Primary nom-based dispatcher for Oracle text lines.

@@ -115,6 +115,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 609.4b: "You may spend mana as though it were mana of any color."
     // Runtime enforcement is in mana_payment.rs via player_can_spend_as_any_color().
     registry.insert(StaticMode::SpendManaAsAnyColor, handle_rule_mod);
+    // CR 510.1a: AssignNoCombatDamage — creature assigns no combat damage.
+    // Runtime enforcement is in combat_damage.rs::combat_damage_amount().
+    registry.insert(StaticMode::AssignNoCombatDamage, handle_rule_mod);
 
     // CR 614.1d: Zone-based restriction handlers.
     // Enforcement happens in zones.rs (CantEnterBattlefieldFrom) and casting.rs (CantCastFrom),
@@ -162,7 +165,6 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
         "DamageReduction",
         "PreventDamage",
         "DealtDamageInsteadExile",
-        "AssignNoCombatDamage",
         "AttackRestriction",
         "MinBlockers",
         "MaxBlockers",

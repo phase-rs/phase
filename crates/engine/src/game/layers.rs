@@ -332,6 +332,8 @@ pub fn evaluate_layers(state: &mut GameState) {
             obj.controller = obj.owner;
             // CR 613: Reset damage-from-toughness flag; re-applied by continuous effects.
             obj.assigns_damage_from_toughness = false;
+            // CR 510.1a: Reset no-combat-damage flag; re-applied by continuous effects.
+            obj.assigns_no_combat_damage = false;
         }
     }
 
@@ -969,6 +971,10 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             // CR 613: Mark creature as assigning combat damage from toughness.
             ContinuousModification::AssignDamageFromToughness => {
                 obj.assigns_damage_from_toughness = true;
+            }
+            // CR 510.1a: Mark creature as assigning no combat damage.
+            ContinuousModification::AssignNoCombatDamage => {
+                obj.assigns_no_combat_damage = true;
             }
             // CR 613.1b: Change controller to the source permanent's controller.
             ContinuousModification::ChangeController => {

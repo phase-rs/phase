@@ -1467,6 +1467,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::SetBasicLandType { land_type } => {
             format!("set land type {}", land_type.as_subtype_str())
         }
+        ContinuousModification::AssignNoCombatDamage => "assign no combat damage".into(),
     }
 }
 

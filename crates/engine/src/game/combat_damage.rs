@@ -12,8 +12,12 @@ use crate::types::player::PlayerId;
 
 /// CR 510.1a + CR 613: Returns the amount of combat damage a creature assigns.
 /// Normally equal to power, but if `assigns_damage_from_toughness` is set (e.g. Doran),
-/// uses toughness instead.
+/// uses toughness instead. If `assigns_no_combat_damage` is set, returns 0.
 fn combat_damage_amount(obj: &GameObject) -> u32 {
+    // CR 510.1a: "~ assigns no combat damage" — creature deals 0 combat damage.
+    if obj.assigns_no_combat_damage {
+        return 0;
+    }
     if obj.assigns_damage_from_toughness {
         // CR 613 + CR 510.1: Continuous effect assigns combat damage equal to toughness rather than power.
         obj.toughness.unwrap_or(0).max(0) as u32

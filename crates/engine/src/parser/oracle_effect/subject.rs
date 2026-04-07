@@ -180,6 +180,34 @@ fn try_parse_subject_restriction_clause(
         });
     }
 
+    // CR 510.1a: "[subject] assigns no combat damage [this turn/this combat]"
+    // Transient rule modification that prevents combat damage assignment.
+    if let Some((before, after)) = tp.split_around(" assigns no combat damage") {
+        let subject = before.original.trim();
+        let application = parse_subject_application(subject, ctx)?;
+        // CR 514.2: "this combat" → UntilEndOfCombat; default "this turn" → UntilEndOfTurn.
+        let after_lower = after.lower.trim_start();
+        let duration = if after_lower.starts_with("this combat") {
+            Duration::UntilEndOfCombat
+        } else {
+            Duration::UntilEndOfTurn
+        };
+        return Some(ParsedEffectClause {
+            effect: Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::new(StaticMode::AssignNoCombatDamage)
+                    .affected(application.affected)
+                    .modifications(vec![ContinuousModification::AssignNoCombatDamage])],
+                duration: Some(duration.clone()),
+                target: application.target,
+            },
+            distribute: None,
+            multi_target: None,
+            duration: Some(duration),
+            sub_ability: None,
+            condition: None,
+        });
+    }
+
     let (subject, predicate) = if let Some(pos) = tp.find(" can't ") {
         let (before, after) = tp.split_at(pos);
         (before.original.trim(), after.original[1..].trim())
@@ -1092,6 +1120,7 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "choose",
     "connive",
     "copy",
+    "assign",
     "counter",
     "create",
     "deal",
@@ -1119,6 +1148,7 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "surveil",
     "tap",
     "transform",
+    "convert",
     "untap",
     "win",
 ];

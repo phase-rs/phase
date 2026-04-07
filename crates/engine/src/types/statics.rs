@@ -272,6 +272,10 @@ pub enum StaticMode {
     /// CR 609.4b: "You may spend mana as though it were mana of any color."
     /// Allows the controller to pay colored mana costs with mana of any color.
     SpendManaAsAnyColor,
+    /// CR 510.1a: This creature assigns no combat damage.
+    /// Used for creatures like Ornithopter of Paradise and various Walls that can
+    /// attack/block but deal 0 combat damage.
+    AssignNoCombatDamage,
     /// Fallback for unrecognized static mode strings.
     Other(String),
 }
@@ -409,6 +413,7 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::SkipStep { step } => write!(f, "SkipStep({step:?})"),
             StaticMode::SpendManaAsAnyColor => write!(f, "SpendManaAsAnyColor"),
+            StaticMode::AssignNoCombatDamage => write!(f, "AssignNoCombatDamage"),
             // Fallback
             StaticMode::Other(s) => write!(f, "{s}"),
         }

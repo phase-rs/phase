@@ -226,6 +226,11 @@ pub struct GameObject {
     #[serde(default)]
     pub assigns_damage_from_toughness: bool,
 
+    /// CR 510.1a: This creature assigns no combat damage.
+    /// Set by continuous effects during layer evaluation (e.g., "~ assigns no combat damage").
+    #[serde(default)]
+    pub assigns_no_combat_damage: bool,
+
     /// CR 719.3b: Case enchantment solve state. Present only on Case permanents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub case_state: Option<CaseState>,
@@ -354,6 +359,7 @@ impl GameObject {
             is_suspected: false,
             monstrous: false,
             assigns_damage_from_toughness: false,
+            assigns_no_combat_damage: false,
             case_state: None,
             class_level: None,
             cast_from_zone: None,
