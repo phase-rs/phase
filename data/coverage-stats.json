@@ -1,58 +1,58 @@
 {
-  "coverage_pct": 77.9,
+  "coverage_pct": 80.8,
   "formats": {
     "brawl": {
-      "pct": 83,
-      "supported": 12522,
-      "total": 15177
+      "pct": 85,
+      "supported": 12947,
+      "total": 15211
     },
     "commander": {
-      "pct": 81,
-      "supported": 25501,
+      "pct": 84,
+      "supported": 26405,
       "total": 31380
     },
     "historic": {
-      "pct": 82,
-      "supported": 12482,
-      "total": 15135
+      "pct": 85,
+      "supported": 12909,
+      "total": 15167
     },
     "legacy": {
-      "pct": 82,
-      "supported": 25457,
+      "pct": 84,
+      "supported": 26362,
       "total": 31226
     },
     "modern": {
-      "pct": 84,
-      "supported": 18849,
-      "total": 22396
+      "pct": 87,
+      "supported": 19489,
+      "total": 22395
     },
     "pauper": {
-      "pct": 91,
-      "supported": 9613,
+      "pct": 93,
+      "supported": 9861,
       "total": 10609
     },
     "pioneer": {
-      "pct": 85,
-      "supported": 12458,
-      "total": 14669
+      "pct": 88,
+      "supported": 12856,
+      "total": 14668
     },
     "standard": {
-      "pct": 85,
-      "supported": 3715,
+      "pct": 87,
+      "supported": 3779,
       "total": 4348
     },
     "standardbrawl": {
-      "pct": 85,
-      "supported": 3726,
+      "pct": 87,
+      "supported": 3790,
       "total": 4360
     },
     "vintage": {
-      "pct": 82,
-      "supported": 25468,
+      "pct": 84,
+      "supported": 26373,
       "total": 31242
     }
   },
-  "keyword_count": 150,
-  "supported_cards": 26732,
-  "total_cards": 34313
+  "keyword_count": 156,
+  "supported_cards": 27844,
+  "total_cards": 34472
 }
