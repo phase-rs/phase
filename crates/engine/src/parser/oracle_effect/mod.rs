@@ -541,6 +541,37 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     })
 }
 
+/// CR 402.2 + CR 114.1: Parse "you have no maximum hand size [for the rest of the game]"
+/// as an effect that creates an emblem with `NoMaximumHandSize` static.
+///
+/// When this text appears on a permanent as a static ability, the static parser handles it.
+/// When it appears as an effect line in a spell or triggered ability (e.g., Choice of Fortunes),
+/// it needs to create an emblem to produce a persistent game-state effect.
+fn try_parse_no_max_hand_size_effect(tp: TextPair<'_>) -> Option<Effect> {
+    // Strip optional "you " prefix, then match "have no maximum hand size"
+    let after_you = nom_on_lower(tp.original, tp.lower, |i| value((), tag("you ")).parse(i));
+    let rest = after_you.map(|(_, r)| r).unwrap_or(tp.original);
+    let rest_lower = rest.to_lowercase();
+
+    // Match "have no maximum hand size" with optional trailing "for the rest of the game"
+    let matched = tag::<_, _, VerboseError<&str>>("have no maximum hand size")
+        .parse(rest_lower.as_str())
+        .ok()?;
+    let remainder = matched.0.trim().trim_end_matches('.');
+    // Allow bare "have no maximum hand size" or "for the rest of the game" suffix
+    if !remainder.is_empty()
+        && tag::<_, _, VerboseError<&str>>("for the rest of the game")
+            .parse(remainder)
+            .is_err()
+    {
+        return None;
+    }
+
+    Some(Effect::CreateEmblem {
+        statics: vec![StaticDefinition::new(StaticMode::NoMaximumHandSize)],
+    })
+}
+
 /// CR 608.2d: Parse "have it [verb]" / "have you [verb]" causative constructions.
 /// Used by "any opponent may" effects where the opponent causes the source or controller
 /// to perform an action (e.g., "have it deal 4 damage to them").
@@ -597,6 +628,12 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
     // Single lowercase pass for all case-insensitive matching within this clause.
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
+
+    // CR 402.2 + CR 114.1: "you have no maximum hand size [for the rest of the game]" —
+    // as an effect, this creates an emblem with NoMaximumHandSize static.
+    if let Some(effect) = try_parse_no_max_hand_size_effect(tp) {
+        return parsed_clause(effect);
+    }
 
     // CR 608.2d: "have it [verb]" / "have you [verb]" — causative construction
     // from "any opponent may" effects (e.g., "have it deal 4 damage to them").
@@ -6928,6 +6965,33 @@ mod tests {
                     .modifications
                     .iter()
                     .any(|m| matches!(m, ContinuousModification::AddToughness { value: 1 })));
+            }
+            other => panic!("expected CreateEmblem, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn effect_you_have_no_max_hand_size_for_rest_of_game() {
+        // CR 402.2 + CR 114.1: Spell effect "you have no maximum hand size for the rest
+        // of the game" creates an emblem with NoMaximumHandSize.
+        let e = parse_effect("You have no maximum hand size for the rest of the game.");
+        match e {
+            Effect::CreateEmblem { statics } => {
+                assert_eq!(statics.len(), 1);
+                assert_eq!(statics[0].mode, StaticMode::NoMaximumHandSize);
+            }
+            other => panic!("expected CreateEmblem, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn effect_you_have_no_max_hand_size_bare() {
+        // Bare form without "for the rest of the game" suffix.
+        let e = parse_effect("You have no maximum hand size.");
+        match e {
+            Effect::CreateEmblem { statics } => {
+                assert_eq!(statics.len(), 1);
+                assert_eq!(statics[0].mode, StaticMode::NoMaximumHandSize);
             }
             other => panic!("expected CreateEmblem, got {:?}", other),
         }

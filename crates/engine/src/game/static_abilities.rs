@@ -368,11 +368,19 @@ pub fn check_static_ability(
     mode: StaticMode,
     context: &StaticCheckContext,
 ) -> bool {
-    for &id in &state.battlefield {
+    // CR 114.4: Abilities of emblems function in the command zone.
+    // Check both battlefield objects and command zone emblems.
+    let zones = state.battlefield.iter().chain(state.command_zone.iter());
+    for &id in zones {
         let obj = match state.objects.get(&id) {
             Some(o) => o,
             None => continue,
         };
+
+        // Only check command zone objects that are emblems (skip commanders, etc.)
+        if obj.zone == crate::types::zones::Zone::Command && !obj.is_emblem {
+            continue;
+        }
 
         for def in &obj.static_definitions {
             if def.mode != mode {
@@ -776,6 +784,34 @@ mod tests {
             &state,
             StaticMode::NoMaximumHandSize,
             &ctx_p1
+        ));
+    }
+
+    #[test]
+    fn test_no_maximum_hand_size_emblem_in_command_zone() {
+        // CR 114.4: Abilities of emblems function in the command zone.
+        let mut state = setup();
+        let emblem_id = crate::game::zones::create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Emblem".to_string(),
+            Zone::Command,
+        );
+        let obj = state.objects.get_mut(&emblem_id).unwrap();
+        obj.is_emblem = true;
+        obj.static_definitions
+            .push(StaticDefinition::new(StaticMode::NoMaximumHandSize));
+
+        // Controller (Player 0) should have no max hand size from emblem
+        let ctx_p0 = StaticCheckContext {
+            player_id: Some(PlayerId(0)),
+            ..Default::default()
+        };
+        assert!(check_static_ability(
+            &state,
+            StaticMode::NoMaximumHandSize,
+            &ctx_p0
         ));
     }
 

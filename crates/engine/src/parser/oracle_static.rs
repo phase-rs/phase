@@ -3247,7 +3247,8 @@ fn parse_quoted_ability(text: &str) -> AbilityDefinition {
 /// Find the position of the cost/effect separator colon in ability text.
 ///
 /// Looks for `: ` or `:\n` that appears after cost-like content (mana symbols,
-/// {T}, numeric loyalty). Returns the byte offset of the colon, or None.
+/// {T}, numeric loyalty, or text-based costs like "Sacrifice this token").
+/// Returns the byte offset of the colon, or None.
 fn find_cost_separator(text: &str) -> Option<usize> {
     // Walk through looking for ':' that follows a closing brace or known cost prefix
     for (idx, ch) in text.char_indices() {
@@ -3255,16 +3256,41 @@ fn find_cost_separator(text: &str) -> Option<usize> {
             let prefix = &text[..idx];
             // Must have cost-like content before the colon
             let trimmed_prefix = prefix.trim();
+            let lower_prefix = trimmed_prefix.to_lowercase();
             let has_cost = prefix.contains('{')
                 || trimmed_prefix.parse::<i32>().is_ok()
                 || trimmed_prefix.strip_prefix('+').is_some()
-                || trimmed_prefix.strip_prefix('\u{2212}').is_some(); // minus sign for loyalty
+                || trimmed_prefix.strip_prefix('\u{2212}').is_some() // minus sign for loyalty
+                // CR 118.12: Text-based costs — sacrifice, discard, pay life, tap/untap, exile, remove
+                || is_text_based_cost_prefix(&lower_prefix);
             if has_cost {
                 return Some(idx);
             }
         }
     }
     None
+}
+
+/// Check if a prefix string looks like a text-based activated ability cost.
+/// Handles common Oracle text cost patterns that don't use mana symbols:
+/// "Sacrifice this token", "Discard a card", "Pay 2 life", "Tap an untapped creature",
+/// "Exile ~ from your graveyard", "Remove a counter from ~", etc.
+fn is_text_based_cost_prefix(lower_prefix: &str) -> bool {
+    type E<'a> = nom_language::error::VerboseError<&'a str>;
+
+    alt((
+        value((), tag::<_, _, E>("sacrifice ")),
+        value((), tag("discard ")),
+        value((), tag("pay ")),
+        value((), tag("tap ")),
+        value((), tag("untap ")),
+        value((), tag("exile ")),
+        value((), tag("remove ")),
+        value((), tag("reveal ")),
+        value((), tag("return ")),
+    ))
+    .parse(lower_prefix)
+    .is_ok()
 }
 
 /// CR 702: Split a keyword list like "flying and first strike" into individual keywords.
@@ -5136,6 +5162,23 @@ mod tests {
             assert_eq!(definition.kind, AbilityKind::Activated);
             assert!(definition.cost.is_some());
         }
+    }
+
+    #[test]
+    fn quoted_ability_sacrifice_cost_separator() {
+        // CR 118.12: "Sacrifice this token: Add {C}." should parse as an activated ability
+        // with sacrifice cost and mana effect, not a spell-like sacrifice effect.
+        let def = parse_quoted_ability("Sacrifice this token: Add {C}.");
+        assert_eq!(def.kind, AbilityKind::Activated);
+        assert!(def.cost.is_some(), "should have a cost");
+        assert!(
+            !matches!(
+                *def.effect,
+                crate::types::ability::Effect::Unimplemented { .. }
+            ),
+            "effect should not be Unimplemented, got {:?}",
+            def.effect
+        );
     }
 
     #[test]
