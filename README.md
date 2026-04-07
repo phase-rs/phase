@@ -12,20 +12,20 @@
 
 <!-- coverage-badges:start -->
 <p align="center">
-  <img alt="Card Coverage" src="https://img.shields.io/badge/card_coverage-78%25-yellowgreen">
-  <img alt="Keywords"      src="https://img.shields.io/badge/keywords-150%2F150-brightgreen">
-  <img alt="Cards"         src="https://img.shields.io/badge/cards-26780%2F34313-yellowgreen">
-  <a href="https://discord.gg/dUZwhYHUyk"><img alt="Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
+  <img alt="Card Coverage" src="https://img.shields.io/badge/card_coverage-80%25-green">
+  <img alt="Keywords" src="https://img.shields.io/badge/keywords-156%2F156-brightgreen">
+  <img alt="Cards" src="https://img.shields.io/badge/cards-27844%2F34472-green">
   <br/>
-  <img alt="Pauper"     src="https://img.shields.io/badge/Pauper-91%25-brightgreen">
-  <img alt="Standard"   src="https://img.shields.io/badge/Standard-86%25-green">
-  <img alt="Pioneer"    src="https://img.shields.io/badge/Pioneer-85%25-green">
-  <img alt="Modern"     src="https://img.shields.io/badge/Modern-84%25-green">
-  <img alt="Legacy"     src="https://img.shields.io/badge/Legacy-82%25-green">
-  <img alt="Vintage"    src="https://img.shields.io/badge/Vintage-82%25-green">
-  <img alt="Commander"  src="https://img.shields.io/badge/Commander-81%25-green">
+  <img alt="Pauper" src="https://img.shields.io/badge/Pauper-93%25-brightgreen">
+  <img alt="Pioneer" src="https://img.shields.io/badge/Pioneer-88%25-green">
+  <img alt="Modern" src="https://img.shields.io/badge/Modern-87%25-green">
+  <img alt="Standard" src="https://img.shields.io/badge/Standard-87%25-green">
+  <img alt="Commander" src="https://img.shields.io/badge/Commander-84%25-green">
+  <img alt="Legacy" src="https://img.shields.io/badge/Legacy-84%25-green">
+  <img alt="Vintage" src="https://img.shields.io/badge/Vintage-84%25-green">
 </p>
 <!-- coverage-badges:end -->
+
 
 
 ---
