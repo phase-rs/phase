@@ -1202,6 +1202,20 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
         for len in (1..name_words.len()).rev() {
             let candidate = name_words[..len].join(" ");
             if candidate.len() >= 2 {
+                // Guard: Single-word candidates that are common English articles
+                // or determiners must not be treated as self-references.
+                // E.g., "The Twelfth Doctor" must not replace "The" in
+                // "The first spell you cast..." — that "The" is an article,
+                // not a reference to the card.
+                if len == 1 {
+                    let lower_candidate = candidate.to_lowercase();
+                    if matches!(
+                        lower_candidate.as_str(),
+                        "the" | "a" | "an" | "of" | "in" | "on" | "to" | "for" | "at" | "by"
+                    ) {
+                        continue;
+                    }
+                }
                 let replaced = replace_all_words_case_sensitive(&result, &candidate, "~");
                 if replaced != result {
                     // Guard: Don't replace subtype references like "Sliver creatures"
@@ -1432,6 +1446,19 @@ mod tests {
         assert_eq!(
             normalize_card_name_refs("Goblin Chainwhirler enters", "Goblin Chainwhirler"),
             "~ enters"
+        );
+    }
+
+    #[test]
+    fn normalize_the_twelfth_doctor_no_article_replacement() {
+        // "The Twelfth Doctor" must not replace the article "The" in
+        // "The first spell you cast..." — "The" is a determiner, not a self-ref.
+        assert_eq!(
+            normalize_card_name_refs(
+                "The first spell you cast from anywhere other than your hand each turn has demonstrate.",
+                "The Twelfth Doctor",
+            ),
+            "The first spell you cast from anywhere other than your hand each turn has demonstrate."
         );
     }
 

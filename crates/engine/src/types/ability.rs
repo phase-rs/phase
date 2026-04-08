@@ -884,7 +884,7 @@ pub enum FilterProp {
     NotSupertype {
         value: Supertype,
     },
-    /// CR 702.157a: Matches suspected creatures.
+    /// CR 701.60b: Matches suspected creatures.
     Suspected,
     /// CR 510.1c: Matches creatures whose toughness is greater than their power.
     ToughnessGTPower,
@@ -2458,7 +2458,7 @@ pub enum Effect {
         #[serde(default)]
         persist: bool,
     },
-    /// CR 702.157a: Suspect target creature — it gains menace and "can't block."
+    /// CR 701.60a: Suspect target creature — it gains menace and "can't block."
     Suspect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
@@ -4117,6 +4117,14 @@ pub enum TriggerCondition {
     ControlsCommander,
     /// CR 702.112a: "if ~ is renowned" — true when the source has been made renowned.
     SourceIsRenowned,
+    /// CR 710: Level-up creature trigger gating — true when the source has at least
+    /// `minimum` level counters (and at most `maximum` if specified).
+    HasCounters {
+        counter_type: String,
+        minimum: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        maximum: Option<u32>,
+    },
 
     // -- Combinators --
     /// All conditions must be true ("if you gained and lost life this turn")

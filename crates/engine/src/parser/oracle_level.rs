@@ -21,10 +21,22 @@ use super::oracle_nom::primitives as nom_primitives;
 /// P/T lines use SetPower/SetToughness (Layer 7b), keyword lines use AddKeyword (Layer 6).
 /// Both are conditioned on `StaticCondition::HasCounters` with min/max.
 ///
-/// Returns the parsed static definitions and the set of Oracle line indices consumed.
-pub(crate) fn parse_level_blocks(lines: &[&str]) -> (Vec<StaticDefinition>, Vec<usize>) {
+/// Returns:
+/// - `Vec<StaticDefinition>`: Parsed static abilities (P/T, keywords) gated on level counter count.
+/// - `Vec<usize>`: Indices of consumed Oracle text lines.
+/// - `Vec<(String, StaticCondition)>`: Ability text lines found within level blocks,
+///   paired with the level condition they should be gated by. These need re-parsing
+///   by the main Oracle dispatcher as triggers, activated abilities, or statics.
+pub(crate) fn parse_level_blocks(
+    lines: &[&str],
+) -> (
+    Vec<StaticDefinition>,
+    Vec<usize>,
+    Vec<(String, StaticCondition)>,
+) {
     let mut statics = Vec::new();
     let mut consumed_indices = Vec::new();
+    let mut ability_lines = Vec::new();
 
     let mut i = 0;
     while i < lines.len() {
@@ -96,13 +108,10 @@ pub(crate) fn parse_level_blocks(lines: &[&str]) -> (Vec<StaticDefinition>, Vec<
                     continue;
                 }
 
-                // B10: Try to consume as an ability line within the LEVEL block.
-                // Ability lines (activated, triggered, or static) that appear within
+                // B10: Ability lines (activated, triggered, or static) that appear within
                 // a LEVEL block should be gated by the same HasCounters condition.
-                // Mark the line as consumed so it is not re-parsed at the top level,
-                // and record it for level-gated processing.
-                // Heuristic: if the line looks like a colon-activated ability, a trigger,
-                // or a known static pattern, consume it as part of this LEVEL block.
+                // Mark the line as consumed and record it with its level condition
+                // for re-parsing by the main Oracle dispatcher.
                 let looks_like_ability = next_lower.contains(": ")
                     || next_lower.starts_with("when")
                     || next_lower.starts_with("whenever")
@@ -113,7 +122,7 @@ pub(crate) fn parse_level_blocks(lines: &[&str]) -> (Vec<StaticDefinition>, Vec<
                     || next_lower.contains("gets ");
                 if looks_like_ability {
                     consumed_indices.push(i);
-                    description_parts.push(next.to_string());
+                    ability_lines.push((next.to_string(), condition.clone()));
                     i += 1;
                     continue;
                 }
@@ -136,7 +145,7 @@ pub(crate) fn parse_level_blocks(lines: &[&str]) -> (Vec<StaticDefinition>, Vec<
         }
     }
 
-    (statics, consumed_indices)
+    (statics, consumed_indices, ability_lines)
 }
 
 enum LevelRange {
@@ -203,7 +212,7 @@ mod tests {
             "LEVEL 8+",
             "8/8",
         ];
-        let (statics, consumed) = parse_level_blocks(&lines);
+        let (statics, consumed, _ability_lines) = parse_level_blocks(&lines);
 
         // Should consume indices 1-5 (not index 0 which is "Level up {R}")
         assert!(!consumed.contains(&0));
@@ -230,5 +239,37 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn parse_level_block_with_trigger() {
+        let lines = vec![
+            "LEVEL 6+",
+            "6/6",
+            "Whenever this creature attacks, it deals 6 damage to each creature defending player controls.",
+        ];
+        let (statics, consumed, ability_lines) = parse_level_blocks(&lines);
+
+        // P/T modifications parsed as static
+        assert_eq!(statics.len(), 1);
+        assert_eq!(statics[0].modifications.len(), 2);
+
+        // Trigger line captured with level condition
+        assert_eq!(ability_lines.len(), 1);
+        assert_eq!(
+            ability_lines[0].0,
+            "Whenever this creature attacks, it deals 6 damage to each creature defending player controls."
+        );
+        assert!(matches!(
+            ability_lines[0].1,
+            StaticCondition::HasCounters {
+                minimum: 6,
+                maximum: None,
+                ..
+            }
+        ));
+
+        // All 3 lines consumed
+        assert_eq!(consumed.len(), 3);
     }
 }

@@ -98,6 +98,16 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
         return Some(def);
     }
 
+    // --- "If [filter] would die, exile it instead" (non-self replacement) ---
+    // CR 614.1a: Replacement effects that exile dying creatures instead of putting
+    // them into the graveyard. Subject is a creature filter, not self-reference.
+    // E.g., "If another creature would die, exile it instead." (Void Maw)
+    //       "If a nontoken creature an opponent controls would die, exile it instead." (Valentin)
+    //       "If a creature an opponent controls would die, exile it instead." (Vren)
+    if let Some(def) = parse_creature_die_exile_replacement(&norm_lower, &text) {
+        return Some(def);
+    }
+
     // --- "Prevent all/the next N damage" patterns (CR 615) ---
     if let Some(def) = parse_damage_prevention_replacement(&norm_lower, &text) {
         return Some(def);
@@ -762,6 +772,84 @@ fn parse_external_enters_tapped(
             ))
             .valid_card(filter)
             .destination_zone(Zone::Battlefield)
+            .description(original_text.to_string()),
+    )
+}
+
+/// CR 614.1a: Parse "If [filter] would die, exile it instead" replacement effects.
+/// Handles non-self creature filters like "another creature", "a nontoken creature
+/// an opponent controls", "a creature an opponent controls".
+fn parse_creature_die_exile_replacement(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    // Must contain "would die" and "instead" (exile-instead pattern).
+    let would_die_pos = norm_lower.find("would die")?;
+    if !norm_lower.contains("instead") {
+        return None;
+    }
+
+    // Extract the subject between "if " and " would die".
+    let subject_start = {
+        let prefix = norm_lower.strip_prefix("if ")?;
+        // Subject is everything from after "if " to before " would die"
+        let subject_end_in_prefix = would_die_pos - "if ".len();
+        prefix[..subject_end_in_prefix].trim()
+    };
+
+    // Skip self-reference patterns — handled by the earlier "~ would die" check.
+    if subject_start.contains('~') {
+        return None;
+    }
+
+    // Parse the subject filter (e.g., "another creature", "a nontoken creature an opponent controls")
+    let (filter, _) = parse_type_phrase(subject_start);
+    if matches!(&filter, TargetFilter::Any) {
+        return None;
+    }
+
+    // Extract the replacement effect after the comma.
+    // "If [filter] would die, exile it instead." → effect is "exile it instead."
+    let after_would_die = &norm_lower[would_die_pos + "would die".len()..].trim_start();
+    let effect_text = after_would_die.strip_prefix(", ")?;
+
+    // Parse the replacement effect (typically "exile it instead")
+    let effect_text_trimmed = effect_text
+        .strip_suffix('.')
+        .unwrap_or(effect_text)
+        .trim_end_matches(" instead")
+        .trim();
+
+    let execute = if effect_text_trimmed == "exile it" || effect_text_trimmed == "exile that card" {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                origin: None,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+            },
+        )
+    } else {
+        // Generic effect text — parse as effect chain from the original-case text
+        let comma_pos = original_text.find(", ").unwrap_or(0);
+        let orig_effect = if comma_pos > 0 {
+            original_text[comma_pos + 2..].trim()
+        } else {
+            effect_text_trimmed
+        };
+        parse_effect_chain(orig_effect, AbilityKind::Spell)
+    };
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Destroy)
+            .execute(execute)
+            .valid_card(filter)
             .description(original_text.to_string()),
     )
 }

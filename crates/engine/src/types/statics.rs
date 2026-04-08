@@ -232,7 +232,7 @@ pub enum StaticMode {
     Shroud,
     /// CR 702.20: Vigilance — attacking doesn't cause this creature to tap.
     Vigilance,
-    /// CR 702.110: Menace — can't be blocked except by two or more creatures.
+    /// CR 702.111: Menace — can't be blocked except by two or more creatures.
     Menace,
     /// CR 702.17: Reach — can block creatures with flying.
     Reach,

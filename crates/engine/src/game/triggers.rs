@@ -1488,6 +1488,18 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::SourceIsRenowned => source_id
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| obj.is_renowned),
+        // CR 710: Level-up creature trigger gating — check level counter count on source.
+        TriggerCondition::HasCounters {
+            counter_type,
+            minimum,
+            maximum,
+        } => source_id
+            .and_then(|id| state.objects.get(&id))
+            .is_some_and(|obj| {
+                let ct = crate::types::counter::parse_counter_type(counter_type);
+                let count = obj.counters.get(&ct).copied().unwrap_or(0);
+                count >= *minimum && maximum.is_none_or(|max| count <= max)
+            }),
     }
 }
 

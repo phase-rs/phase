@@ -85,7 +85,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::Shroud, handle_shroud);
     // CR 702.20: Vigilance — attacking doesn't cause this creature to tap.
     registry.insert(StaticMode::Vigilance, handle_static_vigilance);
-    // CR 702.110: Menace — can't be blocked except by two or more creatures.
+    // CR 702.111: Menace — can't be blocked except by two or more creatures.
     registry.insert(StaticMode::Menace, handle_static_menace);
     // CR 702.17: Reach — can block creatures with flying.
     registry.insert(StaticMode::Reach, handle_static_reach);

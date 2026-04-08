@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, CastingRestriction, Comparator, Effect, ModalChoice, ReplacementDefinition,
-    SolveCondition, SpellCastingOption, StaticDefinition, TargetFilter, TriggerDefinition,
-    TypedFilter,
+    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TargetFilter,
+    TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
@@ -336,9 +336,30 @@ pub fn parse_oracle_text(
     }
 
     // CR 710: Pre-parse leveler LEVEL blocks into counter-gated static abilities.
-    let (level_statics, level_consumed) = parse_level_blocks(&lines);
+    let (level_statics, level_consumed, level_ability_lines) = parse_level_blocks(&lines);
     if !level_statics.is_empty() {
         result.statics.extend(level_statics);
+    }
+    // CR 710: Re-parse ability lines found within LEVEL blocks through the normal
+    // trigger/static pipeline, then attach the level counter condition.
+    for (ability_text, level_condition) in &level_ability_lines {
+        let trigger_condition = match level_condition {
+            StaticCondition::HasCounters {
+                counter_type,
+                minimum,
+                maximum,
+            } => TriggerCondition::HasCounters {
+                counter_type: counter_type.clone(),
+                minimum: *minimum,
+                maximum: *maximum,
+            },
+            _ => continue,
+        };
+        let mut triggers = parse_trigger_lines(ability_text, card_name);
+        for trigger in &mut triggers {
+            trigger.condition = Some(trigger_condition.clone());
+        }
+        result.triggers.extend(triggers);
     }
 
     // CR 207.2c + CR 601.2f: Pre-parse Strive ability word cost before main loop.
