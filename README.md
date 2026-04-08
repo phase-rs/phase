@@ -12,19 +12,20 @@
 
 <!-- coverage-badges:start -->
 <p align="center">
-  <img alt="Card Coverage" src="https://img.shields.io/badge/card_coverage-80%25-green">
-  <img alt="Keywords" src="https://img.shields.io/badge/keywords-156%2F156-brightgreen">
-  <img alt="Cards" src="https://img.shields.io/badge/cards-27844%2F34472-green">
+  <img alt="Card Coverage" src="https://img.shields.io/badge/card_coverage-81%25-green">
+  <img alt="Keywords" src="https://img.shields.io/badge/keywords-168%2F168-brightgreen">
+  <img alt="Cards" src="https://img.shields.io/badge/cards-27933%2F34472-green">
   <br/>
   <img alt="Pauper" src="https://img.shields.io/badge/Pauper-93%25-brightgreen">
   <img alt="Pioneer" src="https://img.shields.io/badge/Pioneer-88%25-green">
   <img alt="Modern" src="https://img.shields.io/badge/Modern-87%25-green">
   <img alt="Standard" src="https://img.shields.io/badge/Standard-87%25-green">
+  <img alt="Legacy" src="https://img.shields.io/badge/Legacy-85%25-green">
+  <img alt="Vintage" src="https://img.shields.io/badge/Vintage-85%25-green">
   <img alt="Commander" src="https://img.shields.io/badge/Commander-84%25-green">
-  <img alt="Legacy" src="https://img.shields.io/badge/Legacy-84%25-green">
-  <img alt="Vintage" src="https://img.shields.io/badge/Vintage-84%25-green">
 </p>
 <!-- coverage-badges:end -->
+
 
 
 
