@@ -23,13 +23,13 @@
     },
     "modern": {
       "pct": 87,
-      "supported": 19541,
-      "total": 22396
+      "supported": 19540,
+      "total": 22395
     },
     "pauper": {
       "pct": 93,
-      "supported": 9880,
-      "total": 10609
+      "supported": 9879,
+      "total": 10608
     },
     "pioneer": {
       "pct": 88,
