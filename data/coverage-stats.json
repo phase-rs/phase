@@ -8,8 +8,8 @@
     },
     "commander": {
       "pct": 84,
-      "supported": 26475,
-      "total": 31379
+      "supported": 26476,
+      "total": 31380
     },
     "historic": {
       "pct": 85,
@@ -18,8 +18,8 @@
     },
     "legacy": {
       "pct": 85,
-      "supported": 26432,
-      "total": 31225
+      "supported": 26433,
+      "total": 31226
     },
     "modern": {
       "pct": 87,
@@ -48,8 +48,8 @@
     },
     "vintage": {
       "pct": 85,
-      "supported": 26443,
-      "total": 31241
+      "supported": 26444,
+      "total": 31242
     }
   },
   "keyword_count": 168,
