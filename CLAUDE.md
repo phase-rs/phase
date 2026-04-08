@@ -322,6 +322,22 @@ If you cannot find the rule number in `docs/MagicCompRules.txt`, do NOT write th
 - Tests colocated in `__tests__/` directories (frontend) or inline `#[cfg(test)]` modules (Rust)
 - The `release` profile is optimized for WASM size: `opt-level = 'z'`, LTO, single codegen unit, stripped
 
+## Releasing
+
+Use `cargo-release` via the workspace alias — **never tag manually with `git tag`**.
+
+```bash
+cargo release-local 0.1.3             # Bump all versions, commit, and tag locally
+git push origin main --follow-tags    # Push the release commit + tag
+```
+
+`cargo release-local` (alias for `cargo release --workspace --execute --no-confirm --no-publish --no-push`) handles:
+- Workspace `Cargo.toml` version (shared across all crates)
+- `client/package.json`, `client/src-tauri/Cargo.toml`, `client/src-tauri/tauri.conf.json` via `pre-release-replacements`
+- Creating a `release: v{version}` commit and `v{version}` tag
+
+The `--no-push` flag is intentional — always review the commit before pushing.
+
 ## CI
 
 GitHub Actions runs two parallel jobs:
