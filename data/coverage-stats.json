@@ -3,56 +3,56 @@
   "formats": {
     "brawl": {
       "pct": 85,
-      "supported": 12960,
+      "supported": 12948,
       "total": 15211
     },
     "commander": {
       "pct": 84,
-      "supported": 26481,
-      "total": 31376
+      "supported": 26474,
+      "total": 31378
     },
     "historic": {
       "pct": 85,
-      "supported": 12922,
+      "supported": 12910,
       "total": 15167
     },
     "legacy": {
       "pct": 85,
-      "supported": 26438,
-      "total": 31222
+      "supported": 26431,
+      "total": 31224
     },
     "modern": {
       "pct": 87,
-      "supported": 19548,
-      "total": 22394
+      "supported": 19540,
+      "total": 22395
     },
     "pauper": {
       "pct": 93,
-      "supported": 9886,
+      "supported": 9879,
       "total": 10608
     },
     "pioneer": {
       "pct": 88,
-      "supported": 12866,
+      "supported": 12855,
       "total": 14668
     },
     "standard": {
       "pct": 87,
-      "supported": 3771,
+      "supported": 3768,
       "total": 4348
     },
     "standardbrawl": {
       "pct": 87,
-      "supported": 3782,
+      "supported": 3779,
       "total": 4360
     },
     "vintage": {
       "pct": 85,
-      "supported": 26449,
-      "total": 31238
+      "supported": 26442,
+      "total": 31240
     }
   },
   "keyword_count": 168,
-  "supported_cards": 27959,
+  "supported_cards": 27948,
   "total_cards": 34502
 }
