@@ -42,3 +42,10 @@ runs:
       run: gh pr merge ${{ steps.pr.outputs.pull-request-number }} --squash --auto
       env:
         GH_TOKEN: ${{ inputs.token }}
+
+    - name: Update branch to base
+      if: steps.pr.outputs.pull-request-number
+      shell: bash
+      run: gh pr update-branch ${{ steps.pr.outputs.pull-request-number }} || true
+      env:
+        GH_TOKEN: ${{ inputs.token }}
