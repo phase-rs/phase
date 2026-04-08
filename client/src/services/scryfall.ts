@@ -1,22 +1,26 @@
-import { get } from "idb-keyval";
-import { cacheImage } from "./imageCache.ts";
-
-interface ImageMapEntry {
-  normal: string;
-  art_crop: string;
+interface ScryfallDataEntry {
+  faces: Array<{ normal: string; art_crop: string }>;
+  name: string;
+  mana_cost: string;
+  cmc: number;
+  type_line: string;
+  colors: string[];
+  color_identity: string[];
+  keywords: string[];
 }
-type ImageMap = Record<string, ImageMapEntry[]>;
 
-let imageMapPromise: Promise<ImageMap | null> | null = null;
+type ScryfallDataMap = Record<string, ScryfallDataEntry>;
+
+let scryfallDataPromise: Promise<ScryfallDataMap | null> | null = null;
 let scryfallQueue: Promise<void> = Promise.resolve();
 
-function loadImageMap(): Promise<ImageMap | null> {
-  if (!imageMapPromise) {
-    imageMapPromise = fetch("/scryfall-images.json")
-      .then((r) => r.json() as Promise<ImageMap>)
+function loadScryfallData(): Promise<ScryfallDataMap | null> {
+  if (!scryfallDataPromise) {
+    scryfallDataPromise = fetch("/scryfall-data.json")
+      .then((r) => r.json() as Promise<ScryfallDataMap>)
       .catch(() => null);
   }
-  return imageMapPromise;
+  return scryfallDataPromise;
 }
 
 const SCRYFALL_DELAY_MS = 100;
@@ -31,7 +35,7 @@ const cardDataCache = new Map<string, Promise<ScryfallCard>>();
 export type ImageSize = "small" | "normal" | "large" | "art_crop";
 
 export interface ScryfallCard {
-  id: string;
+  id?: string;
   name: string;
   mana_cost: string;
   cmc: number;
@@ -40,7 +44,7 @@ export interface ScryfallCard {
   colors?: string[];
   color_identity: string[];
   keywords?: string[];
-  legalities: Record<string, string>;
+  legalities?: Record<string, string>;
   image_uris?: Record<string, string>;
   card_faces?: Array<{
     name: string;
@@ -94,15 +98,18 @@ function parseRetryDelayMs(retryAfter: string | null, attempt: number): number {
  * Enforces a minimum delay between requests (Scryfall asks for 50-100ms),
  * and automatically retries on 429 using the Retry-After header with
  * exponential backoff as a fallback.
+ *
+ * On 429, the queue slot is held during the backoff sleep so that no other
+ * requests can interleave and overwrite the backoff timestamp.
  */
 async function rateLimitedFetch(
   url: string,
 ): Promise<Response> {
   let attempt = 0;
 
-  while (true) {
-    const release = await claimScryfallQueueSlot();
-    try {
+  const release = await claimScryfallQueueSlot();
+  try {
+    while (true) {
       const delayMs = Math.max(0, nextRequestAt - Date.now());
       if (delayMs > 0) {
         await sleep(delayMs);
@@ -111,8 +118,11 @@ async function rateLimitedFetch(
       try {
         const response = await fetch(url);
         if (response.status === 429 && attempt < MAX_RETRIES) {
-          nextRequestAt = Date.now()
-            + parseRetryDelayMs(response.headers.get("Retry-After"), attempt);
+          const backoffMs = parseRetryDelayMs(
+            response.headers.get("Retry-After"),
+            attempt,
+          );
+          nextRequestAt = Date.now() + backoffMs;
           attempt += 1;
           continue;
         }
@@ -126,11 +136,10 @@ async function rateLimitedFetch(
 
         nextRequestAt = Date.now() + BASE_BACKOFF_MS * 2 ** attempt;
         attempt += 1;
-        continue;
       }
-    } finally {
-      release();
     }
+  } finally {
+    release();
   }
 }
 
@@ -153,6 +162,22 @@ export async function fetchCardData(cardName: string): Promise<ScryfallCard> {
   }
 
   const cardPromise = (async () => {
+    // Check local bulk data first — avoids API round-trips for ~99% of cards.
+    const localMap = await loadScryfallData();
+    const entry = localMap?.[name.toLowerCase()];
+    if (entry) {
+      return {
+        name: entry.name,
+        mana_cost: entry.mana_cost,
+        cmc: entry.cmc,
+        type_line: entry.type_line,
+        colors: entry.colors,
+        color_identity: entry.color_identity,
+        keywords: entry.keywords,
+      };
+    }
+
+    // Fall back to Scryfall API for cards not in bulk data (very new cards).
     const exactUrl = `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(name)}`;
     const exactResponse = await rateLimitedFetch(exactUrl);
     if (exactResponse.ok) {
@@ -193,58 +218,19 @@ function getImageUrl(
   throw new Error("No image URI found for card");
 }
 
-export async function fetchCardImage(
-  cardName: string,
-  size: ImageSize = "normal",
-): Promise<Blob> {
-  const cachedBlob = await get<Blob>(`scryfall:${cardName}:${size}`);
-  if (cachedBlob) return cachedBlob;
-
-  const card = await fetchCardData(cardName);
-  const imageUrl = getImageUrl(card, size, 0);
-  const imageResponse = await rateLimitedFetch(imageUrl);
-  if (!imageResponse.ok) {
-    throw new Error(
-      `Scryfall image fetch error: ${imageResponse.status} for "${cardName}"`,
-    );
-  }
-  const blob = await imageResponse.blob();
-  await cacheImage(cardName, size, blob);
-  return blob;
-}
-
-export async function prefetchDeckImages(
-  cardNames: string[],
-): Promise<void> {
-  const unique = [...new Set(cardNames)];
-  for (const name of unique) {
-    try {
-      const imageUrl = await fetchCardImageUrl(name, 0, "normal");
-      await new Promise<void>((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => resolve();
-        img.onerror = () => reject(new Error(`Failed to preload image for "${name}"`));
-        img.src = imageUrl;
-      });
-    } catch {
-      // Skip failed fetches during prefetch
-    }
-  }
-}
-
 export async function fetchCardImageUrl(
   cardName: string,
   faceIndex: number,
   size: ImageSize = "normal",
 ): Promise<string> {
-  // Local image map covers normal and art_crop — skip API round-trip for these.
+  // Local data covers normal and art_crop — skip API round-trip for these.
   if (size === "normal" || size === "art_crop") {
-    const map = await loadImageMap();
+    const data = await loadScryfallData();
     const name = normalizeCardName(cardName).toLowerCase();
-    const faces = map?.[name];
-    if (faces) {
-      const face = faces[faceIndex] ?? faces[0];
-      const url = face[size];
+    const entry = data?.[name];
+    if (entry) {
+      const face = entry.faces[faceIndex] ?? entry.faces[0];
+      const url = face?.[size];
       if (url) return url;
     }
   }

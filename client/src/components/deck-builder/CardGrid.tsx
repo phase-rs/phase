@@ -40,7 +40,7 @@ export function CardGrid({
 
           return (
             <motion.button
-              key={card.id}
+              key={card.id ?? card.name}
               layout
               initial={{ opacity: 0, scale: 0.9 }}
               animate={{ opacity: 1, scale: 1 }}
@@ -80,7 +80,7 @@ export function CardGrid({
 
               {/* Legality badge */}
               <div className="absolute left-1 top-1">
-                <LegalityBadge legalities={card.legalities} format={format} />
+                {card.legalities && <LegalityBadge legalities={card.legalities} format={format} />}
               </div>
 
               {/* Card count badge */}

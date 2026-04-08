@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { getCachedImage, revokeImageUrl } from "../services/imageCache.ts";
 import { fetchCardImageUrl, fetchTokenImageUrl } from "../services/scryfall.ts";
 import type { TokenSearchFilters } from "../services/scryfall.ts";
 
@@ -16,8 +15,6 @@ interface UseCardImageResult {
 }
 
 interface MemoryCacheEntry {
-  objectUrl: string | null;
-  pendingRelease: boolean;
   promise: Promise<string | null> | null;
   refCount: number;
   src: string | null;
@@ -49,14 +46,7 @@ function releaseCachedImageSrc(key: string): void {
   const entry = imageRequestCache.get(key);
   if (!entry) return;
   entry.refCount = Math.max(0, entry.refCount - 1);
-  if (entry.refCount === 0) {
-    if (entry.promise) {
-      entry.pendingRelease = true;
-      return;
-    }
-    if (entry.objectUrl) {
-      revokeImageUrl(entry.objectUrl);
-    }
+  if (entry.refCount === 0 && !entry.promise) {
     imageRequestCache.delete(key);
   }
 }
@@ -79,37 +69,13 @@ async function acquireCachedImageSrc(
   }
 
   const entry: MemoryCacheEntry = {
-    objectUrl: null,
-    pendingRelease: false,
     promise: null,
     refCount: 1,
     src: null,
   };
   imageRequestCache.set(key, entry);
 
-  const finalizeEntry = (resolvedSrc: string | null) => {
-    entry.src = resolvedSrc;
-    entry.promise = null;
-    if (entry.pendingRelease && entry.refCount === 0) {
-      if (entry.objectUrl) {
-        revokeImageUrl(entry.objectUrl);
-      }
-      imageRequestCache.delete(key);
-    }
-    return resolvedSrc;
-  };
-
   entry.promise = (async () => {
-    const filterSuffix = isToken
-      ? `:${filterPower ?? ""}/${filterToughness ?? ""}/${filterColors}`
-      : "";
-    const cacheKey = isToken ? `token:${cardName}${filterSuffix}` : cardName;
-    const cached = await getCachedImage(cacheKey, size);
-    if (cached) {
-      entry.objectUrl = cached;
-      return finalizeEntry(cached);
-    }
-
     const remoteSrc = isToken
       ? await fetchTokenImageUrl(cardName, size, {
           power: filterPower,
@@ -117,13 +83,15 @@ async function acquireCachedImageSrc(
           colors: filterColors ? filterColors.split(",") : undefined,
         })
       : await fetchCardImageUrl(cardName, faceIndex, size);
-    return finalizeEntry(remoteSrc);
-  })().catch((error) => {
-    if (entry.objectUrl) {
-      revokeImageUrl(entry.objectUrl);
+    entry.src = remoteSrc;
+    entry.promise = null;
+    if (entry.refCount === 0) {
+      imageRequestCache.delete(key);
     }
+    return remoteSrc;
+  })().catch(() => {
     imageRequestCache.delete(key);
-    throw error;
+    return null;
   });
 
   return entry.promise;

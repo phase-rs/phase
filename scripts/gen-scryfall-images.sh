@@ -3,9 +3,9 @@ set -euo pipefail
 
 DATA_DIR="data/scryfall"
 ORACLE_FILE="$DATA_DIR/oracle-cards.json"
-OUTPUT="client/public/scryfall-images.json"
+OUTPUT="client/public/scryfall-data.json"
 
-echo "=== Scryfall Image Map Generation ==="
+echo "=== Scryfall Data Generation ==="
 
 # Download oracle-cards bulk data if not present
 if [ ! -f "$ORACLE_FILE" ]; then
@@ -25,7 +25,7 @@ fi
 echo "Generating $OUTPUT..."
 mkdir -p "$(dirname "$OUTPUT")"
 
-# Build a name-keyed image map from oracle-cards bulk data.
+# Build a combined image + card metadata map from oracle-cards bulk data.
 #
 # Keys: lowercased card name + front face name when it differs (e.g. so the
 # engine can look up "Delver of Secrets" and get the correct DFC entry).
@@ -38,28 +38,38 @@ mkdir -p "$(dirname "$OUTPUT")"
 # to prevent name collisions with real cards (e.g. a token named "Llanowar Elves"
 # overwriting the actual Llanowar Elves).
 #
-# Values: array of {normal, art_crop} per face, mirroring getImageUrl's fallback
-# logic — face-level image_uris take priority, then top-level (split cards).
+# Each entry contains:
+#   - faces: array of {normal, art_crop} per face (image URLs)
+#   - name, mana_cost, cmc, type_line, colors, color_identity, keywords (card metadata)
 NON_PLAYABLE='["token","double_faced_token","emblem","art_series","vanguard","scheme","planar","augment","host"]'
 
 jq -c --argjson exclude "$NON_PLAYABLE" '[.[] |
   select(.layout as $l | $exclude | index($l) | not) |
   . as $card |
-  (if $card.card_faces then
-    [$card.card_faces[] | {
-      normal: (.image_uris.normal // $card.image_uris.normal),
-      art_crop: (.image_uris.art_crop // $card.image_uris.art_crop)
-    }]
-  else
-    [{normal: $card.image_uris.normal, art_crop: $card.image_uris.art_crop}]
-  end) as $faces |
+  {
+    faces: (if $card.card_faces then
+      [$card.card_faces[] | {
+        normal: (.image_uris.normal // $card.image_uris.normal),
+        art_crop: (.image_uris.art_crop // $card.image_uris.art_crop)
+      }]
+    else
+      [{normal: $card.image_uris.normal, art_crop: $card.image_uris.art_crop}]
+    end),
+    name: $card.name,
+    mana_cost: ($card.mana_cost // $card.card_faces[0].mana_cost // ""),
+    cmc: $card.cmc,
+    type_line: $card.type_line,
+    colors: ($card.colors // $card.card_faces[0].colors // []),
+    color_identity: $card.color_identity,
+    keywords: ($card.keywords // [])
+  } as $entry |
   (
     [$card.name | ascii_downcase] +
     if $card.card_faces and ($card.card_faces[0].name != $card.name)
     then [$card.card_faces[0].name | ascii_downcase]
     else [] end
   ) | unique[] |
-  {key: ., value: $faces}
+  {key: ., value: $entry}
 ] | from_entries' "$ORACLE_FILE" > "$OUTPUT"
 
 ENTRY_COUNT=$(jq 'length' "$OUTPUT")
