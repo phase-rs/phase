@@ -3,38 +3,38 @@
   "formats": {
     "brawl": {
       "pct": 85,
-      "supported": 12948,
-      "total": 15211
+      "supported": 12947,
+      "total": 15210
     },
     "commander": {
       "pct": 84,
-      "supported": 26473,
-      "total": 31377
+      "supported": 26471,
+      "total": 31375
     },
     "historic": {
       "pct": 85,
-      "supported": 12910,
-      "total": 15167
+      "supported": 12909,
+      "total": 15166
     },
     "legacy": {
       "pct": 85,
-      "supported": 26430,
-      "total": 31223
+      "supported": 26428,
+      "total": 31221
     },
     "modern": {
       "pct": 87,
-      "supported": 19540,
-      "total": 22395
+      "supported": 19538,
+      "total": 22393
     },
     "pauper": {
       "pct": 93,
-      "supported": 9879,
-      "total": 10608
+      "supported": 9878,
+      "total": 10607
     },
     "pioneer": {
       "pct": 88,
-      "supported": 12855,
-      "total": 14668
+      "supported": 12854,
+      "total": 14667
     },
     "standard": {
       "pct": 87,
@@ -48,8 +48,8 @@
     },
     "vintage": {
       "pct": 85,
-      "supported": 26441,
-      "total": 31239
+      "supported": 26439,
+      "total": 31237
     }
   },
   "keyword_count": 168,
