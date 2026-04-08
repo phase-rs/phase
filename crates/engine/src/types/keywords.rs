@@ -122,6 +122,17 @@ pub enum KeywordKind {
     Warp,
     Devour,
     Offspring,
+    Splice,
+    Bargain,
+    Sunburst,
+    Champion,
+    Training,
+    Assist,
+    JumpStart,
+    Cipher,
+    Transmute,
+    Cleave,
+    Undaunted,
     Unknown,
 }
 
@@ -516,6 +527,35 @@ pub enum Keyword {
     /// Firebending N — produces N {R} when this creature attacks (Avatar crossover).
     Firebending(u32),
 
+    /// CR 702.46a: Splice onto [type] — reveal from hand and pay splice cost while casting
+    /// a spell of the specified type to add this card's effects to that spell.
+    Splice(String),
+    /// CR 702.166a: Bargain — you may sacrifice an artifact, enchantment, or token
+    /// as an additional cost to cast this spell.
+    Bargain,
+    /// CR 702.43a: Sunburst — enters with a counter for each color of mana spent to cast it.
+    Sunburst,
+    /// CR 702.72a: Champion a [type] — exile a creature of the specified type you control
+    /// when this enters; return it when this leaves.
+    Champion(String),
+    /// CR 702.149a: Training — whenever this creature attacks with another creature
+    /// with greater power, put a +1/+1 counter on this creature.
+    Training,
+    /// CR 702.132a: Assist — another player can help pay the generic mana cost of this spell.
+    Assist,
+    /// CR 702.133a: Jump-start — cast from graveyard by discarding a card, then exile.
+    JumpStart,
+    /// CR 702.98a: Cipher — exile this spell encoded on a creature you control;
+    /// whenever that creature deals combat damage to a player, cast a copy.
+    Cipher,
+    /// CR 702.52a: Transmute {cost} — discard this card and pay {cost} to search
+    /// your library for a card with the same mana value.
+    Transmute(ManaCost),
+    /// CR 702.148a: Cleave — alternative cost that removes bracketed text from Oracle text.
+    Cleave(ManaCost),
+    /// CR 702.125a: Undaunted — costs {1} less for each opponent.
+    Undaunted,
+
     /// Fallback for unrecognized keywords.
     Unknown(String),
 }
@@ -622,9 +662,29 @@ impl Keyword {
             Keyword::Warp(_) => KeywordKind::Warp,
             Keyword::Devour(_) => KeywordKind::Devour,
             Keyword::Offspring(_) => KeywordKind::Offspring,
+            Keyword::Splice(_) => KeywordKind::Splice,
+            Keyword::Bargain => KeywordKind::Bargain,
+            Keyword::Sunburst => KeywordKind::Sunburst,
+            Keyword::Champion(_) => KeywordKind::Champion,
+            Keyword::Training => KeywordKind::Training,
+            Keyword::Assist => KeywordKind::Assist,
+            Keyword::JumpStart => KeywordKind::JumpStart,
+            Keyword::Cipher => KeywordKind::Cipher,
+            Keyword::Transmute(_) => KeywordKind::Transmute,
+            Keyword::Cleave(_) => KeywordKind::Cleave,
+            Keyword::Undaunted => KeywordKind::Undaunted,
             Keyword::Unknown(_) => KeywordKind::Unknown,
             _ => KeywordKind::Unknown,
         }
+    }
+}
+
+/// Capitalize the first character of a string (for type name normalization).
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
     }
 }
 
@@ -945,6 +1005,32 @@ impl FromStr for Keyword {
                     return Ok(Keyword::Unknown(s.to_string()));
                 }
                 "firebending" => return Ok(Keyword::Firebending(p.parse().unwrap_or(1))),
+                // CR 702.47a: Splice onto [type] [cost]
+                "splice" => {
+                    // Strip "onto " prefix if present (e.g., "onto arcane {w}" → "arcane {w}")
+                    let after_onto = p.strip_prefix("onto ").unwrap_or(p);
+                    // Separate type name from cost — cost starts with '{'
+                    let type_str = match after_onto.find('{') {
+                        Some(brace_idx) => after_onto[..brace_idx].trim(),
+                        None => after_onto.trim(),
+                    };
+                    let capitalized = capitalize_first(type_str);
+                    return Ok(Keyword::Splice(capitalized));
+                }
+                // CR 702.72a: Champion a [type]
+                "champion" => {
+                    // Strip "a " or "an " prefix (e.g., "a kithkin" → "Kithkin")
+                    let type_str = p
+                        .strip_prefix("a ")
+                        .or_else(|| p.strip_prefix("an "))
+                        .unwrap_or(p);
+                    let capitalized = capitalize_first(type_str);
+                    return Ok(Keyword::Champion(capitalized));
+                }
+                // CR 702.52a: Transmute {cost}
+                "transmute" => return Ok(Keyword::Transmute(parse_keyword_mana_cost(p))),
+                // CR 702.148a: Cleave {cost}
+                "cleave" => return Ok(Keyword::Cleave(parse_keyword_mana_cost(p))),
                 // CR 702.74a
                 "hideaway" => return Ok(Keyword::Hideaway(p.parse().unwrap_or(4))),
                 "afflict" => return Ok(Keyword::Afflict(p.parse().unwrap_or(1))),
@@ -1073,6 +1159,20 @@ impl FromStr for Keyword {
             "cumulative" => Ok(Keyword::CumulativeUpkeep(String::new())),
             "ripple" => Ok(Keyword::Ripple),
             "totem" => Ok(Keyword::Totem),
+            // Unit keywords added for MTGJSON keyword name recognition
+            "bargain" => Ok(Keyword::Bargain),
+            "sunburst" => Ok(Keyword::Sunburst),
+            "training" => Ok(Keyword::Training),
+            "assist" => Ok(Keyword::Assist),
+            "jump-start" | "jumpstart" => Ok(Keyword::JumpStart),
+            "cipher" => Ok(Keyword::Cipher),
+            "undaunted" => Ok(Keyword::Undaunted),
+            // CR 702.14: Landwalk variants — MTGJSON sends "Islandwalk" etc. as keyword names.
+            "islandwalk" => Ok(Keyword::Landwalk("Island".to_string())),
+            "swampwalk" => Ok(Keyword::Landwalk("Swamp".to_string())),
+            "forestwalk" => Ok(Keyword::Landwalk("Forest".to_string())),
+            "mountainwalk" => Ok(Keyword::Landwalk("Mountain".to_string())),
+            "plainswalk" => Ok(Keyword::Landwalk("Plains".to_string())),
             _ => Ok(Keyword::Unknown(s.to_string())),
         }
     }
@@ -1409,6 +1509,19 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
                 count,
             })
         }
+        // CR 702.47a / CR 702.166a / CR 702.43a / CR 702.72a / CR 702.149a
+        // CR 702.132a / CR 702.133a / CR 702.98a / CR 702.52a / CR 702.148a / CR 702.125a
+        "Splice" => Ok(Keyword::Splice(data.as_str().unwrap_or("").to_string())),
+        "Bargain" => Ok(Keyword::Bargain),
+        "Sunburst" => Ok(Keyword::Sunburst),
+        "Champion" => Ok(Keyword::Champion(data.as_str().unwrap_or("").to_string())),
+        "Training" => Ok(Keyword::Training),
+        "Assist" => Ok(Keyword::Assist),
+        "JumpStart" => Ok(Keyword::JumpStart),
+        "Cipher" => Ok(Keyword::Cipher),
+        "Transmute" => Ok(Keyword::Transmute(mana(data)?)),
+        "Cleave" => Ok(Keyword::Cleave(mana(data)?)),
+        "Undaunted" => Ok(Keyword::Undaunted),
         "Unknown" => Ok(Keyword::Unknown(data.as_str().unwrap_or("").to_string())),
         _ => Ok(Keyword::Unknown(format!("{variant}:{data}"))),
     }

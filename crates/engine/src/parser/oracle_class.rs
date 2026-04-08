@@ -17,7 +17,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_replacement::parse_replacement_line;
 use super::oracle_special::normalize_self_refs_for_static;
 use super::oracle_static::parse_static_line;
-use super::oracle_trigger::parse_trigger_line;
+use super::oracle_trigger::parse_trigger_lines;
 use super::oracle_util::{strip_reminder_text, TextPair};
 
 /// Detect a "{cost}: Level N" line using structural parsing.
@@ -138,14 +138,16 @@ pub(crate) fn parse_class_oracle_text(
                 || lower.starts_with("whenever ")
                 || lower.starts_with("at ")
             {
-                let mut trigger = parse_trigger_line(line, card_name);
+                let mut triggers = parse_trigger_lines(line, card_name);
                 // CR 716.2a: Gate continuous triggers at levels > 1.
                 if section.level > 1 {
-                    trigger.condition = Some(TriggerCondition::ClassLevelGE {
-                        level: section.level,
-                    });
+                    for trigger in &mut triggers {
+                        trigger.condition = Some(TriggerCondition::ClassLevelGE {
+                            level: section.level,
+                        });
+                    }
                 }
-                result.triggers.push(trigger);
+                result.triggers.extend(triggers);
                 continue;
             }
 
@@ -188,13 +190,15 @@ pub(crate) fn parse_class_oracle_text(
                     || effect_lower.starts_with("whenever ")
                     || effect_lower.starts_with("at ")
                 {
-                    let mut trigger = parse_trigger_line(&effect_text, card_name);
+                    let mut triggers = parse_trigger_lines(&effect_text, card_name);
                     if section.level > 1 {
-                        trigger.condition = Some(TriggerCondition::ClassLevelGE {
-                            level: section.level,
-                        });
+                        for trigger in &mut triggers {
+                            trigger.condition = Some(TriggerCondition::ClassLevelGE {
+                                level: section.level,
+                            });
+                        }
                     }
-                    result.triggers.push(trigger);
+                    result.triggers.extend(triggers);
                     continue;
                 }
                 if is_static_pattern(&effect_lower) {

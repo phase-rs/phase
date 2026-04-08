@@ -48,6 +48,62 @@ fn self_recursion_trigger_zone(ability: &crate::types::ability::AbilityDefinitio
     }
 }
 
+/// Parse a trigger line that may contain compound trigger events into multiple
+/// `TriggerDefinition`s. Compound patterns like "When X and when Y, effect" or
+/// "Whenever X or deals combat damage to a player, effect" produce one trigger
+/// per event, each sharing the same execute effect.
+///
+/// CR 603.2: A triggered ability may have multiple triggering events. Each event
+/// is independently evaluated, producing separate trigger instances that share
+/// the same effect.
+pub fn parse_trigger_lines(text: &str, card_name: &str) -> Vec<TriggerDefinition> {
+    let stripped = strip_reminder_text(text);
+    let normalized = normalize_self_refs(&stripped, card_name);
+    let lower = normalized.to_lowercase();
+
+    // Detect compound trigger patterns in the condition portion.
+    // Split at the effect boundary first, then look for conjunctions in the condition.
+    let tp = TextPair::new(&normalized, &lower);
+    let (condition, effect) = split_trigger(tp);
+    let cond_lower = condition.to_lowercase();
+
+    // Pattern 1: "when/whenever X and when Y" or "when X and whenever Y"
+    // The conjunction " and when " or " and whenever " separates two independent conditions.
+    if let Some(halves) = split_and_when_compound(&cond_lower, &condition) {
+        return halves
+            .into_iter()
+            .map(|cond| {
+                let trigger_text = if effect.is_empty() {
+                    cond
+                } else {
+                    format!("{cond}, {effect}")
+                };
+                parse_trigger_line(&trigger_text, card_name)
+            })
+            .collect();
+    }
+
+    // Pattern 2: "whenever ~ [event1] or [event2]" — compound events sharing a subject.
+    // The "or" joins two event verbs, not two subjects. Detect by checking if the
+    // text after "or" starts with a known trigger event verb.
+    if let Some(halves) = split_or_event_compound(&cond_lower, &condition) {
+        return halves
+            .into_iter()
+            .map(|cond| {
+                let trigger_text = if effect.is_empty() {
+                    cond
+                } else {
+                    format!("{cond}, {effect}")
+                };
+                parse_trigger_line(&trigger_text, card_name)
+            })
+            .collect();
+    }
+
+    // No compound — single trigger.
+    vec![parse_trigger_line(text, card_name)]
+}
+
 /// Parse a full trigger line into a TriggerDefinition.
 /// Input: a line starting with "When", "Whenever", or "At".
 /// The card_name is used for self-reference substitution.
@@ -443,6 +499,9 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
 
         // CR 309.7: Dungeon completion bridges directly.
         StaticCondition::CompletedADungeon => Some(TriggerCondition::CompletedADungeon),
+
+        // CR 903.3: Commander control bridges directly.
+        StaticCondition::ControlsCommander => Some(TriggerCondition::ControlsCommander),
     }
 }
 
@@ -498,6 +557,9 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                 "if it had counters on it",
                 TriggerCondition::HadCounters { counter_type: None },
             ),
+            // CR 702.112a: "if it's renowned" / "if ~ is renowned" — renown state check
+            ("if it's renowned", TriggerCondition::SourceIsRenowned),
+            ("if ~ is renowned", TriggerCondition::SourceIsRenowned),
         ],
     ) {
         return result;
@@ -771,6 +833,191 @@ fn strip_condition_clause(text: &str, clause_start: usize, clause_len: usize) ->
 ///
 fn normalize_self_refs(text: &str, card_name: &str) -> String {
     normalize_card_name_refs(text, card_name)
+}
+
+/// Split compound conditions joined by " and when " or " and whenever ".
+/// Returns `Some(vec![first_condition, second_condition])` with proper trigger keywords,
+/// or `None` if no compound conjunction is found.
+///
+/// Examples:
+/// - "When you cycle ~ and when ~ dies" → ["When you cycle ~", "When ~ dies"]
+/// - "When ~ enters and whenever you cast an Elemental spell" → ["When ~ enters", "Whenever you cast an Elemental spell"]
+fn split_and_when_compound(cond_lower: &str, condition: &str) -> Option<Vec<String>> {
+    // Use nom to detect " and when " or " and whenever " at word boundaries.
+    // Try " and whenever " first (longer match) to avoid " and when " matching the "when" prefix.
+    if let Some(pos) = cond_lower.find(" and whenever ") {
+        let first = condition[..pos].trim().to_string();
+        let second_start = pos + " and ".len();
+        // Capitalize: the second half already starts with "whenever"
+        let second =
+            normalize_compound_pronouns(&capitalize_first(condition[second_start..].trim()));
+        return Some(vec![first, second]);
+    }
+    if let Some(pos) = cond_lower.find(" and when ") {
+        let first = condition[..pos].trim().to_string();
+        let second_start = pos + " and ".len();
+        let second =
+            normalize_compound_pronouns(&capitalize_first(condition[second_start..].trim()));
+        return Some(vec![first, second]);
+    }
+    None
+}
+
+/// In compound trigger splits, the second half may use pronouns ("it", "its")
+/// that refer to the source permanent. Replace these with the self-reference
+/// marker "~" so the trigger condition parser recognizes them.
+fn normalize_compound_pronouns(text: &str) -> String {
+    // Replace " it" at word boundaries (end of string or followed by space/comma/period).
+    // Be careful not to replace "it" inside words like "wait" or "remit".
+    let mut result = text.to_string();
+    // "sacrifice it" → "sacrifice ~", "exile it" → "exile ~", etc.
+    // Use word-boundary-safe replacement: " it" at end, " it," or " it "
+    for (from, to) in [(" it,", " ~,"), (" it.", " ~."), (" it ", " ~ ")] {
+        result = result.replace(from, to);
+    }
+    // Handle " it" at end of string
+    if result.ends_with(" it") {
+        let len = result.len();
+        result.replace_range(len - 2.., "~");
+    }
+    result
+}
+
+/// Split compound conditions where "or" joins two event verbs sharing the same subject.
+/// Returns `Some(vec![first_trigger, second_trigger])` with reconstructed trigger lines,
+/// or `None` if no compound event "or" is found.
+///
+/// Detects "or" followed by a known event verb (dies, deals, enters, attacks, blocks,
+/// is sacrificed, is exiled, leaves). Does NOT match "or" between subjects (e.g.,
+/// "a creature or artifact enters").
+///
+/// Examples:
+/// - "Whenever ~ enters or deals combat damage to a player" → ["Whenever ~ enters", "Whenever ~ deals combat damage to a player"]
+/// - "Whenever ~ deals combat damage to a player or dies" → ["Whenever ~ deals combat damage to a player", "Whenever ~ dies"]
+fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<String>> {
+    // Known event verb prefixes that signal a compound event "or".
+    fn is_event_verb_start(text: &str) -> bool {
+        alt((
+            value((), tag::<_, _, VerboseError<&str>>("dies")),
+            value((), tag("die ")),
+            value((), tag("deals ")),
+            value((), tag("deal ")),
+            value((), tag("enters")),
+            value((), tag("enter ")),
+            value((), tag("attacks")),
+            value((), tag("attack ")),
+            value((), tag("blocks")),
+            value((), tag("block ")),
+            value((), tag("is sacrificed")),
+            value((), tag("are sacrificed")),
+            value((), tag("is exiled")),
+            value((), tag("are exiled")),
+            value((), tag("leaves")),
+            value((), tag("is put into")),
+        ))
+        .parse(text)
+        .is_ok()
+    }
+
+    // Patterns already handled as dedicated compound TriggerMode variants
+    // (EntersOrAttacks, AttacksOrBlocks) — do not split these.
+    fn is_existing_compound_mode(cond_lower: &str) -> bool {
+        cond_lower.contains("enters or attacks")
+            || cond_lower.contains("enters the battlefield or attacks")
+            || cond_lower.contains("attacks or blocks")
+    }
+    if is_existing_compound_mode(cond_lower) {
+        return None;
+    }
+
+    // Scan for " or " occurrences in the condition and check if what follows is an event verb.
+    let mut search_start = 0;
+    while let Some(rel_pos) = cond_lower[search_start..].find(" or ") {
+        let pos = search_start + rel_pos;
+        let after_or = &cond_lower[pos + 4..];
+        if is_event_verb_start(after_or) {
+            // Found a compound event "or". Extract the trigger keyword and subject
+            // from the first half to reconstruct the second trigger line.
+            let first = condition[..pos].trim().to_string();
+
+            // Extract the trigger keyword ("When"/"Whenever") and subject from the first condition.
+            // The subject is everything between the keyword and the first event verb.
+            let keyword_and_subject = extract_keyword_and_subject(&cond_lower[..pos]);
+            let second_event = condition[pos + 4..].trim();
+            let second = format!("{keyword_and_subject} {second_event}");
+
+            return Some(vec![first, second]);
+        }
+        search_start = pos + 4;
+    }
+    None
+}
+
+/// Extract the trigger keyword + subject from a condition prefix.
+/// E.g., "whenever ~ enters" → "Whenever ~" (strips the event verb).
+/// E.g., "whenever ~ deals combat damage to a player" → "Whenever ~".
+fn extract_keyword_and_subject(cond_lower: &str) -> String {
+    // Strip trigger keyword
+    let (keyword, after_keyword) = if let Ok((rest, ())) =
+        value((), tag::<_, _, VerboseError<&str>>("whenever ")).parse(cond_lower)
+    {
+        ("Whenever", rest)
+    } else if let Ok((rest, ())) =
+        value((), tag::<_, _, VerboseError<&str>>("when ")).parse(cond_lower)
+    {
+        ("When", rest)
+    } else {
+        // Fallback: return as-is with capitalized first letter
+        return capitalize_first(cond_lower);
+    };
+
+    // Parse the subject using the existing subject parser — it returns (subject, rest_after_subject).
+    // We need the text span of the subject, not the parsed filter.
+    // Reconstruct by taking everything from after_keyword up to where the event verb starts.
+    let subject_text = extract_subject_text(after_keyword);
+    format!("{keyword} {subject_text}")
+}
+
+/// Extract the subject text span from the beginning of condition text (after keyword).
+/// Returns the text up to the first recognized event verb.
+fn extract_subject_text(text: &str) -> &str {
+    // Known event verb starts that end the subject span
+    let event_prefixes = [
+        "enters",
+        "enter ",
+        "dies",
+        "die ",
+        "deals ",
+        "deal ",
+        "attacks",
+        "attack ",
+        "blocks",
+        "block ",
+        "is sacrificed",
+        "are sacrificed",
+        "is exiled",
+        "are exiled",
+        "leaves",
+        "is put into",
+    ];
+    for prefix in &event_prefixes {
+        if let Some(pos) = text.find(prefix) {
+            if pos > 0 {
+                return text[..pos].trim_end();
+            }
+        }
+    }
+    // Fallback: return the entire text as subject
+    text.trim()
+}
+
+/// Capitalize the first character of a string.
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+    }
 }
 
 fn split_trigger(tp: TextPair<'_>) -> (String, String) {
@@ -6638,5 +6885,86 @@ mod tests {
         } else {
             panic!("expected ControlsNone condition, got {:?}", def.condition);
         }
+    }
+
+    // --- Compound trigger tests ---
+
+    #[test]
+    fn compound_and_when_cycle_and_dies() {
+        // Jund Sojourners: "When you cycle ~ and when ~ dies, you may have it deal 1 damage to any target."
+        let triggers = parse_trigger_lines(
+            "When you cycle this card and when this creature dies, you may have it deal 1 damage to any target.",
+            "Jund Sojourners",
+        );
+        assert_eq!(triggers.len(), 2);
+        assert_eq!(triggers[0].mode, TriggerMode::Cycled);
+        assert_eq!(triggers[1].mode, TriggerMode::ChangesZone);
+        assert_eq!(triggers[1].origin, Some(Zone::Battlefield));
+        assert_eq!(triggers[1].destination, Some(Zone::Graveyard));
+        // Both should have the same execute effect
+        assert!(triggers[0].execute.is_some());
+        assert!(triggers[1].execute.is_some());
+    }
+
+    #[test]
+    fn compound_and_when_enters_and_sacrifice() {
+        // Heaped Harvest: "When this artifact enters and when you sacrifice it, ..."
+        let triggers = parse_trigger_lines(
+            "When this artifact enters and when you sacrifice it, you may search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
+            "Heaped Harvest",
+        );
+        assert_eq!(triggers.len(), 2);
+        assert_eq!(triggers[0].mode, TriggerMode::ChangesZone);
+        assert_eq!(triggers[0].destination, Some(Zone::Battlefield));
+        assert_eq!(triggers[1].mode, TriggerMode::Sacrificed);
+    }
+
+    #[test]
+    fn compound_or_enters_or_deals_combat_damage() {
+        // Aerial Extortionist: "Whenever this creature enters or deals combat damage to a player, ..."
+        let triggers = parse_trigger_lines(
+            "Whenever this creature enters or deals combat damage to a player, exile up to one target nonland permanent.",
+            "Aerial Extortionist",
+        );
+        assert_eq!(triggers.len(), 2);
+        assert_eq!(triggers[0].mode, TriggerMode::ChangesZone);
+        assert_eq!(triggers[0].destination, Some(Zone::Battlefield));
+        assert_eq!(triggers[1].mode, TriggerMode::DamageDone);
+        assert_eq!(triggers[1].damage_kind, DamageKindFilter::CombatOnly);
+    }
+
+    #[test]
+    fn compound_or_deals_combat_damage_or_dies() {
+        // Park Heights Maverick: "Whenever this creature deals combat damage to a player or dies, proliferate."
+        let triggers = parse_trigger_lines(
+            "Whenever this creature deals combat damage to a player or dies, proliferate.",
+            "Park Heights Maverick",
+        );
+        assert_eq!(triggers.len(), 2);
+        assert_eq!(triggers[0].mode, TriggerMode::DamageDone);
+        assert_eq!(triggers[0].damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(triggers[1].mode, TriggerMode::ChangesZone);
+        assert_eq!(triggers[1].origin, Some(Zone::Battlefield));
+        assert_eq!(triggers[1].destination, Some(Zone::Graveyard));
+    }
+
+    #[test]
+    fn compound_and_whenever_enters_and_cast_spell() {
+        // Salacinder and Soot: "When ~ enters and whenever you cast an Elemental spell, ..."
+        let triggers = parse_trigger_lines(
+            "When Salacinder and Soot enters and whenever you cast an Elemental spell, choose one —",
+            "Salacinder and Soot",
+        );
+        assert_eq!(triggers.len(), 2);
+        assert_eq!(triggers[0].mode, TriggerMode::ChangesZone);
+        assert_eq!(triggers[1].mode, TriggerMode::SpellCast);
+    }
+
+    #[test]
+    fn non_compound_trigger_returns_single() {
+        // Normal trigger should produce exactly 1 result
+        let triggers = parse_trigger_lines("When this creature enters, draw a card.", "Test Card");
+        assert_eq!(triggers.len(), 1);
+        assert_eq!(triggers[0].mode, TriggerMode::ChangesZone);
     }
 }

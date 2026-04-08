@@ -3718,10 +3718,13 @@ fn parse_quoted_ability_modifications(text: &str) -> Vec<ContinuousModification>
                         || nom_tag_lower(&lower, &lower, "at the beginning of ").is_some()
                         || nom_tag_lower(&lower, &lower, "at the end of ").is_some()
                     {
-                        let trigger = super::oracle_trigger::parse_trigger_line(ability_text, "~");
-                        modifications.push(ContinuousModification::GrantTrigger {
-                            trigger: Box::new(trigger),
-                        });
+                        let triggers =
+                            super::oracle_trigger::parse_trigger_lines(ability_text, "~");
+                        for trigger in triggers {
+                            modifications.push(ContinuousModification::GrantTrigger {
+                                trigger: Box::new(trigger),
+                            });
+                        }
                     } else {
                         // CR 702: Quoted text that is a keyword (e.g. "Ward—Pay 2 life") should be
                         // granted as AddKeyword, not wrapped in an AbilityDefinition.

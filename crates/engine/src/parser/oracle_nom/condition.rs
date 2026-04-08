@@ -93,6 +93,14 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
             StaticCondition::CompletedADungeon,
             tag("you've completed a dungeon"),
         ),
+        // CR 903.3: Commander control (Lieutenant mechanic)
+        value(
+            StaticCondition::ControlsCommander,
+            alt((
+                tag("you control your commander"),
+                tag("you control a commander"),
+            )),
+        ),
     ))
     .parse(input)
 }
@@ -612,10 +620,20 @@ fn parse_event_state_conditions(input: &str) -> OracleResult<'_, StaticCondition
         // Compound: "you gained and lost life this turn" → And([Gained >= 1, Lost >= 1])
         // Must precede individual verb handlers to avoid partial match on "you gained".
         parse_compound_verb_condition,
+        // Negated event patterns — must precede positive variants to catch "didn't" prefix.
+        parse_you_didnt_this_turn,
         // "a creature died this turn" (Morbid) → CreaturesDiedThisTurn >= 1
         value(
             make_quantity_ge(QuantityRef::CreaturesDiedThisTurn, 1),
-            tag("a creature died this turn"),
+            alt((
+                tag("a creature died this turn"),
+                tag("a creature died under your control this turn"),
+            )),
+        ),
+        // "a nonland permanent left the battlefield this turn" (Revolt variant)
+        value(
+            make_quantity_ge(QuantityRef::NonlandPermanentsLeftBattlefieldThisTurn, 1),
+            tag("a nonland permanent left the battlefield this turn"),
         ),
         // "a permanent you controlled left the battlefield this turn" (Revolt)
         value(
@@ -659,6 +677,8 @@ fn parse_event_state_conditions(input: &str) -> OracleResult<'_, StaticCondition
         parse_spells_cast_last_turn,
         // "you put a counter on a permanent this turn"
         parse_counter_added_this_turn,
+        // "no creatures are on the battlefield"
+        parse_no_on_battlefield,
     ))
     .parse(input)
 }
@@ -827,6 +847,65 @@ fn parse_counter_added_this_turn(input: &str) -> OracleResult<'_, StaticConditio
     let (rest, _) = alt((tag("permanent"), tag("creature"))).parse(rest)?;
     let (rest, _) = tag(" this turn").parse(rest)?;
     Ok((rest, make_quantity_ge(QuantityRef::CounterAddedThisTurn, 1)))
+}
+
+/// Parse negated event-state conditions: "you didn't cast a spell this turn",
+/// "you didn't lose life this turn", "you didn't attack this turn".
+///
+/// CR 603.4: These gate triggers on the absence of an event this turn.
+/// Composed as `QuantityComparison(ref EQ 0)` rather than `Not(ref >= 1)`.
+fn parse_you_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("you didn't ").parse(input)?;
+    alt((
+        value(
+            make_quantity_comparison(
+                QuantityRef::SpellsCastThisTurn { filter: None },
+                Comparator::EQ,
+                0,
+            ),
+            tag("cast a spell this turn"),
+        ),
+        value(
+            make_quantity_comparison(QuantityRef::LifeLostThisTurn, Comparator::EQ, 0),
+            tag("lose life this turn"),
+        ),
+        value(
+            make_quantity_comparison(QuantityRef::AttackedThisTurn, Comparator::EQ, 0),
+            tag("attack this turn"),
+        ),
+    ))
+    .parse(rest)
+}
+
+/// Parse "no [type] are on the battlefield" → ObjectCount EQ 0.
+///
+/// CR 603.8: State-trigger conditions for global absence checks.
+/// Handles "no creatures are on the battlefield", "no nonland permanents are on the battlefield".
+fn parse_no_on_battlefield(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("no ").parse(input)?;
+    if let Some(are_pos) = rest.find(" are on the battlefield") {
+        let type_text = &rest[..are_pos];
+        let (filter, _) = parse_type_phrase(type_text);
+        if !matches!(filter, TargetFilter::Any) {
+            let consumed = "no ".len() + are_pos + " are on the battlefield".len();
+            return Ok((
+                &input[consumed..],
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                    comparator: Comparator::EQ,
+                    rhs: QuantityExpr::Fixed { value: 0 },
+                },
+            ));
+        }
+    }
+    Err(nom::Err::Error(nom_language::error::VerboseError {
+        errors: vec![(
+            input,
+            nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
+        )],
+    }))
 }
 
 /// Parse "[N or more / a / an] [type] entered the battlefield under your control this turn".
@@ -1731,5 +1810,162 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // -- "you didn't" negated event patterns --
+
+    #[test]
+    fn test_you_didnt_cast_a_spell_this_turn() {
+        let (rest, c) = parse_inner_condition("you didn't cast a spell this turn").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert!(matches!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::SpellsCastThisTurn { filter: None }
+                    }
+                ));
+                assert_eq!(comparator, Comparator::EQ);
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 0 });
+            }
+            _ => panic!("expected QuantityComparison, got {c:?}"),
+        }
+    }
+
+    #[test]
+    fn test_you_didnt_lose_life_this_turn() {
+        let (rest, c) = parse_inner_condition("you didn't lose life this turn").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert!(matches!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::LifeLostThisTurn
+                    }
+                ));
+                assert_eq!(comparator, Comparator::EQ);
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 0 });
+            }
+            _ => panic!("expected QuantityComparison, got {c:?}"),
+        }
+    }
+
+    #[test]
+    fn test_you_didnt_attack_this_turn() {
+        let (rest, c) = parse_inner_condition("you didn't attack this turn").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert!(matches!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::AttackedThisTurn
+                    }
+                ));
+                assert_eq!(comparator, Comparator::EQ);
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 0 });
+            }
+            _ => panic!("expected QuantityComparison, got {c:?}"),
+        }
+    }
+
+    // -- "no [type] are on the battlefield" --
+
+    #[test]
+    fn test_no_creatures_on_battlefield() {
+        let (rest, c) = parse_inner_condition("no creatures are on the battlefield").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert!(matches!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. }
+                    }
+                ));
+                assert_eq!(comparator, Comparator::EQ);
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 0 });
+            }
+            _ => panic!("expected QuantityComparison, got {c:?}"),
+        }
+    }
+
+    // -- "a nonland permanent left the battlefield this turn" --
+
+    #[test]
+    fn test_nonland_permanent_left_battlefield() {
+        let (rest, c) =
+            parse_inner_condition("a nonland permanent left the battlefield this turn").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert!(matches!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::NonlandPermanentsLeftBattlefieldThisTurn
+                    }
+                ));
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 1 });
+            }
+            _ => panic!("expected QuantityComparison, got {c:?}"),
+        }
+    }
+
+    // -- "you control your commander" --
+
+    #[test]
+    fn test_you_control_your_commander() {
+        let (rest, c) = parse_inner_condition("you control your commander").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::ControlsCommander);
+    }
+
+    // -- "a creature died under your control this turn" --
+
+    #[test]
+    fn test_creature_died_under_your_control() {
+        let (rest, c) =
+            parse_inner_condition("a creature died under your control this turn").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert!(matches!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CreaturesDiedThisTurn
+                    }
+                ));
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 1 });
+            }
+            _ => panic!("expected QuantityComparison, got {c:?}"),
+        }
     }
 }

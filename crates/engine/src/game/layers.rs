@@ -288,6 +288,13 @@ pub(crate) fn evaluate_condition(
             .dungeon_progress
             .get(&controller)
             .is_some_and(|p| !p.completed.is_empty()),
+        // CR 903.3: True when the controller controls at least one of their commanders.
+        StaticCondition::ControlsCommander => state.battlefield.iter().any(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.controller == controller && obj.is_commander)
+        }),
     }
 }
 

@@ -167,6 +167,11 @@ pub struct GameObject {
     #[serde(skip_deserializing, default, skip_serializing_if = "Option::is_none")]
     pub commander_tax: Option<u32>,
 
+    /// CR 702.112a: Whether this creature has become renowned.
+    /// Set to true when renown triggers (damage dealt while not yet renowned).
+    #[serde(default)]
+    pub is_renowned: bool,
+
     /// CR 114.5: Whether this object is an emblem (immune to removal, persists in command zone)
     #[serde(default)]
     pub is_emblem: bool,
@@ -352,6 +357,7 @@ impl GameObject {
             loyalty_activated_this_turn: false,
             is_commander: false,
             commander_tax: None,
+            is_renowned: false,
             is_emblem: false,
             is_token: false,
             modal: None,

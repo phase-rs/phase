@@ -1473,6 +1473,21 @@ pub(crate) fn check_trigger_condition(
             .dungeon_progress
             .get(&controller)
             .is_some_and(|p| p.completed.contains(dungeon)),
+        // CR 903.3: True when the controller controls at least one of their commander(s).
+        TriggerCondition::ControlsCommander => {
+            // Commander designation is stored per-player. Check if any permanent on the
+            // battlefield owned by and controlled by this player is a commander.
+            state.battlefield.iter().any(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.controller == controller && obj.is_commander)
+            })
+        }
+        // CR 702.112a: True when the source permanent has been made renowned.
+        TriggerCondition::SourceIsRenowned => source_id
+            .and_then(|id| state.objects.get(&id))
+            .is_some_and(|obj| obj.is_renowned),
     }
 }
 

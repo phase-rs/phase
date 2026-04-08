@@ -632,7 +632,13 @@ fn build_oracle_face_inner(
         &subtypes,
     );
 
-    // Merge keywords extracted from Oracle text with MTGJSON keywords
+    // Merge keywords extracted from Oracle text with MTGJSON keywords.
+    // When the Oracle parser extracts a parameterized keyword (e.g., Morph({2}{B}{G}{U})),
+    // remove any MTGJSON-derived default of the same kind (e.g., Morph(zero)).
+    for extracted_kw in &parsed.extracted_keywords {
+        let kind = extracted_kw.kind();
+        keywords.retain(|existing| existing.kind() != kind || existing == extracted_kw);
+    }
     keywords.extend(parsed.extracted_keywords);
 
     // CR 702.124c: "Partner with [Name]" — upgrade Generic → With(name).

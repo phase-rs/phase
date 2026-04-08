@@ -49,7 +49,7 @@ use super::oracle_special::{
     parse_harmonize_keyword, parse_solve_condition, try_parse_die_roll_table,
 };
 use super::oracle_static::{parse_static_line, parse_static_line_multi};
-use super::oracle_trigger::parse_trigger_line;
+use super::oracle_trigger::parse_trigger_lines;
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text, TextPair};
 
 /// Collected parsed abilities from Oracle text.
@@ -641,17 +641,21 @@ pub fn parse_oracle_text(
         }
 
         // Priority 5-6: Triggered abilities — starts with When/Whenever/At
+        // CR 603.2: Compound triggers ("When X and when Y, effect") produce
+        // multiple TriggerDefinitions sharing the same execute effect.
         if has_trigger_prefix(&lower) {
-            let mut trigger = parse_trigger_line(&line, card_name);
+            let mut triggers = parse_trigger_lines(&line, card_name);
             i += 1;
             // CR 706: If the trigger's effect ends with "roll a dN", consume
             // subsequent d20 table lines and attach them as die result branches.
             if has_roll_die_pattern(&lower) {
-                if let Some(ref mut execute) = trigger.execute {
-                    i = attach_die_result_branches_to_chain(execute, &lines, i);
+                if let Some(last) = triggers.last_mut() {
+                    if let Some(ref mut execute) = last.execute {
+                        i = attach_die_result_branches_to_chain(execute, &lines, i);
+                    }
                 }
             }
-            result.triggers.push(trigger);
+            result.triggers.extend(triggers);
             continue;
         }
 
@@ -662,19 +666,23 @@ pub fn parse_oracle_text(
         if let Some((aw_name, effect_text)) = strip_ability_word_with_name(&line) {
             let effect_lower = effect_text.to_lowercase();
             if has_trigger_prefix(&effect_lower) {
-                let mut trigger = parse_trigger_line(&effect_text, card_name);
+                let mut triggers = parse_trigger_lines(&effect_text, card_name);
                 // B7: Attach ability-word condition as fallback when extract_if_condition
                 // doesn't recognize the intervening-if pattern.
-                if trigger.condition.is_none() {
-                    trigger.condition = ability_word_to_trigger_condition(&aw_name);
+                for trigger in &mut triggers {
+                    if trigger.condition.is_none() {
+                        trigger.condition = ability_word_to_trigger_condition(&aw_name);
+                    }
                 }
                 i += 1;
                 if has_roll_die_pattern(&effect_lower) {
-                    if let Some(ref mut execute) = trigger.execute {
-                        i = attach_die_result_branches_to_chain(execute, &lines, i);
+                    if let Some(last) = triggers.last_mut() {
+                        if let Some(ref mut execute) = last.execute {
+                            i = attach_die_result_branches_to_chain(execute, &lines, i);
+                        }
                     }
                 }
-                result.triggers.push(trigger);
+                result.triggers.extend(triggers);
                 continue;
             }
         }
@@ -1109,8 +1117,13 @@ pub fn parse_oracle_text(
             }
         }
 
-        // Priority 13: Keyword cost lines — skip (handled by MTGJSON keywords)
+        // Priority 13: Keyword cost lines — extract keyword if parseable, then skip.
+        // MTGJSON provides keyword names (e.g. "Morph") but not parameterized forms.
+        // The Oracle text has the full form (e.g. "Morph {2}{B}{G}{U}") which we extract here.
         if is_keyword_cost_line(&lower) {
+            if let Some(kw) = parse_keyword_from_oracle(&lower) {
+                result.extracted_keywords.push(kw);
+            }
             i += 1;
             continue;
         }
@@ -1157,15 +1170,17 @@ pub fn parse_oracle_text(
 
             // Try as trigger
             if has_trigger_prefix(&effect_lower) {
-                let mut trigger = parse_trigger_line(&effect_text, card_name);
+                let mut triggers = parse_trigger_lines(&effect_text, card_name);
                 i += 1;
                 // CR 706: Consume subsequent d20 table lines for triggered die rolls.
                 if has_roll_die_pattern(&effect_lower) {
-                    if let Some(ref mut execute) = trigger.execute {
-                        i = attach_die_result_branches_to_chain(execute, &lines, i);
+                    if let Some(last) = triggers.last_mut() {
+                        if let Some(ref mut execute) = last.execute {
+                            i = attach_die_result_branches_to_chain(execute, &lines, i);
+                        }
                     }
                 }
-                result.triggers.push(trigger);
+                result.triggers.extend(triggers);
                 continue;
             }
             // Try as static

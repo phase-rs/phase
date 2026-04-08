@@ -172,7 +172,9 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     {
         let after_then = &trimmed["then ".len()..];
         let after_then_lower = &trimmed_lower["then ".len()..];
-        if starts_clause_text(after_then) || starts_with_damage_clause(after_then_lower) {
+        if starts_clause_text_or_conjugated(after_then)
+            || starts_with_damage_clause(after_then_lower)
+        {
             return Some((ClauseBoundary::Then, whitespace_len + "then ".len()));
         }
     }
@@ -230,6 +232,44 @@ pub(super) fn starts_clause_text(text: &str) -> bool {
     starts_clause_text_lower(&lower)
 }
 
+/// Check whether `text` begins with a conjugated (third-person) verb form that,
+/// after deconjugation, would match a recognized imperative verb.
+///
+/// This handles patterns like "draws seven cards" or "sacrifices a creature"
+/// where the subject carries over from the prior clause (e.g.,
+/// "Each player discards their hand, then draws seven cards.").
+///
+/// Uses `normalize_verb_token` for irregular forms (does→do, has→have, copies→copy)
+/// and the standard -s stripping for regular verbs.
+pub(super) fn starts_clause_text_or_conjugated(text: &str) -> bool {
+    if starts_clause_text(text) {
+        return true;
+    }
+    let lower = text.to_ascii_lowercase();
+    let first_word = lower.split_whitespace().next().unwrap_or("");
+    // Only attempt deconjugation on words ending in 's' that aren't already
+    // recognized — avoids false positives on noun phrases.
+    if !first_word.ends_with('s') || first_word.ends_with("ss") {
+        return false;
+    }
+    // Exclude possessive pronouns and determiners that happen to end in 's'
+    // but are not conjugated verbs (e.g., "its", "this", "those").
+    if matches!(
+        first_word,
+        "its" | "this" | "those" | "his" | "less" | "plus" | "as"
+    ) {
+        return false;
+    }
+    let base = super::normalize_verb_token(first_word);
+    if base == first_word {
+        return false; // normalize_verb_token didn't change it — not a conjugated verb
+    }
+    // Reconstruct with the base form and check again.
+    let rest = &lower[first_word.len()..];
+    let deconjugated = format!("{base}{rest}");
+    starts_clause_text_lower(&deconjugated)
+}
+
 /// Inner implementation operating on pre-lowercased input.
 fn starts_clause_text_lower(s: &str) -> bool {
     // Table-driven prefix check via nom tag() — try all imperative verbs and
@@ -283,10 +323,19 @@ fn starts_clause_text_lower(s: &str) -> bool {
     )))
     .or(alt((
         value((), tag("target ")),
+        value((), tag("transform ")),
         value((), tag("untap ")),
         value((), tag("you may ")),
         value((), tag("you ")),
         value((), tag("it ")),
+        value((), tag("copy ")),
+        value((), tag("double ")),
+        value((), tag("goad ")),
+        value((), tag("manifest ")),
+        value((), tag("populate")),
+        value((), tag("remove ")),
+        value((), tag("seek ")),
+        value((), tag("connive")),
     )))
     .parse(s)
     .is_ok()
@@ -1249,6 +1298,38 @@ mod tests {
                 verb,
             );
         }
+    }
+
+    #[test]
+    fn conjugated_verb_splits_after_then() {
+        // CR 608.2c: Third-person verb forms after ", then" must split.
+        // "Each player discards their hand, then draws seven cards."
+        let chunks = clause_texts("discards their hand, then draws seven cards");
+        assert_eq!(chunks, vec!["discards their hand", "draws seven cards"]);
+    }
+
+    #[test]
+    fn conjugated_verb_puts_splits_after_then() {
+        // "then puts that card on the bottom" should split
+        let chunks = clause_texts("reveals the top card, then puts that card on the bottom");
+        assert_eq!(
+            chunks,
+            vec!["reveals the top card", "puts that card on the bottom"]
+        );
+    }
+
+    #[test]
+    fn conjugated_verb_sacrifices_splits_after_then() {
+        let chunks = clause_texts("creates a token, then sacrifices a creature");
+        assert_eq!(chunks, vec!["creates a token", "sacrifices a creature"]);
+    }
+
+    #[test]
+    fn possessive_its_does_not_trigger_deconjugation() {
+        // "its controller" must NOT be deconjugated — "its" is a possessive pronoun.
+        assert!(!starts_clause_text_or_conjugated(
+            "its controller gains life"
+        ));
     }
 
     #[test]

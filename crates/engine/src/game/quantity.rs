@@ -479,6 +479,12 @@ fn resolve_ref(
             .iter()
             .filter(|r| r.from_zone == Zone::Battlefield && r.controller == controller)
             .count() as i32,
+        // CR 400.7: Count of nonland permanents (any controller) that left the battlefield this turn.
+        QuantityRef::NonlandPermanentsLeftBattlefieldThisTurn => state
+            .zone_changes_this_turn
+            .iter()
+            .filter(|r| r.from_zone == Zone::Battlefield && !r.core_types.contains(&CoreType::Land))
+            .count() as i32,
         // CR 500: Cumulative turns taken by this player.
         QuantityRef::TurnsTaken => player.map_or(0, |p| p.turns_taken as i32),
         // Chosen number stored on the source object via ChosenAttribute::Number.

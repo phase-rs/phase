@@ -665,6 +665,23 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
         });
     }
 
+    // CR 608.2c: Deconjugate bare third-person verbs that appear after ", then" splits
+    // where the subject carried over from the previous clause.
+    // E.g., "draws seven cards" → "draw seven cards" (from "Each player discards
+    // their hand, then draws seven cards.").
+    // Only fires when the first word is a conjugated verb form that, after
+    // deconjugation, matches a recognized imperative clause start — this avoids
+    // false positives on noun phrases or subject-prefixed text.
+    let deconjugated_storage;
+    let text = if !sequence::starts_clause_text(text)
+        && sequence::starts_clause_text_or_conjugated(text)
+    {
+        deconjugated_storage = subject::deconjugate_verb(text);
+        &deconjugated_storage
+    } else {
+        text
+    };
+
     // Single lowercase pass for all case-insensitive matching within this clause.
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
@@ -6455,6 +6472,51 @@ mod tests {
             AbilityKind::Spell,
         );
         assert!(def.sub_ability.is_some());
+    }
+
+    #[test]
+    fn effect_chain_then_conjugated_draws() {
+        // CR 608.2c: "Each player discards their hand, then draws seven cards."
+        // The clause splitter must recognize "draws" as a conjugated verb form,
+        // and the effect parser must deconjugate it to produce a Draw effect.
+        let def = parse_effect_chain(
+            "Each player discards their hand, then draws seven cards.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*def.effect, Effect::Discard { .. }),
+            "primary effect should be Discard, got {:?}",
+            def.effect
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("should have sub_ability for Draw after ', then draws'");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 7 }
+                }
+            ),
+            "sub_ability should be Draw(7), got {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
+    fn effect_chain_then_conjugated_sacrifices() {
+        // "then sacrifices the rest" — conjugated verb after ", then"
+        let def = parse_effect_chain(
+            "chooses an artifact, then sacrifices the rest",
+            AbilityKind::Spell,
+        );
+        // The first part may parse as Unimplemented (complex choice), but the chain
+        // should exist and the sub should attempt to parse "sacrifice the rest".
+        assert!(
+            def.sub_ability.is_some(),
+            "should have sub_ability after ', then sacrifices'"
+        );
     }
 
     #[test]

@@ -272,7 +272,7 @@ pub(crate) fn lower_oracle_block(
     result: &mut super::oracle::ParsedAbilities,
 ) {
     use super::oracle_cost::parse_oracle_cost;
-    use super::oracle_trigger::parse_trigger_line;
+    use super::oracle_trigger::parse_trigger_lines;
 
     match block {
         OracleBlockAst::ActivatedModal {
@@ -295,13 +295,12 @@ pub(crate) fn lower_oracle_block(
             header,
             modes,
         } => {
-            let mut trigger = parse_trigger_line(&trigger_line, card_name);
-            trigger.execute = Some(Box::new(build_modal_ability(
-                AbilityKind::Spell,
-                &header,
-                &modes,
-            )));
-            result.triggers.push(trigger);
+            let mut triggers = parse_trigger_lines(&trigger_line, card_name);
+            let modal_execute = Box::new(build_modal_ability(AbilityKind::Spell, &header, &modes));
+            for trigger in &mut triggers {
+                trigger.execute = Some(modal_execute.clone());
+            }
+            result.triggers.extend(triggers);
         }
     }
 }

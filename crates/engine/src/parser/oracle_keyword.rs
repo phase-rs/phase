@@ -617,6 +617,17 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Casualty(n) => format!("casualty {n}"),
         Keyword::Entwine(_) => "entwine".to_string(),
         Keyword::Affinity(_) => "affinity".to_string(),
+        Keyword::Splice(_) => "splice".to_string(),
+        Keyword::Bargain => "bargain".to_string(),
+        Keyword::Sunburst => "sunburst".to_string(),
+        Keyword::Champion(_) => "champion".to_string(),
+        Keyword::Training => "training".to_string(),
+        Keyword::Assist => "assist".to_string(),
+        Keyword::JumpStart => "jump-start".to_string(),
+        Keyword::Cipher => "cipher".to_string(),
+        Keyword::Transmute(_) => "transmute".to_string(),
+        Keyword::Cleave(_) => "cleave".to_string(),
+        Keyword::Undaunted => "undaunted".to_string(),
         Keyword::Unknown(s) => s.to_lowercase(),
     }
 }
@@ -1050,6 +1061,66 @@ mod tests {
                 ManaColor::Green
             )))
         );
+    }
+
+    #[test]
+    fn extract_keyword_line_transmute() {
+        // CR 702.52a: Transmute {cost} — single-keyword line with parameterized cost
+        let mtgjson_kws = vec!["transmute".to_string()];
+
+        // Verify parse_keyword_from_oracle works directly
+        let direct = parse_keyword_from_oracle("transmute {1}{b}{b}");
+        assert!(
+            direct.is_some(),
+            "parse_keyword_from_oracle should handle 'transmute {{1}}{{b}}{{b}}'"
+        );
+        assert!(matches!(direct.unwrap(), Keyword::Transmute(_)));
+
+        let result = extract_keyword_line("Transmute {1}{B}{B}", &mtgjson_kws);
+        assert!(result.is_some(), "Should recognize as keyword line");
+        let keywords = result.unwrap();
+        assert_eq!(keywords.len(), 1);
+        assert!(matches!(keywords[0], Keyword::Transmute(_)));
+    }
+
+    #[test]
+    fn extract_keyword_line_splice() {
+        // CR 702.47a: Splice onto [type] {cost}
+        let mtgjson_kws = vec!["splice".to_string()];
+        let result = extract_keyword_line("Splice onto Arcane {1}{W}", &mtgjson_kws);
+        assert!(result.is_some(), "Should recognize as keyword line");
+        let keywords = result.unwrap();
+        assert_eq!(keywords.len(), 1);
+        assert!(matches!(keywords[0], Keyword::Splice(_)));
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_landwalk_variants() {
+        // CR 702.14: Landwalk variants from Oracle text
+        let kw = parse_keyword_from_oracle("swampwalk").unwrap();
+        assert_eq!(kw, Keyword::Landwalk("Swamp".to_string()));
+
+        let kw = parse_keyword_from_oracle("islandwalk").unwrap();
+        assert_eq!(kw, Keyword::Landwalk("Island".to_string()));
+
+        let kw = parse_keyword_from_oracle("forestwalk").unwrap();
+        assert_eq!(kw, Keyword::Landwalk("Forest".to_string()));
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_unit_keywords() {
+        // Unit keywords that should be recognized
+        let kw = parse_keyword_from_oracle("bargain").unwrap();
+        assert_eq!(kw, Keyword::Bargain);
+
+        let kw = parse_keyword_from_oracle("training").unwrap();
+        assert_eq!(kw, Keyword::Training);
+
+        let kw = parse_keyword_from_oracle("jump-start").unwrap();
+        assert_eq!(kw, Keyword::JumpStart);
+
+        let kw = parse_keyword_from_oracle("undaunted").unwrap();
+        assert_eq!(kw, Keyword::Undaunted);
     }
 
     #[test]
