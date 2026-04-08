@@ -47,6 +47,9 @@ jobs:
           cp client/public/card-data.json data/card-data.json
           cargo run --release --bin coverage-report -- data/ --all > client/public/coverage-data.json
 
+      - name: Generate Scryfall data
+        run: ./scripts/gen-scryfall-images.sh
+
       - name: Build WASM
         run: ./scripts/build-wasm.sh release
 
@@ -55,6 +58,7 @@ jobs:
           CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/card-data.json"
           COVERAGE_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/coverage-data.json"
           COVERAGE_SUMMARY_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/coverage-summary.json"
+          SCRYFALL_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/scryfall-data.json"
           AUDIO_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/audio"
         run: |
           cd client
@@ -81,8 +85,14 @@ jobs:
           preCommands: |
             jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' client/public/coverage-data.json > client/public/coverage-summary.json
           command: r2 object put phase-rs-data/coverage-summary.json --file client/public/coverage-summary.json --content-type application/json
+      - name: Upload Scryfall data to R2
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: r2 object put phase-rs-data/scryfall-data.json --file client/public/scryfall-data.json --content-type application/json
       - name: Remove large data files from dist (served from R2)
-        run: rm -f client/dist/card-data.json client/dist/coverage-data.json client/dist/coverage-summary.json
+        run: rm -f client/dist/card-data.json client/dist/coverage-data.json client/dist/coverage-summary.json client/dist/scryfall-data.json
 
       - name: Upload frontend artifact
         uses: actions/upload-artifact@v4

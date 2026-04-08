@@ -60,6 +60,9 @@ jobs:
           curl -fSL -o client/public/coverage-summary.json "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/preview/coverage-summary.json"
           cp client/public/card-data.json data/card-data.json
 
+      - name: Generate Scryfall data
+        run: ./scripts/gen-scryfall-images.sh
+
       - name: Update README badges
         run: |
           cargo run --release --bin coverage-report -- data/ --write-stats data/coverage-stats.json > /dev/null
@@ -95,6 +98,12 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: r2 object put phase-rs-data/staging/coverage-summary.json --file client/public/coverage-summary.json --content-type application/json
+      - name: Upload Scryfall data to R2 (staging)
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: r2 object put phase-rs-data/staging/scryfall-data.json --file client/public/scryfall-data.json --content-type application/json
       - name: Build WASM
         run: ./scripts/build-wasm.sh release
 
@@ -103,6 +112,7 @@ jobs:
           CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/card-data.json"
           COVERAGE_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/coverage-data.json"
           COVERAGE_SUMMARY_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/coverage-summary.json"
+          SCRYFALL_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/scryfall-data.json"
           AUDIO_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/audio"
         run: |
           cd client
@@ -110,7 +120,7 @@ jobs:
           pnpm build
 
       - name: Remove large data files from dist (served from R2)
-        run: rm -f client/dist/card-data.json client/dist/card-data.json.br client/dist/coverage-data.json client/dist/coverage-data.json.br client/dist/coverage-summary.json client/dist/coverage-summary.json.br
+        run: rm -f client/dist/card-data.json client/dist/card-data.json.br client/dist/coverage-data.json client/dist/coverage-data.json.br client/dist/coverage-summary.json client/dist/coverage-summary.json.br client/dist/scryfall-data.json client/dist/scryfall-data.json.br
 
       - name: SPA fallback for GitHub Pages
         run: cp client/dist/index.html client/dist/404.html

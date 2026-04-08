@@ -16,7 +16,7 @@ let scryfallQueue: Promise<void> = Promise.resolve();
 
 function loadScryfallData(): Promise<ScryfallDataMap | null> {
   if (!scryfallDataPromise) {
-    scryfallDataPromise = fetch("/scryfall-data.json")
+    scryfallDataPromise = fetch(__SCRYFALL_DATA_URL__)
       .then((r) => r.json() as Promise<ScryfallDataMap>)
       .catch(() => null);
   }

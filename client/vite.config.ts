@@ -113,6 +113,9 @@ export default defineConfig({
     __AUDIO_BASE_URL__: JSON.stringify(
       process.env.AUDIO_BASE_URL || "",
     ),
+    __SCRYFALL_DATA_URL__: JSON.stringify(
+      process.env.SCRYFALL_DATA_URL || "/scryfall-data.json",
+    ),
     __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
   },
   worker: {
