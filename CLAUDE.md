@@ -327,6 +327,7 @@ If you cannot find the rule number in `docs/MagicCompRules.txt`, do NOT write th
 Use `cargo-release` via the workspace alias — **never tag manually with `git tag`**.
 
 ```bash
+git pull --rebase origin main         # Rebase onto latest (avoids push rejection from automated PRs)
 cargo release-local 0.1.3             # Bump all versions, commit, and tag locally
 git push origin main --follow-tags    # Push the release commit + tag
 ```
@@ -336,7 +337,7 @@ git push origin main --follow-tags    # Push the release commit + tag
 - `client/package.json`, `client/src-tauri/Cargo.toml`, `client/src-tauri/tauri.conf.json` via `pre-release-replacements`
 - Creating a `release: v{version}` commit and `v{version}` tag
 
-The `--no-push` flag is intentional — always review the commit before pushing.
+**Important:** Always `git pull --rebase` before `cargo release-local`. Automated coverage PRs merge frequently, causing push rejections if your local main is behind. Rebasing after the tag is created requires force-pushing the tag, which is messy — rebase first to avoid this.
 
 ## CI
 

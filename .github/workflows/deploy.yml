@@ -69,6 +69,16 @@ jobs:
           ./scripts/update-badges.sh data/coverage-stats.json
 
       - name: Create PR for updated stats and badges
+        if: ${{ hashFiles('data/coverage-stats.json') != '' }}
+        run: |
+          if git diff --quiet data/coverage-stats.json README.md; then
+            echo "Coverage stats unchanged — skipping PR."
+          else
+            echo "STATS_CHANGED=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Submit coverage PR
+        if: env.STATS_CHANGED == 'true'
         uses: ./.github/actions/create-auto-merge-pr
         with:
           token: ${{ secrets.CI_PAT }}
