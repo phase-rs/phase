@@ -8,8 +8,8 @@
     },
     "commander": {
       "pct": 84,
-      "supported": 26475,
-      "total": 31379
+      "supported": 26473,
+      "total": 31377
     },
     "historic": {
       "pct": 85,
@@ -18,18 +18,18 @@
     },
     "legacy": {
       "pct": 85,
-      "supported": 26432,
-      "total": 31225
+      "supported": 26430,
+      "total": 31223
     },
     "modern": {
       "pct": 87,
-      "supported": 19540,
-      "total": 22395
+      "supported": 19539,
+      "total": 22394
     },
     "pauper": {
       "pct": 93,
-      "supported": 9879,
-      "total": 10608
+      "supported": 9878,
+      "total": 10607
     },
     "pioneer": {
       "pct": 88,
@@ -48,8 +48,8 @@
     },
     "vintage": {
       "pct": 85,
-      "supported": 26443,
-      "total": 31241
+      "supported": 26441,
+      "total": 31239
     }
   },
   "keyword_count": 168,
