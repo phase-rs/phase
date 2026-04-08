@@ -24,13 +24,8 @@ function loadScryfallData(): Promise<ScryfallDataMap | null> {
 }
 
 const SCRYFALL_DELAY_MS = 100;
-const NOT_FOUND_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 1000;
-
-/** Cards that returned 404 from both exact and fuzzy lookup. */
-const notFoundCache = new Map<string, number>();
-const cardDataCache = new Map<string, Promise<ScryfallCard>>();
 
 export type ImageSize = "small" | "normal" | "large" | "art_crop";
 
@@ -117,12 +112,15 @@ async function rateLimitedFetch(
 
       try {
         const response = await fetch(url);
-        if (response.status === 429 && attempt < MAX_RETRIES) {
+        if (response.status === 429) {
           const backoffMs = parseRetryDelayMs(
             response.headers.get("Retry-After"),
             attempt,
           );
           nextRequestAt = Date.now() + backoffMs;
+          if (attempt >= MAX_RETRIES) {
+            return response;
+          }
           attempt += 1;
           continue;
         }
@@ -130,11 +128,13 @@ async function rateLimitedFetch(
         nextRequestAt = Date.now() + SCRYFALL_DELAY_MS;
         return response;
       } catch (error) {
+        // Network errors (including CORS-blocked 429s) — apply backoff
+        // before both retries AND final throw so the next queued request
+        // doesn't fire immediately into another rate limit.
+        nextRequestAt = Date.now() + BASE_BACKOFF_MS * 2 ** attempt;
         if (attempt >= MAX_RETRIES) {
           throw error;
         }
-
-        nextRequestAt = Date.now() + BASE_BACKOFF_MS * 2 ** attempt;
         attempt += 1;
       }
     }
@@ -143,65 +143,40 @@ async function rateLimitedFetch(
   }
 }
 
-/** Strip set code brackets (e.g. "Goblin Lackey [UZ]" → "Goblin Lackey"). */
+/**
+ * Strip deck-format decorators that are not part of the card's official name.
+ *
+ * Handles: set codes `[UZ]`, treatment tags `<retro>`, collector numbers
+ * `<288>`, and foil markers `(F)`.
+ *
+ * Examples:
+ *   "Goblin Lackey [UZ]"                      → "Goblin Lackey"
+ *   "Abrade <retro>"                           → "Abrade"
+ *   "Krenko, Mob Boss <retro> [RVR] (F)"       → "Krenko, Mob Boss"
+ *   "Mountain <288>"                            → "Mountain"
+ */
 export function normalizeCardName(name: string): string {
-  return name.replace(/\s*\[[^\]]*\]\s*$/, "").trim();
+  return name
+    .replace(/\s*(?:<[^>]*>|\[[^\]]*\]|\(F\))\s*/g, " ")
+    .trim();
 }
 
 export async function fetchCardData(cardName: string): Promise<ScryfallCard> {
   const name = normalizeCardName(cardName);
-
-  const cachedAt = notFoundCache.get(name);
-  if (cachedAt !== undefined && Date.now() - cachedAt < NOT_FOUND_TTL_MS) {
-    throw new Error(`Card not found (cached): "${name}"`);
+  const localMap = await loadScryfallData();
+  const entry = localMap?.[name.toLowerCase()];
+  if (!entry) {
+    throw new Error(`Card not in local data: "${name}"`);
   }
-
-  const cachedCard = cardDataCache.get(name);
-  if (cachedCard) {
-    return cachedCard;
-  }
-
-  const cardPromise = (async () => {
-    // Check local bulk data first — avoids API round-trips for ~99% of cards.
-    const localMap = await loadScryfallData();
-    const entry = localMap?.[name.toLowerCase()];
-    if (entry) {
-      return {
-        name: entry.name,
-        mana_cost: entry.mana_cost,
-        cmc: entry.cmc,
-        type_line: entry.type_line,
-        colors: entry.colors,
-        color_identity: entry.color_identity,
-        keywords: entry.keywords,
-      };
-    }
-
-    // Fall back to Scryfall API for cards not in bulk data (very new cards).
-    const exactUrl = `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(name)}`;
-    const exactResponse = await rateLimitedFetch(exactUrl);
-    if (exactResponse.ok) {
-      return exactResponse.json() as Promise<ScryfallCard>;
-    }
-
-    if (exactResponse.status !== 404) {
-      throw new Error(`Scryfall API error: ${exactResponse.status} for "${name}"`);
-    }
-
-    const fuzzyUrl = `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(name)}`;
-    const fuzzyResponse = await rateLimitedFetch(fuzzyUrl);
-    if (!fuzzyResponse.ok) {
-      notFoundCache.set(name, Date.now());
-      throw new Error(`Scryfall API error: ${fuzzyResponse.status} for "${name}"`);
-    }
-    return fuzzyResponse.json() as Promise<ScryfallCard>;
-  })().catch((error) => {
-    cardDataCache.delete(name);
-    throw error;
-  });
-
-  cardDataCache.set(name, cardPromise);
-  return cardPromise;
+  return {
+    name: entry.name,
+    mana_cost: entry.mana_cost,
+    cmc: entry.cmc,
+    type_line: entry.type_line,
+    colors: entry.colors,
+    color_identity: entry.color_identity,
+    keywords: entry.keywords,
+  };
 }
 
 function getImageUrl(
@@ -223,20 +198,18 @@ export async function fetchCardImageUrl(
   faceIndex: number,
   size: ImageSize = "normal",
 ): Promise<string> {
-  // Local data covers normal and art_crop — skip API round-trip for these.
-  if (size === "normal" || size === "art_crop") {
-    const data = await loadScryfallData();
-    const name = normalizeCardName(cardName).toLowerCase();
-    const entry = data?.[name];
-    if (entry) {
-      const face = entry.faces[faceIndex] ?? entry.faces[0];
-      const url = face?.[size];
-      if (url) return url;
-    }
+  const data = await loadScryfallData();
+  const name = normalizeCardName(cardName).toLowerCase();
+  const entry = data?.[name];
+  if (!entry) {
+    throw new Error(`Card image not in local data: "${name}"`);
   }
-  // Fall back to Scryfall API for cache misses or other sizes (small, large).
-  const card = await fetchCardData(cardName);
-  return getImageUrl(card, size, faceIndex);
+  const face = entry.faces[faceIndex] ?? entry.faces[0];
+  const url = face?.[size === "small" || size === "large" ? "normal" : size];
+  if (!url) {
+    throw new Error(`No ${size} image for "${name}"`);
+  }
+  return url;
 }
 
 const MANA_COLOR_TO_SCRYFALL: Record<string, string> = {

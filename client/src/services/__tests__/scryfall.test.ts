@@ -1,27 +1,32 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-function makeCardResponse(name: string): Response {
-  return new Response(
-    JSON.stringify({
-      id: `${name}-id`,
-      name,
-      mana_cost: "{1}",
-      cmc: 1,
-      type_line: "Instant",
+function makeLocalDataMap(
+  cards: Record<string, { name: string; mana_cost?: string; cmc?: number; type_line?: string }>,
+): Response {
+  const map: Record<string, unknown> = {};
+  for (const [key, card] of Object.entries(cards)) {
+    map[key.toLowerCase()] = {
+      name: card.name,
+      mana_cost: card.mana_cost ?? "{1}",
+      cmc: card.cmc ?? 1,
+      type_line: card.type_line ?? "Instant",
+      colors: [],
       color_identity: [],
-      legalities: {},
-      image_uris: {
-        normal: `https://img.example/${encodeURIComponent(name)}.jpg`,
-      },
-    }),
-    {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    },
-  );
+      keywords: [],
+      faces: [
+        {
+          normal: `https://img.example/${encodeURIComponent(card.name)}.jpg`,
+          art_crop: `https://img.example/${encodeURIComponent(card.name)}-art.jpg`,
+        },
+      ],
+    };
+  }
+  return new Response(JSON.stringify(map), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
-/** Response for /scryfall-data.json — empty map so tests exercise the API path. */
 function makeEmptyCardDataMap(): Response {
   return new Response(JSON.stringify({}), {
     status: 200,
@@ -34,7 +39,136 @@ async function loadScryfallModule() {
   return import("../scryfall.ts");
 }
 
-describe("scryfall service", () => {
+describe("normalizeCardName", () => {
+  it("strips set code brackets", async () => {
+    const { normalizeCardName } = await loadScryfallModule();
+    expect(normalizeCardName("Goblin Lackey [UZ]")).toBe("Goblin Lackey");
+  });
+
+  it("strips angle-bracket treatment tags", async () => {
+    const { normalizeCardName } = await loadScryfallModule();
+    expect(normalizeCardName("Abrade <retro>")).toBe("Abrade");
+    expect(normalizeCardName("Kiki-Jiki, Mirror Breaker <timeshifted>")).toBe(
+      "Kiki-Jiki, Mirror Breaker",
+    );
+  });
+
+  it("strips collector numbers in angle brackets", async () => {
+    const { normalizeCardName } = await loadScryfallModule();
+    expect(normalizeCardName("Mountain <288>")).toBe("Mountain");
+  });
+
+  it("strips foil markers", async () => {
+    const { normalizeCardName } = await loadScryfallModule();
+    expect(normalizeCardName("Goblin Rabblemaster [PRM-BAB] (F)")).toBe(
+      "Goblin Rabblemaster",
+    );
+  });
+
+  it("strips combined decorators", async () => {
+    const { normalizeCardName } = await loadScryfallModule();
+    expect(
+      normalizeCardName("Krenko, Mob Boss <retro> [RVR] (F)"),
+    ).toBe("Krenko, Mob Boss");
+  });
+
+  it("leaves plain card names unchanged", async () => {
+    const { normalizeCardName } = await loadScryfallModule();
+    expect(normalizeCardName("Lightning Bolt")).toBe("Lightning Bolt");
+  });
+});
+
+describe("fetchCardData", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("returns card data from local JSON", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      makeLocalDataMap({
+        "lightning bolt": { name: "Lightning Bolt" },
+      }),
+    );
+
+    const { fetchCardData } = await loadScryfallModule();
+    const card = await fetchCardData("Lightning Bolt");
+
+    expect(card.name).toBe("Lightning Bolt");
+    // Only the local data fetch — no API calls
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws when card is not in local data (no API fallback)", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeEmptyCardDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    await expect(fetchCardData("Nonexistent Card")).rejects.toThrow(
+      /not in local data/,
+    );
+
+    // Only the local data fetch — no API calls
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("normalizes decorated names before local lookup", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      makeLocalDataMap({
+        abrade: { name: "Abrade" },
+      }),
+    );
+
+    const { fetchCardData } = await loadScryfallModule();
+    const card = await fetchCardData("Abrade <retro>");
+
+    expect(card.name).toBe("Abrade");
+  });
+});
+
+describe("fetchCardImageUrl", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("returns image URL from local data", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      makeLocalDataMap({
+        "lightning bolt": { name: "Lightning Bolt" },
+      }),
+    );
+
+    const { fetchCardImageUrl } = await loadScryfallModule();
+    const url = await fetchCardImageUrl("Lightning Bolt", 0, "normal");
+
+    expect(url).toBe("https://img.example/Lightning%20Bolt.jpg");
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws when card image is not in local data (no API fallback)", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeEmptyCardDataMap());
+
+    const { fetchCardImageUrl } = await loadScryfallModule();
+    await expect(
+      fetchCardImageUrl("Nonexistent Card", 0, "normal"),
+    ).rejects.toThrow(/not in local data/);
+
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("normalizes decorated names for image lookup", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      makeLocalDataMap({
+        mountain: { name: "Mountain" },
+      }),
+    );
+
+    const { fetchCardImageUrl } = await loadScryfallModule();
+    const url = await fetchCardImageUrl("Mountain <288>", 0, "art_crop");
+
+    expect(url).toBe("https://img.example/Mountain-art.jpg");
+  });
+});
+
+describe("rateLimitedFetch (token/search API)", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
@@ -43,88 +177,33 @@ describe("scryfall service", () => {
     vi.useRealTimers();
   });
 
-  it("deduplicates concurrent card lookups for the same name", async () => {
-    global.fetch = vi
-      .fn()
-      .mockResolvedValueOnce(makeEmptyCardDataMap())
-      .mockResolvedValue(makeCardResponse("Lightning Bolt"));
+  it("retries on network error with backoff", async () => {
+    vi.useFakeTimers();
 
-    const { fetchCardData } = await loadScryfallModule();
-    const [first, second] = await Promise.all([
-      fetchCardData("Lightning Bolt"),
-      fetchCardData("Lightning Bolt"),
-    ]);
-
-    expect(first.name).toBe("Lightning Bolt");
-    expect(second.name).toBe("Lightning Bolt");
-    // 1 for local card data map + 1 for API lookup (deduplicated)
-    expect(global.fetch).toHaveBeenCalledTimes(2);
-    expect(global.fetch).toHaveBeenCalledWith(
-      "https://api.scryfall.com/cards/named?exact=Lightning%20Bolt",
+    const tokenResponse = new Response(
+      JSON.stringify({
+        data: [{
+          name: "Goblin Token",
+          image_uris: { normal: "https://img.example/goblin.jpg" },
+        }],
+        total_cards: 1,
+        has_more: false,
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
     );
-  });
 
-  it("retries when fetch is rejected before the browser exposes the status code", async () => {
-    vi.useFakeTimers();
     global.fetch = vi
       .fn()
-      .mockResolvedValueOnce(makeEmptyCardDataMap())
       .mockRejectedValueOnce(new TypeError("Failed to fetch"))
-      .mockResolvedValueOnce(makeCardResponse("Counterspell"));
+      .mockResolvedValueOnce(tokenResponse);
 
-    const { fetchCardData } = await loadScryfallModule();
-    const pending = fetchCardData("Counterspell");
+    const { fetchTokenImageUrl } = await loadScryfallModule();
+    const pending = fetchTokenImageUrl("Goblin", "normal");
 
-    await vi.advanceTimersByTimeAsync(1000);
-    const card = await pending;
+    await vi.advanceTimersByTimeAsync(2000);
+    const url = await pending;
 
-    expect(card.name).toBe("Counterspell");
-    // 1 for local map + 1 rejected + 1 retry
-    expect(global.fetch).toHaveBeenCalledTimes(3);
-  });
-
-  it("serializes Scryfall requests so concurrent misses do not burst", async () => {
-    vi.useFakeTimers();
-
-    let inFlight = 0;
-    let maxInFlight = 0;
-    const resolvers: Array<(response: Response) => void> = [];
-    let callIndex = 0;
-
-    global.fetch = vi.fn(() => {
-      const idx = callIndex++;
-      // First call is for local card data map — resolve immediately
-      if (idx === 0) {
-        return Promise.resolve(makeEmptyCardDataMap());
-      }
-      inFlight += 1;
-      maxInFlight = Math.max(maxInFlight, inFlight);
-      return new Promise<Response>((resolve) => {
-        resolvers.push((response) => {
-          inFlight -= 1;
-          resolve(response);
-        });
-      });
-    });
-
-    const { fetchCardData } = await loadScryfallModule();
-    const first = fetchCardData("Lightning Bolt");
-    const second = fetchCardData("Counterspell");
-
-    await vi.advanceTimersByTimeAsync(0);
-    // Local map (resolved) + first API call
+    expect(url).toBe("https://img.example/goblin.jpg");
     expect(global.fetch).toHaveBeenCalledTimes(2);
-
-    resolvers.shift()!(makeCardResponse("Lightning Bolt"));
-    await vi.advanceTimersByTimeAsync(0);
-    expect(global.fetch).toHaveBeenCalledTimes(2);
-
-    await vi.advanceTimersByTimeAsync(100);
-    expect(global.fetch).toHaveBeenCalledTimes(3);
-
-    resolvers.shift()!(makeCardResponse("Counterspell"));
-    await Promise.all([first, second]);
-
-    expect(maxInFlight).toBe(1);
   });
 });
