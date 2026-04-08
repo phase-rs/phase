@@ -5,7 +5,7 @@ use crate::types::ability::{
 use super::oracle_keyword::parse_keyword_from_oracle;
 use super::oracle_nom::primitives as nom_primitives;
 
-/// CR 710: Parse LEVEL block lines from a leveler creature's Oracle text.
+/// CR 711: Parse LEVEL block lines from a leveler creature's Oracle text.
 ///
 /// Level-up creature Oracle text contains blocks like:
 /// ```text
@@ -271,5 +271,55 @@ mod tests {
 
         // All 3 lines consumed
         assert_eq!(consumed.len(), 3);
+    }
+
+    #[test]
+    fn parse_level_block_with_activated_ability() {
+        let lines = vec![
+            "LEVEL 1-2",
+            "2/3",
+            "{T}: This creature deals 1 damage to any target.",
+            "LEVEL 3+",
+            "2/4",
+            "{T}: This creature deals 3 damage to any target.",
+        ];
+        let (statics, consumed, ability_lines) = parse_level_blocks(&lines);
+
+        // Two P/T statics
+        assert_eq!(statics.len(), 2);
+
+        // Two activated ability lines captured with level conditions
+        assert_eq!(ability_lines.len(), 2);
+
+        // First: bounded range 1-2
+        assert_eq!(
+            ability_lines[0].0,
+            "{T}: This creature deals 1 damage to any target."
+        );
+        assert!(matches!(
+            ability_lines[0].1,
+            StaticCondition::HasCounters {
+                minimum: 1,
+                maximum: Some(2),
+                ..
+            }
+        ));
+
+        // Second: unbounded 3+
+        assert_eq!(
+            ability_lines[1].0,
+            "{T}: This creature deals 3 damage to any target."
+        );
+        assert!(matches!(
+            ability_lines[1].1,
+            StaticCondition::HasCounters {
+                minimum: 3,
+                maximum: None,
+                ..
+            }
+        ));
+
+        // All 6 lines consumed
+        assert_eq!(consumed.len(), 6);
     }
 }

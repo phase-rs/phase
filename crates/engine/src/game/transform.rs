@@ -6,7 +6,7 @@ use crate::types::zones::Zone;
 use super::engine::EngineError;
 use super::printed_cards::{apply_back_face_to_object, snapshot_object_face};
 
-/// CR 701.25a: Transform a double-faced permanent — turn it to its other face.
+/// CR 701.27a: Transform a double-faced permanent — turn it to its other face.
 ///
 /// Toggles `obj.transformed`, swaps current characteristics with back_face data,
 /// emits `GameEvent::Transformed`, and marks layers dirty.

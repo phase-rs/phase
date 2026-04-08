@@ -2010,7 +2010,7 @@ pub(super) fn parse_imperative_family_ast(
                 None
             }
         }
-        // CR 702.157a: "suspect it" / "suspect target creature"
+        // CR 701.60a: "suspect it" / "suspect target creature"
         "suspect" | "suspects" => {
             let rest = lower[first_word.len()..].trim();
             let target = if !rest.is_empty() {

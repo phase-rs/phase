@@ -2128,7 +2128,7 @@ mod tests {
 
     #[test]
     fn must_be_blocked_with_menace_needs_two() {
-        // CR 509.1c + CR 702.110b: MustBeBlocked + Menace still needs 2+ blockers.
+        // CR 509.1c + CR 702.111b: MustBeBlocked + Menace still needs 2+ blockers.
         let mut state = setup();
         let attacker = create_creature(&mut state, PlayerId(0), "Menace Lure", 3, 3);
         add_must_be_blocked(&mut state, attacker);

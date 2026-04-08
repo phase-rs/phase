@@ -560,7 +560,7 @@ fn matches_filter_prop(
                 _ => None,
             })
             .is_some_and(|chosen| obj.card_types.core_types.contains(chosen)),
-        // CR 702.157a: Match creatures with the suspected designation.
+        // CR 701.60b: Match creatures with the suspected designation.
         FilterProp::Suspected => obj.is_suspected,
         // CR 510.1c: Match creatures whose toughness exceeds their power.
         FilterProp::ToughnessGTPower => {

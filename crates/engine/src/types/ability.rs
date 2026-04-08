@@ -1425,7 +1425,7 @@ pub enum StaticCondition {
         condition: Box<StaticCondition>,
     },
     /// CR 122.1: True when the source object has at least `minimum` (and at most `maximum`,
-    /// if specified) counters of the given type. Used for level-up ranges (CR 710.3).
+    /// if specified) counters of the given type. Used for level-up ranges (CR 711.2a + CR 711.2b).
     HasCounters {
         counter_type: String,
         minimum: u32,
@@ -3614,6 +3614,13 @@ pub enum ActivationRestriction {
     ClassLevelIs {
         level: u8,
     },
+    /// CR 711.2a + CR 711.2b: Leveler counter range — ability can only be activated when
+    /// the source has at least `minimum` level counters and at most `maximum` (if specified).
+    LevelCounterRange {
+        minimum: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        maximum: Option<u32>,
+    },
 }
 
 /// Structured spell-casting restrictions parsed from Oracle text.
@@ -4117,7 +4124,7 @@ pub enum TriggerCondition {
     ControlsCommander,
     /// CR 702.112a: "if ~ is renowned" — true when the source has been made renowned.
     SourceIsRenowned,
-    /// CR 710: Level-up creature trigger gating — true when the source has at least
+    /// CR 711.2a + CR 711.2b: Level-up creature trigger gating — true when the source has at least
     /// `minimum` level counters (and at most `maximum` if specified).
     HasCounters {
         counter_type: String,

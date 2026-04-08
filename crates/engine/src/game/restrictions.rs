@@ -4,6 +4,7 @@ use crate::types::ability::{
     QuantityExpr, SpellCastingOptionKind,
 };
 use crate::types::card_type::{CoreType, Supertype};
+use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
@@ -338,6 +339,18 @@ fn activation_restriction_applies(
             .get(&source_id)
             .and_then(|obj| obj.class_level)
             .is_some_and(|current| current == *level),
+        // CR 711.2a + CR 711.2b: Leveler counter range — activatable when source has
+        // level counters in the specified range [minimum, maximum] (or >= minimum if unbounded).
+        ActivationRestriction::LevelCounterRange { minimum, maximum } => {
+            let level_counter = CounterType::Generic("level".to_string());
+            let count = state
+                .objects
+                .get(&source_id)
+                .and_then(|obj| obj.counters.get(&level_counter))
+                .copied()
+                .unwrap_or(0);
+            count >= *minimum && maximum.is_none_or(|max| count <= max)
+        }
     }
 }
 

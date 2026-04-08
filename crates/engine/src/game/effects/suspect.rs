@@ -6,8 +6,8 @@ use crate::types::game_state::GameState;
 use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
 
-/// CR 702.157a: Suspect target creature(s).
-/// A suspected creature has menace and "This creature can't block."
+/// CR 701.60a: Suspect target creature(s).
+/// A suspected creature has menace and "This creature can't block." (CR 701.60c)
 ///
 /// Option C architecture: the designation (`is_suspected`) is the source of truth,
 /// and the derived abilities (Menace, CantBlock) are written to `base_keywords` /
@@ -36,7 +36,7 @@ pub fn resolve(
         if let Some(obj) = state.objects.get_mut(&obj_id) {
             obj.is_suspected = true;
 
-            // CR 702.157a: Add menace to base_keywords (survives layer recalc).
+            // CR 701.60c: Add menace to base_keywords (survives layer recalc).
             if !obj
                 .base_keywords
                 .iter()
@@ -45,7 +45,7 @@ pub fn resolve(
                 obj.base_keywords.push(Keyword::Menace);
             }
 
-            // CR 702.157a: Add CantBlock to base_static_definitions (survives layer recalc).
+            // CR 701.60c: Add CantBlock to base_static_definitions (survives layer recalc).
             if !obj
                 .base_static_definitions
                 .iter()

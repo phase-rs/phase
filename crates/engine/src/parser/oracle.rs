@@ -335,25 +335,57 @@ pub fn parse_oracle_text(
         return parse_class_oracle_text(&lines, card_name, mtgjson_keyword_names, result);
     }
 
-    // CR 710: Pre-parse leveler LEVEL blocks into counter-gated static abilities.
+    // CR 711: Pre-parse leveler LEVEL blocks into counter-gated static abilities.
     let (level_statics, level_consumed, level_ability_lines) = parse_level_blocks(&lines);
     if !level_statics.is_empty() {
         result.statics.extend(level_statics);
     }
-    // CR 710: Re-parse ability lines found within LEVEL blocks through the normal
-    // trigger/static pipeline, then attach the level counter condition.
+    // CR 711.2a + CR 711.2b: Re-parse ability lines found within LEVEL blocks through
+    // the normal trigger/activated/static pipeline, then attach the level counter condition.
     for (ability_text, level_condition) in &level_ability_lines {
-        let trigger_condition = match level_condition {
+        let (minimum, maximum) = match level_condition {
             StaticCondition::HasCounters {
-                counter_type,
-                minimum,
-                maximum,
-            } => TriggerCondition::HasCounters {
-                counter_type: counter_type.clone(),
-                minimum: *minimum,
-                maximum: *maximum,
-            },
+                minimum, maximum, ..
+            } => (*minimum, *maximum),
             _ => continue,
+        };
+
+        // CR 711.2a + CR 711.2b: Activated abilities within LEVEL blocks get a LevelCounterRange restriction.
+        if let Some(colon_pos) = find_activated_colon(ability_text) {
+            let cost_text = ability_text[..colon_pos].trim();
+            let effect_text = ability_text[colon_pos + 1..].trim();
+            let (effect_text, constraints) = strip_activated_constraints(effect_text);
+            let normalized_cost_text = normalize_self_refs_for_static(cost_text, card_name);
+            let cost = parse_oracle_cost(&normalized_cost_text);
+
+            let mut def = parse_effect_chain(&effect_text, AbilityKind::Activated);
+            if has_unimplemented(&def) {
+                let normalized_effect = normalize_self_refs_for_static(&effect_text, card_name);
+                if normalized_effect != effect_text {
+                    let alt = parse_effect_chain(&normalized_effect, AbilityKind::Activated);
+                    if !has_unimplemented(&alt) {
+                        def = alt;
+                    }
+                }
+            }
+            def.cost = Some(cost);
+            def.description = Some(ability_text.to_string());
+            if constraints.sorcery_speed() {
+                def.sorcery_speed = true;
+            }
+            let mut restrictions = constraints.restrictions;
+            restrictions.push(ActivationRestriction::LevelCounterRange { minimum, maximum });
+            def.activation_restrictions = restrictions;
+            extract_cost_reduction_from_chain(&mut def);
+            result.abilities.push(def);
+            continue;
+        }
+
+        // CR 711.2a + CR 711.2b: Triggered abilities within LEVEL blocks get a HasCounters condition.
+        let trigger_condition = TriggerCondition::HasCounters {
+            counter_type: "level".to_string(),
+            minimum,
+            maximum,
         };
         let mut triggers = parse_trigger_lines(ability_text, card_name);
         for trigger in &mut triggers {
@@ -387,7 +419,7 @@ pub fn parse_oracle_text(
     let mut i = 0;
 
     while i < lines.len() {
-        // CR 710: Skip lines already consumed by the leveler pre-parser.
+        // CR 711: Skip lines already consumed by the leveler pre-parser.
         if level_consumed.contains(&i) {
             i += 1;
             continue;
@@ -5529,5 +5561,50 @@ mod tests {
         );
         assert_eq!(r.triggers.len(), 1);
         assert_eq!(r.triggers[0].mode, TriggerMode::Exerted);
+    }
+
+    // ── Leveler activated abilities (CR 711.2a + CR 711.2b) ──
+
+    #[test]
+    fn leveler_activated_abilities_get_level_counter_range() {
+        let r = parse(
+            "Level up {3}{R}\nLEVEL 1-2\n2/3\n{T}: This creature deals 1 damage to any target.\nLEVEL 3+\n2/4\n{T}: This creature deals 3 damage to any target.",
+            "Brimstone Mage",
+            &[Keyword::LevelUp(ManaCost::generic(0))],
+            &["Creature"],
+            &[],
+        );
+        // Two level-gated activated abilities
+        let level_gated: Vec<_> = r
+            .abilities
+            .iter()
+            .filter(|a| {
+                a.activation_restrictions
+                    .iter()
+                    .any(|ar| matches!(ar, ActivationRestriction::LevelCounterRange { .. }))
+            })
+            .collect();
+        assert_eq!(level_gated.len(), 2);
+
+        // First level-gated ability: LEVEL 1-2
+        assert_eq!(level_gated[0].kind, AbilityKind::Activated);
+        assert!(level_gated[0].activation_restrictions.contains(
+            &ActivationRestriction::LevelCounterRange {
+                minimum: 1,
+                maximum: Some(2),
+            }
+        ));
+
+        // Second level-gated ability: LEVEL 3+
+        assert_eq!(level_gated[1].kind, AbilityKind::Activated);
+        assert!(level_gated[1].activation_restrictions.contains(
+            &ActivationRestriction::LevelCounterRange {
+                minimum: 3,
+                maximum: None,
+            }
+        ));
+
+        // No spurious triggers
+        assert_eq!(r.triggers.len(), 0);
     }
 }
