@@ -8,8 +8,8 @@
     },
     "commander": {
       "pct": 84,
-      "supported": 26483,
-      "total": 31378
+      "supported": 26482,
+      "total": 31377
     },
     "historic": {
       "pct": 85,
@@ -18,18 +18,18 @@
     },
     "legacy": {
       "pct": 85,
-      "supported": 26440,
-      "total": 31224
+      "supported": 26439,
+      "total": 31223
     },
     "modern": {
       "pct": 87,
-      "supported": 19548,
-      "total": 22394
+      "supported": 19547,
+      "total": 22393
     },
     "pauper": {
       "pct": 93,
-      "supported": 9886,
-      "total": 10608
+      "supported": 9885,
+      "total": 10607
     },
     "pioneer": {
       "pct": 88,
@@ -48,11 +48,11 @@
     },
     "vintage": {
       "pct": 85,
-      "supported": 26451,
-      "total": 31240
+      "supported": 26450,
+      "total": 31239
     }
   },
   "keyword_count": 168,
-  "supported_cards": 27933,
-  "total_cards": 34472
+  "supported_cards": 27959,
+  "total_cards": 34502
 }

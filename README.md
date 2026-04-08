@@ -14,7 +14,7 @@
 <p align="center">
   <img alt="Card Coverage" src="https://img.shields.io/badge/card_coverage-81%25-green">
   <img alt="Keywords" src="https://img.shields.io/badge/keywords-168%2F168-brightgreen">
-  <img alt="Cards" src="https://img.shields.io/badge/cards-27933%2F34472-green">
+  <img alt="Cards" src="https://img.shields.io/badge/cards-27959%2F34502-green">
   <br/>
   <img alt="Pauper" src="https://img.shields.io/badge/Pauper-93%25-brightgreen">
   <img alt="Pioneer" src="https://img.shields.io/badge/Pioneer-88%25-green">
@@ -25,6 +25,7 @@
   <img alt="Commander" src="https://img.shields.io/badge/Commander-84%25-green">
 </p>
 <!-- coverage-badges:end -->
+
 
 
 
