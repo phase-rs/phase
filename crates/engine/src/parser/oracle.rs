@@ -336,7 +336,8 @@ pub fn parse_oracle_text(
     }
 
     // CR 711: Pre-parse leveler LEVEL blocks into counter-gated static abilities.
-    let (level_statics, level_consumed, level_ability_lines) = parse_level_blocks(&lines);
+    let (level_statics, level_consumed, level_ability_lines) =
+        parse_level_blocks(&lines, card_name);
     if !level_statics.is_empty() {
         result.statics.extend(level_statics);
     }
@@ -381,25 +382,8 @@ pub fn parse_oracle_text(
             continue;
         }
 
-        // CR 711.2a + CR 711.2b: Static abilities within LEVEL blocks get a HasCounters condition.
-        // Try statics before triggers because parse_trigger_lines produces Unknown fallbacks
-        // for unrecognized text, which would incorrectly consume static ability lines.
-        let static_text = normalize_self_refs_for_static(ability_text, card_name);
-        let multi = parse_static_line_multi(&static_text);
-        if !multi.is_empty() {
-            for mut sd in multi {
-                sd.condition = Some(level_condition.clone());
-                result.statics.push(sd);
-            }
-            continue;
-        }
-        if let Some(mut sd) = parse_static_line(&static_text) {
-            sd.condition = Some(level_condition.clone());
-            result.statics.push(sd);
-            continue;
-        }
-
         // CR 711.2a + CR 711.2b: Triggered abilities within LEVEL blocks get a HasCounters condition.
+        // (Static abilities are now parsed directly in oracle_level.rs with the level condition attached.)
         let trigger_condition = TriggerCondition::HasCounters {
             counter_type: "level".to_string(),
             minimum,

@@ -64,6 +64,26 @@ If parser changes were made, also run:
 cargo coverage
 ```
 
+### Nom Combinator Gate (parser files only)
+
+**After implementation, if ANY file under `crates/engine/src/parser/` was modified, run this check:**
+
+```bash
+git diff --name-only | grep 'crates/engine/src/parser/' | while read f; do
+  git diff "$f" | grep '^+' | grep -v '^+++' | grep -vE '^\+\s*//' | grep -E '\.(contains|starts_with|ends_with|find)\(' | grep -v '#\[test\]' | grep -v '#\[cfg(test)\]'
+done
+```
+
+If this produces ANY output, you have introduced string-matching dispatch in parser code. **This is a hard failure.** You must replace every flagged occurrence with nom combinators (`tag()`, `alt()`, `value()`, `preceded()`, etc.) or delegate to an existing building block (`parse_static_line`, `parse_keyword_from_oracle`, etc.) before proceeding.
+
+The ONLY exceptions are:
+- Test code (`#[cfg(test)]` modules)
+- Comments
+- Non-dispatch structural uses explicitly annotated with `// structural: not dispatch`
+- Code in `oracle_util.rs` using `TextPair::strip_prefix`/`strip_suffix` (these are dual-string operations, not parsing dispatch)
+
+If you find yourself needing a string heuristic to detect whether a line is "probably" a certain type, **try the actual parser instead**. For example, use `parse_static_line(text).is_some()` rather than `text.contains("gets ")`. The parser IS the detector.
+
 ---
 
 ## Phase 3 — Review

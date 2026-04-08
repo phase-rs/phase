@@ -20,9 +20,17 @@ Send your plan to an agent for architectural review. The reviewer MUST probe eac
 
 ## 5. Idiomatic Rust
 - Are there any `bool` fields that should be typed enums (`ControllerRef`, `Comparator`, `Option<T>`)?
-- Are there any string-matching patterns (`contains()`, `starts_with()`, `find()`) that should be nom combinators?
 - Are there any wildcard `_` match arms that should be exhaustive?
 - Does the plan use `strip_prefix` chaining over `format!()` + matching?
+
+## 5a. Nom Combinator Compliance (HARD GATE for parser files)
+If the plan modifies ANY file under `crates/engine/src/parser/`, this check is mandatory. **Reject** if any of the following are true:
+- The plan uses `contains()`, `starts_with()`, `ends_with()`, or `find()` for detection, dispatch, or classification of Oracle text lines or phrases.
+- The plan describes a "heuristic" to detect whether a line is "probably" a certain type (e.g., `text.contains("gets ")` to detect statics). The correct approach is to try the actual parser: `parse_static_line(text).is_some()`.
+- The plan introduces string-matching where a nom combinator (`tag()`, `alt()`, `preceded()`, `value()`) or existing building block would serve the same purpose.
+- The plan does not specify which nom combinators or existing parser functions will be used for each detection/dispatch step.
+
+The parser IS the detector. Never duplicate parser logic as a string heuristic.
 
 ## 6. CR Verification
 - Does every CR annotation reference a verified rule number? (Grepped against `docs/MagicCompRules.txt`?)

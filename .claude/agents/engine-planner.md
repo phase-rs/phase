@@ -57,6 +57,8 @@ Your plan MUST include these sections with substantive, specific answers — not
 
 **Rust Idioms:** What is the most idiomatic representation? Enum design, trait use, exhaustive match, existing type reuse. No bools — use typed enums. No string matching for parsing — use nom combinators.
 
+**Nom Compliance (parser files only):** If the plan touches ANY file under `crates/engine/src/parser/`, this section is mandatory. For every detection, dispatch, or classification operation in your plan, specify the exact nom combinator or existing parser function to use. If your plan describes detecting a line type with `contains()`, `starts_with()`, `find()`, or any string heuristic — **STOP and redesign.** The correct approach is either: (a) use nom combinators (`tag()`, `alt()`, `preceded()`, etc.), or (b) try the actual parser as the detector (e.g., `parse_static_line(text).is_some()` instead of `text.contains("gets ")`). The parser IS the detector — never duplicate its logic as a string heuristic.
+
 **Extension vs Creation:** Does this extend an existing pattern or create a new one? If creating a new pattern, justify why no existing pattern can be extended.
 
 **Analogous Trace:** Name the feature you traced and the full file path (e.g., "Traced `Scry` through `types/ability.rs` → `parser/oracle_effect/imperative.rs` → `game/effects/scry.rs` → `game/effects/mod.rs`").

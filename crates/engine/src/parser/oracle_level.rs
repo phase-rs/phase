@@ -1,10 +1,15 @@
+use nom::bytes::tag;
+use nom::Parser;
+
 use crate::types::ability::{
     ContinuousModification, StaticCondition, StaticDefinition, TargetFilter,
 };
 
+use super::oracle::find_activated_colon;
 use super::oracle_keyword::parse_keyword_from_oracle;
 use super::oracle_nom::primitives as nom_primitives;
-use super::oracle_static::parse_static_line;
+use super::oracle_special::normalize_self_refs_for_static;
+use super::oracle_static::{parse_static_line, parse_static_line_multi};
 
 /// CR 711: Parse LEVEL block lines from a leveler creature's Oracle text.
 ///
@@ -30,6 +35,7 @@ use super::oracle_static::parse_static_line;
 ///   by the main Oracle dispatcher as triggers, activated abilities, or statics.
 pub(crate) fn parse_level_blocks(
     lines: &[&str],
+    card_name: &str,
 ) -> (
     Vec<StaticDefinition>,
     Vec<usize>,
@@ -109,24 +115,42 @@ pub(crate) fn parse_level_blocks(
                     continue;
                 }
 
-                // B10: Ability lines (activated, triggered, or static) that appear within
-                // a LEVEL block should be gated by the same HasCounters condition.
-                // Mark the line as consumed and record it with its level condition
-                // for re-parsing by the main Oracle dispatcher.
-                // Detection: check structural markers for activated/triggered abilities,
-                // then fall back to trying parse_static_line for static abilities.
-                let looks_like_ability = next_lower.contains(": ")
-                    || next_lower.starts_with("when")
-                    || next_lower.starts_with("whenever")
-                    || next_lower.starts_with("at ")
-                    || next_lower.ends_with("be blocked")
-                    || next_lower.contains("can't ")
-                    || next_lower.contains("has ")
-                    || next_lower.contains("gets ")
-                    || next_lower.contains("get ")
-                    || next_lower.contains("have ")
-                    || parse_static_line(next).is_some();
-                if looks_like_ability {
+                // CR 711.2a + CR 711.2b: Static abilities within LEVEL blocks get a
+                // HasCounters condition. Parse them directly here so they get the level
+                // condition attached without a redundant re-parse round-trip through oracle.rs.
+                let static_text = normalize_self_refs_for_static(next, card_name);
+                let multi = parse_static_line_multi(&static_text);
+                if !multi.is_empty() {
+                    consumed_indices.push(i);
+                    for mut sd in multi {
+                        sd.condition = Some(condition.clone());
+                        statics.push(sd);
+                    }
+                    i += 1;
+                    continue;
+                }
+                if let Some(mut sd) = parse_static_line(&static_text) {
+                    consumed_indices.push(i);
+                    sd.condition = Some(condition.clone());
+                    statics.push(sd);
+                    i += 1;
+                    continue;
+                }
+
+                // Activated abilities: structural colon with cost-like prefix (mana symbols,
+                // "sacrifice", "tap", etc.). Uses find_activated_colon from oracle.rs.
+                // Triggered abilities: nom-based prefix detection for "when"/"whenever"/"at the beginning".
+                let is_activated = find_activated_colon(next).is_some();
+                let is_trigger = tag::<&str, &str, nom::error::Error<&str>>("when")
+                    .parse(next_lower.as_str())
+                    .is_ok()
+                    || tag::<&str, &str, nom::error::Error<&str>>("whenever")
+                        .parse(next_lower.as_str())
+                        .is_ok()
+                    || tag::<&str, &str, nom::error::Error<&str>>("at the beginning")
+                        .parse(next_lower.as_str())
+                        .is_ok();
+                if is_activated || is_trigger {
                     consumed_indices.push(i);
                     ability_lines.push((next.to_string(), condition.clone()));
                     i += 1;
@@ -218,7 +242,7 @@ mod tests {
             "LEVEL 8+",
             "8/8",
         ];
-        let (statics, consumed, _ability_lines) = parse_level_blocks(&lines);
+        let (statics, consumed, _ability_lines) = parse_level_blocks(&lines, "Test Card");
 
         // Should consume indices 1-5 (not index 0 which is "Level up {R}")
         assert!(!consumed.contains(&0));
@@ -254,7 +278,7 @@ mod tests {
             "6/6",
             "Whenever this creature attacks, it deals 6 damage to each creature defending player controls.",
         ];
-        let (statics, consumed, ability_lines) = parse_level_blocks(&lines);
+        let (statics, consumed, ability_lines) = parse_level_blocks(&lines, "Test Card");
 
         // P/T modifications parsed as static
         assert_eq!(statics.len(), 1);
@@ -289,7 +313,7 @@ mod tests {
             "2/4",
             "{T}: This creature deals 3 damage to any target.",
         ];
-        let (statics, consumed, ability_lines) = parse_level_blocks(&lines);
+        let (statics, consumed, ability_lines) = parse_level_blocks(&lines, "Test Card");
 
         // Two P/T statics
         assert_eq!(statics.len(), 2);
@@ -338,25 +362,23 @@ mod tests {
             "Flying",
             "Other Merfolk creatures you control get +1/+1.",
         ];
-        let (statics, consumed, ability_lines) = parse_level_blocks(&lines);
+        let (statics, consumed, ability_lines) = parse_level_blocks(&lines, "Coralhelm Commander");
 
-        // P/T + Flying parsed as static modifications
-        assert_eq!(statics.len(), 1);
-        assert_eq!(statics[0].modifications.len(), 3); // SetPower, SetToughness, AddKeyword
+        // Lord pump parsed directly as statics[0] (encountered first in inner loop),
+        // P/T + keyword block pushed as statics[1] (after inner loop completes).
+        assert_eq!(statics.len(), 2);
+        assert_eq!(statics[0].modifications.len(), 2); // AddPower, AddToughness (lord pump)
+        assert_eq!(statics[1].modifications.len(), 3); // SetPower, SetToughness, AddKeyword
 
-        // Lord static detected and captured as ability line for re-parsing
-        assert_eq!(ability_lines.len(), 1);
-        assert_eq!(
-            ability_lines[0].0,
-            "Other Merfolk creatures you control get +1/+1."
-        );
+        // Lord static parsed directly with level condition (not routed to ability_lines)
+        assert_eq!(ability_lines.len(), 0);
         assert!(matches!(
-            ability_lines[0].1,
-            StaticCondition::HasCounters {
+            statics[0].condition,
+            Some(StaticCondition::HasCounters {
                 minimum: 4,
                 maximum: None,
                 ..
-            }
+            })
         ));
 
         // All 4 lines consumed
