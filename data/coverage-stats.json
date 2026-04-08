@@ -3,8 +3,8 @@
   "formats": {
     "brawl": {
       "pct": 85,
-      "supported": 12960,
-      "total": 15211
+      "supported": 12961,
+      "total": 15212
     },
     "commander": {
       "pct": 84,
@@ -13,8 +13,8 @@
     },
     "historic": {
       "pct": 85,
-      "supported": 12922,
-      "total": 15167
+      "supported": 12923,
+      "total": 15168
     },
     "legacy": {
       "pct": 85,
@@ -23,8 +23,8 @@
     },
     "modern": {
       "pct": 87,
-      "supported": 19548,
-      "total": 22394
+      "supported": 19549,
+      "total": 22395
     },
     "pauper": {
       "pct": 93,
@@ -33,8 +33,8 @@
     },
     "pioneer": {
       "pct": 88,
-      "supported": 12866,
-      "total": 14668
+      "supported": 12867,
+      "total": 14669
     },
     "standard": {
       "pct": 87,
