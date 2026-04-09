@@ -135,6 +135,22 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             if let Some(obj) = state.objects.get_mut(&entry.id) {
                 obj.cast_from_zone = ability.context.cast_from_zone;
             }
+            // CR 614.1c: Apply pending ETB counters from delayed triggers
+            // (e.g., "that creature enters with an additional +1/+1 counter").
+            let pending: Vec<_> = state
+                .pending_etb_counters
+                .iter()
+                .filter(|(oid, _, _)| *oid == entry.id)
+                .map(|(_, ct, n)| (ct.clone(), *n))
+                .collect();
+            if !pending.is_empty() {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    super::engine_replacement::apply_etb_counters(obj, &pending, events);
+                }
+                state
+                    .pending_etb_counters
+                    .retain(|(oid, _, _)| *oid != entry.id);
+            }
         }
 
         // CR 715.3d: When an Adventure spell resolves to exile, restore the creature face

@@ -1406,6 +1406,11 @@ pub struct GameState {
     /// Consumed when the player casts their next qualifying spell.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_spell_cost_reductions: Vec<PendingSpellCostReduction>,
+    /// CR 614.1c: Pending ETB counters for objects that haven't entered yet.
+    /// Added by delayed triggers like "that creature enters with an additional +1/+1 counter".
+    /// Consumed when the object enters the battlefield. Each entry: (object_id, counter_type, count).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_etb_counters: Vec<(ObjectId, String, u32)>,
 
     /// Modal modes chosen this turn per source: (ObjectId, mode_index).
     /// CR 700.2: "choose one that hasn't been chosen this turn"
@@ -1674,6 +1679,7 @@ impl GameState {
             damage_dealt_this_turn: Vec::new(),
             mana_spent_on_spells_this_turn: HashMap::new(),
             pending_spell_cost_reductions: Vec::new(),
+            pending_etb_counters: Vec::new(),
             modal_modes_chosen_this_turn: HashSet::new(),
             modal_modes_chosen_this_game: HashSet::new(),
             revealed_cards: HashSet::new(),
@@ -1830,6 +1836,7 @@ impl PartialEq for GameState {
             && self.battlefield_entries_this_turn == other.battlefield_entries_this_turn
             && self.damage_dealt_this_turn == other.damage_dealt_this_turn
             && self.pending_spell_cost_reductions == other.pending_spell_cost_reductions
+            && self.pending_etb_counters == other.pending_etb_counters
             && self.modal_modes_chosen_this_turn == other.modal_modes_chosen_this_turn
             && self.modal_modes_chosen_this_game == other.modal_modes_chosen_this_game
             && self.pending_continuation == other.pending_continuation

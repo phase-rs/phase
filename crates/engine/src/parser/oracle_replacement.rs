@@ -830,10 +830,25 @@ fn parse_creature_die_exile_replacement(
     }
 
     // Parse the subject filter (e.g., "another creature", "a nontoken creature an opponent controls")
-    let (filter, _) = parse_type_phrase(subject_start);
+    // Also detect inline conditions like "dealt damage this turn by a source you controlled"
+    let (filter, subject_rest) = parse_type_phrase(subject_start);
     if matches!(&filter, TargetFilter::Any) {
         return None;
     }
+
+    // CR 120.1: Check for "dealt damage this turn by a source you controlled" condition.
+    let replacement_condition = if let Ok((_, _)) =
+        tag::<_, _, VerboseError<&str>>("dealt damage this turn by a source you controlled")
+            .parse(subject_rest.trim())
+    {
+        Some(
+            crate::types::ability::ReplacementCondition::DealtDamageThisTurnBySourceControlledBy {
+                controller: crate::types::ability::ControllerRef::You,
+            },
+        )
+    } else {
+        None
+    };
 
     // Extract the replacement effect after the comma.
     // "If [filter] would die, exile it instead." → effect is "exile it instead."
@@ -873,12 +888,14 @@ fn parse_creature_die_exile_replacement(
         parse_effect_chain(orig_effect, AbilityKind::Spell)
     };
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Destroy)
-            .execute(execute)
-            .valid_card(filter)
-            .description(original_text.to_string()),
-    )
+    let mut def = ReplacementDefinition::new(ReplacementEvent::Destroy)
+        .execute(execute)
+        .valid_card(filter)
+        .description(original_text.to_string());
+    if let Some(cond) = replacement_condition {
+        def = def.condition(cond);
+    }
+    Some(def)
 }
 
 /// Parse "If a card/token would be put into a graveyard, exile it instead."

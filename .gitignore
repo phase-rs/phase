@@ -62,3 +62,4 @@ Thumbs.db
 .deploy-cache
 17lands/
 replay_dtypes.py
+.codex/

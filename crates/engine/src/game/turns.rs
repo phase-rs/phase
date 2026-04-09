@@ -166,6 +166,8 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.mana_spent_on_spells_this_turn.clear();
     // CR 601.2f: Clear one-shot cost reductions from the previous turn.
     state.pending_spell_cost_reductions.clear();
+    // CR 614.1c: Pending ETB counters are turn-scoped (e.g., "this turn" effects).
+    state.pending_etb_counters.clear();
     state.modal_modes_chosen_this_turn.clear();
     for player in &mut state.players {
         player.has_drawn_this_turn = false;
@@ -382,10 +384,17 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
         }
     });
 
-    // CR 603.7c: Remove "until end of turn" delayed triggers (non-one-shot).
-    // One-shot triggers are removed when they fire; WheneverEvent triggers persist
-    // until cleanup and must be pruned here.
-    state.delayed_triggers.retain(|dt| dt.one_shot);
+    // CR 603.7b + CR 603.7c: Remove "this turn" delayed triggers at cleanup.
+    // WheneverEvent (multi-fire, one_shot=false) triggers persist until cleanup.
+    // WhenNextEvent (one-shot) triggers that didn't fire also expire — their
+    // "this turn" duration means they must not carry over to the next turn.
+    state.delayed_triggers.retain(|dt| {
+        dt.one_shot
+            && !matches!(
+                dt.condition,
+                crate::types::ability::DelayedTriggerCondition::WhenNextEvent { .. }
+            )
+    });
 
     // CR 730.2: Check day/night transition at cleanup.
     day_night::check_day_night_transition(state, events);

@@ -177,7 +177,7 @@ fn assert_assign_combat_damage_actions_respect_budget(state: &GameState) {
             } = action
             {
                 match mode {
-                    crate::types::game_state::CombatDamageAssignmentMode::Normal => {
+                    engine::types::game_state::CombatDamageAssignmentMode::Normal => {
                         let assigned_total: u32 =
                             assignments.iter().map(|(_, amount)| *amount).sum();
                         assert_eq!(
@@ -186,7 +186,7 @@ fn assert_assign_combat_damage_actions_respect_budget(state: &GameState) {
                             "combat damage assignments must spend the full damage budget"
                         );
                     }
-                    crate::types::game_state::CombatDamageAssignmentMode::AsThoughUnblocked => {
+                    engine::types::game_state::CombatDamageAssignmentMode::AsThoughUnblocked => {
                         assert!(
                             assignments.is_empty() && trample_damage == 0 && controller_damage == 0,
                             "as-though-unblocked combat damage should not use blocker/trample splits"

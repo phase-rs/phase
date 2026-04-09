@@ -732,6 +732,10 @@ pub enum DelayedTriggerCondition {
     /// TriggerDefinition. The embedded trigger's `execute` field should be `None` —
     /// the actual effect lives in `DelayedTrigger.ability`.
     WheneverEvent { trigger: Box<TriggerDefinition> },
+    /// CR 603.7: "When you next [event] this turn" — fires once on the next matching
+    /// event, then is removed. One-shot variant of `WheneverEvent`.
+    /// Uses existing trigger matching infrastructure to detect the event.
+    WhenNextEvent { trigger: Box<TriggerDefinition> },
 }
 
 /// Specifies variable-count targeting for "any number of" effects.
@@ -2539,6 +2543,14 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         spell_filter: Option<TargetFilter>,
     },
+    /// CR 614.1c: Register pending ETB counters for the triggering spell.
+    /// Reads `current_trigger_event` (SpellCast) to identify the object, then adds
+    /// counters to `pending_etb_counters` so they are applied when the object enters
+    /// the battlefield. Used by "that creature enters with an additional +1/+1 counter".
+    AddPendingETBCounters {
+        counter_type: String,
+        count: QuantityExpr,
+    },
     /// CR 114.1: Create an emblem with the specified static abilities in the command zone.
     /// Emblems persist for the rest of the game and cannot be removed.
     CreateEmblem {
@@ -3107,6 +3119,7 @@ impl Effect {
             | Effect::CreateDelayedTrigger { .. }
             | Effect::AddRestriction { .. }
             | Effect::ReduceNextSpellCost { .. }
+            | Effect::AddPendingETBCounters { .. }
             | Effect::CreateEmblem { .. }
             | Effect::PayCost { .. }
             | Effect::GrantCastingPermission { .. }
@@ -3228,6 +3241,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::CreateDelayedTrigger { .. } => "CreateDelayedTrigger",
         Effect::AddRestriction { .. } => "AddRestriction",
         Effect::ReduceNextSpellCost { .. } => "ReduceNextSpellCost",
+        Effect::AddPendingETBCounters { .. } => "AddPendingETBCounters",
         Effect::CreateEmblem { .. } => "CreateEmblem",
         Effect::PayCost { .. } => "PayCost",
         Effect::CastFromZone { .. } => "CastFromZone",
@@ -3367,6 +3381,7 @@ pub enum EffectKind {
     CreateDelayedTrigger,
     AddRestriction,
     ReduceNextSpellCost,
+    AddPendingETBCounters,
     CreateEmblem,
     PayCost,
     CastFromZone,
@@ -3509,6 +3524,7 @@ impl From<&Effect> for EffectKind {
             Effect::CreateDelayedTrigger { .. } => EffectKind::CreateDelayedTrigger,
             Effect::AddRestriction { .. } => EffectKind::AddRestriction,
             Effect::ReduceNextSpellCost { .. } => EffectKind::ReduceNextSpellCost,
+            Effect::AddPendingETBCounters { .. } => EffectKind::AddPendingETBCounters,
             Effect::CreateEmblem { .. } => EffectKind::CreateEmblem,
             Effect::PayCost { .. } => EffectKind::PayCost,
             Effect::CastFromZone { .. } => EffectKind::CastFromZone,
@@ -4253,6 +4269,10 @@ pub enum ReplacementCondition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost_text: Option<String>,
     },
+    /// CR 120.1: "dealt damage this turn by a source you controlled" — replacement applies
+    /// only to objects that were dealt damage this turn by a source controlled by the specified
+    /// player. Checks `damage_dealt_this_turn` records in game state.
+    DealtDamageThisTurnBySourceControlledBy { controller: ControllerRef },
     /// "unless you revealed a [type] card" / "unless you paid {mana}"
     /// CR 614.1d — Generic condition text that the engine does not yet decompose further.
     /// Using this variant lets the replacement be recognized for coverage while deferring

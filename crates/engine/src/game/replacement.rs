@@ -1041,6 +1041,7 @@ fn evaluate_replacement_condition(
     controller: PlayerId,
     source_id: ObjectId,
     state: &GameState,
+    affected_object_id: Option<ObjectId>,
 ) -> bool {
     match condition {
         ReplacementCondition::UnlessControlsSubtype { subtypes } => {
@@ -1151,6 +1152,43 @@ fn evaluate_replacement_condition(
         // TODO: Propagate additional_cost_paid to GameObject for precise evaluation.
         // For now, conservatively apply the replacement (counters always placed).
         ReplacementCondition::CastViaKicker { .. } => true,
+        // CR 120.1: "dealt damage this turn by a source you controlled" — check damage records.
+        ReplacementCondition::DealtDamageThisTurnBySourceControlledBy {
+            controller: ctrl_ref,
+        } => {
+            let required_controller = match ctrl_ref {
+                ControllerRef::You => controller,
+                ControllerRef::Opponent => {
+                    // Find any opponent — simplified for two-player
+                    state
+                        .players
+                        .iter()
+                        .find(|p| p.id != controller && !p.is_eliminated)
+                        .map_or(controller, |p| p.id)
+                }
+            };
+            // Check if the affected object was dealt damage this turn by a source
+            // controlled by the required controller.
+            if let Some(affected_id) = affected_object_id {
+                state.damage_dealt_this_turn.iter().any(|record| {
+                    record.target == TargetRef::Object(affected_id)
+                        && state
+                            .objects
+                            .get(&record.source_id)
+                            .map(|src| src.controller)
+                            .or_else(|| {
+                                // Source may have left the battlefield; check LKI cache.
+                                state
+                                    .lki_cache
+                                    .get(&record.source_id)
+                                    .map(|lki| lki.controller)
+                            })
+                            .is_some_and(|c| c == required_controller)
+                })
+            } else {
+                false
+            }
+        }
         // Unrecognized condition — always applies (enters tapped) as a safe default.
         // The engine recognizes the replacement but cannot evaluate the condition,
         // so it conservatively taps the land.
@@ -1237,7 +1275,13 @@ pub fn find_applicable_replacements(
                     }
                     // Evaluate replacement condition (e.g. "unless you control a Mountain")
                     if let Some(ref cond) = repl_def.condition {
-                        if !evaluate_replacement_condition(cond, obj.controller, obj.id, state) {
+                        if !evaluate_replacement_condition(
+                            cond,
+                            obj.controller,
+                            obj.id,
+                            state,
+                            event.affected_object_id(),
+                        ) {
                             continue;
                         }
                     }
@@ -2930,7 +2974,7 @@ mod tests {
         let cond = ReplacementCondition::UnlessYourTurn;
         // Controller is active player → replacement suppressed (enters untapped)
         assert!(
-            !evaluate_replacement_condition(&cond, PlayerId(0), ObjectId(1), &state),
+            !evaluate_replacement_condition(&cond, PlayerId(0), ObjectId(1), &state, None),
             "Should be suppressed (untapped) on controller's turn"
         );
     }
@@ -2941,7 +2985,7 @@ mod tests {
         let cond = ReplacementCondition::UnlessYourTurn;
         // Controller is NOT active player → replacement applies (enters tapped)
         assert!(
-            evaluate_replacement_condition(&cond, PlayerId(1), ObjectId(1), &state),
+            evaluate_replacement_condition(&cond, PlayerId(1), ObjectId(1), &state, None),
             "Should apply (tapped) on opponent's turn"
         );
     }
@@ -2961,7 +3005,7 @@ mod tests {
         };
         // turns_taken=2 ≤ 3 on controller's turn → suppressed (untapped)
         assert!(
-            !evaluate_replacement_condition(&cond, PlayerId(0), ObjectId(1), &state),
+            !evaluate_replacement_condition(&cond, PlayerId(0), ObjectId(1), &state, None),
             "Should be suppressed (untapped) when turns_taken <= threshold"
         );
     }
@@ -2981,7 +3025,7 @@ mod tests {
         };
         // turns_taken=4 > 3 → replacement applies (tapped)
         assert!(
-            evaluate_replacement_condition(&cond, PlayerId(0), ObjectId(1), &state),
+            evaluate_replacement_condition(&cond, PlayerId(0), ObjectId(1), &state, None),
             "Should apply (tapped) when turns_taken > threshold"
         );
     }
@@ -3001,7 +3045,7 @@ mod tests {
         };
         // Not controller's turn → replacement applies (tapped) even though turns_taken ≤ 3
         assert!(
-            evaluate_replacement_condition(&cond, PlayerId(0), ObjectId(1), &state),
+            evaluate_replacement_condition(&cond, PlayerId(0), ObjectId(1), &state, None),
             "Should apply (tapped) when not controller's turn"
         );
     }
@@ -3021,7 +3065,7 @@ mod tests {
         };
         // No turn gate, turns_taken=2 ≤ 3 → suppressed regardless of active player
         assert!(
-            !evaluate_replacement_condition(&cond, PlayerId(0), ObjectId(1), &state),
+            !evaluate_replacement_condition(&cond, PlayerId(0), ObjectId(1), &state, None),
             "Should be suppressed (untapped) with no turn requirement"
         );
     }

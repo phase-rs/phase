@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, CounterTriggerFilter, Effect, QuantityExpr,
     ReplacementDefinition, TargetFilter, TriggerDefinition,
@@ -43,14 +45,19 @@ pub(crate) fn parse_chapter_line(line: &str) -> Option<(Vec<u32>, String)> {
 }
 
 /// CR 714: Parse all chapter lines from a Saga's Oracle text.
-/// Returns (chapter_triggers, etb_replacement).
+/// Returns (chapter_triggers, etb_replacement, consumed_line_indices).
 pub(crate) fn parse_saga_chapters(
     lines: &[&str],
     _card_name: &str,
-) -> (Vec<TriggerDefinition>, ReplacementDefinition) {
+) -> (
+    Vec<TriggerDefinition>,
+    ReplacementDefinition,
+    HashSet<usize>,
+) {
     let mut chapters: Vec<(Vec<u32>, String)> = Vec::new();
+    let mut consumed = HashSet::new();
 
-    for &line in lines {
+    for (idx, &line) in lines.iter().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -62,10 +69,12 @@ pub(crate) fn parse_saga_chapters(
 
         if let Some((nums, effect)) = parse_chapter_line(&stripped) {
             chapters.push((nums, effect));
-        } else if let Some(last) = chapters.last_mut() {
+            consumed.insert(idx);
+        } else if !chapters.is_empty() && chapters.last().is_some() {
             // Multi-line chapter body: continuation of previous chapter
-            last.1.push(' ');
-            last.1.push_str(&stripped);
+            chapters.last_mut().unwrap().1.push(' ');
+            chapters.last_mut().unwrap().1.push_str(&stripped);
+            consumed.insert(idx);
         }
     }
 
@@ -99,7 +108,7 @@ pub(crate) fn parse_saga_chapters(
         .destination_zone(Zone::Battlefield)
         .description("Saga ETB lore counter".to_string());
 
-    (triggers, etb_replacement)
+    (triggers, etb_replacement, consumed)
 }
 
 /// Check if a line is a saga chapter (e.g. "I —", "II —", "III —").

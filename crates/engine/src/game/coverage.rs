@@ -667,6 +667,7 @@ fn fmt_delayed_condition(cond: &DelayedTriggerCondition) -> String {
         }
         DelayedTriggerCondition::WhenDiesOrExiled { .. } => "when dies or exiled".into(),
         DelayedTriggerCondition::WheneverEvent { .. } => "whenever event this turn".into(),
+        DelayedTriggerCondition::WhenNextEvent { .. } => "when next event this turn".into(),
     }
 }
 
@@ -1343,7 +1344,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Clash
         | Effect::Incubate { .. }
         | Effect::TimeTravel
-        | Effect::Conjure { .. } => {}
+        | Effect::Conjure { .. }
+        | Effect::AddPendingETBCounters { .. } => {}
     }
     d
 }
