@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "engine"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "assert_matches",
  "indexmap",
@@ -513,7 +513,7 @@ dependencies = [
 
 [[package]]
 name = "engine-wasm"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "console_error_panic_hook",
  "engine",
@@ -564,7 +564,7 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
 name = "feed-scraper"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "clap",
  "reqwest",
@@ -1399,7 +1399,7 @@ dependencies = [
 
 [[package]]
 name = "phase-ai"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "engine",
  "rand 0.9.2",
@@ -1412,7 +1412,7 @@ dependencies = [
 
 [[package]]
 name = "phase-server"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "axum",
  "clap",
@@ -2011,7 +2011,7 @@ dependencies = [
 
 [[package]]
 name = "server-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "engine",
  "phase-ai",
