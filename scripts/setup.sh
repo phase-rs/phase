@@ -27,7 +27,7 @@ echo "Step 2/3: Installing frontend dependencies..."
 
 echo ""
 echo "Step 3/3: Configuring git hooks..."
-git config core.hooksPath .githooks
+git config --local include.path ../.gitconfig
 
 echo ""
 echo "Done!"
