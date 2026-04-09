@@ -4,6 +4,7 @@ use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
@@ -12,6 +13,7 @@ use crate::eval::{evaluate_creature, threat_level, StrategicIntent};
 use super::context::{collect_ability_effects, PolicyContext};
 use super::registry::TacticalPolicy;
 use super::stack_awareness::assess_spell_impact;
+use super::strategy_helpers::visible_opponent_creature_value;
 
 pub struct EffectTimingPolicy;
 
@@ -41,18 +43,47 @@ fn score_action_shape(ctx: &PolicyContext<'_>) -> f64 {
                 return 0.0;
             };
 
+            let mut score = 0.0;
+
             let is_pre_combat_preferred =
                 object.card_types.core_types.contains(&CoreType::Creature)
                     || object.card_types.subtypes.iter().any(|s| s == "Aura");
             if is_pre_combat_preferred {
                 if matches!(ctx.state.phase, Phase::PreCombatMain) {
-                    0.35
+                    score += 0.35;
+
+                    // Haste creatures get extra pre-combat bonus — can attack immediately
+                    if object.has_keyword(&Keyword::Haste)
+                        && object.card_types.core_types.contains(&CoreType::Creature)
+                    {
+                        score += 0.2;
+                    }
                 } else {
-                    0.1
+                    score += 0.1;
                 }
-            } else {
-                0.0
             }
+
+            // Removal pre-combat bonus: opens combat lanes by removing blockers
+            if matches!(ctx.state.phase, Phase::PreCombatMain) {
+                if let Some(facts) = ctx.cast_facts() {
+                    if facts.has_direct_removal_text
+                        && visible_opponent_creature_value(ctx.state, ctx.ai_player) > 0.0
+                    {
+                        score += 0.2;
+                    }
+                }
+            }
+
+            // Draw post-combat bonus: draw after combat decisions are resolved
+            if matches!(ctx.state.phase, Phase::PostCombatMain) {
+                if let Some(facts) = ctx.cast_facts() {
+                    if facts.has_draw {
+                        score += 0.15;
+                    }
+                }
+            }
+
+            score
         }
         _ => 0.0,
     }

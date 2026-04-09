@@ -147,6 +147,43 @@ pub struct PolicyPenalties {
     pub lethal_burn_bonus: f64,
     /// Multiplier for protect-own-spell counter incentive (× threatened spell value).
     pub protect_spell_bonus_mult: f64,
+
+    /// Penalty for tapping out when opponent has lethal damage on board.
+    #[serde(default = "default_lethality_tapout_penalty")]
+    pub lethality_tapout_penalty: f64,
+    /// Value of a land when scoring sacrifice candidates (higher = worse to sacrifice).
+    #[serde(default = "default_sacrifice_land_penalty")]
+    pub sacrifice_land_penalty: f64,
+    /// Value of a token when scoring sacrifice candidates (lower = cheaper to sacrifice).
+    #[serde(default = "default_sacrifice_token_cost")]
+    pub sacrifice_token_cost: f64,
+    /// Multiplier for evasion removal bonus (× target power).
+    #[serde(default = "default_evasion_removal_bonus_mult")]
+    pub evasion_removal_bonus_mult: f64,
+    /// Penalty for using destroy/damage removal on a recursive creature.
+    #[serde(default = "default_recursion_destroy_penalty")]
+    pub recursion_destroy_penalty: f64,
+    /// Bonus for using exile on a recursive creature.
+    #[serde(default = "default_recursion_exile_bonus")]
+    pub recursion_exile_bonus: f64,
+    /// Penalty for destroying a creature with death triggers (value on death).
+    #[serde(default = "default_death_trigger_destroy_penalty")]
+    pub death_trigger_destroy_penalty: f64,
+    /// Per-creature penalty when overextending into probable board wipe.
+    #[serde(default = "default_wrath_overextend_penalty")]
+    pub wrath_overextend_penalty: f64,
+    /// Bonus for casting defensive creatures when AI life is critical.
+    #[serde(default = "default_low_life_defensive_bonus")]
+    pub low_life_defensive_bonus: f64,
+    /// Penalty for casting pure aggro creatures when AI life is critical.
+    #[serde(default = "default_low_life_aggro_penalty")]
+    pub low_life_aggro_penalty: f64,
+    /// Bonus for card-generating plays when behind on card advantage.
+    #[serde(default = "default_card_advantage_behind_extra")]
+    pub card_advantage_behind_extra: f64,
+    /// Penalty for spending the last counterspell on a low-impact target.
+    #[serde(default = "default_counter_last_reservation_penalty")]
+    pub counter_last_reservation_penalty: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -169,8 +206,57 @@ impl Default for PolicyPenalties {
             pump_response_bonus: 2.5,
             lethal_burn_bonus: 15.0,
             protect_spell_bonus_mult: 0.75,
+            lethality_tapout_penalty: default_lethality_tapout_penalty(),
+            sacrifice_land_penalty: default_sacrifice_land_penalty(),
+            sacrifice_token_cost: default_sacrifice_token_cost(),
+            evasion_removal_bonus_mult: default_evasion_removal_bonus_mult(),
+            recursion_destroy_penalty: default_recursion_destroy_penalty(),
+            recursion_exile_bonus: default_recursion_exile_bonus(),
+            death_trigger_destroy_penalty: default_death_trigger_destroy_penalty(),
+            wrath_overextend_penalty: default_wrath_overextend_penalty(),
+            low_life_defensive_bonus: default_low_life_defensive_bonus(),
+            low_life_aggro_penalty: default_low_life_aggro_penalty(),
+            card_advantage_behind_extra: default_card_advantage_behind_extra(),
+            counter_last_reservation_penalty: default_counter_last_reservation_penalty(),
         }
     }
+}
+
+fn default_lethality_tapout_penalty() -> f64 {
+    -2.5
+}
+fn default_sacrifice_land_penalty() -> f64 {
+    4.0
+}
+fn default_sacrifice_token_cost() -> f64 {
+    0.5
+}
+fn default_evasion_removal_bonus_mult() -> f64 {
+    0.4
+}
+fn default_recursion_destroy_penalty() -> f64 {
+    -1.5
+}
+fn default_death_trigger_destroy_penalty() -> f64 {
+    -0.5
+}
+fn default_recursion_exile_bonus() -> f64 {
+    1.0
+}
+fn default_wrath_overextend_penalty() -> f64 {
+    -0.4
+}
+fn default_low_life_defensive_bonus() -> f64 {
+    0.3
+}
+fn default_low_life_aggro_penalty() -> f64 {
+    -0.3
+}
+fn default_card_advantage_behind_extra() -> f64 {
+    0.15
+}
+fn default_counter_last_reservation_penalty() -> f64 {
+    -1.5
 }
 
 /// Full AI configuration combining difficulty, search, and evaluation settings.

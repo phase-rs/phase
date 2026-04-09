@@ -120,7 +120,7 @@ fn graveyard_value(state: &GameState, player: PlayerId, weights: &ZoneWeights) -
 }
 
 /// Check if a game object has any graveyard-recursion keyword.
-fn has_recursion_keyword(obj: &engine::game::game_object::GameObject) -> bool {
+pub(crate) fn has_recursion_keyword(obj: &engine::game::game_object::GameObject) -> bool {
     obj.keywords.iter().any(|kw| {
         matches!(
             kw,

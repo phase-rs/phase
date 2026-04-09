@@ -1,10 +1,17 @@
 use super::anti_self_harm::AntiSelfHarmPolicy;
 use super::board_development::BoardDevelopmentPolicy;
+use super::board_wipe_telegraph::BoardWipeTelegraphPolicy;
+use super::card_advantage::CardAdvantagePolicy;
 use super::context::PolicyContext;
 use super::effect_timing::EffectTimingPolicy;
 use super::etb_value::EtbValuePolicy;
+use super::evasion_removal_priority::EvasionRemovalPriorityPolicy;
 use super::hand_disruption::HandDisruptionPolicy;
 use super::interaction_reservation::InteractionReservationPolicy;
+use super::lethality_awareness::LethalityAwarenessPolicy;
+use super::life_total_resource::LifeTotalResourcePolicy;
+use super::recursion_awareness::RecursionAwarenessPolicy;
+use super::sacrifice_value::SacrificeValuePolicy;
 use super::tutor::TutorPolicy;
 use crate::cast_facts::cast_facts_for_action;
 use crate::config::AiConfig;
@@ -35,6 +42,13 @@ impl Default for PolicyRegistry {
                 Box::new(super::mana_efficiency::ManaEfficiencyPolicy),
                 Box::new(super::stack_awareness::StackAwarenessPolicy),
                 Box::new(super::downside_awareness::DownsideAwarenessPolicy),
+                Box::new(LethalityAwarenessPolicy),
+                Box::new(SacrificeValuePolicy),
+                Box::new(EvasionRemovalPriorityPolicy),
+                Box::new(RecursionAwarenessPolicy),
+                Box::new(BoardWipeTelegraphPolicy),
+                Box::new(LifeTotalResourcePolicy),
+                Box::new(CardAdvantagePolicy),
             ],
         }
     }

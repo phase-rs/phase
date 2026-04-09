@@ -77,7 +77,36 @@ fn score_counter_target_value(ctx: &PolicyContext<'_>, target_id: ObjectId) -> f
         return -10.0;
     }
 
-    assess_spell_impact(ctx.state, entry)
+    let mut score = assess_spell_impact(ctx.state, entry);
+
+    // Last-counter reservation: if this is the AI's only counterspell, penalize
+    // spending it on low-impact targets. Save it for something that matters.
+    let impact_threshold = 3.0;
+    if score < impact_threshold {
+        let counters_in_hand =
+            super::strategy_helpers::count_counterspells_in_hand(ctx.state, ctx.ai_player);
+        if counters_in_hand == 1 {
+            score += ctx.penalties().counter_last_reservation_penalty;
+        }
+    }
+
+    // Low-MV creature penalty: don't waste a counter on a cheap creature
+    // unless the AI is in a lethal situation.
+    if let Some(obj) = ctx.state.objects.get(&entry.source_id) {
+        let is_cheap_creature = obj.mana_cost.mana_value() <= 2
+            && obj
+                .card_types
+                .core_types
+                .contains(&engine::types::card_type::CoreType::Creature);
+        if is_cheap_creature {
+            let intent = crate::eval::strategic_intent(ctx.state, ctx.ai_player);
+            if !matches!(intent, crate::eval::StrategicIntent::Stabilize) {
+                score -= 1.0;
+            }
+        }
+    }
+
+    score
 }
 
 /// When the AI's pending spell is harmful, boost targeting a creature that an

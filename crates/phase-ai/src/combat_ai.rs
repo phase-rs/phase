@@ -635,7 +635,7 @@ fn can_attack(state: &GameState, obj_id: ObjectId) -> bool {
 }
 
 /// Check if a blocker can legally block an attacker (flying/reach, shadow checks).
-fn can_block_check(
+pub(crate) fn can_block_check(
     blocker: &engine::game::game_object::GameObject,
     attacker: &engine::game::game_object::GameObject,
 ) -> bool {

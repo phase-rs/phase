@@ -382,7 +382,7 @@ pub fn evaluate_state_breakdown(
 }
 
 /// Board statistics: (creature_count, total_power, total_toughness, non_creature_permanents).
-fn board_stats(state: &GameState, player: PlayerId) -> (i32, i32, i32, i32) {
+pub fn board_stats(state: &GameState, player: PlayerId) -> (i32, i32, i32, i32) {
     let mut creatures = 0;
     let mut total_power = 0;
     let mut total_toughness = 0;

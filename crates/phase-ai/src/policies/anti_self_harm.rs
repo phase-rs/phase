@@ -449,6 +449,24 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                 }
             }
         }
+    } else {
+        // Non-creature permanent valuation: scale by mana value as a proxy for
+        // impact. Tokens (Map, Clue, Food, Treasure) are low-value targets;
+        // planeswalkers and high-MV enchantments/artifacts are high-value.
+        let noncreature_value = if object.is_token {
+            0.5
+        } else if object
+            .card_types
+            .core_types
+            .contains(&CoreType::Planeswalker)
+        {
+            // Planeswalkers are high-priority removal targets
+            object.mana_cost.mana_value() as f64 + 2.0
+        } else {
+            // Artifacts/enchantments: scale by mana value (capped)
+            (object.mana_cost.mana_value() as f64).min(6.0)
+        };
+        score += controller_delta * noncreature_value;
     }
 
     score
@@ -2163,6 +2181,211 @@ mod tests {
         assert!(
             score > -4.0,
             "Should not heavily penalize pump on tapped attacker in combat, got {score}"
+        );
+    }
+
+    #[test]
+    fn trigger_target_prefers_creature_over_token() {
+        let mut state = make_state();
+        let creature = add_creature(&mut state, PlayerId(1), "Menace Bear", 2, 2);
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .keywords
+            .push(Keyword::Menace);
+
+        // Create a Map token (artifact, non-creature)
+        let token_card_id = CardId(state.next_object_id);
+        let token = create_object(
+            &mut state,
+            token_card_id,
+            PlayerId(1),
+            "Map".to_string(),
+            Zone::Battlefield,
+        );
+        let token_obj = state.objects.get_mut(&token).unwrap();
+        token_obj
+            .card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Artifact);
+        token_obj.is_token = true;
+
+        // Set up pending trigger with exile effect (like Seam Rip)
+        state.pending_trigger = Some(engine::game::triggers::PendingTrigger {
+            source_id: ObjectId(200),
+            controller: PlayerId(0),
+            condition: None,
+            ability: ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    under_your_control: false,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                },
+                Vec::new(),
+                ObjectId(200),
+                PlayerId(0),
+            ),
+            timestamp: 1,
+            target_constraints: Vec::new(),
+            trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
+            description: None,
+        });
+
+        let config = AiConfig::default();
+        let legal_targets = vec![TargetRef::Object(creature), TargetRef::Object(token)];
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TriggerTargetSelection {
+                player: PlayerId(0),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: legal_targets.clone(),
+                    optional: false,
+                }],
+                target_constraints: Vec::new(),
+                selection: Default::default(),
+                source_id: Some(ObjectId(200)),
+                description: None,
+            },
+            candidates: Vec::new(),
+        };
+
+        // Score targeting the creature
+        let creature_candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(creature)),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Target,
+            },
+        };
+        let creature_ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &creature_candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+        let creature_score = AntiSelfHarmPolicy.score(&creature_ctx);
+
+        // Score targeting the token
+        let token_candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(token)),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Target,
+            },
+        };
+        let token_ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &token_candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+        let token_score = AntiSelfHarmPolicy.score(&token_ctx);
+
+        assert!(
+            creature_score > token_score,
+            "Should prefer exiling creature ({creature_score}) over token ({token_score})"
+        );
+        // Creature should score significantly higher (at least 2.0 gap)
+        assert!(
+            creature_score - token_score > 2.0,
+            "Gap should be significant: creature={creature_score}, token={token_score}, gap={}",
+            creature_score - token_score
+        );
+    }
+
+    #[test]
+    fn trigger_target_effects_are_extracted() {
+        let mut state = make_state();
+        state.pending_trigger = Some(engine::game::triggers::PendingTrigger {
+            source_id: ObjectId(200),
+            controller: PlayerId(0),
+            condition: None,
+            ability: ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    under_your_control: false,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                },
+                Vec::new(),
+                ObjectId(200),
+                PlayerId(0),
+            ),
+            timestamp: 1,
+            target_constraints: Vec::new(),
+            trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
+            description: None,
+        });
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TriggerTargetSelection {
+                player: PlayerId(0),
+                target_slots: vec![],
+                target_constraints: Vec::new(),
+                selection: Default::default(),
+                source_id: Some(ObjectId(200)),
+                description: None,
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::ChooseTarget { target: None },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Target,
+            },
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+
+        let effects = ctx.effects();
+        assert_eq!(
+            effects.len(),
+            1,
+            "Should extract effects from pending trigger"
+        );
+        assert!(
+            matches!(
+                effects[0],
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            ),
+            "Should see ChangeZone Exile effect"
         );
     }
 }

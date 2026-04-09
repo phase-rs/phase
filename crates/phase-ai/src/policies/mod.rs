@@ -1,16 +1,23 @@
 mod anti_self_harm;
 mod board_development;
+mod board_wipe_telegraph;
+mod card_advantage;
 pub(crate) mod context;
 mod downside_awareness;
 pub(crate) mod effect_classify;
 mod effect_timing;
 mod etb_value;
+mod evasion_removal_priority;
 pub(crate) mod hand_disruption;
 mod interaction_reservation;
+mod lethality_awareness;
+mod life_total_resource;
 mod mana_efficiency;
+mod recursion_awareness;
 mod registry;
+mod sacrifice_value;
 pub(crate) mod stack_awareness;
-mod strategy_helpers;
+pub(crate) mod strategy_helpers;
 pub(crate) mod tutor;
 
 pub use registry::PolicyRegistry;

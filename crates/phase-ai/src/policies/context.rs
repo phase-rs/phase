@@ -36,7 +36,7 @@ impl<'a> PolicyContext<'a> {
                 .values()
                 .find(|object| object.card_id == *card_id),
             GameAction::ActivateAbility { source_id, .. } => self.state.objects.get(source_id),
-            // During target selection, the source is in the pending cast.
+            // During target selection, the source is in the pending cast or trigger.
             GameAction::ChooseTarget { .. } | GameAction::SelectTargets { .. } => {
                 match &self.decision.waiting_for {
                     WaitingFor::TargetSelection { pending_cast, .. } => {
@@ -45,6 +45,9 @@ impl<'a> PolicyContext<'a> {
                     WaitingFor::MultiTargetSelection {
                         pending_ability, ..
                     } => self.state.objects.get(&pending_ability.source_id),
+                    WaitingFor::TriggerTargetSelection { source_id, .. } => {
+                        source_id.as_ref().and_then(|id| self.state.objects.get(id))
+                    }
                     _ => None,
                 }
             }
@@ -77,7 +80,7 @@ impl<'a> PolicyContext<'a> {
             _ => {}
         }
 
-        // During target selection, extract effects from the pending cast/ability
+        // During target selection, extract effects from the pending cast/ability/trigger
         match &self.decision.waiting_for {
             WaitingFor::TargetSelection { pending_cast, .. } => {
                 collect_ability_effects(&pending_cast.ability)
@@ -85,6 +88,12 @@ impl<'a> PolicyContext<'a> {
             WaitingFor::MultiTargetSelection {
                 pending_ability, ..
             } => collect_ability_effects(pending_ability),
+            WaitingFor::TriggerTargetSelection { .. } => self
+                .state
+                .pending_trigger
+                .as_ref()
+                .map(|t| collect_ability_effects(&t.ability))
+                .unwrap_or_default(),
             _ => Vec::new(),
         }
     }

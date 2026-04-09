@@ -1,12 +1,16 @@
 use engine::game::game_object::GameObject;
 use engine::game::players;
+use engine::types::ability::Effect;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
+use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
 use crate::cast_facts::cast_facts_for_action;
+use crate::combat_ai;
+use crate::config::PolicyPenalties;
 use crate::eval::{evaluate_creature, threat_level};
 
 use super::context::PolicyContext;
@@ -112,6 +116,107 @@ pub(crate) fn battlefield_pressure_delta(state: &GameState, ai_player: PlayerId)
     }
 
     ours - theirs
+}
+
+/// Sum of opponent untapped creature power, weighted by evasion.
+/// Creatures AI cannot block count at full power; blockable ones at 50%.
+pub(crate) fn opponent_lethal_damage(state: &GameState, ai_player: PlayerId) -> i32 {
+    let opponents = players::opponents(state, ai_player);
+
+    // Collect AI's untapped creatures for blocking checks
+    let ai_blockers: Vec<&GameObject> = state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|obj| {
+            obj.controller == ai_player
+                && !obj.tapped
+                && obj.card_types.core_types.contains(&CoreType::Creature)
+        })
+        .collect();
+
+    let mut total = 0i32;
+    for &obj_id in &state.battlefield {
+        let Some(obj) = state.objects.get(&obj_id) else {
+            continue;
+        };
+        if !opponents.contains(&obj.controller)
+            || obj.tapped
+            || !obj.card_types.core_types.contains(&CoreType::Creature)
+        {
+            continue;
+        }
+        let power = obj.power.unwrap_or(0);
+        let can_be_blocked = ai_blockers
+            .iter()
+            .any(|blocker| combat_ai::can_block_check(blocker, obj));
+        if can_be_blocked {
+            // Blockable creatures contribute half power (some will get through)
+            total += power / 2;
+        } else {
+            total += power;
+        }
+    }
+    total
+}
+
+/// Whether any of ai_player's untapped creatures can legally block the given creature.
+/// Delegates to `combat_ai::can_block_check` for flying/reach/shadow rules.
+pub(crate) fn ai_can_block(state: &GameState, ai_player: PlayerId, attacker_id: ObjectId) -> bool {
+    let Some(attacker) = state.objects.get(&attacker_id) else {
+        return false;
+    };
+    state.battlefield.iter().any(|&id| {
+        state.objects.get(&id).is_some_and(|obj| {
+            obj.controller == ai_player
+                && !obj.tapped
+                && obj.card_types.core_types.contains(&CoreType::Creature)
+                && combat_ai::can_block_check(obj, attacker)
+        })
+    })
+}
+
+/// Value of a permanent for sacrifice-ordering decisions.
+/// Higher values mean the permanent is more costly to sacrifice.
+pub(crate) fn sacrifice_cost(
+    state: &GameState,
+    obj_id: ObjectId,
+    penalties: &PolicyPenalties,
+) -> f64 {
+    let Some(obj) = state.objects.get(&obj_id) else {
+        return 0.0;
+    };
+    if obj.card_types.core_types.contains(&CoreType::Land) {
+        return penalties.sacrifice_land_penalty;
+    }
+    // Token creatures: use creature eval if they have meaningful stats,
+    // otherwise use flat token cost (Treasures, Maps, Clues, etc.)
+    if obj.is_token {
+        if obj.card_types.core_types.contains(&CoreType::Creature) {
+            return evaluate_creature(state, obj_id).max(penalties.sacrifice_token_cost);
+        }
+        return penalties.sacrifice_token_cost;
+    }
+    if obj.card_types.core_types.contains(&CoreType::Creature) {
+        return evaluate_creature(state, obj_id);
+    }
+    // Other permanents: scale by mana value, capped
+    (obj.mana_cost.mana_value() as f64).min(4.0)
+}
+
+/// Count spells in hand with a Counter effect ability.
+pub(crate) fn count_counterspells_in_hand(state: &GameState, player: PlayerId) -> usize {
+    state.players[player.0 as usize]
+        .hand
+        .iter()
+        .filter(|&&obj_id| {
+            state.objects.get(&obj_id).is_some_and(|obj| {
+                obj.abilities
+                    .iter()
+                    .any(|ability| matches!(&*ability.effect, Effect::Counter { .. }))
+            })
+        })
+        .count()
 }
 
 fn keyword_pressure(object: &GameObject) -> f64 {
