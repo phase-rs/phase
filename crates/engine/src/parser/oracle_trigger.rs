@@ -542,6 +542,32 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         }
     }
 
+    // CR 603.4 + CR 601.2: "if none of them were cast or no mana was spent to cast them" —
+    // compound intervening-if for batch enter triggers. The entering creature(s) must either
+    // not have been cast at all, or have been cast for free (no mana spent).
+    if let Some(pos) = tp.find("if none of them were cast or no mana was spent to cast them") {
+        let pattern = "if none of them were cast or no mana was spent to cast them";
+        return (
+            strip_condition_clause(text, pos, pattern.len()),
+            Some(TriggerCondition::Or {
+                conditions: vec![
+                    TriggerCondition::WasNotCast,
+                    TriggerCondition::ManaSpentCondition {
+                        text: "no mana was spent to cast them".to_string(),
+                    },
+                ],
+            }),
+        );
+    }
+
+    // CR 603.4 + CR 601.2: "if it wasn't cast" — negation of WasCast.
+    if let Some(pos) = tp.find("if it wasn't cast") {
+        return (
+            strip_condition_clause(text, pos, "if it wasn't cast".len()),
+            Some(TriggerCondition::WasNotCast),
+        );
+    }
+
     // Simple pattern→condition extractions (no dynamic parsing or guards needed).
     if let Some(result) = try_extract_simple_condition(
         &tp,
@@ -1178,10 +1204,10 @@ pub(crate) fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerD
     .unwrap_or(&lower);
 
     // Parse the subject ("~", "another creature you control", "a creature", etc.)
-    // CR 603.2c: Detect "one or more" quantifier for batched trigger semantics
-    let is_batched = tag::<_, _, VerboseError<&str>>("one or more ")
-        .parse(after_keyword)
-        .is_ok();
+    // CR 603.2c: Detect "one or more" quantifier for batched trigger semantics.
+    // Scan the full subject text (not just the start) because compound subjects like
+    // "~ and/or one or more other creatures" place "one or more" after the first branch.
+    let is_batched = scan_contains(after_keyword, "one or more ");
     let (subject, rest) = parse_trigger_subject(after_keyword);
 
     // Parse event verb from the remaining text
@@ -1231,12 +1257,17 @@ fn extract_trigger_subject_for_context(condition_text: &str) -> TargetFilter {
 fn parse_trigger_subject(text: &str) -> (TargetFilter, &str) {
     let (first, rest) = parse_single_subject(text);
 
-    // Check for "or " combinator to build compound subjects
+    // Check for "and/or " or "or " combinator to build compound subjects.
+    // CR 603.2c: "~ and/or one or more other creatures" means the trigger fires
+    // when any matching object enters — semantically equivalent to "or" for triggers.
     let rest_trimmed = rest.trim_start();
-    if let Ok((after_or, ())) =
-        value((), tag::<_, _, VerboseError<&str>>("or ")).parse(rest_trimmed)
+    if let Ok((after_sep, ())) = alt((
+        value((), tag::<_, _, VerboseError<&str>>("and/or ")),
+        value((), tag::<_, _, VerboseError<&str>>("or ")),
+    ))
+    .parse(rest_trimmed)
     {
-        let (second, final_rest) = parse_trigger_subject(after_or);
+        let (second, final_rest) = parse_trigger_subject(after_sep);
         return (merge_or_filters(first, second), final_rest);
     }
 
@@ -7037,5 +7068,70 @@ mod tests {
         let triggers = parse_trigger_lines("When this creature enters, draw a card.", "Test Card");
         assert_eq!(triggers.len(), 1);
         assert_eq!(triggers[0].mode, TriggerMode::ChangesZone);
+    }
+
+    // ── "and/or" compound subject triggers ──
+
+    #[test]
+    fn trigger_self_and_or_other_nontoken_creatures_enter() {
+        // CR 603.4 + CR 601.2: Satoru-style "~ and/or one or more other nontoken
+        // creatures you control enter, if none of them were cast ..."
+        let def = parse_trigger_line(
+            "Whenever ~ and/or one or more other nontoken creatures you control enter, if none of them were cast or no mana was spent to cast them, draw a card.",
+            "Satoru, the Infiltrator",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert!(def.batched);
+
+        // Subject should be Or { SelfRef, Typed(nontoken creature you control, Another) }
+        match &def.valid_card {
+            Some(TargetFilter::Or { filters }) => {
+                assert_eq!(filters.len(), 2, "Expected 2 filters in Or, got {filters:?}");
+                assert_eq!(filters[0], TargetFilter::SelfRef);
+                // Second filter: nontoken creature you control with Another
+                if let TargetFilter::Typed(tf) = &filters[1] {
+                    assert!(
+                        tf.properties.contains(&FilterProp::Another),
+                        "Expected Another property, got {:?}",
+                        tf.properties
+                    );
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                    assert!(
+                        tf.type_filters.contains(&TypeFilter::Creature),
+                        "Expected Creature type, got {:?}",
+                        tf.type_filters
+                    );
+                } else {
+                    panic!("Expected Typed filter, got {:?}", filters[1]);
+                }
+            }
+            other => panic!("Expected Or filter, got {other:?}"),
+        }
+
+        // Condition: Or { WasNotCast, ManaSpentCondition }
+        match &def.condition {
+            Some(TriggerCondition::Or { conditions }) => {
+                assert_eq!(conditions.len(), 2);
+                assert_eq!(conditions[0], TriggerCondition::WasNotCast);
+                assert!(
+                    matches!(&conditions[1], TriggerCondition::ManaSpentCondition { .. }),
+                    "Expected ManaSpentCondition, got {:?}",
+                    conditions[1]
+                );
+            }
+            other => panic!("Expected Or condition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_if_it_wasnt_cast() {
+        // CR 603.4 + CR 601.2: "if it wasn't cast" — negation of WasCast.
+        let def = parse_trigger_line(
+            "Whenever a creature enters under your control, if it wasn't cast, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.condition, Some(TriggerCondition::WasNotCast));
     }
 }

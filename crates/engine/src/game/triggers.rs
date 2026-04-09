@@ -1258,6 +1258,11 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::WasCast => source_id
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| obj.cast_from_zone.is_some()),
+        // CR 601.2: "if it wasn't cast" / "if none of them were cast" — true when
+        // the entering creature was NOT cast (ninjutsu, reanimation, flicker, etc.).
+        TriggerCondition::WasNotCast => source_id
+            .and_then(|id| state.objects.get(&id))
+            .is_some_and(|obj| obj.cast_from_zone.is_none()),
         // CR 508.1: "if it's attacking" — true when the trigger source is in combat.attackers.
         TriggerCondition::SourceIsAttacking => {
             let sid = source_id.unwrap_or(ObjectId(0));

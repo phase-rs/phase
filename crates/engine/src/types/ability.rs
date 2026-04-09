@@ -4081,6 +4081,11 @@ pub enum TriggerCondition {
     /// CR 701.57a: Used by Discover ETB triggers.
     WasCast,
 
+    /// "if none of them were cast" / "if it wasn't cast" — true when the entering
+    /// creature was NOT cast (entered via ninjutsu, reanimation, flicker, etc.).
+    /// CR 601.2: Negation of WasCast — checks that `cast_from_zone` is `None`.
+    WasNotCast,
+
     /// "if it's attacking" — true when the trigger source object is currently an attacker.
     /// CR 508.1: Used by ninjutsu ETB triggers (e.g., Thousand-Faced Shadow).
     SourceIsAttacking,
