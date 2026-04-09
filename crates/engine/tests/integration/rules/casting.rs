@@ -28,7 +28,10 @@ fn top_stack_cost_paid(runner: &engine::game::scenario::GameRunner) -> bool {
         .last()
         .expect("stack should not be empty");
     match &entry.kind {
-        StackEntryKind::Spell { ability, .. } => ability.context.additional_cost_paid,
+        StackEntryKind::Spell {
+            ability: Some(ability),
+            ..
+        } => ability.context.additional_cost_paid,
         other => panic!("expected Spell on stack, got {:?}", other),
     }
 }
@@ -491,6 +494,53 @@ fn escape_cancel_returns_to_priority() {
         matches!(result.waiting_for, WaitingFor::Priority { .. }),
         "Expected Priority after cancel, got {:?}",
         result.waiting_for
+    );
+}
+
+// --- Zone-scoped cost modification tests ---
+
+/// CR 601.2f: Cost modifications scoped to "from graveyards or from exile"
+/// must NOT apply when the spell is cast from hand.
+/// Regression test for Aven Interrupter incorrectly taxing hand-cast spells.
+#[test]
+fn raise_cost_from_exile_does_not_tax_hand_cast() {
+    use engine::parser::oracle_static::parse_static_line;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Give P0 exactly 1 red mana — enough for a {R} spell, but not {2}{R}.
+    scenario.add_basic_land(P0, ManaColor::Red);
+
+    // Opponent's creature with Aven Interrupter's static:
+    // "Spells your opponents cast from graveyards or from exile cost {2} more to cast."
+    scenario
+        .add_creature(P1, "Aven Interrupter", 2, 2)
+        .with_static_definition(
+            parse_static_line(
+                "Spells your opponents cast from graveyards or from exile cost {2} more to cast.",
+            )
+            .expect("Aven Interrupter static should parse"),
+        );
+
+    // Lightning Bolt in P0's hand: costs {R}
+    let spell_id = scenario.add_bolt_to_hand(P0);
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell_id].card_id;
+
+    // Cast from hand — should succeed with just 1 Mountain because the tax
+    // only applies to spells cast from graveyards/exile.
+    let result = runner.act(GameAction::CastSpell {
+        object_id: spell_id,
+        card_id,
+        targets: vec![],
+    });
+
+    assert!(
+        result.is_ok(),
+        "Spell from hand should NOT be taxed by zone-scoped RaiseCost — got: {:?}",
+        result.err(),
     );
 }
 

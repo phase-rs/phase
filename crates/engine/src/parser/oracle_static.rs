@@ -4601,14 +4601,56 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
 
     let first_qualified_spell_filter = parse_first_qualified_spell_filter(lower);
 
+    // Extract "from [zone(s)]" clause between player scope and "cost".
+    // E.g., "cast from graveyards or from exile" → [Graveyard, Exile]
+    // This must be extracted before type parsing so it doesn't pollute type_desc.
+    let cast_from_zones: Vec<Zone> = {
+        let mut zones = Vec::new();
+        if let Some(cost_idx) = lower.find(" cost") {
+            let prefix = &lower[..cost_idx];
+            // Look for "from <zone> or from <zone>" or "from <zone>" after "cast".
+            // Use the first " from " to capture compound patterns like
+            // "from graveyards or from exile".
+            if let Some(from_idx) = prefix.find(" from ") {
+                let from_text = &prefix[from_idx..];
+                // Skip "from anywhere other than" — that's a negation pattern
+                // requiring a Not filter, not a direct zone match.
+                if !nom_primitives::scan_contains(from_text, "anywhere other than") {
+                    if nom_primitives::scan_contains(from_text, "graveyard") {
+                        zones.push(Zone::Graveyard);
+                    }
+                    if nom_primitives::scan_contains(from_text, "exile") {
+                        zones.push(Zone::Exile);
+                    }
+                    if nom_primitives::scan_contains(from_text, "hand") {
+                        zones.push(Zone::Hand);
+                    }
+                    if nom_primitives::scan_contains(from_text, "command zone") {
+                        zones.push(Zone::Command);
+                    }
+                }
+            }
+        }
+        zones
+    };
+
     // Extract spell type filter from the text before "cost"
     // E.g., "Creature spells you cast" → Creature, "Instant and sorcery spells" → AnyOf(Instant, Sorcery)
     let spell_filter = if let Some(filter) = first_qualified_spell_filter.clone() {
         Some(filter)
     } else if let Some(cost_idx) = lower.find(" cost") {
         let prefix = &lower[..cost_idx];
-        // Strip player scope suffixes first, then "spells"/"spell"
-        let type_desc = prefix
+        // Strip "from [zones]" clause (only if zones were detected), player scope, then "spells"
+        let without_from = if !cast_from_zones.is_empty() {
+            if let Some(from_idx) = prefix.find(" from ") {
+                &prefix[..from_idx]
+            } else {
+                prefix
+            }
+        } else {
+            prefix
+        };
+        let type_desc = without_from
             .trim_end_matches(" you cast")
             .trim_end_matches(" your opponents cast")
             .trim_end_matches(" opponents cast")
@@ -4642,6 +4684,44 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
         }
     } else {
         None
+    };
+
+    // Merge cast-from-zone restriction into the spell filter.
+    // If zones were extracted, add InZone/InAnyZone to ensure the cost modification
+    // only applies when the spell is being cast from the specified zone(s).
+    let spell_filter = if !cast_from_zones.is_empty() {
+        let zone_prop = if cast_from_zones.len() == 1 {
+            FilterProp::InZone {
+                zone: cast_from_zones[0],
+            }
+        } else {
+            FilterProp::InAnyZone {
+                zones: cast_from_zones,
+            }
+        };
+        match spell_filter {
+            Some(TargetFilter::Typed(mut tf)) => {
+                tf.properties.push(zone_prop);
+                Some(TargetFilter::Typed(tf))
+            }
+            Some(other) => {
+                // Wrap non-Typed filters with an And that adds the zone constraint.
+                Some(TargetFilter::And {
+                    filters: vec![
+                        other,
+                        TargetFilter::Typed(TypedFilter::card().properties(vec![zone_prop])),
+                    ],
+                })
+            }
+            None => {
+                // No type filter, just zone restriction (e.g., "Spells ... cast from exile cost more")
+                Some(TargetFilter::Typed(
+                    TypedFilter::card().properties(vec![zone_prop]),
+                ))
+            }
+        }
+    } else {
+        spell_filter
     };
 
     // Detect dynamic "for each" count pattern
@@ -5296,6 +5376,81 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn static_opponent_spells_from_zones_cost_more() {
+        // Aven Interrupter: "Spells your opponents cast from graveyards or from exile cost {2} more to cast."
+        let def = parse_static_line(
+            "Spells your opponents cast from graveyards or from exile cost {2} more to cast.",
+        )
+        .unwrap();
+        assert!(matches!(
+            def.mode,
+            StaticMode::RaiseCost {
+                amount: ManaCost::Cost { generic: 2, .. },
+                ..
+            }
+        ));
+        if let StaticMode::RaiseCost {
+            ref spell_filter, ..
+        } = def.mode
+        {
+            let filter = spell_filter.as_ref().expect("Expected spell_filter with zone constraint");
+            match filter {
+                TargetFilter::Typed(tf) => {
+                    assert!(
+                        tf.properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::InAnyZone { zones }
+                                if zones.contains(&Zone::Graveyard) && zones.contains(&Zone::Exile)
+                        )),
+                        "Expected InAnyZone with Graveyard and Exile, got {:?}",
+                        tf.properties
+                    );
+                }
+                _ => panic!("Expected Typed filter, got {:?}", filter),
+            }
+        }
+        // Affected should scope to opponents
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+            }
+            other => panic!("Expected Typed affected with Opponent, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn static_spells_from_exile_cost_less() {
+        // "Spells you cast from exile this turn cost {X} less to cast" (without "this turn" dynamic)
+        let def =
+            parse_static_line("Spells you cast from exile cost {1} less to cast.").unwrap();
+        assert!(matches!(
+            def.mode,
+            StaticMode::ReduceCost {
+                amount: ManaCost::Cost { generic: 1, .. },
+                ..
+            }
+        ));
+        if let StaticMode::ReduceCost {
+            ref spell_filter, ..
+        } = def.mode
+        {
+            let filter = spell_filter.as_ref().expect("Expected spell_filter with zone constraint");
+            match filter {
+                TargetFilter::Typed(tf) => {
+                    assert!(
+                        tf.properties
+                            .iter()
+                            .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Exile })),
+                        "Expected InZone Exile, got {:?}",
+                        tf.properties
+                    );
+                }
+                _ => panic!("Expected Typed filter"),
+            }
+        }
     }
 
     #[test]
