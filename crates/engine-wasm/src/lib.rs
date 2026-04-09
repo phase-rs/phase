@@ -89,6 +89,16 @@ pub fn init_panic_hook() {
     console_error_panic_hook::set_once();
 }
 
+/// Clear the game state without dropping the WASM instance or card database.
+///
+/// Used by the singleton adapter to reset between game sessions. Any in-flight
+/// AI computation that calls `with_state()` after this will return an error
+/// immediately rather than running a full search on stale state.
+#[wasm_bindgen]
+pub fn clear_game_state() {
+    GAME_STATE.with(|cell| cell.set(None));
+}
+
 /// Verify WASM integration works.
 #[wasm_bindgen]
 pub fn ping() -> String {

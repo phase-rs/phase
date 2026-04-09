@@ -3,7 +3,7 @@ import { createContext, useEffect, useRef, type ReactNode } from "react";
 import type { FormatConfig, GameAction, MatchConfig } from "../adapter/types";
 import { P2PHostAdapter, P2PGuestAdapter } from "../adapter/p2p-adapter";
 import type { P2PAdapterEvent } from "../adapter/p2p-adapter";
-import { WasmAdapter } from "../adapter/wasm-adapter";
+import { WasmAdapter, getSharedAdapter } from "../adapter/wasm-adapter";
 import { WebSocketAdapter } from "../adapter/ws-adapter";
 import { audioManager } from "../audio/AudioManager";
 import type { DeckData, WsAdapterEvent } from "../adapter/ws-adapter";
@@ -412,11 +412,15 @@ export function GameProvider({
     }
 
     // AI or local mode — async setup (loadGame is async due to IndexedDB)
+    //
+    // Uses the shared singleton adapter so the WASM worker (and its V8 TurboFan-
+    // optimized code, card database, and AI worker pool) persist across game sessions.
+    // On cleanup, we clear the WASM game state but keep the worker alive.
     const setupLocal = async () => {
       if (cancelled) return;
 
       const savedState = await loadGame(gameId);
-      const adapter = new WasmAdapter();
+      const adapter = getSharedAdapter();
 
       if (savedState) {
         try {
@@ -440,7 +444,6 @@ export function GameProvider({
             : `Could not restore saved game: ${err instanceof Error ? err.message : String(err)}`;
           onResumeResetRef.current?.(reason);
           clearGame(gameId);
-          const freshAdapter = new WasmAdapter();
           const parsedDeck = loadActiveDeck();
           if (!parsedDeck) {
             onNoDeckRef.current?.();
@@ -448,9 +451,9 @@ export function GameProvider({
           }
           const deckList = buildDeckList(parsedDeck, formatConfig);
           try {
-            await initGame(gameId, freshAdapter, deckList, formatConfig, playerCount, matchConfig);
+            await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig);
             if (cancelled) return;
-            if (!freshAdapter.cardDbLoaded) {
+            if (!adapter.cardDbLoaded) {
               onCardDataMissingRef.current?.();
             }
             controller = createGameLoopController({ mode, difficulty, playerCount });
@@ -493,7 +496,32 @@ export function GameProvider({
       cancelled = true;
       if (controller) controller.dispose();
       audioManager.setContext("menu");
-      reset();
+      // Clear store state but keep the shared WASM worker alive — its V8
+      // TurboFan-compiled code, card database, and AI pool persist for reuse.
+      const adapter = useGameStore.getState().adapter;
+      if (adapter instanceof WasmAdapter) {
+        // Not awaited (cleanup can't be async), but safe: resetGame is posted
+        // to the same worker's FIFO message queue, so it executes before any
+        // subsequent initializeGame call from the next game session.
+        adapter.resetGameState();
+        useGameStore.setState({
+          gameId: null,
+          gameState: null,
+          events: [],
+          eventHistory: [],
+          logHistory: [],
+          nextLogSeq: 0,
+          adapter: null,
+          waitingFor: null,
+          legalActions: [],
+          autoPassRecommended: false,
+          spellCosts: {},
+          stateHistory: [],
+          turnCheckpoints: [],
+        });
+      } else {
+        reset();
+      }
     };
   }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig]);
 

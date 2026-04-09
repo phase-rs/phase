@@ -18,6 +18,7 @@ import init, {
   restore_game_state,
   load_card_database,
   export_game_state_json,
+  clear_game_state,
 } from "@wasm/engine";
 
 import type { GameAction } from "./types";
@@ -58,6 +59,7 @@ type EngineRequest =
   | { type: "restoreState"; id: number; stateJson: string }
   | { type: "exportState"; id: number }
   | { type: "loadCardDbFromUrl"; id: number }
+  | { type: "resetGame"; id: number }
   | { type: "ping"; id: number };
 
 type EngineResponse =
@@ -217,6 +219,12 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       case "exportState": {
         const json = export_game_state_json();
         result(msg.id, json);
+        break;
+      }
+
+      case "resetGame": {
+        clear_game_state();
+        result(msg.id, null);
         break;
       }
 

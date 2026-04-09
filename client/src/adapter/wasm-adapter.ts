@@ -12,6 +12,23 @@ import { EngineWorkerClient } from "./engine-worker-client";
 import { AiWorkerPool } from "./ai-worker-pool";
 
 /**
+ * Module-level singleton for AI/local games.
+ *
+ * Keeping the WASM worker alive across game sessions preserves V8's TurboFan-compiled
+ * code. The first WASM instantiation runs on V8's Liftoff (unoptimized) baseline compiler
+ * while TurboFan optimizes in the background. Terminating the worker discards this work;
+ * reusing it means AI computation runs at full speed from the second game onward.
+ * The card database and AI worker pool are also preserved.
+ */
+let sharedAdapter: WasmAdapter | null = null;
+
+/** Get or create the shared WasmAdapter singleton for AI/local games. */
+export function getSharedAdapter(): WasmAdapter {
+  if (!sharedAdapter) sharedAdapter = new WasmAdapter();
+  return sharedAdapter;
+}
+
+/**
  * WASM-backed implementation of EngineAdapter.
  *
  * Delegates all engine operations to a Web Worker that owns its own WASM instance.
@@ -194,7 +211,23 @@ export class WasmAdapter implements EngineAdapter {
     }
   }
 
+  /**
+   * Clear the WASM game state without terminating the worker.
+   *
+   * Preserves the WASM instance (with V8 TurboFan optimizations), card database,
+   * and AI worker pool. Any in-flight AI computation on the old state will
+   * short-circuit with an error rather than running a full search.
+   */
+  async resetGameState(): Promise<void> {
+    if (this.engine) {
+      await this.engine.resetGame();
+    }
+  }
+
   dispose(): void {
+    // Clear the singleton reference so getSharedAdapter() creates a fresh
+    // instance if called after dispose (e.g., error recovery code paths).
+    if (sharedAdapter === this) sharedAdapter = null;
     this.engine?.dispose();
     this.engine = null;
     this.aiPool?.dispose();

@@ -177,6 +177,10 @@ export class EngineWorkerClient {
     await this.request<null>({ type: "restoreState", stateJson });
   }
 
+  async resetGame(): Promise<void> {
+    await this.request<null>({ type: "resetGame" });
+  }
+
   async ping(): Promise<string> {
     return this.request<string>({ type: "ping" });
   }
