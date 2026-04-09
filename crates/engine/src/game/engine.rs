@@ -1818,7 +1818,22 @@ fn handle_play_land(
                     if let Some(new_controller) = controller_override {
                         obj.controller = new_controller;
                     }
+                    // CR 614.1c: Apply counters from replacement pipeline.
                     engine_replacement::apply_etb_counters(obj, &enter_with_counters, events);
+                    // CR 614.1c: Apply pending ETB counters from delayed triggers
+                    // (e.g., "that creature enters with an additional +1/+1 counter").
+                    let pending: Vec<_> = state
+                        .pending_etb_counters
+                        .iter()
+                        .filter(|(oid, _, _)| *oid == object_id)
+                        .map(|(_, ct, n)| (ct.clone(), *n))
+                        .collect();
+                    if !pending.is_empty() {
+                        engine_replacement::apply_etb_counters(obj, &pending, events);
+                        state
+                            .pending_etb_counters
+                            .retain(|(oid, _, _)| *oid != object_id);
+                    }
                 }
             }
         }

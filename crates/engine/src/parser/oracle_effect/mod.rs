@@ -266,6 +266,112 @@ fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     })
 }
 
+/// CR 603.7: Parse "when you next cast a [type] spell this turn, [effect]" delayed triggers.
+/// Creates a one-shot delayed trigger that fires once on the next matching SpellCast event.
+/// Examples:
+/// - "When you next cast a creature spell this turn, that creature enters with an additional +1/+1 counter on it."
+/// - "When you next cast a creature spell this turn, search your library for a creature card..."
+fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
+    use crate::types::triggers::TriggerMode;
+
+    // Must start with "when you next cast a "
+    let _ = tag::<_, _, VerboseError<&str>>("when you next cast a ")
+        .parse(tp.lower)
+        .ok()?;
+
+    // Must contain "this turn, " to delimit condition from effect
+    let (before_this_turn, after) = tp.rsplit_around(" this turn, ")?;
+
+    // Extract the spell type from between "when you next cast a " and " spell"
+    let condition_fragment = &before_this_turn.lower["when you next cast a ".len()..];
+    // Verify " spell" suffix and parse type via parse_type_phrase building block
+    let spell_suffix = condition_fragment.strip_suffix(" spell")?;
+    let (type_filter, remainder) = super::oracle_target::parse_type_phrase(spell_suffix);
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+
+    // Build a SpellCast trigger definition with the parsed type filter
+    let mut trigger_def = crate::types::ability::TriggerDefinition::new(TriggerMode::SpellCast);
+    trigger_def.valid_card = Some(type_filter);
+    // "when YOU next cast" — scope to the source's controller.
+    trigger_def.valid_target = Some(TargetFilter::Controller);
+
+    let effect_text = after.original;
+    let effect_lower = after.lower;
+
+    // Check for "that creature enters with an additional +1/+1 counter on it" pattern
+    let inner = if let Some(parsed) = try_parse_enters_with_additional_counters(effect_lower) {
+        parsed
+    } else {
+        parse_effect_chain(effect_text, AbilityKind::Spell)
+    };
+
+    Some(ParsedEffectClause {
+        effect: Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(trigger_def),
+            },
+            effect: Box::new(inner),
+            uses_tracked_set: false,
+        },
+        duration: None,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+    })
+}
+
+/// Parse "that creature enters with an additional [N] +1/+1 counter(s) on it" into
+/// an `AddPendingETBCounters` effect. Returns `None` if the text doesn't match.
+fn try_parse_enters_with_additional_counters(lower: &str) -> Option<AbilityDefinition> {
+    // "that creature enters with an additional +1/+1 counter on it"
+    // "that creature enters with N additional +1/+1 counters on it"
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("that creature enters with ")
+        .parse(lower)
+        .ok()?;
+
+    // Parse "an additional" or "N additional"
+    let (rest, count) =
+        if let Ok((r, _)) = tag::<_, _, VerboseError<&str>>("an additional ").parse(rest) {
+            (r, 1u32)
+        } else if let Ok((r, n)) = nom_primitives::parse_number(rest) {
+            let (r, _) = tag::<_, _, VerboseError<&str>>(" additional ")
+                .parse(r)
+                .ok()?;
+            (r, n)
+        } else {
+            return None;
+        };
+
+    // Parse counter type: "+1/+1 counter" or "-1/-1 counter" etc.
+    let (rest, counter_type) = alt((
+        value("P1P1".to_string(), tag::<_, _, VerboseError<&str>>("+1/+1")),
+        value("M1M1".to_string(), tag("-1/-1")),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    // Match " counter on it" or " counters on it"
+    let _ = alt((
+        tag::<_, _, VerboseError<&str>>(" counter on it"),
+        tag(" counters on it"),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    Some(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::AddPendingETBCounters {
+            counter_type,
+            count: QuantityExpr::Fixed {
+                value: count as i32,
+            },
+        },
+    ))
+}
+
 /// CR 603.7c: Parse inline delayed triggers like "when that creature dies, draw a card".
 /// Returns a `CreateDelayedTrigger` wrapping the parsed inner effect.
 fn try_parse_inline_delayed_trigger(tp: TextPair) -> Option<ParsedEffectClause> {
@@ -760,6 +866,11 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
 
     // CR 603.7c: "Whenever X this turn, Y" — multi-fire delayed trigger creation.
     if let Some(clause) = try_parse_whenever_this_turn(tp) {
+        return clause;
+    }
+
+    // CR 603.7: "When you next cast a [type] spell this turn, ..." — one-shot delayed trigger.
+    if let Some(clause) = try_parse_when_next_event(tp) {
         return clause;
     }
 

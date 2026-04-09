@@ -387,11 +387,14 @@ pub fn parse_oracle_text(
     let lines: Vec<&str> = oracle_text.split('\n').collect();
 
     // CR 714: Pre-parse Saga chapter lines into triggers + ETB replacement.
-    if subtypes.iter().any(|s| s == "Saga") {
-        let (chapter_triggers, etb_replacement) = parse_saga_chapters(&lines, card_name);
+    let saga_consumed = if subtypes.iter().any(|s| s == "Saga") {
+        let (chapter_triggers, etb_replacement, consumed) = parse_saga_chapters(&lines, card_name);
         result.triggers.extend(chapter_triggers);
         result.replacements.push(etb_replacement);
-    }
+        consumed
+    } else {
+        std::collections::HashSet::new()
+    };
 
     // CR 716: Pre-parse Class level sections into level-gated abilities.
     if subtypes.iter().any(|s| s == "Class") {
@@ -486,6 +489,11 @@ pub fn parse_oracle_text(
     while i < lines.len() {
         // CR 711: Skip lines already consumed by the leveler pre-parser.
         if level_consumed.contains(&i) {
+            i += 1;
+            continue;
+        }
+        // CR 714: Skip lines already consumed by the saga pre-parser.
+        if saga_consumed.contains(&i) {
             i += 1;
             continue;
         }

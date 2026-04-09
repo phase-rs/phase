@@ -286,6 +286,9 @@ pub fn resolve_effect(
         Effect::ReduceNextSpellCost { .. } => {
             resolve_reduce_next_spell_cost(state, ability, events)
         }
+        Effect::AddPendingETBCounters { .. } => {
+            resolve_add_pending_etb_counters(state, ability, events)
+        }
         Effect::CreateEmblem { .. } => create_emblem::resolve(state, ability, events),
         Effect::PayCost { .. } => pay::resolve(state, ability, events),
         Effect::CastFromZone { .. } => cast_from_zone::resolve(state, ability, events),
@@ -1375,6 +1378,58 @@ fn resolve_reduce_next_spell_cost(
         });
     events.push(GameEvent::EffectResolved {
         kind: crate::types::ability::EffectKind::ReduceNextSpellCost,
+        source_id: ability.source_id,
+    });
+    Ok(())
+}
+
+/// CR 614.1c: Register pending ETB counters for the triggering creature spell.
+/// Reads `current_trigger_event` (SpellCast) to identify the object, then adds
+/// counters to `pending_etb_counters` so they are applied when the object enters
+/// the battlefield.
+fn resolve_add_pending_etb_counters(
+    state: &mut GameState,
+    ability: &crate::types::ability::ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), crate::types::ability::EffectError> {
+    let (counter_type, count) = match &ability.effect {
+        Effect::AddPendingETBCounters {
+            counter_type,
+            count,
+        } => (counter_type.clone(), count.clone()),
+        _ => {
+            return Err(crate::types::ability::EffectError::MissingParam(
+                "AddPendingETBCounters".to_string(),
+            ))
+        }
+    };
+
+    // Resolve the count using existing quantity infrastructure
+    let resolved_count = crate::game::quantity::resolve_quantity(
+        state,
+        &count,
+        ability.controller,
+        ability.source_id,
+    ) as u32;
+
+    // Extract the object_id from the triggering SpellCast event
+    let object_id = state.current_trigger_event.as_ref().and_then(|e| match e {
+        GameEvent::SpellCast { object_id, .. } => Some(*object_id),
+        _ => None,
+    });
+
+    if let Some(oid) = object_id {
+        state
+            .pending_etb_counters
+            .push((oid, counter_type, resolved_count));
+    } else {
+        tracing::warn!(
+            "AddPendingETBCounters: no SpellCast trigger event found — counters not registered"
+        );
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: crate::types::ability::EffectKind::AddPendingETBCounters,
         source_id: ability.source_id,
     });
     Ok(())
