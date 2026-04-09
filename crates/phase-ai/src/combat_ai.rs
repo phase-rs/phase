@@ -397,8 +397,22 @@ pub fn choose_blockers_with_profile(
             let p_life = state.players[player.0 as usize].life;
             // Chump block: sacrifice the blocker to prevent significant damage
             // when life total is threatened (attacker power >= 3 and life <= 3x that)
+            // CR 702.19b: Trample means a chump blocker only prevents blocker_toughness
+            // damage, not the full attacker_power. Skip chump blocking tramplers when
+            // the blocker is too small to make a meaningful difference.
+            let has_trample = attacker.has_keyword(&Keyword::Trample);
+            let blocker_toughness = state
+                .objects
+                .get(&blocker_id)
+                .and_then(|b| b.toughness)
+                .unwrap_or(1);
+            let damage_prevented = if has_trample {
+                blocker_toughness
+            } else {
+                attacker_power
+            };
             let should_chump_stabilize = priority == 0
-                && attacker_power >= 3
+                && damage_prevented >= 2
                 && matches!(objective, CombatObjective::Stabilize)
                 && p_life <= attacker_power * 3;
             // Race chump: losing the damage race, block anything with power >= 2
@@ -407,6 +421,75 @@ pub fn choose_blockers_with_profile(
             if priority > 0 || should_chump_stabilize || should_chump_race {
                 assignments.push((blocker_id, attacker_id));
                 used_blockers.push(blocker_id);
+            }
+        }
+    }
+
+    // Third pass: if unblocked damage is still lethal, greedily assign remaining
+    // blockers to the highest-power unblocked attackers to survive.
+    if matches!(objective, CombatObjective::Stabilize) {
+        let p_life = state.players[player.0 as usize].life;
+        let unblocked_damage: i32 = sorted_attackers
+            .iter()
+            .filter(|&&(aid, _)| !assignments.iter().any(|&(_, a)| a == aid))
+            .filter_map(|&(aid, _)| state.objects.get(&aid))
+            .map(|obj| obj.power.unwrap_or(0))
+            .sum();
+
+        if unblocked_damage >= p_life {
+            // Sort unblocked attackers by damage prevented descending.
+            // Non-tramplers are fully blocked (damage_prevented = power).
+            // Tramplers only lose blocker_toughness worth of damage, so we
+            // estimate 1 here (minimum toughness) and refine at assignment time.
+            let mut unblocked: Vec<(ObjectId, i32, i32)> = sorted_attackers
+                .iter()
+                .filter(|&&(aid, _)| !assignments.iter().any(|&(_, a)| a == aid))
+                .filter_map(|&(aid, _)| {
+                    let obj = state.objects.get(&aid)?;
+                    let power = obj.power.unwrap_or(0);
+                    let estimated_prevented = if obj.has_keyword(&Keyword::Trample) {
+                        1 // chump only prevents ~1 damage vs trample
+                    } else {
+                        power
+                    };
+                    Some((aid, power, estimated_prevented))
+                })
+                .collect();
+            unblocked.sort_by_key(|b| std::cmp::Reverse(b.2));
+
+            let mut remaining_damage = unblocked_damage;
+            for (attacker_id, attacker_power, _) in unblocked {
+                if remaining_damage < p_life {
+                    break; // No longer lethal
+                }
+                let attacker = match state.objects.get(&attacker_id) {
+                    Some(a) => a,
+                    None => continue,
+                };
+                // Find any unused blocker that can legally block this attacker
+                if let Some(&blocker_id) = available_blockers.iter().find(|&&bid| {
+                    !used_blockers.contains(&bid)
+                        && state
+                            .objects
+                            .get(&bid)
+                            .map(|b| can_block_check(b, attacker))
+                            .unwrap_or(false)
+                }) {
+                    assignments.push((blocker_id, attacker_id));
+                    used_blockers.push(blocker_id);
+                    // CR 702.19b: Trample only requires lethal damage assigned to blocker;
+                    // excess tramples through. A chump block only prevents blocker_toughness.
+                    let damage_prevented = if attacker.has_keyword(&Keyword::Trample) {
+                        state
+                            .objects
+                            .get(&blocker_id)
+                            .and_then(|b| b.toughness)
+                            .unwrap_or(1)
+                    } else {
+                        attacker_power
+                    };
+                    remaining_damage -= damage_prevented;
+                }
             }
         }
     }
@@ -855,6 +938,95 @@ mod tests {
                 AttackTarget::Planeswalker(_) | AttackTarget::Battle(_) => {}
             }
         }
+    }
+
+    #[test]
+    fn lethal_aggregate_damage_triggers_chump_blocks() {
+        let mut state = setup();
+        // Three 2/2s attacking — 6 total damage, player at 5 life = lethal
+        let a1 = add_creature(&mut state, PlayerId(0), "Bear1", 2, 2, vec![]);
+        let a2 = add_creature(&mut state, PlayerId(0), "Bear2", 2, 2, vec![]);
+        let a3 = add_creature(&mut state, PlayerId(0), "Bear3", 2, 2, vec![]);
+        let chump = add_creature(&mut state, PlayerId(1), "Token", 1, 1, vec![]);
+        state.players[1].life = 5;
+
+        let blockers = choose_blockers(&state, PlayerId(1), &[a1, a2, a3]);
+
+        // Must chump block at least one attacker to drop damage from 6 to 4 (survivable)
+        assert!(
+            !blockers.is_empty(),
+            "Facing lethal aggregate damage, AI must chump block to survive"
+        );
+        assert!(
+            blockers.iter().any(|&(b, _)| b == chump),
+            "The 1/1 token should chump block when facing lethal"
+        );
+    }
+
+    #[test]
+    fn lethal_aggregate_prefers_blocking_highest_power() {
+        let mut state = setup();
+        // A 3/3 and two 1/1s attacking — 5 total, player at 5 life = lethal
+        let big = add_creature(&mut state, PlayerId(0), "Ogre", 3, 3, vec![]);
+        let small1 = add_creature(&mut state, PlayerId(0), "Rat1", 1, 1, vec![]);
+        let _small2 = add_creature(&mut state, PlayerId(0), "Rat2", 1, 1, vec![]);
+        let chump = add_creature(&mut state, PlayerId(1), "Token", 1, 1, vec![]);
+        state.players[1].life = 5;
+
+        let blockers = choose_blockers(&state, PlayerId(1), &[big, small1, _small2]);
+
+        // Should block the 3/3 to prevent the most damage
+        assert!(
+            blockers.contains(&(chump, big)),
+            "Should chump the highest-power attacker to maximize damage prevented"
+        );
+    }
+
+    #[test]
+    fn lethal_aggregate_accounts_for_trample() {
+        let mut state = setup();
+        // 5/5 trample + 2/2 = 7 total damage, player at 5 life
+        // Chumping the 5/5 trample with a 1/1 only prevents 1 damage (4 tramples through)
+        // So actual damage after chump = 4 + 2 = 6, still lethal
+        // The AI should recognize this and prefer blocking the 2/2 instead
+        let trampler = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Trampler",
+            5,
+            5,
+            vec![Keyword::Trample],
+        );
+        let bear = add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
+        let chump = add_creature(&mut state, PlayerId(1), "Token", 1, 1, vec![]);
+        state.players[1].life = 5;
+
+        let blockers = choose_blockers(&state, PlayerId(1), &[trampler, bear]);
+
+        // Should block the 2/2 (prevents 2 damage) not the 5/5 trampler (prevents only 1)
+        assert!(
+            blockers.contains(&(chump, bear)),
+            "Should chump the non-trampler to prevent more damage, got {:?}",
+            blockers
+        );
+    }
+
+    #[test]
+    fn non_lethal_aggregate_skips_chump() {
+        let mut state = setup();
+        // Two 2/2s attacking — 4 total, player at 20 life = not lethal
+        let a1 = add_creature(&mut state, PlayerId(0), "Bear1", 2, 2, vec![]);
+        let a2 = add_creature(&mut state, PlayerId(0), "Bear2", 2, 2, vec![]);
+        let _chump = add_creature(&mut state, PlayerId(1), "Token", 1, 1, vec![]);
+        state.players[1].life = 20;
+
+        let blockers = choose_blockers(&state, PlayerId(1), &[a1, a2]);
+
+        // At 20 life, taking 4 is fine — don't waste the chump
+        assert!(
+            blockers.is_empty(),
+            "Healthy defender should not chump block against non-lethal aggregate damage"
+        );
     }
 
     #[test]

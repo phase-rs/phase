@@ -6,7 +6,7 @@ use engine::types::ability::{
     AbilityCost, Effect, QuantityExpr, ReplacementMode, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
-use engine::types::card_type::CoreType;
+use engine::types::card_type::{CoreType, Supertype};
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, WardCost};
@@ -50,6 +50,26 @@ impl TacticalPolicy for AntiSelfHarmPolicy {
 /// - Beneficial spell (pump/aura buff) but AI has no creatures → would buff opponents.
 /// - Harmful spell (destroy) but opponents have no creatures → would kill own.
 fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
+    // CR 704.5j: Penalise casting a legendary permanent when we already control one
+    // with the same name — the legend rule SBA will force us to sacrifice one.
+    let legend_penalty = ctx
+        .source_object()
+        .filter(|source| source.card_types.supertypes.contains(&Supertype::Legendary))
+        .and_then(|source| {
+            ctx.state
+                .battlefield
+                .iter()
+                .any(|&id| {
+                    ctx.state.objects.get(&id).is_some_and(|o| {
+                        o.controller == ctx.ai_player
+                            && o.card_types.supertypes.contains(&Supertype::Legendary)
+                            && o.name == source.name
+                    })
+                })
+                .then_some(-8.0)
+        })
+        .unwrap_or(0.0);
+
     let effects = ctx.effects();
 
     let mut has_beneficial_creature_target = effects.iter().any(|effect| {
@@ -78,7 +98,7 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
     }
 
     if !has_beneficial_creature_target && !has_harmful_creature_only_target && !has_harmful_bounce {
-        return 0.0;
+        return legend_penalty;
     }
 
     let has_own_creature = ctx.state.battlefield.iter().any(|&id| {
@@ -126,6 +146,8 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
             penalty -= 8.0;
         }
     }
+
+    penalty += legend_penalty;
 
     // Penalize pump spells during opponent's combat that would require tapping creature
     // mana sources. auto_tap prefers pure lands (tier 0) over non-land dorks (tier 1),
@@ -1062,6 +1084,138 @@ mod tests {
 
     /// Regression: AI should not cast a pump spell when it has no creatures,
     /// since the only targets would be opponent creatures.
+    #[test]
+    fn pre_cast_penalises_duplicate_legendary() {
+        let mut state = make_state();
+
+        // AI already controls a legendary creature on the battlefield
+        let existing = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Thalia".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&existing).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.supertypes.push(Supertype::Legendary);
+        obj.power = Some(2);
+        obj.toughness = Some(1);
+
+        // AI tries to cast a second copy from hand
+        let spell_id = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Thalia".to_string(),
+            Zone::Hand,
+        );
+        let obj2 = state.objects.get_mut(&spell_id).unwrap();
+        obj2.card_types.core_types.push(CoreType::Creature);
+        obj2.card_types.supertypes.push(Supertype::Legendary);
+        obj2.power = Some(2);
+        obj2.toughness = Some(1);
+        obj2.abilities = vec![engine::types::ability::AbilityDefinition::new(
+            engine::types::ability::AbilityKind::Spell,
+            Effect::Draw {
+                count: engine::types::ability::QuantityExpr::Fixed { value: 0 },
+            },
+        )];
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: CardId(201),
+                targets: Vec::new(),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Spell,
+            },
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+
+        let score = AntiSelfHarmPolicy.score(&ctx);
+        assert!(
+            score < -5.0,
+            "Casting a duplicate legendary should be heavily penalised, got {score}"
+        );
+    }
+
+    #[test]
+    fn pre_cast_allows_first_legendary() {
+        let mut state = make_state();
+
+        // No existing legendary on battlefield — casting should be fine
+        let spell_id = create_object(
+            &mut state,
+            CardId(202),
+            PlayerId(0),
+            "Thalia".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&spell_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.supertypes.push(Supertype::Legendary);
+        obj.power = Some(2);
+        obj.toughness = Some(1);
+        obj.abilities = vec![engine::types::ability::AbilityDefinition::new(
+            engine::types::ability::AbilityKind::Spell,
+            Effect::Draw {
+                count: engine::types::ability::QuantityExpr::Fixed { value: 0 },
+            },
+        )];
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: CardId(202),
+                targets: Vec::new(),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Spell,
+            },
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+
+        let score = AntiSelfHarmPolicy.score(&ctx);
+        assert!(
+            score >= -1.0,
+            "Casting first copy of a legendary should not be penalised, got {score}"
+        );
+    }
+
     #[test]
     fn pre_cast_penalises_pump_with_no_friendly_creatures() {
         let mut state = make_state();
