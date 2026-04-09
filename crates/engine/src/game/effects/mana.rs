@@ -13,12 +13,13 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (produced, restrictions, expiry) = match &ability.effect {
+    let (produced, restrictions, grants, expiry) = match &ability.effect {
         Effect::Mana {
             produced,
             restrictions,
+            grants,
             expiry,
-        } => (produced, restrictions, *expiry),
+        } => (produced, restrictions, grants, *expiry),
         _ => return Err(EffectError::MissingParam("Produced".to_string())),
     };
     // CR 106.3: Mana is produced by the effects of mana abilities. The source
@@ -54,6 +55,7 @@ pub fn resolve(
             source_id: ability.source_id,
             snow: false,
             restrictions: concrete_restrictions.clone(),
+            grants: grants.clone(),
             expiry,
         };
         player.mana_pool.add(unit);
@@ -193,6 +195,7 @@ mod tests {
             Effect::Mana {
                 produced,
                 restrictions: vec![],
+                grants: vec![],
                 expiry: None,
             },
             vec![],
@@ -590,6 +593,7 @@ mod tests {
                     color_options: vec![ManaColor::Green],
                 },
                 restrictions: vec![ManaSpendRestriction::SpellType("Creature".to_string())],
+                grants: vec![],
                 expiry: None,
             },
             vec![],
@@ -634,6 +638,7 @@ mod tests {
                     color_options: vec![ManaColor::Green],
                 },
                 restrictions: vec![ManaSpendRestriction::ChosenCreatureType],
+                grants: vec![],
                 expiry: None,
             },
             vec![],
@@ -662,6 +667,7 @@ mod tests {
                     colors: vec![ManaColor::Red],
                 },
                 restrictions: vec![ManaSpendRestriction::ChosenCreatureType],
+                grants: vec![],
                 expiry: None,
             },
             vec![],
@@ -674,5 +680,33 @@ mod tests {
         // No source object → restriction can't resolve → mana is unrestricted
         let unit = &state.players[0].mana_pool.mana[0];
         assert!(unit.restrictions.is_empty());
+    }
+
+    #[test]
+    fn grants_flow_through_to_mana_unit() {
+        use crate::types::mana::ManaSpellGrant;
+
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+
+        let ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: vec![ManaColor::Green],
+                },
+                restrictions: vec![],
+                grants: vec![ManaSpellGrant::CantBeCountered],
+                expiry: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let unit = &state.players[0].mana_pool.mana[0];
+        assert_eq!(unit.grants, vec![ManaSpellGrant::CantBeCountered]);
     }
 }

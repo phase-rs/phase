@@ -2991,6 +2991,7 @@ mod tests {
                             colors: vec![crate::types::mana::ManaColor::Blue],
                         },
                         restrictions: vec![],
+                        grants: vec![],
                         expiry: None,
                     },
                 )
@@ -3004,6 +3005,7 @@ mod tests {
                             colors: vec![crate::types::mana::ManaColor::Black],
                         },
                         restrictions: vec![],
+                        grants: vec![],
                         expiry: None,
                     },
                 )
@@ -3045,6 +3047,7 @@ mod tests {
                             colors: vec![crate::types::mana::ManaColor::Blue],
                         },
                         restrictions: vec![],
+                        grants: vec![],
                         expiry: None,
                     },
                 )
@@ -3058,6 +3061,7 @@ mod tests {
                             colors: vec![crate::types::mana::ManaColor::Black],
                         },
                         restrictions: vec![],
+                        grants: vec![],
                         expiry: None,
                     },
                 )
@@ -3120,6 +3124,7 @@ mod tests {
                             colors: vec![crate::types::mana::ManaColor::Black],
                         },
                         restrictions: vec![],
+                        grants: vec![],
                         expiry: None,
                     },
                 )
@@ -3311,6 +3316,7 @@ mod tests {
                 source_id: ObjectId(0),
                 snow: false,
                 restrictions: Vec::new(),
+                grants: vec![],
                 expiry: None,
             });
         }
@@ -3381,6 +3387,7 @@ mod tests {
                 source_id: ObjectId(0),
                 snow: false,
                 restrictions: Vec::new(),
+                grants: vec![],
                 expiry: None,
             });
         }
@@ -3460,6 +3467,7 @@ mod tests {
             source_id: ObjectId(0),
             snow: false,
             restrictions: Vec::new(),
+            grants: vec![],
             expiry: None,
         });
 
@@ -3516,6 +3524,7 @@ mod tests {
                 source_id: ObjectId(0),
                 snow: false,
                 restrictions: Vec::new(),
+                grants: vec![],
                 expiry: None,
             });
         }
@@ -3940,6 +3949,7 @@ mod tests {
                             colors: vec![crate::types::mana::ManaColor::Green],
                         },
                         restrictions: vec![],
+                        grants: vec![],
                         expiry: None,
                     },
                 )
@@ -4007,6 +4017,7 @@ mod tests {
                             colors: vec![crate::types::mana::ManaColor::Green],
                         },
                         restrictions: vec![],
+                        grants: vec![],
                         expiry: None,
                     },
                 )
@@ -4069,6 +4080,7 @@ mod tests {
                             ],
                         },
                         restrictions: vec![],
+                        grants: vec![],
                         expiry: None,
                     },
                 )
@@ -4685,6 +4697,7 @@ mod tests {
             source_id: ObjectId(0),
             snow: false,
             restrictions: Vec::new(),
+            grants: vec![],
             expiry: None,
         });
 

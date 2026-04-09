@@ -1824,6 +1824,7 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
         } => Effect::Mana {
             produced,
             restrictions,
+            grants: vec![],
             expiry: None,
         },
         CostResourceImperativeAst::Damage {

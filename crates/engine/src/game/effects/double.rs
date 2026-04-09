@@ -200,6 +200,7 @@ fn resolve_double_mana(
                 source_id: ability.source_id,
                 snow: false,
                 restrictions: vec![],
+                grants: vec![],
                 expiry: None,
             });
 
@@ -412,6 +413,7 @@ mod tests {
                 source_id: ObjectId(50),
                 snow: false,
                 restrictions: vec![],
+                grants: vec![],
                 expiry: None,
             });
         }

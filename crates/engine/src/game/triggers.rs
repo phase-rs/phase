@@ -329,6 +329,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                                 colors: vec![crate::types::mana::ManaColor::Red; n as usize],
                             },
                             restrictions: vec![],
+                            grants: vec![],
                             expiry: Some(crate::types::mana::ManaExpiry::EndOfCombat),
                         };
                         let fb_ability =

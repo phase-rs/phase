@@ -1427,6 +1427,7 @@ mod tests {
                         count: QuantityExpr::Fixed { value: 1 },
                     },
                     restrictions: vec![],
+                    grants: vec![],
                     expiry: None,
                 },
             )
@@ -1441,6 +1442,7 @@ mod tests {
                         color_options: vec![ManaColor::White, ManaColor::Blue],
                     },
                     restrictions: vec![],
+                    grants: vec![],
                     expiry: None,
                 },
             )

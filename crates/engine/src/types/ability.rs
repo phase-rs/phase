@@ -2396,6 +2396,9 @@ pub enum Effect {
         produced: ManaProduction,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         restrictions: Vec<ManaSpendRestriction>,
+        /// CR 106.6: Properties granted to the spell this mana is spent on.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        grants: Vec<crate::types::mana::ManaSpellGrant>,
         /// When set, produced mana persists beyond normal phase-transition drains
         /// until the specified expiry condition is met (e.g., EndOfCombat for firebending).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5420,6 +5423,7 @@ mod tests {
                 colors: vec![ManaColor::Green, ManaColor::Green],
             },
             restrictions: vec![],
+            grants: vec![],
             expiry: None,
         };
         let json = serde_json::to_string(&effect).unwrap();
@@ -5439,6 +5443,7 @@ mod tests {
                     colors: vec![ManaColor::White, ManaColor::Green],
                 },
                 restrictions: vec![],
+                grants: vec![],
                 expiry: None,
             }
         );

@@ -136,6 +136,12 @@ pub(super) enum ContinuationAst {
     },
     ManaRestriction {
         restriction: ManaSpendRestriction,
+        grants: Vec<crate::types::mana::ManaSpellGrant>,
+    },
+    /// CR 106.6: "that spell can't be countered" — adds grants to the preceding
+    /// mana effect without a new restriction (the restriction was already parsed).
+    ManaGrant {
+        grants: Vec<crate::types::mana::ManaSpellGrant>,
     },
     CounterSourceStatic {
         source_static: Box<StaticDefinition>,

@@ -729,6 +729,7 @@ mod tests {
                 source_id: ObjectId(0),
                 snow: false,
                 restrictions: Vec::new(),
+                grants: vec![],
                 expiry: None,
             });
         }
@@ -983,6 +984,7 @@ mod tests {
             source_id: ObjectId(0),
             snow: false,
             restrictions: Vec::new(),
+            grants: vec![],
             expiry: None,
         });
 

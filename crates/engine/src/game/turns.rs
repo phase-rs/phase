@@ -869,6 +869,7 @@ mod tests {
             source_id: ObjectId(1),
             snow: false,
             restrictions: Vec::new(),
+            grants: vec![],
             expiry: None,
         });
 

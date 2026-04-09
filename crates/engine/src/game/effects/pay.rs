@@ -128,6 +128,7 @@ mod tests {
                 source_id: ObjectId(0),
                 snow: false,
                 restrictions: vec![],
+                grants: vec![],
                 expiry: None,
             });
         }

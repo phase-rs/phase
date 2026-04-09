@@ -379,6 +379,7 @@ mod tests {
                     colors: vec![color],
                 },
                 restrictions: vec![],
+                grants: vec![],
                 expiry: None,
             },
         )
@@ -626,6 +627,7 @@ mod tests {
                     ],
                 },
                 restrictions: vec![],
+                grants: vec![],
                 expiry: None,
             },
         )
@@ -676,6 +678,7 @@ mod tests {
                         color_options: vec![ManaColor::White, ManaColor::Blue],
                     },
                     restrictions: vec![],
+                    grants: vec![],
                     expiry: None,
                 },
             )

@@ -1982,6 +1982,7 @@ mod tests {
                             colors: vec![ManaColor::Blue],
                         },
                         restrictions: vec![],
+                        grants: vec![],
                         expiry: None,
                     },
                 )
@@ -1995,6 +1996,7 @@ mod tests {
                             colors: vec![ManaColor::Black],
                         },
                         restrictions: vec![],
+                        grants: vec![],
                         expiry: None,
                     },
                 )

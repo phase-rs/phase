@@ -47,6 +47,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
         return Some(Effect::Mana {
             produced,
             restrictions: vec![],
+            grants: vec![],
             expiry: None,
         });
     }
@@ -86,6 +87,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
             return Some(Effect::Mana {
                 produced,
                 restrictions: vec![],
+                grants: vec![],
                 expiry: None,
             });
         }
@@ -99,6 +101,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                     color_options: all_mana_colors(),
                 },
                 restrictions: vec![],
+                grants: vec![],
                 expiry: None,
             });
         }
@@ -113,6 +116,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
             return Some(Effect::Mana {
                 produced: ManaProduction::ChosenColor { count },
                 restrictions: vec![],
+                grants: vec![],
                 expiry: None,
             });
         }
@@ -129,6 +133,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                             color_options: colors,
                         },
                         restrictions: vec![],
+                        grants: vec![],
                         expiry: None,
                     });
                 }
@@ -146,6 +151,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                         color_options,
                     },
                     restrictions: vec![],
+                    grants: vec![],
                     expiry: None,
                 });
             }
@@ -164,6 +170,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
     Some(Effect::Mana {
         produced,
         restrictions: vec![],
+        grants: vec![],
         expiry: None,
     })
 }
@@ -509,15 +516,26 @@ pub(super) fn all_mana_colors() -> Vec<ManaColor> {
 }
 
 /// Parse a "Spend this mana only to cast..." clause into a `ManaSpendRestriction`.
+/// Parse a "Spend this mana only to cast..." clause into a restriction and optional spell grants.
+///
+/// CR 106.6: Some abilities that produce mana have an additional effect on the spell
+/// the mana is spent on (e.g., "that spell can't be countered").
 ///
 /// Uses nom combinators for prefix matching: "spend this mana only", "to activate
 /// abilities", "on costs that include", "to cast".
 ///
 /// Handles patterns like:
-/// - "spend this mana only to cast creature spells" -> SpellType("Creature")
-/// - "spend this mana only to cast a creature spell of the chosen type" -> ChosenCreatureType
-/// - "spend this mana only to activate abilities" -> ActivateOnly
-pub(crate) fn parse_mana_spend_restriction(lower: &str) -> Option<ManaSpendRestriction> {
+/// - "spend this mana only to cast creature spells" -> `SpellType("Creature")`
+/// - "spend this mana only to cast a creature spell of the chosen type" -> `ChosenCreatureType`
+/// - "spend this mana only to activate abilities" -> `ActivateOnly`
+///
+/// Returns `(restriction, grants)` where grants are properties conferred to the spell.
+pub(crate) fn parse_mana_spend_restriction(
+    lower: &str,
+) -> Option<(
+    ManaSpendRestriction,
+    Vec<crate::types::mana::ManaSpellGrant>,
+)> {
     let (_, base) = nom_on_lower(lower, lower, |i| {
         value((), tag("spend this mana only ")).parse(i)
     })?;
@@ -530,7 +548,7 @@ pub(crate) fn parse_mana_spend_restriction(lower: &str) -> Option<ManaSpendRestr
     })
     .is_some()
     {
-        return Some(ManaSpendRestriction::ActivateOnly);
+        return Some((ManaSpendRestriction::ActivateOnly, vec![]));
     }
 
     // "spend this mana only on costs that include" -- X-cost restriction
@@ -539,17 +557,19 @@ pub(crate) fn parse_mana_spend_restriction(lower: &str) -> Option<ManaSpendRestr
     })
     .is_some()
     {
-        return Some(ManaSpendRestriction::XCostOnly);
+        return Some((ManaSpendRestriction::XCostOnly, vec![]));
     }
 
     let (_, rest) = nom_on_lower(base, &base_lower, |i| value((), tag("to cast ")).parse(i))?;
     let rest = rest.trim();
 
-    // Strip trailing ", and that spell can't be countered" or similar trailing clauses
-    let rest = rest.split(", and ").next().unwrap_or(rest).trim();
+    // CR 106.6: Extract "and that spell can't be countered" grant before parsing restriction.
+    let (rest, grants) = extract_spell_grants(rest);
+    let rest = rest.trim();
     if matches!(rest, "spells with flashback" | "a spell with flashback") {
-        return Some(ManaSpendRestriction::SpellWithKeywordKind(
-            KeywordKind::Flashback,
+        return Some((
+            ManaSpendRestriction::SpellWithKeywordKind(KeywordKind::Flashback),
+            grants,
         ));
     }
 
@@ -557,20 +577,26 @@ pub(crate) fn parse_mana_spend_restriction(lower: &str) -> Option<ManaSpendRestr
         rest,
         "spells with flashback from a graveyard" | "a spell with flashback from a graveyard"
     ) {
-        return Some(ManaSpendRestriction::SpellWithKeywordKindFromZone {
-            kind: KeywordKind::Flashback,
-            zone: crate::types::zones::Zone::Graveyard,
-        });
+        return Some((
+            ManaSpendRestriction::SpellWithKeywordKindFromZone {
+                kind: KeywordKind::Flashback,
+                zone: crate::types::zones::Zone::Graveyard,
+            },
+            grants,
+        ));
     }
 
     if matches!(
         rest,
         "spells with flashback from your graveyard" | "a spell with flashback from your graveyard"
     ) {
-        return Some(ManaSpendRestriction::SpellWithKeywordKindFromZone {
-            kind: KeywordKind::Flashback,
-            zone: crate::types::zones::Zone::Graveyard,
-        });
+        return Some((
+            ManaSpendRestriction::SpellWithKeywordKindFromZone {
+                kind: KeywordKind::Flashback,
+                zone: crate::types::zones::Zone::Graveyard,
+            },
+            grants,
+        ));
     }
 
     // CR 106.12: Check for "or activate abilities of [type]" suffix.
@@ -583,7 +609,7 @@ pub(crate) fn parse_mana_spend_restriction(lower: &str) -> Option<ManaSpendRestr
         .trim();
 
     if spell_part.contains("of the chosen type") {
-        return Some(ManaSpendRestriction::ChosenCreatureType);
+        return Some((ManaSpendRestriction::ChosenCreatureType, grants));
     }
 
     // "creature spells" / "a creature spell" / "artifact spells" etc.
@@ -607,9 +633,12 @@ pub(crate) fn parse_mana_spend_restriction(lower: &str) -> Option<ManaSpendRestr
                 super::capitalize(second)
             );
             if has_ability_activation {
-                return Some(ManaSpendRestriction::SpellTypeOrAbilityActivation(compound));
+                return Some((
+                    ManaSpendRestriction::SpellTypeOrAbilityActivation(compound),
+                    grants,
+                ));
             }
-            return Some(ManaSpendRestriction::SpellType(compound));
+            return Some((ManaSpendRestriction::SpellType(compound), grants));
         }
     }
 
@@ -617,12 +646,64 @@ pub(crate) fn parse_mana_spend_restriction(lower: &str) -> Option<ManaSpendRestr
     let type_name = super::capitalize(type_word);
 
     if has_ability_activation {
-        Some(ManaSpendRestriction::SpellTypeOrAbilityActivation(
-            type_name,
+        Some((
+            ManaSpendRestriction::SpellTypeOrAbilityActivation(type_name),
+            grants,
         ))
     } else {
-        Some(ManaSpendRestriction::SpellType(type_name))
+        Some((ManaSpendRestriction::SpellType(type_name), grants))
     }
+}
+
+/// CR 106.6: Parse a standalone "that spell can't be countered" clause.
+///
+/// Used when comma-splitting separates the grant from the restriction text,
+/// producing a standalone clause like "that spell can't be countered".
+pub(super) fn parse_mana_spell_grant(
+    lower: &str,
+) -> Option<Vec<crate::types::mana::ManaSpellGrant>> {
+    use crate::types::mana::ManaSpellGrant;
+    let trimmed = lower.trim().trim_end_matches('.');
+    // Use nom tag for matching
+    if value::<_, _, nom_language::error::VerboseError<&str>, _>(
+        (),
+        tag("that spell can't be countered"),
+    )
+    .parse(trimmed)
+    .is_ok()
+    {
+        return Some(vec![ManaSpellGrant::CantBeCountered]);
+    }
+    None
+}
+
+/// CR 106.6: Extract trailing spell grants from a mana restriction clause.
+///
+/// Recognizes patterns like:
+/// - ", and that spell can't be countered"
+/// - ", and that spell can't be countered."
+///
+/// Returns the text before the grant clause and the list of grants found.
+/// Uses suffix stripping (structural, not dispatch) since the grant clause
+/// is always a fixed trailing phrase.
+fn extract_spell_grants(text: &str) -> (&str, Vec<crate::types::mana::ManaSpellGrant>) {
+    use crate::types::mana::ManaSpellGrant;
+
+    let lower = text.to_lowercase();
+    // structural: not dispatch — suffix stripping of fixed trailing clause
+    for suffix in [
+        ", and that spell can't be countered.",
+        ", and that spell can't be countered",
+    ] {
+        if let Some(before) = lower.strip_suffix(suffix) {
+            let before_len = before.len();
+            return (
+                text[..before_len].trim(),
+                vec![ManaSpellGrant::CantBeCountered],
+            );
+        }
+    }
+    (text, vec![])
 }
 
 /// CR 106.1 / CR 106.3: Parse "an amount of {color} equal to [quantity]"
@@ -656,6 +737,7 @@ fn try_parse_amount_equal_to(clause: &str) -> Option<Effect> {
             color_options,
         },
         restrictions: vec![],
+        grants: vec![],
         expiry: None,
     })
 }

@@ -124,6 +124,7 @@ pub fn synthesize_basic_land_mana(face: &mut CardFace) {
                             colors: vec![color],
                         },
                         restrictions: vec![],
+                        grants: vec![],
                         expiry: None,
                     },
                 )

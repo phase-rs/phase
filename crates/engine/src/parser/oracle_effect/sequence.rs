@@ -541,12 +541,31 @@ pub(super) fn apply_clause_continuation(
                 *existing = card_filter;
             }
         }
-        ContinuationAst::ManaRestriction { restriction } => {
+        ContinuationAst::ManaRestriction {
+            restriction,
+            grants: new_grants,
+        } => {
             let Some(previous) = defs.last_mut() else {
                 return;
             };
-            if let Effect::Mana { restrictions, .. } = &mut *previous.effect {
+            if let Effect::Mana {
+                restrictions,
+                grants,
+                ..
+            } = &mut *previous.effect
+            {
                 restrictions.push(restriction);
+                grants.extend(new_grants);
+            }
+        }
+        ContinuationAst::ManaGrant {
+            grants: new_grants,
+        } => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            if let Effect::Mana { grants, .. } = &mut *previous.effect {
+                grants.extend(new_grants);
             }
         }
         ContinuationAst::CounterSourceStatic { source_static } => {
@@ -724,9 +743,9 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::RevealHandFilter { .. } => {
             matches!(current_effect, Effect::RevealHand { .. })
         }
-        ContinuationAst::ManaRestriction { .. } | ContinuationAst::CounterSourceStatic { .. } => {
-            true
-        }
+        ContinuationAst::ManaRestriction { .. }
+        | ContinuationAst::ManaGrant { .. }
+        | ContinuationAst::CounterSourceStatic { .. } => true,
         ContinuationAst::FlashbackCostEqualsManaCost => true,
         ContinuationAst::SearchDestination { .. } => false,
         ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
@@ -960,8 +979,22 @@ pub(super) fn parse_followup_continuation_ast(
             };
             Some(ContinuationAst::RevealHandFilter { card_filter })
         }
-        Effect::Mana { .. } => super::mana::parse_mana_spend_restriction(&lower)
-            .map(|restriction| ContinuationAst::ManaRestriction { restriction }),
+        Effect::Mana { .. } => {
+            if let Some((restriction, grants)) =
+                super::mana::parse_mana_spend_restriction(&lower)
+            {
+                return Some(ContinuationAst::ManaRestriction {
+                    restriction,
+                    grants,
+                });
+            }
+            // CR 106.6: "that spell can't be countered" as a standalone clause
+            // after comma-splitting from the restriction text.
+            if let Some(grants) = super::mana::parse_mana_spell_grant(&lower) {
+                return Some(ContinuationAst::ManaGrant { grants });
+            }
+            None
+        }
         Effect::GenericEffect {
             static_abilities, ..
         } if lower == "the flashback cost is equal to its mana cost"

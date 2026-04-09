@@ -276,6 +276,7 @@ mod tests {
                     colors: vec![ManaColor::Green],
                 },
                 restrictions: vec![],
+                grants: vec![],
                 expiry: None,
             },
         );

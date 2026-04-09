@@ -108,6 +108,7 @@ pub fn produce_mana(
         source_id,
         snow: false,
         restrictions: Vec::new(),
+        grants: Vec::new(),
         expiry: None,
     };
 
@@ -640,6 +641,7 @@ mod tests {
             source_id: ObjectId(1),
             snow: false,
             restrictions: Vec::new(),
+            grants: vec![],
             expiry: None,
         }
     }
@@ -936,6 +938,7 @@ mod tests {
             source_id: ObjectId(1),
             snow: false,
             restrictions: vec![ManaRestriction::OnlyForCreatureType("Elf".to_string())],
+            grants: vec![],
             expiry: None,
         });
         pool.add(make_unit(ManaType::Green));
@@ -974,6 +977,7 @@ mod tests {
             restrictions: vec![ManaRestriction::OnlyForSpellWithKeywordKind(
                 crate::types::keywords::KeywordKind::Flashback,
             )],
+            grants: vec![],
             expiry: None,
         });
 
@@ -1015,6 +1019,7 @@ mod tests {
                 crate::types::keywords::KeywordKind::Flashback,
                 crate::types::zones::Zone::Graveyard,
             )],
+            grants: vec![],
             expiry: None,
         });
 
@@ -1059,6 +1064,7 @@ mod tests {
             source_id: ObjectId(1),
             snow: false,
             restrictions: vec![],
+            grants: vec![],
             expiry: None,
         });
         let cost = ManaCost::Cost {
@@ -1080,6 +1086,7 @@ mod tests {
             source_id: ObjectId(1),
             snow: false,
             restrictions: vec![],
+            grants: vec![],
             expiry: None,
         });
         let cost = ManaCost::Cost {

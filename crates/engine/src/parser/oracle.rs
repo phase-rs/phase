@@ -4584,7 +4584,10 @@ mod tests {
         use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
         use crate::types::ability::ManaSpendRestriction;
         let result = parse_mana_spend_restriction("spend this mana only to activate abilities");
-        assert_eq!(result, Some(ManaSpendRestriction::ActivateOnly));
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::ActivateOnly)
+        );
     }
 
     #[test]
@@ -4594,7 +4597,7 @@ mod tests {
         let result =
             parse_mana_spend_restriction("spend this mana only to cast noncreature spells");
         assert_eq!(
-            result,
+            result.map(|(r, _)| r),
             Some(ManaSpendRestriction::SpellType("Noncreature".to_string()))
         );
     }
@@ -4604,7 +4607,10 @@ mod tests {
         use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
         use crate::types::ability::ManaSpendRestriction;
         let result = parse_mana_spend_restriction("spend this mana only on costs that include {x}");
-        assert_eq!(result, Some(ManaSpendRestriction::XCostOnly));
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::XCostOnly)
+        );
     }
 
     #[test]
@@ -4614,7 +4620,7 @@ mod tests {
         let result =
             parse_mana_spend_restriction("spend this mana only to cast instant or sorcery spells");
         assert_eq!(
-            result,
+            result.map(|(r, _)| r),
             Some(ManaSpendRestriction::SpellType(
                 "Instant or Sorcery".to_string()
             ))
@@ -4627,7 +4633,7 @@ mod tests {
         let result =
             parse_mana_spend_restriction("spend this mana only to cast spells with flashback");
         assert_eq!(
-            result,
+            result.map(|(r, _)| r),
             Some(ManaSpendRestriction::SpellWithKeywordKind(
                 KeywordKind::Flashback,
             ))
@@ -4641,12 +4647,41 @@ mod tests {
             "spend this mana only to cast spells with flashback from a graveyard",
         );
         assert_eq!(
-            result,
+            result.map(|(r, _)| r),
             Some(ManaSpendRestriction::SpellWithKeywordKindFromZone {
                 kind: KeywordKind::Flashback,
                 zone: Zone::Graveyard,
             })
         );
+    }
+
+    #[test]
+    fn mana_spend_restriction_chosen_type_cant_be_countered() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::mana::ManaSpellGrant;
+        // Cavern of Souls pattern
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast a creature spell of the chosen type, and that spell can't be countered",
+        );
+        let (restriction, grants) = result.expect("should parse");
+        assert_eq!(restriction, ManaSpendRestriction::ChosenCreatureType);
+        assert_eq!(grants, vec![ManaSpellGrant::CantBeCountered]);
+    }
+
+    #[test]
+    fn mana_spend_restriction_legendary_cant_be_countered() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::mana::ManaSpellGrant;
+        // Delighted Halfling pattern
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast a legendary spell, and that spell can't be countered",
+        );
+        let (restriction, grants) = result.expect("should parse");
+        assert_eq!(
+            restriction,
+            ManaSpendRestriction::SpellType("Legendary".to_string())
+        );
+        assert_eq!(grants, vec![ManaSpellGrant::CantBeCountered]);
     }
 
     #[test]

@@ -671,6 +671,7 @@ fn treasure_ability() -> AbilityDefinition {
                 ],
             },
             restrictions: vec![],
+            grants: vec![],
             expiry: None,
         },
     )
@@ -778,6 +779,7 @@ fn powerstone_ability() -> AbilityDefinition {
             restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation(
                 "Artifact".to_string(),
             )],
+            grants: vec![],
             expiry: None,
         },
     )

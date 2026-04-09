@@ -1679,7 +1679,7 @@ pub(super) fn pay_mana_cost(
         .iter_mut()
         .find(|p| p.id == player)
         .expect("player exists");
-    mana_payment::pay_cost_with_demand(
+    let (spent_units, _life_payments) = mana_payment::pay_cost_with_demand(
         &mut player_data.mana_pool,
         cost,
         Some(&hand_demand),
@@ -1688,7 +1688,40 @@ pub(super) fn pay_mana_cost(
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
 
+    // CR 106.6: Apply mana spell grants to the spell being cast.
+    apply_mana_spell_grants(state, source_id, &spent_units);
+
     Ok(())
+}
+
+/// CR 106.6: When mana with spell grants is spent to cast a spell, apply those
+/// grants to the spell object (e.g., "that spell can't be countered").
+fn apply_mana_spell_grants(
+    state: &mut GameState,
+    spell_id: ObjectId,
+    spent_units: &[crate::types::mana::ManaUnit],
+) {
+    use crate::types::ability::StaticDefinition;
+    use crate::types::mana::ManaSpellGrant;
+    use crate::types::statics::StaticMode;
+
+    let has_cant_be_countered = spent_units
+        .iter()
+        .any(|u| u.grants.contains(&ManaSpellGrant::CantBeCountered));
+
+    if has_cant_be_countered {
+        if let Some(obj) = state.objects.get_mut(&spell_id) {
+            // Only add if not already present (idempotent).
+            if !obj
+                .static_definitions
+                .iter()
+                .any(|sd| sd.mode == StaticMode::CantBeCountered)
+            {
+                obj.static_definitions
+                    .push(StaticDefinition::new(StaticMode::CantBeCountered));
+            }
+        }
+    }
 }
 
 /// Pay an activated ability's cost. Handles `Tap`, `Mana`, `Composite` (recursive),
@@ -2583,6 +2616,7 @@ mod tests {
                 source_id: ObjectId(0),
                 snow: false,
                 restrictions: Vec::new(),
+                grants: vec![],
                 expiry: None,
             });
         }
@@ -2677,6 +2711,7 @@ mod tests {
                         colors: vec![ManaColor::Blue],
                     },
                     restrictions: vec![],
+                    grants: vec![],
                     expiry: None,
                 },
             )
@@ -2690,6 +2725,7 @@ mod tests {
                         colors: vec![ManaColor::Black],
                     },
                     restrictions: vec![],
+                    grants: vec![],
                     expiry: None,
                 },
             )
@@ -2723,6 +2759,7 @@ mod tests {
                         count: QuantityExpr::Fixed { value: 1 },
                     },
                     restrictions: vec![],
+                    grants: vec![],
                     expiry: None,
                 },
             )
@@ -2737,6 +2774,7 @@ mod tests {
                         color_options: vec![ManaColor::White, ManaColor::Blue],
                     },
                     restrictions: vec![],
+                    grants: vec![],
                     expiry: None,
                 },
             )
@@ -4790,6 +4828,7 @@ mod tests {
                         colors: vec![ManaColor::Green],
                     },
                     restrictions: vec![],
+                    grants: vec![],
                     expiry: None,
                 },
             )
@@ -4963,6 +5002,7 @@ mod tests {
                             colors: vec![ManaColor::Green],
                         },
                         restrictions: vec![],
+                        grants: vec![],
                         expiry: None,
                     },
                 )
@@ -5082,6 +5122,7 @@ mod tests {
                             color_options: vec![ManaColor::Green],
                         },
                         restrictions: vec![],
+                        grants: vec![],
                         expiry: None,
                     },
                 )

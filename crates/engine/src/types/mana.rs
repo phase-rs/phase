@@ -153,6 +153,14 @@ impl ManaRestriction {
     }
 }
 
+/// CR 106.6: Additional effect that the mana confers upon the spell it is spent on.
+/// E.g., "that spell can't be countered" (Cavern of Souls, Delighted Halfling).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManaSpellGrant {
+    /// The spell cast with this mana can't be countered.
+    CantBeCountered,
+}
+
 /// When mana expires — controls lifecycle beyond the normal CR 500.4 phase drain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaExpiry {
@@ -167,6 +175,9 @@ pub struct ManaUnit {
     pub source_id: ObjectId,
     pub snow: bool,
     pub restrictions: Vec<ManaRestriction>,
+    /// CR 106.6: Properties granted to the spell this mana is spent on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<ManaSpellGrant>,
     /// When set, this mana survives normal phase-transition drains until the
     /// specified expiry condition is met.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -186,6 +197,7 @@ impl ManaUnit {
             source_id,
             snow,
             restrictions,
+            grants: Vec::new(),
             expiry: None,
         }
     }
@@ -695,6 +707,7 @@ mod tests {
             source_id: ObjectId(42),
             snow: true,
             restrictions: vec![ManaRestriction::OnlyForSpellType("Creature".to_string())],
+            grants: vec![],
             expiry: None,
         };
         assert_eq!(unit.source_id, ObjectId(42));

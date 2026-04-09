@@ -359,6 +359,7 @@ impl GameScenario {
                     colors: vec![color],
                 },
                 restrictions: vec![],
+                grants: vec![],
                 expiry: None,
             },
         )

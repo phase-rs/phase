@@ -1747,6 +1747,7 @@ mod tests {
                     colors: vec![ManaColor::Green],
                 },
                 restrictions: vec![],
+                grants: vec![],
                 expiry: None,
             },
         );
@@ -1835,6 +1836,7 @@ mod tests {
                     colors: vec![ManaColor::Green],
                 },
                 restrictions: vec![],
+                grants: vec![],
                 expiry: None,
             },
         );
