@@ -789,10 +789,12 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
         }
     }
 
-    // Clear transient cast_from_zone on all objects after trigger collection.
-    // This field only needs to survive long enough for ETB trigger processing.
+    // Clear transient cast_from_zone and mana_spent_to_cast on all objects after
+    // trigger collection. These fields only need to survive long enough for ETB
+    // trigger processing.
     for obj in state.objects.values_mut() {
         obj.cast_from_zone = None;
+        obj.mana_spent_to_cast = false;
     }
 }
 
@@ -1461,8 +1463,24 @@ pub(crate) fn check_trigger_condition(
             // TODO: Track mana color spending during casting. Stub: false.
             false
         }
-        // CR 601.2b: General mana spending condition (text-based fallback).
-        TriggerCondition::ManaSpentCondition { .. } => false,
+        // CR 601.2h: "if no mana was spent to cast it/them" — check the entering object.
+        TriggerCondition::ManaSpentCondition { text } => {
+            let entering_id = trigger_event
+                .and_then(|e| match e {
+                    GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                    _ => None,
+                })
+                .or(source_id);
+            if text.contains("no mana was spent") {
+                entering_id
+                    .and_then(|id| state.objects.get(&id))
+                    .is_some_and(|obj| !obj.mana_spent_to_cast)
+            } else {
+                // Other mana-spent conditions (e.g., "if mana from a Treasure was spent")
+                // remain unimplemented — default to false.
+                false
+            }
+        }
         // CR 400.7: "if it had counters on it" — check LKI for counters.
         TriggerCondition::HadCounters { counter_type } => source_id
             .and_then(|id| state.lki_cache.get(&id))

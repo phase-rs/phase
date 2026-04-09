@@ -256,6 +256,12 @@ pub struct GameObject {
     /// to evaluate conditions like "if you cast it from your hand".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_from_zone: Option<Zone>,
+
+    /// CR 601.2h: Whether mana was actually spent to cast this object.
+    /// Set during casting finalization when mana is paid. Used for trigger conditions
+    /// like "if no mana was spent to cast it" (e.g., Satoru, the Infiltrator).
+    #[serde(default)]
+    pub mana_spent_to_cast: bool,
 }
 
 impl GameObject {
@@ -376,6 +382,7 @@ impl GameObject {
             case_state: None,
             class_level: None,
             cast_from_zone: None,
+            mana_spent_to_cast: false,
         }
     }
 
