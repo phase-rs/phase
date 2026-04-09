@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-04-08T00:00:00Z",
+  "updated": "2026-04-23T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -20,23 +20,19 @@
       ],
       "main": [
         {
-          "count": 6,
-          "name": "Island"
-        },
-        {
-          "count": 3,
-          "name": "Eddymurk Crab"
-        },
-        {
           "count": 1,
-          "name": "Willowrush Verge"
+          "name": "Cori Mountain Monastery"
+        },
+        {
+          "count": 5,
+          "name": "Island"
         },
         {
           "count": 4,
           "name": "Opt"
         },
         {
-          "count": 3,
+          "count": 4,
           "name": "Elusive Otter"
         },
         {
@@ -48,11 +44,15 @@
           "name": "Burst Lightning"
         },
         {
+          "count": 2,
+          "name": "Torch the Tower"
+        },
+        {
           "count": 4,
           "name": "Boomerang Basics"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Roaring Furnace // Steaming Sauna"
         },
         {
@@ -60,20 +60,20 @@
           "name": "Wild Ride"
         },
         {
-          "count": 2,
+          "count": 3,
           "name": "Multiversal Passage"
-        },
-        {
-          "count": 1,
-          "name": "Sear"
         },
         {
           "count": 2,
           "name": "Into the Flood Maw"
         },
         {
-          "count": 4,
+          "count": 2,
           "name": "Stock Up"
+        },
+        {
+          "count": 2,
+          "name": "Quantum Riddler"
         },
         {
           "count": 4,
@@ -98,24 +98,16 @@
       ],
       "sideboard": [
         {
+          "count": 2,
+          "name": "Eddymurk Crab"
+        },
+        {
           "count": 1,
           "name": "Annul"
         },
         {
-          "count": 1,
-          "name": "Torch the Tower"
-        },
-        {
           "count": 2,
-          "name": "Get Out"
-        },
-        {
-          "count": 1,
-          "name": "Sear"
-        },
-        {
-          "count": 1,
-          "name": "Roaring Furnace // Steaming Sauna"
+          "name": "Spell Snare"
         },
         {
           "count": 2,
@@ -126,16 +118,16 @@
           "name": "Ral, Crackling Wit"
         },
         {
-          "count": 2,
+          "count": 3,
           "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 1,
-          "name": "Broadside Barrage"
         },
         {
           "count": 2,
           "name": "Fire Magic"
+        },
+        {
+          "count": 1,
+          "name": "Broadside Barrage"
         }
       ]
     },
@@ -151,10 +143,10 @@
       "main": [
         {
           "count": 2,
-          "name": "Surrak, Elusive Hunter"
+          "name": "Webstrike Elite"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Promising Vein"
         },
         {
@@ -166,28 +158,28 @@
           "name": "Mightform Harmonizer"
         },
         {
-          "count": 4,
-          "name": "Esper Origins"
-        },
-        {
           "count": 2,
-          "name": "Meltstrider's Resolve"
+          "name": "Archdruid's Charm"
         },
         {
-          "count": 3,
+          "count": 4,
           "name": "Escape Tunnel"
         },
         {
-          "count": 2,
-          "name": "Royal Treatment"
+          "count": 4,
+          "name": "Sapling Nursery"
         },
         {
           "count": 4,
           "name": "Sazh's Chocobo"
         },
         {
-          "count": 4,
+          "count": 3,
           "name": "Ba Sing Se"
+        },
+        {
+          "count": 2,
+          "name": "Mossborn Hydra"
         },
         {
           "count": 4,
@@ -206,21 +198,17 @@
           "name": "Fabled Passage"
         },
         {
-          "count": 14,
+          "count": 13,
           "name": "Forest"
         }
       ],
       "sideboard": [
         {
-          "count": 1,
-          "name": "Scrapshooter"
-        },
-        {
-          "count": 2,
+          "count": 4,
           "name": "Meltstrider's Resolve"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Surrak, Elusive Hunter"
         },
         {
@@ -228,16 +216,20 @@
           "name": "Pawpatch Formation"
         },
         {
-          "count": 3,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 4,
-          "name": "Mossborn Hydra"
+          "count": 2,
+          "name": "Torpor Orb"
         },
         {
           "count": 2,
-          "name": "Eumidian Terrabotanist"
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 2,
+          "name": "Mossborn Hydra"
+        },
+        {
+          "count": 1,
+          "name": "Keen-Eyed Curator"
         }
       ]
     },
@@ -373,43 +365,23 @@
       "main": [
         {
           "count": 4,
-          "name": "Sunderflock"
+          "name": "Sleight of Hand"
         },
         {
-          "count": 6,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Eddymurk Crab"
+          "count": 1,
+          "name": "Spell Pierce"
         },
         {
           "count": 4,
           "name": "Opt"
         },
         {
-          "count": 4,
-          "name": "Burst Lightning"
-        },
-        {
           "count": 1,
-          "name": "Bounce Off"
-        },
-        {
-          "count": 4,
-          "name": "Winternight Stories"
+          "name": "Three Steps Ahead"
         },
         {
           "count": 2,
           "name": "Multiversal Passage"
-        },
-        {
-          "count": 1,
-          "name": "Sear"
-        },
-        {
-          "count": 1,
-          "name": "Spell Pierce"
         },
         {
           "count": 3,
@@ -417,7 +389,31 @@
         },
         {
           "count": 4,
+          "name": "Sunderflock"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 4,
+          "name": "Eddymurk Crab"
+        },
+        {
+          "count": 2,
+          "name": "Abrade"
+        },
+        {
+          "count": 4,
           "name": "Hearth Elemental"
+        },
+        {
+          "count": 1,
+          "name": "Into the Flood Maw"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
         },
         {
           "count": 3,
@@ -428,225 +424,74 @@
           "name": "Riverpyre Verge"
         },
         {
+          "count": 4,
+          "name": "Burst Lightning"
+        },
+        {
           "count": 1,
-          "name": "Spider-Sense"
+          "name": "Island"
         },
         {
-          "count": 4,
-          "name": "Steam Vents"
+          "count": 1,
+          "name": "Island"
         },
         {
-          "count": 4,
-          "name": "Spirebluff Canal"
+          "count": 1,
+          "name": "Island"
         },
         {
           "count": 2,
-          "name": "Glacial Dragonhunt"
+          "name": "Island"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 1,
+          "name": "Bounce Off"
         },
         {
           "count": 4,
-          "name": "Sleight of Hand"
+          "name": "Winternight Stories"
         }
       ],
       "sideboard": [
         {
+          "count": 2,
+          "name": "Broadside Barrage"
+        },
+        {
           "count": 1,
-          "name": "Disdainful Stroke"
+          "name": "The Legend of Kuruk"
+        },
+        {
+          "count": 2,
+          "name": "Fire Magic"
         },
         {
           "count": 2,
           "name": "Hydro-Man, Fluid Felon"
         },
         {
-          "count": 2,
-          "name": "Annul"
-        },
-        {
-          "count": 1,
-          "name": "Abrade"
-        },
-        {
-          "count": 2,
-          "name": "Pyroclasm"
-        },
-        {
           "count": 1,
           "name": "Ral, Crackling Wit"
         },
         {
+          "count": 1,
+          "name": "Wan Shi Tong, Librarian"
+        },
+        {
           "count": 2,
           "name": "Soul-Guide Lantern"
         },
         {
           "count": 2,
-          "name": "Sunspine Lynx"
-        },
-        {
-          "count": 1,
-          "name": "Negate"
-        },
-        {
-          "count": 1,
-          "name": "Broadside Barrage"
-        }
-      ]
-    },
-    {
-      "name": "Dimir Midrange",
-      "author": "MTGGoldfish",
-      "colors": [
-        "B",
-        "U"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Floodpits Drowner"
-        },
-        {
-          "count": 4,
-          "name": "Swamp"
-        },
-        {
-          "count": 1,
-          "name": "Loch Mare"
-        },
-        {
-          "count": 1,
-          "name": "Preacher of the Schism"
-        },
-        {
-          "count": 4,
-          "name": "Kaito, Bane of Nightmares"
-        },
-        {
-          "count": 1,
-          "name": "Phantom Interference"
-        },
-        {
-          "count": 1,
-          "name": "Starting Town"
-        },
-        {
-          "count": 2,
-          "name": "Cecil, Dark Knight"
-        },
-        {
-          "count": 2,
-          "name": "Restless Reef"
-        },
-        {
-          "count": 1,
-          "name": "Fountainport"
-        },
-        {
-          "count": 4,
-          "name": "Island"
-        },
-        {
-          "count": 1,
-          "name": "Spell Snare"
-        },
-        {
-          "count": 3,
-          "name": "Multiversal Passage"
-        },
-        {
-          "count": 3,
-          "name": "Enduring Curiosity"
-        },
-        {
-          "count": 1,
-          "name": "Bitter Triumph"
-        },
-        {
-          "count": 4,
-          "name": "Tishana's Tidebinder"
-        },
-        {
-          "count": 2,
-          "name": "Shoot the Sheriff"
-        },
-        {
-          "count": 3,
-          "name": "Requiting Hex"
-        },
-        {
-          "count": 4,
-          "name": "Spyglass Siren"
-        },
-        {
-          "count": 4,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 2,
-          "name": "Soulstone Sanctuary"
-        },
-        {
-          "count": 4,
-          "name": "Deep-Cavern Bat"
-        },
-        {
-          "count": 4,
-          "name": "Gloomlake Verge"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Disdainful Stroke"
-        },
-        {
-          "count": 1,
-          "name": "Strategic Betrayal"
-        },
-        {
-          "count": 1,
-          "name": "Essence Scatter"
-        },
-        {
-          "count": 1,
           "name": "Annul"
         },
         {
-          "count": 1,
-          "name": "Requiting Hex"
-        },
-        {
-          "count": 1,
-          "name": "Loch Mare"
-        },
-        {
-          "count": 1,
-          "name": "The Unagi of Kyoshi Island"
-        },
-        {
-          "count": 1,
-          "name": "Duress"
-        },
-        {
-          "count": 1,
-          "name": "Day of Black Sun"
-        },
-        {
-          "count": 1,
-          "name": "Tragic Trajectory"
-        },
-        {
-          "count": 1,
-          "name": "Bitter Triumph"
-        },
-        {
           "count": 2,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 1,
-          "name": "Spell Pierce"
+          "name": "Disdainful Stroke"
         }
       ]
     },
@@ -790,6 +635,293 @@
       ]
     },
     {
+      "name": "4c Ouroboroid",
+      "author": "MTGGoldfish",
+      "colors": [
+        "G",
+        "W",
+        "U"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 1,
+          "name": "Craterhoof Behemoth"
+        },
+        {
+          "count": 2,
+          "name": "Willowrush Verge"
+        },
+        {
+          "count": 1,
+          "name": "Forest"
+        },
+        {
+          "count": 2,
+          "name": "Mockingbird"
+        },
+        {
+          "count": 2,
+          "name": "Archdruid's Charm"
+        },
+        {
+          "count": 4,
+          "name": "Starting Town"
+        },
+        {
+          "count": 2,
+          "name": "Keen-Eyed Curator"
+        },
+        {
+          "count": 3,
+          "name": "Temple Garden"
+        },
+        {
+          "count": 2,
+          "name": "Seam Rip"
+        },
+        {
+          "count": 4,
+          "name": "Llanowar Elves"
+        },
+        {
+          "count": 4,
+          "name": "Badgermole Cub"
+        },
+        {
+          "count": 2,
+          "name": "Brightglass Gearhulk"
+        },
+        {
+          "count": 4,
+          "name": "Gene Pollinator"
+        },
+        {
+          "count": 4,
+          "name": "Breeding Pool"
+        },
+        {
+          "count": 4,
+          "name": "Nature's Rhythm"
+        },
+        {
+          "count": 1,
+          "name": "Meltstrider's Resolve"
+        },
+        {
+          "count": 4,
+          "name": "Multiversal Passage"
+        },
+        {
+          "count": 4,
+          "name": "Hushwood Verge"
+        },
+        {
+          "count": 4,
+          "name": "Spider Manifestation"
+        },
+        {
+          "count": 2,
+          "name": "Ouroboroid"
+        },
+        {
+          "count": 4,
+          "name": "Quantum Riddler"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Surrak, Elusive Hunter"
+        },
+        {
+          "count": 1,
+          "name": "Get Lost"
+        },
+        {
+          "count": 1,
+          "name": "Seam Rip"
+        },
+        {
+          "count": 1,
+          "name": "Keen-Eyed Curator"
+        },
+        {
+          "count": 2,
+          "name": "Oko, Lorwyn Liege"
+        },
+        {
+          "count": 2,
+          "name": "Meltstrider's Resolve"
+        },
+        {
+          "count": 2,
+          "name": "Sage of the Skies"
+        },
+        {
+          "count": 2,
+          "name": "Spider-Sense"
+        },
+        {
+          "count": 2,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 1,
+          "name": "Ygra, Eater of All"
+        }
+      ]
+    },
+    {
+      "name": "Dimir Midrange",
+      "author": "MTGGoldfish",
+      "colors": [
+        "B",
+        "U"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 2,
+          "name": "Bitter Triumph"
+        },
+        {
+          "count": 3,
+          "name": "Dream Beavers"
+        },
+        {
+          "count": 4,
+          "name": "Enduring Curiosity"
+        },
+        {
+          "count": 4,
+          "name": "Kaito, Bane of Nightmares"
+        },
+        {
+          "count": 4,
+          "name": "Gloomlake Verge"
+        },
+        {
+          "count": 4,
+          "name": "Swamp"
+        },
+        {
+          "count": 2,
+          "name": "Spyglass Siren"
+        },
+        {
+          "count": 4,
+          "name": "Watery Grave"
+        },
+        {
+          "count": 4,
+          "name": "Floodpits Drowner"
+        },
+        {
+          "count": 2,
+          "name": "Restless Reef"
+        },
+        {
+          "count": 3,
+          "name": "Shoot the Sheriff"
+        },
+        {
+          "count": 4,
+          "name": "Deep-Cavern Bat"
+        },
+        {
+          "count": 2,
+          "name": "Tishana's Tidebinder"
+        },
+        {
+          "count": 2,
+          "name": "Cecil, Dark Knight"
+        },
+        {
+          "count": 2,
+          "name": "Starting Town"
+        },
+        {
+          "count": 3,
+          "name": "Requiting Hex"
+        },
+        {
+          "count": 3,
+          "name": "Multiversal Passage"
+        },
+        {
+          "count": 2,
+          "name": "Preacher of the Schism"
+        },
+        {
+          "count": 4,
+          "name": "Island"
+        },
+        {
+          "count": 1,
+          "name": "Soulstone Sanctuary"
+        },
+        {
+          "count": 1,
+          "name": "Fountainport"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Duress"
+        },
+        {
+          "count": 1,
+          "name": "Faebloom Trick"
+        },
+        {
+          "count": 1,
+          "name": "Ghost Vacuum"
+        },
+        {
+          "count": 1,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 1,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 2,
+          "name": "Disdainful Stroke"
+        },
+        {
+          "count": 2,
+          "name": "Annul"
+        },
+        {
+          "count": 2,
+          "name": "Day of Black Sun"
+        },
+        {
+          "count": 1,
+          "name": "Strategic Betrayal"
+        },
+        {
+          "count": 1,
+          "name": "Tishana's Tidebinder"
+        },
+        {
+          "count": 1,
+          "name": "The Legend of Kuruk"
+        },
+        {
+          "count": 1,
+          "name": "Shoot the Sheriff"
+        }
+      ]
+    },
+    {
       "name": "Mono-White Momo",
       "author": "MTGGoldfish",
       "colors": [
@@ -888,282 +1020,118 @@
       ]
     },
     {
-      "name": "Jeskai Control",
+      "name": "Azorius Momo",
       "author": "MTGGoldfish",
       "colors": [
         "W",
-        "U",
-        "R"
+        "U"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 1,
-          "name": "Cori Mountain Monastery"
-        },
-        {
-          "count": 1,
-          "name": "Elegant Parlor"
-        },
-        {
-          "count": 2,
-          "name": "Mistrise Village"
-        },
-        {
-          "count": 2,
-          "name": "Thundering Falls"
-        },
-        {
-          "count": 1,
-          "name": "Restless Anchorage"
-        },
-        {
-          "count": 2,
-          "name": "Three Steps Ahead"
-        },
-        {
-          "count": 1,
-          "name": "Wan Shi Tong, Librarian"
+          "count": 3,
+          "name": "Abandoned Air Temple"
         },
         {
           "count": 4,
-          "name": "Consult the Star Charts"
+          "name": "Cosmogrand Zenith"
         },
         {
           "count": 4,
           "name": "Floodfarm Verge"
         },
         {
-          "count": 2,
-          "name": "Seam Rip"
-        },
-        {
-          "count": 3,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 2,
-          "name": "Shiko, Paragon of the Way"
+          "count": 4,
+          "name": "Haliya, Guided by Light"
         },
         {
           "count": 4,
-          "name": "Get Lost"
-        },
-        {
-          "count": 3,
-          "name": "Jeskai Revelation"
+          "name": "Springleaf Drum"
         },
         {
           "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 1,
-          "name": "Marang River Regent"
+          "name": "Mockingbird"
         },
         {
           "count": 4,
-          "name": "No More Lies"
-        },
-        {
-          "count": 2,
-          "name": "Day of Judgment"
-        },
-        {
-          "count": 4,
-          "name": "Lightning Helix"
-        },
-        {
-          "count": 2,
-          "name": "Meticulous Archive"
+          "name": "Momo, Friendly Flier"
         },
         {
           "count": 3,
-          "name": "Sacred Foundry"
+          "name": "Multiversal Passage"
         },
         {
           "count": 3,
-          "name": "Stock Up"
+          "name": "Nurturing Pixie"
         },
         {
-          "count": 2,
-          "name": "Riverpyre Verge"
+          "count": 3,
+          "name": "Parting Gust"
         },
         {
-          "count": 1,
+          "count": 8,
           "name": "Plains"
         },
         {
-          "count": 1,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 2,
-          "name": "Sunbillow Verge"
-        },
-        {
-          "count": 1,
-          "name": "Fire Magic"
-        },
-        {
-          "count": 1,
-          "name": "Ultima"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Ultima"
-        },
-        {
-          "count": 1,
-          "name": "Rest in Peace"
-        },
-        {
-          "count": 2,
-          "name": "Torpor Orb"
-        },
-        {
-          "count": 2,
-          "name": "Tishana's Tidebinder"
+          "count": 4,
+          "name": "Sage of the Skies"
         },
         {
           "count": 3,
-          "name": "Kutzil's Flanker"
-        },
-        {
-          "count": 2,
-          "name": "Authority of the Consuls"
-        },
-        {
-          "count": 1,
-          "name": "Fire Magic"
-        },
-        {
-          "count": 3,
-          "name": "Voice of Victory"
-        }
-      ]
-    },
-    {
-      "name": "Mono-Red Aggro",
-      "author": "MTGGoldfish",
-      "colors": [
-        "R",
-        "U"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 2,
-          "name": "Sear"
-        },
-        {
-          "count": 3,
-          "name": "Shock"
+          "name": "Quantum Riddler"
         },
         {
           "count": 4,
-          "name": "Razorkin Needlehead"
-        },
-        {
-          "count": 2,
-          "name": "Fanatical Firebrand"
-        },
-        {
-          "count": 12,
-          "name": "Mountain"
+          "name": "Seam Rip"
         },
         {
           "count": 4,
-          "name": "Scalding Viper"
+          "name": "Hallowed Fountain"
         },
         {
           "count": 4,
-          "name": "Burst Lightning"
-        },
-        {
-          "count": 1,
-          "name": "Soulstone Sanctuary"
-        },
-        {
-          "count": 4,
-          "name": "Hearthborn Battler"
-        },
-        {
-          "count": 4,
-          "name": "Hired Claw"
-        },
-        {
-          "count": 4,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 2,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 4,
-          "name": "Ojer Axonil, Deepest Might"
-        },
-        {
-          "count": 1,
-          "name": "Kellan, Planar Trailblazer"
-        },
-        {
-          "count": 4,
-          "name": "Nova Hellkite"
-        },
-        {
-          "count": 1,
-          "name": "Lightning Strike"
+          "name": "Starfield Shepherd"
         }
       ],
       "sideboard": [
         {
           "count": 2,
-          "name": "Sear"
+          "name": "Avatar's Wrath"
         },
         {
           "count": 4,
-          "name": "Magebane Lizard"
+          "name": "Clarion Conqueror"
         },
         {
           "count": 1,
-          "name": "Scorching Shot"
+          "name": "Curious Farm Animals"
+        },
+        {
+          "count": 3,
+          "name": "No More Lies"
+        },
+        {
+          "count": 1,
+          "name": "Quantum Riddler"
         },
         {
           "count": 2,
           "name": "Soul-Guide Lantern"
         },
         {
-          "count": 3,
-          "name": "Twisted Fealty"
-        },
-        {
           "count": 2,
-          "name": "Sunspine Lynx"
-        },
-        {
-          "count": 1,
-          "name": "Shock"
+          "name": "Spider-Sense"
         }
       ]
     },
     {
-      "name": "Bant Airbending Combo",
+      "name": "Bant Ouroboroid",
       "author": "MTGGoldfish",
       "colors": [
-        "W",
         "G",
+        "W",
         "U"
       ],
       "tags": [
@@ -1171,16 +1139,16 @@
       ],
       "main": [
         {
-          "count": 2,
-          "name": "Michelangelo's Technique"
+          "count": 1,
+          "name": "Craterhoof Behemoth"
         },
         {
-          "count": 4,
-          "name": "Aang, Swift Savior"
+          "count": 1,
+          "name": "Forest"
         },
         {
-          "count": 4,
-          "name": "Interdimensional Web Watch"
+          "count": 3,
+          "name": "Mockingbird"
         },
         {
           "count": 4,
@@ -1191,15 +1159,15 @@
           "name": "Temple Garden"
         },
         {
-          "count": 2,
-          "name": "Floodfarm Verge"
+          "count": 1,
+          "name": "Keen-Eyed Curator"
         },
         {
-          "count": 2,
+          "count": 3,
           "name": "Seam Rip"
         },
         {
-          "count": 4,
+          "count": 1,
           "name": "Hallowed Fountain"
         },
         {
@@ -1211,8 +1179,12 @@
           "name": "Badgermole Cub"
         },
         {
+          "count": 2,
+          "name": "Brightglass Gearhulk"
+        },
+        {
           "count": 4,
-          "name": "Aang, at the Crossroads"
+          "name": "Gene Pollinator"
         },
         {
           "count": 4,
@@ -1220,65 +1192,69 @@
         },
         {
           "count": 4,
-          "name": "Bramble Familiar"
+          "name": "Nature's Rhythm"
         },
         {
           "count": 1,
-          "name": "Cavern of Souls"
+          "name": "Meltstrider's Resolve"
+        },
+        {
+          "count": 4,
+          "name": "Multiversal Passage"
         },
         {
           "count": 4,
           "name": "Hushwood Verge"
         },
         {
-          "count": 4,
-          "name": "Doc Aurlock, Grizzled Genius"
-        },
-        {
           "count": 1,
-          "name": "Plains"
+          "name": "Unable to Scream"
         },
         {
           "count": 4,
-          "name": "Appa, Steadfast Guardian"
+          "name": "Spider Manifestation"
+        },
+        {
+          "count": 2,
+          "name": "Ouroboroid"
+        },
+        {
+          "count": 4,
+          "name": "Quantum Riddler"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Surrak, Elusive Hunter"
+          "name": "Disdainful Stroke"
+        },
+        {
+          "count": 1,
+          "name": "Unable to Scream"
         },
         {
           "count": 2,
-          "name": "Seam Rip"
-        },
-        {
-          "count": 1,
-          "name": "Tishana's Tidebinder"
-        },
-        {
-          "count": 1,
-          "name": "Aven Interrupter"
-        },
-        {
-          "count": 2,
-          "name": "Kutzil's Flanker"
-        },
-        {
-          "count": 1,
-          "name": "Leatherhead, Swamp Stalker"
+          "name": "Oko, Lorwyn Liege"
         },
         {
           "count": 1,
           "name": "Beza, the Bounding Spring"
         },
         {
-          "count": 1,
-          "name": "Avatar's Wrath"
+          "count": 3,
+          "name": "Sage of the Skies"
         },
         {
           "count": 2,
-          "name": "Quantum Riddler"
+          "name": "Spider-Sense"
+        },
+        {
+          "count": 1,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 1,
+          "name": "Focus Fire"
         },
         {
           "count": 2,
@@ -1286,7 +1262,7 @@
         },
         {
           "count": 1,
-          "name": "Voice of Victory"
+          "name": "Insidious Fungus"
         }
       ]
     }
