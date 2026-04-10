@@ -9,10 +9,21 @@ use super::registry::TacticalPolicy;
 use super::strategy_helpers::{
     battlefield_pressure_delta, best_proactive_cast_score, is_own_main_phase,
 };
+use crate::deck_profile::DeckArchetype;
 
 pub struct InteractionReservationPolicy;
 
 impl TacticalPolicy for InteractionReservationPolicy {
+    fn archetype_scale(&self, archetype: DeckArchetype) -> f64 {
+        match archetype {
+            DeckArchetype::Aggro => 0.4,
+            DeckArchetype::Control => 2.0,
+            DeckArchetype::Midrange => 1.0,
+            DeckArchetype::Ramp => 1.0,
+            DeckArchetype::Combo => 1.0,
+        }
+    }
+
     fn score(&self, ctx: &PolicyContext<'_>) -> f64 {
         if !is_own_main_phase(ctx) || !matches!(ctx.candidate.action, GameAction::PassPriority) {
             return 0.0;
@@ -56,12 +67,29 @@ impl TacticalPolicy for InteractionReservationPolicy {
             && ctx.state.players[ctx.ai_player.0 as usize].life >= 8;
         let proactive_score = best_proactive_cast_score(ctx);
 
+        // If opponent has negligible counterspell probability (Full threat profile),
+        // reduce the reservation bonus — no need to hold mana against aggro with no counters.
+        let counter_discount = ctx
+            .context
+            .opponent_threat
+            .as_ref()
+            .and_then(|threat| {
+                if ctx.config.search.threat_awareness == crate::config::ThreatAwareness::Full
+                    && threat.probabilities.counterspell < 0.1
+                {
+                    Some(0.5) // halve the bonus
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(1.0);
+
         // Counter spells are time-critical — they only work during the opponent's cast.
         // Hold mana for counters even when behind (that's when control needs them most).
         if has_counter_interaction && proactive_score < 0.5 {
-            0.3
+            0.3 * counter_discount
         } else if board_is_stable && proactive_score < 0.42 {
-            0.18
+            0.18 * counter_discount
         } else if proactive_score >= 0.42 {
             -0.16
         } else {

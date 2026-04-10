@@ -5,6 +5,7 @@ use engine::types::zones::Zone;
 use super::context::PolicyContext;
 use super::registry::TacticalPolicy;
 use super::strategy_helpers::is_own_main_phase;
+use crate::deck_profile::DeckArchetype;
 
 /// Rewards casting spells that have synergy with existing board presence.
 ///
@@ -14,6 +15,16 @@ use super::strategy_helpers::is_own_main_phase;
 pub struct SynergyCastingPolicy;
 
 impl TacticalPolicy for SynergyCastingPolicy {
+    fn archetype_scale(&self, archetype: DeckArchetype) -> f64 {
+        match archetype {
+            DeckArchetype::Aggro => 1.0,
+            DeckArchetype::Control => 1.0,
+            DeckArchetype::Midrange => 1.0,
+            DeckArchetype::Ramp => 1.0,
+            DeckArchetype::Combo => 2.0,
+        }
+    }
+
     fn score(&self, ctx: &PolicyContext<'_>) -> f64 {
         if !is_own_main_phase(ctx) {
             return 0.0;

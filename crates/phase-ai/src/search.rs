@@ -7,8 +7,11 @@ use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
 
 use crate::combat_ai::{choose_attackers_with_targets_with_profile, choose_blockers_with_profile};
-use crate::config::AiConfig;
+use crate::config::{AiConfig, ThreatAwareness};
 use crate::context::AiContext;
+use crate::threat_profile::{
+    build_threat_profile_multiplayer, ArchetypeBaseProbabilities, ThreatProfile,
+};
 use crate::planner::{
     apply_candidate, build_continuation_planner, rank_candidates, PlannerServices, SearchBudget,
 };
@@ -63,22 +66,25 @@ pub fn score_candidates(
     ai_player: PlayerId,
     config: &AiConfig,
 ) -> Vec<(GameAction, f64)> {
+    let ctx = build_decision_context(state);
+    let policies = PolicyRegistry::default();
+    let context = build_ai_context(state, ai_player, config);
+
     // Combat decisions bypass the candidate pipeline entirely — the combat AI
     // reads directly from game state and never uses generated candidates.
     // This must run before validation/gating, which can filter out all candidates
     // and cause an empty-actions early return that skips deterministic_choice.
+    // build_ai_context runs first so combat gets the archetype-modulated profile.
     if matches!(
         state.waiting_for,
         WaitingFor::DeclareAttackers { .. } | WaitingFor::DeclareBlockers { .. }
     ) {
-        if let Some(action) = deterministic_choice(state, ai_player, config, &[]) {
+        let effective_profile = config.profile.with_strategy(&context.strategy);
+        if let Some(action) = deterministic_combat_choice(state, ai_player, &effective_profile) {
             return vec![(action, 1.0)];
         }
     }
 
-    let ctx = build_decision_context(state);
-    let policies = PolicyRegistry::default();
-    let context = build_ai_context(state, ai_player, config);
     let mut services = PlannerServices::new(ai_player, config, &policies, context);
     let candidates = services.validate_candidates(state, ctx.candidates.clone());
     let gated = gate_candidates(
@@ -219,7 +225,44 @@ fn build_ai_context(state: &GameState, player: PlayerId, config: &AiConfig) -> A
     if deck.is_empty() {
         return AiContext::empty(&config.weights);
     }
-    AiContext::analyze_with(deck, &config.weights, &config.archetype_multipliers)
+    let mut ctx = AiContext::analyze_with(deck, &config.weights, &config.archetype_multipliers);
+
+    // Compute opponent threat profile based on difficulty setting.
+    ctx.opponent_threat = match config.search.threat_awareness {
+        ThreatAwareness::None => None,
+        ThreatAwareness::ArchetypeOnly => {
+            // Use fixed archetype-based probabilities (no per-card analysis).
+            // Derive opponent archetype from the opponent's deck pool if available,
+            // otherwise fall back to Midrange.
+            let opponents = engine::game::players::opponents(state, player);
+            let opp_archetype = opponents
+                .first()
+                .and_then(|&opp| {
+                    let opp_deck = state
+                        .deck_pools
+                        .iter()
+                        .find(|p| p.player == opp)
+                        .map(|p| p.current_main.as_slice())
+                        .unwrap_or(&[]);
+                    if opp_deck.is_empty() {
+                        None
+                    } else {
+                        Some(crate::deck_profile::DeckProfile::analyze(opp_deck).archetype)
+                    }
+                })
+                .unwrap_or(crate::deck_profile::DeckArchetype::Midrange);
+            Some(ThreatProfile {
+                probabilities: ArchetypeBaseProbabilities::for_archetype(opp_archetype),
+                opponent_archetype: opp_archetype,
+                category_pools: Default::default(),
+                pool_size: 0,
+                hand_size: 0,
+            })
+        }
+        ThreatAwareness::Full => build_threat_profile_multiplayer(state, player),
+    };
+
+    ctx
 }
 
 /// Handle deterministic decisions that don't benefit from search or parallelism.
@@ -481,6 +524,34 @@ pub(crate) fn deterministic_choice(
             let attacker_ids: Vec<_> = combat.attackers.iter().map(|a| a.object_id).collect();
             let assignments =
                 choose_blockers_with_profile(state, ai_player, &attacker_ids, &config.profile);
+            return Some(GameAction::DeclareBlockers { assignments });
+        }
+        return Some(GameAction::DeclareBlockers {
+            assignments: Vec::new(),
+        });
+    }
+
+    None
+}
+
+/// Handle combat decisions with an archetype-modulated profile.
+/// Separated from `deterministic_choice` so the combat fast-path in `score_candidates`
+/// can pass an effective profile (difficulty x archetype) to the combat AI.
+fn deterministic_combat_choice(
+    state: &GameState,
+    ai_player: PlayerId,
+    profile: &crate::config::AiProfile,
+) -> Option<GameAction> {
+    if let WaitingFor::DeclareAttackers { .. } = &state.waiting_for {
+        let attacks = choose_attackers_with_targets_with_profile(state, ai_player, profile);
+        return Some(GameAction::DeclareAttackers { attacks });
+    }
+
+    if let WaitingFor::DeclareBlockers { .. } = &state.waiting_for {
+        if let Some(combat) = &state.combat {
+            let attacker_ids: Vec<_> = combat.attackers.iter().map(|a| a.object_id).collect();
+            let assignments =
+                choose_blockers_with_profile(state, ai_player, &attacker_ids, profile);
             return Some(GameAction::DeclareBlockers { assignments });
         }
         return Some(GameAction::DeclareBlockers {

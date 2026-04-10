@@ -358,7 +358,46 @@ impl<'a> PlannerServices<'a> {
         let card_adv =
             crate::card_advantage::differential(state, self.ai_player) * weights.card_advantage;
 
-        tactical + synergy + zones + card_adv
+        tactical + synergy + zones + card_adv + self.threat_adjustment(state)
+    }
+
+    /// Adjust evaluation based on opponent threat probabilities.
+    /// Penalizes positions where the AI is vulnerable to likely opponent threats:
+    /// tapping out against counterspells, or overextending into board wipes.
+    fn threat_adjustment(&self, state: &GameState) -> f64 {
+        let Some(threat) = &self.context.opponent_threat else {
+            return 0.0;
+        };
+
+        let penalties = &self.config.policy_penalties;
+        let probs = &threat.probabilities;
+        let mut adjustment = 0.0;
+
+        // Penalize tapping out when opponent likely has countermagic.
+        let ai_mana = crate::zone_eval::available_mana(state, self.ai_player);
+        if ai_mana <= 1 && probs.counterspell > 0.3 {
+            adjustment += penalties.threat_counter_tapout_penalty * probs.counterspell;
+        }
+
+        // Penalize overextending when opponent likely has board wipe.
+        let ai_creatures = state
+            .battlefield
+            .iter()
+            .filter(|&&id| {
+                state.objects.get(&id).is_some_and(|obj| {
+                    obj.controller == self.ai_player
+                        && obj
+                            .card_types
+                            .core_types
+                            .contains(&engine::types::card_type::CoreType::Creature)
+                })
+            })
+            .count();
+        if ai_creatures >= 3 && probs.board_wipe > 0.2 {
+            adjustment += penalties.threat_wipe_overextend_penalty * probs.board_wipe;
+        }
+
+        adjustment
     }
 
     pub fn evaluate_for_planner(&self, state: &GameState) -> ValueEstimate {

@@ -11,8 +11,10 @@ pub mod eval;
 pub mod planner;
 pub mod policies;
 pub mod search;
+pub mod strategy_profile;
 pub mod synergy;
 pub mod tactical_gate;
+pub mod threat_profile;
 pub mod zone_eval;
 
 pub use card_hints::should_play_now;

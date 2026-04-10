@@ -3,7 +3,9 @@ use engine::game::DeckEntry;
 use crate::deck_profile::ArchetypeMultipliers;
 use crate::deck_profile::DeckProfile;
 use crate::eval::EvalWeightSet;
+use crate::strategy_profile::StrategyProfile;
 use crate::synergy::SynergyGraph;
+use crate::threat_profile::ThreatProfile;
 
 /// Pre-computed deck analysis, built once per game from the deck pool.
 /// Threaded through `PlannerServices` into eval, policies, and search.
@@ -16,6 +18,9 @@ pub struct AiContext {
     pub deck_profile: DeckProfile,
     pub synergy_graph: SynergyGraph,
     pub adjusted_weights: EvalWeightSet,
+    pub strategy: StrategyProfile,
+    /// Opponent threat profile (None when threat awareness is disabled).
+    pub opponent_threat: Option<ThreatProfile>,
 }
 
 impl AiContext {
@@ -37,10 +42,13 @@ impl AiContext {
             mid: deck_profile.adjust_weights_with(multipliers, &base_weights.mid),
             late: deck_profile.adjust_weights_with(multipliers, &base_weights.late),
         };
+        let strategy = StrategyProfile::for_profile(&deck_profile);
         Self {
             deck_profile,
             synergy_graph,
             adjusted_weights,
+            strategy,
+            opponent_threat: None,
         }
     }
 
@@ -51,6 +59,8 @@ impl AiContext {
             deck_profile: DeckProfile::default(),
             synergy_graph: SynergyGraph::empty(),
             adjusted_weights: base_weights.clone(),
+            strategy: StrategyProfile::default(),
+            opponent_threat: None,
         }
     }
 }

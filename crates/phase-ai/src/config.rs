@@ -2,6 +2,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::deck_profile::ArchetypeMultipliers;
 use crate::eval::{EvalWeightSet, KeywordBonuses};
+use crate::strategy_profile::StrategyProfile;
+
+/// How much the AI reasons about what the opponent might hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThreatAwareness {
+    /// VeryEasy, Easy: no threat reasoning.
+    #[default]
+    None,
+    /// Medium: fixed probabilities from opponent archetype.
+    ArchetypeOnly,
+    /// Hard, VeryHard: per-card hypergeometric analysis.
+    Full,
+}
 
 /// AI difficulty level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -35,6 +48,8 @@ pub struct SearchConfig {
     /// after this duration regardless of node count. Essential for WASM
     /// where hardware performance varies widely.
     pub time_budget_ms: Option<u32>,
+    /// How much the AI reasons about opponent hand threats.
+    pub threat_awareness: ThreatAwareness,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +70,22 @@ pub struct AiProfile {
     pub risk_tolerance: f64,
     pub interaction_patience: f64,
     pub stabilize_bias: f64,
+}
+
+impl AiProfile {
+    /// Apply archetype strategy modulation to this difficulty-based profile.
+    /// Clamps results to valid ranges to prevent extreme combinations.
+    ///
+    /// Key principle: archetype modulates what the AI values, difficulty modulates
+    /// how well it executes.
+    pub fn with_strategy(&self, strategy: &StrategyProfile) -> AiProfile {
+        AiProfile {
+            risk_tolerance: (self.risk_tolerance * strategy.risk_tolerance_mult).clamp(0.2, 1.0),
+            interaction_patience: (self.interaction_patience * strategy.interaction_patience_mult)
+                .clamp(0.1, 1.0),
+            stabilize_bias: (self.stabilize_bias * strategy.stabilize_bias_mult).clamp(0.5, 2.0),
+        }
+    }
 }
 
 impl Default for AiProfile {
@@ -79,6 +110,7 @@ impl Default for SearchConfig {
             rollout_samples: 0,
             opponent_model: OpponentModel::DeterministicBestReply,
             time_budget_ms: None,
+            threat_awareness: ThreatAwareness::None,
         }
     }
 }
@@ -171,6 +203,12 @@ pub struct PolicyPenalties {
     /// (tribal overlap, deck synergy graph).
     #[serde(default = "default_synergy_casting_bonus")]
     pub synergy_casting_bonus: f64,
+    /// Penalty multiplier for tapping out when opponent likely has countermagic.
+    #[serde(default = "default_threat_counter_tapout_penalty")]
+    pub threat_counter_tapout_penalty: f64,
+    /// Penalty multiplier for overextending when opponent likely has board wipe.
+    #[serde(default = "default_threat_wipe_overextend_penalty")]
+    pub threat_wipe_overextend_penalty: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -207,6 +245,8 @@ impl Default for PolicyPenalties {
             counter_last_reservation_penalty: default_counter_last_reservation_penalty(),
             tempo_curve_bonus: default_tempo_curve_bonus(),
             synergy_casting_bonus: default_synergy_casting_bonus(),
+            threat_counter_tapout_penalty: default_threat_counter_tapout_penalty(),
+            threat_wipe_overextend_penalty: default_threat_wipe_overextend_penalty(),
         }
     }
 }
@@ -252,6 +292,12 @@ fn default_tempo_curve_bonus() -> f64 {
 }
 fn default_synergy_casting_bonus() -> f64 {
     0.25
+}
+fn default_threat_counter_tapout_penalty() -> f64 {
+    -1.5
+}
+fn default_threat_wipe_overextend_penalty() -> f64 {
+    -0.6
 }
 
 /// Full AI configuration combining difficulty, search, and evaluation settings.
@@ -302,6 +348,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 rollout_samples: 0,
                 opponent_model: OpponentModel::DeterministicBestReply,
                 time_budget_ms: None,
+                threat_awareness: ThreatAwareness::None,
             },
         ),
         AiDifficulty::Easy => (
@@ -323,6 +370,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 rollout_samples: 0,
                 opponent_model: OpponentModel::DeterministicBestReply,
                 time_budget_ms: None,
+                threat_awareness: ThreatAwareness::None,
             },
         ),
         AiDifficulty::Medium => (
@@ -344,6 +392,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 rollout_samples: 1,
                 opponent_model: OpponentModel::DeterministicBestReply,
                 time_budget_ms: None,
+                threat_awareness: ThreatAwareness::ArchetypeOnly,
             },
         ),
         AiDifficulty::Hard => (
@@ -365,6 +414,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 rollout_samples: 1,
                 opponent_model: OpponentModel::ThreatWeightedReply,
                 time_budget_ms: None,
+                threat_awareness: ThreatAwareness::Full,
             },
         ),
         AiDifficulty::VeryHard => (
@@ -386,6 +436,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 rollout_samples: 2,
                 opponent_model: OpponentModel::ThreatWeightedReply,
                 time_budget_ms: None,
+                threat_awareness: ThreatAwareness::Full,
             },
         ),
     };

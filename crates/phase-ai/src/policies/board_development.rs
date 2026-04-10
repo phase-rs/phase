@@ -4,10 +4,21 @@ use engine::types::card_type::CoreType;
 use super::context::PolicyContext;
 use super::registry::TacticalPolicy;
 use super::strategy_helpers::{best_proactive_cast_score, board_presence_score, is_own_main_phase};
+use crate::deck_profile::DeckArchetype;
 
 pub struct BoardDevelopmentPolicy;
 
 impl TacticalPolicy for BoardDevelopmentPolicy {
+    fn archetype_scale(&self, archetype: DeckArchetype) -> f64 {
+        match archetype {
+            DeckArchetype::Aggro => 1.0,
+            DeckArchetype::Control => 1.0,
+            DeckArchetype::Midrange => 1.0,
+            DeckArchetype::Ramp => 1.4,
+            DeckArchetype::Combo => 0.8,
+        }
+    }
+
     fn score(&self, ctx: &PolicyContext<'_>) -> f64 {
         if !is_own_main_phase(ctx) {
             return 0.0;

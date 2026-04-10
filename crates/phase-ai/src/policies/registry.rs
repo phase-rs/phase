@@ -15,6 +15,7 @@ use super::sacrifice_value::SacrificeValuePolicy;
 use super::tutor::TutorPolicy;
 use crate::cast_facts::cast_facts_for_action;
 use crate::config::AiConfig;
+use crate::deck_profile::DeckArchetype;
 use crate::planner::PolicyPrior;
 use engine::ai_support::{AiDecisionContext, CandidateAction};
 use engine::types::game_state::GameState;
@@ -22,6 +23,13 @@ use engine::types::player::PlayerId;
 
 pub trait TacticalPolicy: Send + Sync {
     fn score(&self, ctx: &PolicyContext<'_>) -> f64;
+
+    /// Archetype scaling factor for this policy. Default is 1.0 (no scaling).
+    /// Policies override this to return their archetype-specific multiplier.
+    fn archetype_scale(&self, archetype: DeckArchetype) -> f64 {
+        let _ = archetype;
+        1.0
+    }
 }
 
 pub struct PolicyRegistry {
@@ -58,7 +66,18 @@ impl Default for PolicyRegistry {
 
 impl PolicyRegistry {
     pub fn score(&self, ctx: &PolicyContext<'_>) -> f64 {
-        self.policies.iter().map(|policy| policy.score(ctx)).sum()
+        let archetype = ctx.context.deck_profile.archetype;
+        let turn = ctx.state.turn_number;
+        let turn_mult = ctx.context.strategy.turn_phase_mult(turn);
+
+        self.policies
+            .iter()
+            .map(|policy| {
+                let raw = policy.score(ctx);
+                let arch_scale = policy.archetype_scale(archetype);
+                raw * arch_scale * turn_mult
+            })
+            .sum()
     }
 
     pub fn priors(

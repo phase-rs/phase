@@ -3,6 +3,7 @@ use engine::types::actions::GameAction;
 use super::context::PolicyContext;
 use super::registry::TacticalPolicy;
 use super::strategy_helpers::is_own_main_phase;
+use crate::deck_profile::DeckArchetype;
 use crate::zone_eval;
 
 /// Rewards playing spells on-curve (matching mana value to available mana),
@@ -15,6 +16,16 @@ use crate::zone_eval;
 pub struct TempoCurvePolicy;
 
 impl TacticalPolicy for TempoCurvePolicy {
+    fn archetype_scale(&self, archetype: DeckArchetype) -> f64 {
+        match archetype {
+            DeckArchetype::Aggro => 1.8,
+            DeckArchetype::Control => 0.5,
+            DeckArchetype::Midrange => 1.0,
+            DeckArchetype::Ramp => 1.3,
+            DeckArchetype::Combo => 0.8,
+        }
+    }
+
     fn score(&self, ctx: &PolicyContext<'_>) -> f64 {
         if !is_own_main_phase(ctx) {
             return 0.0;

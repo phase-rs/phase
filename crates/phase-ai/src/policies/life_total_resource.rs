@@ -7,10 +7,21 @@ use crate::eval::board_stats;
 
 use super::context::PolicyContext;
 use super::registry::TacticalPolicy;
+use crate::deck_profile::DeckArchetype;
 
 pub struct LifeTotalResourcePolicy;
 
 impl TacticalPolicy for LifeTotalResourcePolicy {
+    fn archetype_scale(&self, archetype: DeckArchetype) -> f64 {
+        match archetype {
+            DeckArchetype::Aggro => 1.3,
+            DeckArchetype::Control => 0.8,
+            DeckArchetype::Midrange => 1.0,
+            DeckArchetype::Ramp => 1.0,
+            DeckArchetype::Combo => 1.0,
+        }
+    }
+
     fn score(&self, ctx: &PolicyContext<'_>) -> f64 {
         match &ctx.candidate.action {
             GameAction::CastSpell { .. } | GameAction::ActivateAbility { .. } => {}

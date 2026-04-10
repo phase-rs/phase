@@ -5,10 +5,21 @@ use engine::types::player::PlayerId;
 use super::context::PolicyContext;
 use super::registry::TacticalPolicy;
 use super::strategy_helpers::{is_own_main_phase, opponent_lethal_damage};
+use crate::deck_profile::DeckArchetype;
 
 pub struct LethalityAwarenessPolicy;
 
 impl TacticalPolicy for LethalityAwarenessPolicy {
+    fn archetype_scale(&self, archetype: DeckArchetype) -> f64 {
+        match archetype {
+            DeckArchetype::Aggro => 1.5,
+            DeckArchetype::Control => 1.0,
+            DeckArchetype::Midrange => 1.0,
+            DeckArchetype::Ramp => 1.0,
+            DeckArchetype::Combo => 1.0,
+        }
+    }
+
     fn score(&self, ctx: &PolicyContext<'_>) -> f64 {
         let ai_life = ctx.state.players[ctx.ai_player.0 as usize].life;
         let lethal_damage = opponent_lethal_damage(ctx.state, ctx.ai_player);

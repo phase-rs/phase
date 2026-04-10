@@ -17,10 +17,26 @@ pub enum DeckArchetype {
     Ramp,
 }
 
+/// Result of deck archetype classification with confidence.
+/// `Pure` = strong single-archetype match; `Hybrid` = top two within 20% of each other.
+#[derive(Debug, Clone)]
+pub enum ArchetypeClassification {
+    /// Strong single-archetype match.
+    Pure(DeckArchetype),
+    /// Ambiguous — top two archetypes are within 20% of each other.
+    Hybrid {
+        primary: DeckArchetype,
+        primary_weight: f64,
+        secondary: DeckArchetype,
+    },
+}
+
 /// Deck composition analysis derived from typed card data.
 /// Computed once per game from `GameState.deck_pools`.
 #[derive(Debug, Clone)]
 pub struct DeckProfile {
+    pub classification: ArchetypeClassification,
+    /// Convenience: primary archetype regardless of classification.
     pub archetype: DeckArchetype,
     pub avg_mana_value: f64,
     pub creature_ratio: f64,
@@ -87,15 +103,20 @@ impl DeckProfile {
         let draw_ratio = draw as f64 / nonland;
         let ramp_ratio = ramp as f64 / nonland;
 
-        let archetype = classify(
+        let classification = classify(
             avg_mana_value,
             creature_ratio,
             removal_ratio,
             draw_ratio,
             ramp_ratio,
         );
+        let archetype = match &classification {
+            ArchetypeClassification::Pure(arch) => *arch,
+            ArchetypeClassification::Hybrid { primary, .. } => *primary,
+        };
 
         Self {
+            classification,
             archetype,
             avg_mana_value,
             creature_ratio,
@@ -135,6 +156,7 @@ impl DeckProfile {
 impl Default for DeckProfile {
     fn default() -> Self {
         Self {
+            classification: ArchetypeClassification::Pure(DeckArchetype::Midrange),
             archetype: DeckArchetype::Midrange,
             avg_mana_value: 0.0,
             creature_ratio: 0.0,
@@ -184,13 +206,15 @@ impl ArchetypeMultipliers {
 }
 
 /// Score each archetype and return the best match.
+/// Returns `Hybrid` when the top two archetypes are within 20% of each other,
+/// indicating an ambiguous classification where blending is appropriate.
 fn classify(
     avg_mv: f64,
     creature_ratio: f64,
     removal_ratio: f64,
     draw_ratio: f64,
     ramp_ratio: f64,
-) -> DeckArchetype {
+) -> ArchetypeClassification {
     let aggro_score = (3.5 - avg_mv).max(0.0) + creature_ratio * 2.0 - removal_ratio;
     let control_score =
         (avg_mv - 2.5).max(0.0) + removal_ratio * 2.0 + draw_ratio * 1.5 - creature_ratio;
@@ -199,7 +223,7 @@ fn classify(
     // Midrange is the baseline — it wins when nothing else scores strongly.
     let midrange_score = 1.0;
 
-    let scores = [
+    let mut scores = [
         (aggro_score, DeckArchetype::Aggro),
         (control_score, DeckArchetype::Control),
         (ramp_score, DeckArchetype::Ramp),
@@ -207,11 +231,22 @@ fn classify(
         (midrange_score, DeckArchetype::Midrange),
     ];
 
-    scores
-        .into_iter()
-        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(_, arch)| arch)
-        .unwrap_or(DeckArchetype::Midrange)
+    scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let (best_score, best_arch) = scores[0];
+    let (second_score, second_arch) = scores[1];
+
+    // If top two scores are within 20% of each other, classify as hybrid.
+    // Guard against zero/negative best_score to avoid division issues.
+    if best_score > 0.0 && (best_score - second_score) / best_score < 0.2 {
+        let total = best_score + second_score;
+        ArchetypeClassification::Hybrid {
+            primary: best_arch,
+            primary_weight: best_score / total,
+            secondary: second_arch,
+        }
+    } else {
+        ArchetypeClassification::Pure(best_arch)
+    }
 }
 
 fn is_removal_effect(effect: &Effect) -> bool {

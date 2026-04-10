@@ -2,10 +2,21 @@ use engine::types::actions::GameAction;
 
 use super::context::PolicyContext;
 use super::registry::TacticalPolicy;
+use crate::deck_profile::DeckArchetype;
 
 pub struct CardAdvantagePolicy;
 
 impl TacticalPolicy for CardAdvantagePolicy {
+    fn archetype_scale(&self, archetype: DeckArchetype) -> f64 {
+        match archetype {
+            DeckArchetype::Aggro => 0.5,
+            DeckArchetype::Control => 1.8,
+            DeckArchetype::Midrange => 1.0,
+            DeckArchetype::Ramp => 1.0,
+            DeckArchetype::Combo => 1.5,
+        }
+    }
+
     fn score(&self, ctx: &PolicyContext<'_>) -> f64 {
         match &ctx.candidate.action {
             GameAction::CastSpell { .. } | GameAction::ActivateAbility { .. } => {}

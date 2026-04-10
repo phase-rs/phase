@@ -772,7 +772,7 @@ fn should_attack_given_objective(
     favorable_trade: bool,
     has_lifelink: bool,
     attacker_power: i32,
-    _profile: &AiProfile,
+    profile: &AiProfile,
 ) -> bool {
     // Lifelink creates a life swing: opponent loses N, you gain N = 2N effective swing.
     // This makes marginal attacks worthwhile, especially while racing.
@@ -781,7 +781,15 @@ fn should_attack_given_objective(
         CombatObjective::PushLethal => true,
         CombatObjective::Stabilize => free_damage || lifelink_bonus,
         CombatObjective::PreserveAdvantage => free_damage || favorable_trade || lifelink_bonus,
-        CombatObjective::Race => free_damage || favorable_trade || lifelink_bonus,
+        CombatObjective::Race => {
+            // Aggressive profiles (high risk tolerance, e.g. aggro decks) accept
+            // unfavorable trades in a race — they prioritize pushing damage.
+            if profile.risk_tolerance > 0.7 {
+                true
+            } else {
+                free_damage || favorable_trade || lifelink_bonus
+            }
+        }
     }
 }
 
