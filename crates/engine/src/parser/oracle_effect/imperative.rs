@@ -1579,25 +1579,32 @@ pub(super) fn parse_destroy_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
 
 pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
     if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("exile the top ").parse(lower) {
-        let (count, remainder) = nom_primitives::parse_number
-            .parse(rest)
-            .map(|(rem, n)| (n, rem.trim_start()))
-            .unwrap_or((1, rest));
-        // Only handles "your library" (TargetFilter::Controller). Opponent/any-player
-        // targeting ("target player's library") falls through to ChangeZone handling.
-        if alt((
-            tag::<_, _, VerboseError<&str>>("card of your library"),
-            tag("cards of your library"),
-        ))
-        .parse(remainder)
-        .is_ok()
-        {
-            return Some(ZoneCounterImperativeAst::ExileTop {
-                player: TargetFilter::Controller,
-                count: QuantityExpr::Fixed {
-                    value: count as i32,
+        let (count, remainder) = if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest) {
+            (QuantityExpr::Fixed { value: n as i32 }, rem.trim_start())
+        } else if let Ok((rem, _)) = tag::<_, _, VerboseError<&str>>("x").parse(rest) {
+            (
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
                 },
-            });
+                rem.trim_start(),
+            )
+        } else {
+            (QuantityExpr::Fixed { value: 1 }, rest)
+        };
+        for (pattern, player) in [
+            ("card of your library", TargetFilter::Controller),
+            ("cards of your library", TargetFilter::Controller),
+            ("card of that player's library", TargetFilter::ParentTarget),
+            ("cards of that player's library", TargetFilter::ParentTarget),
+        ] {
+            if tag::<_, _, VerboseError<&str>>(pattern)
+                .parse(remainder)
+                .is_ok()
+            {
+                return Some(ZoneCounterImperativeAst::ExileTop { player, count });
+            }
         }
     }
 

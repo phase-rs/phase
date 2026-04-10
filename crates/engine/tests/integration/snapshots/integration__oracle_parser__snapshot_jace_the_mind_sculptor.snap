@@ -1,5 +1,6 @@
 ---
-source: crates/engine/tests/oracle_parser.rs
+source: crates/engine/tests/integration/oracle_parser.rs
+assertion_line: 92
 expression: result
 ---
 {
@@ -74,7 +75,17 @@ expression: result
         "effect": {
           "type": "PutAtLibraryPosition",
           "target": {
-            "type": "Any"
+            "type": "Typed",
+            "type_filters": [
+              "Card"
+            ],
+            "controller": "You",
+            "properties": [
+              {
+                "type": "InZone",
+                "zone": "Hand"
+              }
+            ]
           },
           "position": {
             "type": "Top"

@@ -8,9 +8,9 @@ use crate::types::ability::{
     AdditionalCost, AggregateFunction, ChoiceType, ContinuousModification, ControllerRef,
     CountScope, DelayedTriggerCondition, DoublePTMode, Duration, Effect, FilterProp,
     GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty, PlayerFilter, PtValue,
-    QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, SharedQuality,
-    StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
-    ZoneRef,
+    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    SharedQuality, StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -2399,6 +2399,13 @@ fn check_replacements(replacements: &[ReplacementDefinition], missing: &mut Vec<
         } = &def.mode
         {
             collect_ability_missing_parts(decline, missing);
+        }
+
+        if let Some(ReplacementCondition::Unrecognized { ref text }) = def.condition {
+            let label = format!("Replacement:Unrecognized({})", truncate_label(text, 60));
+            if !missing.contains(&label) {
+                missing.push(label);
+            }
         }
     }
 }
@@ -5861,7 +5868,7 @@ pub fn format_semantic_audit_markdown(summary: &SemanticAuditSummary) -> String 
 mod tests {
     use super::*;
     use crate::database::legality::{legalities_to_export_map, LegalityStatus};
-    use crate::types::ability::{AbilityKind, Effect, TargetFilter};
+    use crate::types::ability::{AbilityKind, Effect, ReplacementCondition, TargetFilter};
     use crate::types::card_type::CardType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -6542,5 +6549,23 @@ mod tests {
         assert_eq!(extract_pt_modifier("gets -1/-1"), Some((-1, -1)));
         assert_eq!(extract_pt_modifier("gets +0/+3"), Some((0, 3)));
         assert_eq!(extract_pt_modifier("no modifier here"), None);
+    }
+
+    #[test]
+    fn replacement_unrecognized_condition_counts_as_gap() {
+        let mut face = make_face();
+        face.replacements.push(
+            ReplacementDefinition::new(ReplacementEvent::ChangeZone).condition(
+                ReplacementCondition::Unrecognized {
+                    text: "you revealed a Dragon card".to_string(),
+                },
+            ),
+        );
+
+        let gaps = card_face_gaps(&face);
+
+        assert!(gaps
+            .iter()
+            .any(|gap| gap == "Replacement:Unrecognized(you revealed a Dragon card)"));
     }
 }

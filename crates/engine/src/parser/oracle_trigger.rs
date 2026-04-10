@@ -1391,7 +1391,10 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
         return (filter, rest);
     }
 
-    // Fallback: no subject parsed, return Any
+    push_warning(format!(
+        "target-fallback: trigger subject parse fell back to Any for '{}'",
+        text.trim()
+    ));
     (TargetFilter::Any, text)
 }
 
@@ -3640,6 +3643,7 @@ fn parse_control_none_filter(text: &str) -> Option<TargetFilter> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::oracle_warnings::{clear_warnings, take_warnings};
     use crate::types::ability::{
         Comparator, Duration, Effect, PtValue, QuantityExpr, QuantityRef, UnlessCost,
     };
@@ -3692,6 +3696,16 @@ mod tests {
                 TypedFilter::default().controller(ControllerRef::Opponent)
             ))
         );
+    }
+
+    #[test]
+    fn trigger_subject_warns_on_any_fallback() {
+        clear_warnings();
+        let (filter, rest) = parse_single_subject("xyzzy");
+        assert_eq!(filter, TargetFilter::Any);
+        assert_eq!(rest, "xyzzy");
+        assert!(take_warnings().iter().any(|warning| warning
+            == "target-fallback: trigger subject parse fell back to Any for 'xyzzy'"));
     }
 
     #[test]

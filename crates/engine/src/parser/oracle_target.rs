@@ -23,6 +23,7 @@ use super::oracle_util::{
     merge_or_filters, parse_subtype, starts_with_possessive, strip_possessive, TextPair,
     SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
+use super::oracle_warnings::push_warning;
 
 /// Run a nom combinator on lowercased text, returning the result and
 /// remainder from the original (mixed-case) text.
@@ -110,6 +111,68 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     let text = text.trim_start();
     let lower = text.to_lowercase();
 
+    // Quantified target phrases routed here from callers that only need the filter,
+    // not the target-count metadata.
+    static QUANTIFIED_PREFIXES: &[&str] = &[
+        "up to one ",
+        "up to two ",
+        "up to three ",
+        "up to four ",
+        "up to five ",
+        "up to six ",
+        "one, two, or three ",
+        "one or two ",
+        "one ",
+        "two ",
+        "three ",
+        "four ",
+        "five ",
+        "six ",
+        "x ",
+    ];
+    for prefix in QUANTIFIED_PREFIXES {
+        if let Ok((rest, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>(*prefix).parse(lower.as_str())
+        {
+            let trimmed_rest = rest.trim_start();
+            let quantified_target = alt((
+                tag::<_, _, nom_language::error::VerboseError<&str>>("target "),
+                tag("other target "),
+                tag("another target "),
+            ))
+            .parse(rest)
+            .is_ok()
+                || starts_with_type_word(trimmed_rest)
+                || (!matches!(*prefix, "one " | "up to one ") && trimmed_rest.starts_with("of "));
+            if quantified_target {
+                let original_rest = &text[lower.len() - rest.len()..];
+                return parse_target(original_rest);
+            }
+        }
+    }
+
+    for prefix in ["or untap ", "untap ", "or tap ", "tap "] {
+        if let Ok((rest, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>(prefix).parse(lower.as_str())
+        {
+            let original_rest = &text[lower.len() - rest.len()..];
+            return parse_target(original_rest);
+        }
+    }
+
+    for phrase in [
+        "one, two, or three targets",
+        "one or two targets",
+        "any number of targets",
+        "targets",
+    ] {
+        if let Ok((rest, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>(phrase).parse(lower.as_str())
+        {
+            return (TargetFilter::Any, &text[lower.len() - rest.len()..]);
+        }
+    }
+
     // CR 608.2c: Bare anaphoric references inherit the parent target selected earlier
     // in the same spell/ability instruction sequence.
     // "it" with word boundary — prevents matching "item", "iterate", etc.
@@ -119,6 +182,34 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     // "them" with word boundary
     if let Some((_, rest)) = nom_on_lower(text, &lower, |input| parse_word_bounded(input, "them")) {
         return (TargetFilter::ParentTarget, rest);
+    }
+    if tag::<_, _, nom_language::error::VerboseError<&str>>("one of ")
+        .parse(lower.as_str())
+        .is_err()
+    {
+        if let Some((_, rest)) =
+            nom_on_lower(text, &lower, |input| parse_word_bounded(input, "one"))
+        {
+            return (TargetFilter::ParentTarget, rest);
+        }
+    }
+    // Gendered object pronouns also refer back to the prior selected object.
+    if let Some((_, rest)) = nom_on_lower(text, &lower, |input| parse_word_bounded(input, "him")) {
+        return (TargetFilter::ParentTarget, rest);
+    }
+    if let Some((_, rest)) = nom_on_lower(text, &lower, |input| parse_word_bounded(input, "her")) {
+        return (TargetFilter::ParentTarget, rest);
+    }
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("on ").parse(lower.as_str())
+    {
+        let original_rest = &text[lower.len() - rest.len()..];
+        if matches!(
+            rest,
+            "it" | "them" | "him" | "her" | "enchanted permanent" | "enchanted creature"
+        ) {
+            return parse_target(original_rest);
+        }
     }
     // "that [type phrase]" → anaphoric reference to a typed subject
     if let Ok((rest_subject, _)) =
@@ -158,6 +249,24 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     {
         let (filter, rest) = parse_type_phrase(&text[lower.len() - rest.len()..]);
         return (filter, rest);
+    }
+
+    if let Some((_, rest)) = nom_on_lower(text, &lower, |input| parse_word_bounded(input, "player"))
+    {
+        return (TargetFilter::Player, rest);
+    }
+
+    for zone_word in ["graveyard", "graveyards"] {
+        if let Some((_, rest)) =
+            nom_on_lower(text, &lower, |input| parse_word_bounded(input, zone_word))
+        {
+            return (
+                TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }])),
+                rest,
+            );
+        }
     }
 
     // CR 201.5: "this creature", "this spell", etc. — self-reference
@@ -214,6 +323,12 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
 
     // CR 603.7: Anaphoric tracked-set pronouns
     static TRACKED_SET_PHRASES: &[&str] = &[
+        "the chosen cards",
+        "the rest",
+        "the other",
+        "those lands",
+        "those tokens",
+        "the revealed cards",
         "those cards",
         "those permanents",
         "those creatures",
@@ -236,6 +351,55 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         }
     }
 
+    // Singular selection from a previously-referenced set.
+    static SELECTED_FROM_SET_PHRASES: &[&str] = &[
+        "new targets for the copies",
+        "new targets for the copy",
+        "new targets for it",
+        "up to one of them",
+        "either of them",
+        "the chosen creature",
+        "the chosen card",
+        "the token",
+        "one of those cards",
+        "one of those permanents",
+        "one of those creatures",
+        "one of the revealed cards",
+        "one of them",
+    ];
+    for phrase in SELECTED_FROM_SET_PHRASES {
+        if let Ok((rest, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>(*phrase).parse(lower.as_str())
+        {
+            return (
+                TargetFilter::ParentTarget,
+                &text[lower.len() - rest.len()..],
+            );
+        }
+    }
+
+    // Set references that appear after an explicit quantity has already been parsed
+    // upstream, e.g. "put two of them into your hand".
+    static SET_REFERENCE_SUFFIXES: &[&str] = &[
+        "of those cards",
+        "of those permanents",
+        "of those creatures",
+        "of the revealed cards",
+        "of them",
+    ];
+    for phrase in SET_REFERENCE_SUFFIXES {
+        if let Ok((rest, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>(*phrase).parse(lower.as_str())
+        {
+            return (
+                TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                &text[lower.len() - rest.len()..],
+            );
+        }
+    }
+
     // CR 608.2c: "the player" / "the opponent" — definite anaphoric reference to a
     // previously-mentioned player in the same instruction sequence.
     if let Ok((rest, _)) =
@@ -243,6 +407,15 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     {
         return (
             TargetFilter::ParentTarget,
+            &text[lower.len() - rest.len()..],
+        );
+    }
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("the creature's controller")
+            .parse(lower.as_str())
+    {
+        return (
+            TargetFilter::ParentTargetController,
             &text[lower.len() - rest.len()..],
         );
     }
@@ -268,6 +441,24 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
             rest,
         );
+    }
+
+    for phrase in ["opponent's graveyard", "an opponent's graveyard"] {
+        if let Ok((rest, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>(phrase).parse(lower.as_str())
+        {
+            return (
+                TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::Opponent,
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ])),
+                &text[lower.len() - rest.len()..],
+            );
+        }
     }
 
     // CR 610.3: "each card exiled with ~" / "each card exiled with this <type>"
@@ -320,10 +511,20 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     if let Some((filter, rest)) = nom_on_lower(text, &lower, |input| {
         nom::branch::alt((
             value(
+                TargetFilter::ParentTargetController,
+                tag("enchanted permanent's controller"),
+            ),
+            value(
                 TargetFilter::Typed(
                     TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
                 ),
                 tag::<_, _, nom_language::error::VerboseError<&str>>("enchanted creature"),
+            ),
+            value(
+                TargetFilter::Typed(
+                    TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy]),
+                ),
+                tag("enchanted permanent"),
             ),
             value(
                 TargetFilter::Typed(
@@ -397,7 +598,10 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     if target_filter_has_meaningful_content(&filter) {
         (filter, rest)
     } else {
-        // No meaningful content parsed — preserve original fallback behavior
+        push_warning(format!(
+            "target-fallback: parse_target could not classify '{}'",
+            text.trim()
+        ));
         (TargetFilter::Any, text)
     }
 }
@@ -417,13 +621,13 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     if let Ok((rest, _)) =
         tag::<_, _, nom_language::error::VerboseError<&str>>("a ").parse(&lower[pos..])
     {
-        if starts_with_type_word(rest) {
+        if starts_with_type_phrase_lead(rest) {
             pos += "a ".len();
         }
     } else if let Ok((rest, _)) =
         tag::<_, _, nom_language::error::VerboseError<&str>>("an ").parse(&lower[pos..])
     {
-        if starts_with_type_word(rest) {
+        if starts_with_type_phrase_lead(rest) {
             pos += "an ".len();
         }
     }
@@ -851,6 +1055,13 @@ pub(crate) fn starts_with_type_word(text: &str) -> bool {
         }
     }
     false
+}
+
+fn starts_with_type_phrase_lead(text: &str) -> bool {
+    let text = text.trim_start();
+    starts_with_type_word(text)
+        || nom_target::parse_supertype_prefix(text).is_ok()
+        || parse_color_prefix(text).is_some()
 }
 
 fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
@@ -1940,6 +2151,7 @@ fn parse_zone_suffix(text: &str) -> Option<(FilterProp, Option<ControllerRef>, u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::oracle_warnings::{clear_warnings, take_warnings};
     use crate::types::counter::CounterType;
 
     #[test]
@@ -1962,6 +2174,17 @@ mod tests {
             f,
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
         );
+    }
+
+    #[test]
+    fn parse_target_warns_on_any_fallback() {
+        clear_warnings();
+        let (filter, rest) = parse_target("foobar");
+        assert_eq!(filter, TargetFilter::Any);
+        assert_eq!(rest, "foobar");
+        assert!(take_warnings()
+            .iter()
+            .any(|warning| warning == "target-fallback: parse_target could not classify 'foobar'"));
     }
 
     #[test]
@@ -2021,12 +2244,114 @@ mod tests {
     }
 
     #[test]
+    fn bare_player_is_player_target() {
+        let (f, rest) = parse_target("player, choose a creature card in that player's graveyard");
+        assert_eq!(f, TargetFilter::Player);
+        assert_eq!(rest, ", choose a creature card in that player's graveyard");
+    }
+
+    #[test]
+    fn bare_graveyards_are_cards_in_graveyard_zone() {
+        let (f, rest) = parse_target("graveyards");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }]))
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn bare_him_inherits_parent_target() {
+        let (f, rest) = parse_target("him");
+        assert_eq!(f, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn bare_her_inherits_parent_target() {
+        let (f, rest) = parse_target("her");
+        assert_eq!(f, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn on_it_inherits_parent_target() {
+        let (f, rest) = parse_target("on it");
+        assert_eq!(f, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn bare_one_inherits_parent_target() {
+        let (f, rest) = parse_target("one into your hand");
+        assert_eq!(f, TargetFilter::ParentTarget);
+        assert_eq!(rest, " into your hand");
+    }
+
+    #[test]
+    fn tap_or_untap_target_permanent_strips_verb_prefix() {
+        let (f, rest) = parse_target("or untap target permanent");
+        assert_eq!(f, TargetFilter::Typed(TypedFilter::permanent()));
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn target_count_placeholders_map_to_any_target() {
+        let (f, rest) = parse_target("one or two targets");
+        assert_eq!(f, TargetFilter::Any);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn quantified_of_them_produces_tracked_set() {
+        let (f, rest) = parse_target("two of them");
+        assert_eq!(
+            f,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn quantified_cards_from_hand_parse_as_zone_filter() {
+        let (f, rest) = parse_target("two cards from your hand");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::card()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone { zone: Zone::Hand }])
+            )
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
     fn enchanted_creature() {
         let (f, _) = parse_target("enchanted creature");
         assert_eq!(
             f,
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]))
         );
+    }
+
+    #[test]
+    fn enchanted_permanent() {
+        let (f, _) = parse_target("enchanted permanent");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy]))
+        );
+    }
+
+    #[test]
+    fn enchanted_permanents_controller() {
+        let (f, _) = parse_target("enchanted permanent's controller");
+        assert_eq!(f, TargetFilter::ParentTargetController);
     }
 
     #[test]
@@ -2383,6 +2708,159 @@ mod tests {
         let (f, rest) = parse_target("those cards");
         assert_eq!(
             f,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn the_rest_produces_tracked_set() {
+        let (f, rest) = parse_target("the rest");
+        assert_eq!(
+            f,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn those_tokens_produces_tracked_set() {
+        let (f, rest) = parse_target("those tokens");
+        assert_eq!(
+            f,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn those_lands_produce_tracked_set() {
+        let (filter, rest) = parse_target("those lands");
+        assert_eq!(
+            filter,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn the_token_inherits_parent_target() {
+        let (filter, rest) = parse_target("the token");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn the_chosen_creature_inherits_parent_target() {
+        let (filter, rest) = parse_target("the chosen creature");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn the_chosen_card_inherits_parent_target() {
+        let (filter, rest) = parse_target("the chosen card");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn the_chosen_cards_produce_tracked_set() {
+        let (filter, rest) = parse_target("the chosen cards");
+        assert_eq!(
+            filter,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn one_of_them_inherits_parent_target() {
+        let (filter, rest) = parse_target("one of them");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn one_of_those_cards_inherits_parent_target() {
+        let (filter, rest) = parse_target("one of those cards");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn new_targets_for_the_copy_inherits_parent_target() {
+        let (filter, rest) = parse_target("new targets for the copy");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn new_targets_for_it_inherits_parent_target() {
+        let (filter, rest) = parse_target("new targets for it");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn up_to_one_of_them_inherits_parent_target() {
+        let (filter, rest) = parse_target("up to one of them");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn either_of_them_inherits_parent_target() {
+        let (filter, rest) = parse_target("either of them");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn quantified_target_phrase_strips_prefix() {
+        let (filter, rest) = parse_target("one or two target creatures");
+        assert_eq!(filter, TargetFilter::Typed(TypedFilter::creature()));
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn quantified_up_to_target_phrase_strips_prefix() {
+        let (filter, rest) = parse_target("up to one target creature you control");
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn quantified_x_target_phrase_strips_prefix() {
+        let (filter, rest) = parse_target("X target creature cards from your graveyard");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("Expected Typed filter");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn of_them_produces_tracked_set() {
+        let (filter, rest) = parse_target("of them");
+        assert_eq!(
+            filter,
             TargetFilter::TrackedSet {
                 id: TrackedSetId(0)
             }
@@ -2985,6 +3463,41 @@ mod tests {
                     }])
             )
         );
+    }
+
+    #[test]
+    fn parse_target_article_basic_land_you_control() {
+        let (filter, rest) = parse_target("a basic land you control");
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(
+                TypedFilter::land()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::HasSupertype {
+                        value: Supertype::Basic,
+                    }])
+            )
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_target_article_basic_land_card_from_hand() {
+        let (filter, rest) = parse_target("a basic land card from your hand");
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(
+                TypedFilter::land()
+                    .controller(ControllerRef::You)
+                    .properties(vec![
+                        FilterProp::HasSupertype {
+                            value: Supertype::Basic,
+                        },
+                        FilterProp::InZone { zone: Zone::Hand },
+                    ])
+            )
+        );
+        assert_eq!(rest, "");
     }
 
     #[test]
@@ -3914,6 +4427,30 @@ mod tests {
                 ..Default::default()
             })
         );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_target_opponents_graveyard() {
+        let (filter, rest) = parse_target("opponent's graveyard");
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::Opponent,
+                },
+                FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                },
+            ]))
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_target_the_creatures_controller() {
+        let (filter, rest) = parse_target("the creature's controller");
+        assert_eq!(filter, TargetFilter::ParentTargetController);
         assert_eq!(rest, "");
     }
 }

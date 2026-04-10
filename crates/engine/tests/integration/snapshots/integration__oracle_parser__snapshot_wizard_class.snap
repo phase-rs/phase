@@ -1,5 +1,6 @@
 ---
-source: crates/engine/tests/oracle_parser.rs
+source: crates/engine/tests/integration/oracle_parser.rs
+assertion_line: 154
 expression: result
 ---
 {
@@ -194,5 +195,8 @@ expression: result
     }
   ],
   "replacements": [],
-  "extractedKeywords": []
+  "extractedKeywords": [],
+  "parseWarnings": [
+    "target-fallback: trigger subject parse fell back to Any for 'you draw a card'"
+  ]
 }
