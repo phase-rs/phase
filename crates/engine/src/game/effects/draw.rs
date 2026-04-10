@@ -11,7 +11,7 @@ use crate::types::proposed_event::ProposedEvent;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
-fn allowed_draw_count(
+pub(crate) fn allowed_draw_count(
     state: &GameState,
     player_id: crate::types::player::PlayerId,
     count: u32,

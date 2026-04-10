@@ -329,29 +329,66 @@ pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
 }
 
 /// CR 504.1: During the draw step, the active player draws a card.
-pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) {
+/// CR 614.1a: Routes through the replacement pipeline so effects like Dredge apply.
+/// Returns `Some(WaitingFor)` if a replacement effect needs player interaction.
+pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
     let active = state.active_player;
-    let player = state
-        .players
-        .iter()
-        .find(|p| p.id == active)
-        .expect("active player exists");
 
-    if player.library.is_empty() {
-        return;
+    // CR 121.1 + CR 614.1a: Route through replacement pipeline (Dredge, Abundance, etc.).
+    let proposed = ProposedEvent::Draw {
+        player_id: active,
+        count: 1,
+        applied: HashSet::new(),
+    };
+
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) => {
+            if let ProposedEvent::Draw {
+                player_id, count, ..
+            } = event
+            {
+                let allowed =
+                    crate::game::effects::draw::allowed_draw_count(state, player_id, count);
+
+                let cards_to_draw: Vec<_> = state
+                    .players
+                    .iter()
+                    .find(|p| p.id == player_id)
+                    .map(|p| p.library.iter().take(allowed as usize).copied().collect())
+                    .unwrap_or_default();
+
+                // CR 704.5b: Attempting to draw from an empty library causes a game loss.
+                if allowed > 0 && cards_to_draw.len() < allowed as usize {
+                    if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
+                        p.drew_from_empty_library = true;
+                    }
+                }
+
+                for obj_id in cards_to_draw {
+                    zones::move_to_zone(state, obj_id, Zone::Hand, events);
+                    // CR 121.1: Emit CardDrawn so "whenever a player draws" triggers fire.
+                    events.push(GameEvent::CardDrawn {
+                        player_id,
+                        object_id: obj_id,
+                    });
+                    if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
+                        p.has_drawn_this_turn = true;
+                        p.cards_drawn_this_turn = p.cards_drawn_this_turn.saturating_add(1);
+                    }
+                }
+            }
+        }
+        ReplacementResult::Prevented => {
+            // Draw was prevented (e.g., "can't draw cards" effect)
+        }
+        ReplacementResult::NeedsChoice(player) => {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(player, state);
+            return Some(state.waiting_for.clone());
+        }
     }
 
-    // Library top = index 0
-    let top_card = player.library[0];
-    zones::move_to_zone(state, top_card, Zone::Hand, events);
-
-    let player = state
-        .players
-        .iter_mut()
-        .find(|p| p.id == active)
-        .expect("active player exists");
-    player.has_drawn_this_turn = true;
-    player.cards_drawn_this_turn = player.cards_drawn_this_turn.saturating_add(1);
+    None
 }
 
 /// Execute the cleanup step. Returns `Some(WaitingFor)` if the player must
@@ -671,7 +708,9 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
             }
             Phase::Draw => {
                 if !should_skip_draw(state) {
-                    execute_draw(state, events);
+                    if let Some(wf) = execute_draw(state, events) {
+                        return wf;
+                    }
                 }
                 // CR 504.2: "At the beginning of [your] draw step" triggers fire here.
                 if process_phase_triggers(state) {
