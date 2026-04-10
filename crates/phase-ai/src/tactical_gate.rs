@@ -287,7 +287,9 @@ fn should_reject_pump_window(
     power_bonus: i32,
     toughness_bonus: i32,
 ) -> bool {
-    if facts.live_stack_response && hostile_stack_targets_own_creature(ctx.state, ctx.ai_player) {
+    if facts.live_stack_response
+        && pump_can_save_from_hostile_stack(ctx.state, ctx.ai_player, toughness_bonus)
+    {
         return false;
     }
 
@@ -309,7 +311,16 @@ fn should_reject_pump_window(
     !pump_changes_combat_outcome(ctx.state, ctx.ai_player, power_bonus, toughness_bonus)
 }
 
-fn hostile_stack_targets_own_creature(state: &GameState, ai_player: PlayerId) -> bool {
+/// Check if pumping can actually save a creature from hostile stack effects.
+/// Destroy/Exile/Counter/Bounce kill regardless of stats — pump doesn't help.
+/// Only damage-based removal can be survived with a toughness boost.
+fn pump_can_save_from_hostile_stack(
+    state: &GameState,
+    ai_player: PlayerId,
+    toughness_bonus: i32,
+) -> bool {
+    use engine::types::ability::QuantityExpr;
+
     state.stack.iter().any(|entry| {
         let Some(ability) = entry.ability() else {
             return false;
@@ -318,13 +329,38 @@ fn hostile_stack_targets_own_creature(state: &GameState, ai_player: PlayerId) ->
             let TargetRef::Object(object_id) = target else {
                 return false;
             };
-            state.objects.get(object_id).is_some_and(|object| {
-                object.controller == ai_player
-                    && object.card_types.core_types.contains(&CoreType::Creature)
-                    && collect_ability_effects(ability)
-                        .iter()
-                        .any(|effect| matches!(effect_polarity(effect), EffectPolarity::Harmful))
-            })
+            let Some(object) = state.objects.get(object_id) else {
+                return false;
+            };
+            if object.controller != ai_player
+                || !object.card_types.core_types.contains(&CoreType::Creature)
+            {
+                return false;
+            }
+
+            let effects = collect_ability_effects(ability);
+            for effect in &effects {
+                match effect {
+                    // Destroy/Exile/Counter/Bounce — pump doesn't save
+                    Effect::Destroy { .. } | Effect::Counter { .. } | Effect::Bounce { .. } => {
+                        return false
+                    }
+                    Effect::ChangeZone { .. } => return false,
+                    // Damage — pump saves if toughness + bonus > damage
+                    Effect::DealDamage {
+                        amount: QuantityExpr::Fixed { value },
+                        ..
+                    } => {
+                        let toughness = object.toughness.unwrap_or(0);
+                        let remaining = toughness - object.damage_marked as i32;
+                        if remaining + toughness_bonus > *value {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            false
         })
     })
 }

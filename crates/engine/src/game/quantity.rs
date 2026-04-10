@@ -367,6 +367,9 @@ fn resolve_ref(
             }
             count
         }
+        // CR 609.3: Numeric result from the preceding effect in a sub_ability chain.
+        // Used for "gain life equal to the life lost this way" patterns.
+        QuantityRef::PreviousEffectAmount => state.last_effect_amount.unwrap_or(0),
         // CR 609.3: "for each [thing] this way" — read the most recent tracked set size.
         QuantityRef::TrackedSetSize => state
             .tracked_object_sets

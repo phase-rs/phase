@@ -1502,6 +1502,12 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_zone_changed_ids: Vec<ObjectId>,
 
+    /// CR 609.3: Numeric result from the preceding effect in a sub_ability chain.
+    /// Set after resolve_effect for effects producing a numeric result (LoseLife, DealDamage).
+    /// Read by QuantityRef::PreviousEffectAmount ("gain life equal to the life lost this way").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_effect_amount: Option<i32>,
+
     /// Count from the most recent interactive effect resolution (e.g., number of cards
     /// actually discarded in a DiscardChoice). Used as fallback for EventContextAmount
     /// in sub_ability continuations where current_trigger_event has no amount.
@@ -1728,6 +1734,7 @@ impl GameState {
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
             last_zone_changed_ids: Vec::new(),
+            last_effect_amount: None,
             last_effect_count: None,
             monarch: None,
             city_blessing: HashSet::new(),

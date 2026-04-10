@@ -1209,6 +1209,10 @@ pub enum QuantityRef {
     /// Only valid during sub-ability chain resolution; returns 0 outside that context.
     /// The caller (token resolver) is responsible for consuming the tracked set after use.
     TrackedSetSize,
+    /// CR 609.3: Numeric amount produced by the preceding effect in the sub_ability chain.
+    /// Used for "gain life equal to the life lost this way" and similar patterns where
+    /// a sub_ability references the parent effect's numeric result (life lost, damage dealt).
+    PreviousEffectAmount,
     /// CR 118.4: Amount of life the controller has lost this turn.
     /// Used for "as long as you've lost life this turn" static conditions.
     LifeLostThisTurn,

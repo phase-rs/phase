@@ -521,6 +521,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             )
         }
         QuantityRef::BasicLandTypeCount => "basic land types".into(),
+        QuantityRef::PreviousEffectAmount => "amount from preceding effect".into(),
         QuantityRef::TrackedSetSize => "cards moved".into(),
         QuantityRef::LifeLostThisTurn => "life lost this turn".into(),
         QuantityRef::EventContextAmount => "event amount".into(),
@@ -3245,6 +3246,7 @@ fn quantity_ref_variant_name(qref: &QuantityRef) -> &'static str {
         QuantityRef::DistinctCardTypesInZone { .. } => "DistinctCardTypesInZone",
         QuantityRef::ZoneCardCount { .. } => "ZoneCardCount",
         QuantityRef::BasicLandTypeCount => "BasicLandTypeCount",
+        QuantityRef::PreviousEffectAmount => "PreviousEffectAmount",
         QuantityRef::TrackedSetSize => "TrackedSetSize",
         QuantityRef::LifeLostThisTurn => "LifeLostThisTurn",
         QuantityRef::EventContextAmount => "EventContextAmount",
@@ -3334,6 +3336,7 @@ fn resolver_handled_features() -> HashSet<&'static str> {
         "quantity_ref:DistinctCardTypesInZone",
         "quantity_ref:ZoneCardCount",
         "quantity_ref:BasicLandTypeCount",
+        "quantity_ref:PreviousEffectAmount",
         "quantity_ref:TrackedSetSize",
         "quantity_ref:LifeLostThisTurn",
         "quantity_ref:EventContextAmount",

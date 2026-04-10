@@ -278,6 +278,18 @@ pub(crate) fn parse_cda_quantity(text: &str) -> Option<QuantityExpr> {
 pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     let lower = text.to_lowercase();
     let lower = lower.trim();
+    // CR 609.3: "the life/damage lost/dealt this way" — numeric result from preceding effect.
+    // Must check before "that much" to avoid false match on "this way" vs. "this turn".
+    if lower.ends_with("this way")
+        && (lower.contains("life lost")
+            || lower.contains("damage dealt")
+            || lower.contains("life paid"))
+    {
+        return Some(QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount,
+        });
+    }
+
     match lower {
         "that much" | "that many" => {
             return Some(QuantityExpr::Ref {

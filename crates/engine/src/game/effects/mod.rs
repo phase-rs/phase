@@ -503,6 +503,7 @@ pub fn resolve_ability_chain(
     if depth == 0 {
         state.last_revealed_ids.clear();
         state.last_zone_changed_ids.clear();
+        state.last_effect_amount = None;
     }
 
     // BeginGame abilities are handled at game-start setup, not during stack resolution
@@ -792,6 +793,28 @@ pub fn resolve_ability_chain(
                 }
             }
         } // end shares_quality_failed else
+    }
+
+    // CR 609.3: Extract numeric result from events emitted by this effect for
+    // PreviousEffectAmount in sub_abilities ("gain life equal to the life lost this way").
+    // Sum all LifeChanged (negative = loss) and DamageDealt events from this effect.
+    {
+        let mut amount_sum: i32 = 0;
+        for event in &events[events_before..] {
+            match event {
+                GameEvent::LifeChanged { amount, .. } => {
+                    // Life loss is negative; take absolute value for "life lost this way"
+                    amount_sum += amount.unsigned_abs() as i32;
+                }
+                GameEvent::DamageDealt { amount, .. } => {
+                    amount_sum += *amount as i32;
+                }
+                _ => {}
+            }
+        }
+        if amount_sum > 0 {
+            state.last_effect_amount = Some(amount_sum);
+        }
     }
 
     // CR 608.2c: Populate last_zone_changed_ids for ZoneChangedThisWay condition evaluation.

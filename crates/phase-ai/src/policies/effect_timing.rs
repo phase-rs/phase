@@ -152,13 +152,49 @@ fn counterspell_score(ctx: &PolicyContext<'_>) -> f64 {
     let patience = ctx.config.profile.interaction_patience;
     let intent_bonus = match ctx.strategic_intent() {
         StrategicIntent::PreserveAdvantage => 0.15,
-        StrategicIntent::Stabilize => 0.1,
+        StrategicIntent::Stabilize => 0.2,
         _ => 0.0,
     };
+
+    // Creature spells on the stack represent recurring damage — urgency to counter
+    // scales with existing opponent board pressure (each additional creature compounds).
+    let creature_urgency = if !ctx.state.stack.is_empty() {
+        let has_creature_on_stack = ctx.state.stack.iter().any(|entry| {
+            entry.controller != ctx.ai_player
+                && ctx.state.objects.get(&entry.source_id).is_some_and(|obj| {
+                    obj.card_types
+                        .core_types
+                        .contains(&engine::types::card_type::CoreType::Creature)
+                })
+        });
+        if has_creature_on_stack {
+            let opponent_creatures = ctx
+                .state
+                .battlefield
+                .iter()
+                .filter(|&&id| {
+                    ctx.state.objects.get(&id).is_some_and(|obj| {
+                        obj.controller != ctx.ai_player
+                            && obj
+                                .card_types
+                                .core_types
+                                .contains(&engine::types::card_type::CoreType::Creature)
+                    })
+                })
+                .count();
+            // Base urgency + scaling per existing creature
+            0.3 + 0.1 * (opponent_creatures as f64).min(3.0)
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
     let stack_pressure = if ctx.state.stack.is_empty() {
         0.0
     } else {
-        (0.8 * patience) + intent_bonus
+        (0.8 * patience) + intent_bonus + creature_urgency
     };
 
     // Boost incentive to cast a counter when opponent is countering one of our spells

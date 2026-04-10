@@ -21,6 +21,7 @@ pub struct CastFacts<'a> {
     pub has_reveal_hand_or_discard: bool,
     pub has_draw: bool,
     pub has_token_creation: bool,
+    pub has_counter_spell: bool,
     pub has_direct_removal_text: bool,
     pub has_mass_damage_or_mass_shrink_text: bool,
     pub requires_targets_in_spell_text: bool,
@@ -153,6 +154,9 @@ pub fn cast_facts_for_object(object: &GameObject) -> CastFacts<'_> {
         has_token_creation: all_effects
             .iter()
             .any(|effect| matches!(effect, Effect::Token { .. })),
+        has_counter_spell: all_effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Counter { .. })),
         has_direct_removal_text: all_effects.iter().any(|effect| is_direct_removal(effect)),
         has_mass_damage_or_mass_shrink_text: all_effects
             .iter()

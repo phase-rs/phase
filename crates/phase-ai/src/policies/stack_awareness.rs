@@ -90,8 +90,9 @@ fn score_counter_target_value(ctx: &PolicyContext<'_>, target_id: ObjectId) -> f
         }
     }
 
-    // Low-MV creature penalty: don't waste a counter on a cheap creature
-    // unless the AI is in a lethal situation.
+    // Low-MV creature penalty: scale by counter density in hand.
+    // With many counters, save them for high-impact threats. With few counters,
+    // the current threat IS the thing to counter — don't hold out for something better.
     if let Some(obj) = ctx.state.objects.get(&entry.source_id) {
         let is_cheap_creature = obj.mana_cost.mana_value() <= 2
             && obj
@@ -101,7 +102,11 @@ fn score_counter_target_value(ctx: &PolicyContext<'_>, target_id: ObjectId) -> f
         if is_cheap_creature {
             let intent = crate::eval::strategic_intent(ctx.state, ctx.ai_player);
             if !matches!(intent, crate::eval::StrategicIntent::Stabilize) {
-                score -= 1.0;
+                let counters_in_hand =
+                    super::strategy_helpers::count_counterspells_in_hand(ctx.state, ctx.ai_player);
+                // 1 counter = no penalty, 2 = -0.3, 3+ = -0.6
+                let penalty = -0.3 * (counters_in_hand as f64 - 1.0).clamp(0.0, 2.0);
+                score += penalty;
             }
         }
     }
