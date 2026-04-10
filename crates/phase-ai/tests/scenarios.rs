@@ -372,7 +372,7 @@ fn scenario_very_hard_wasm_passes_on_redundant_removal() {
 #[test]
 fn scenario_harvester_of_misery_cast_is_preferred_over_pass() {
     let mut scenario = GameScenario::new();
-    let harvester = scenario
+    let _harvester = scenario
         .add_creature_to_hand_from_oracle(
             P0,
             "Harvester of Misery",
