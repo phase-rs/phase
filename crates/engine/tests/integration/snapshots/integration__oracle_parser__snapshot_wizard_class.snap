@@ -195,8 +195,5 @@ expression: result
     }
   ],
   "replacements": [],
-  "extractedKeywords": [],
-  "parseWarnings": [
-    "target-fallback: trigger subject parse fell back to Any for 'you draw a card'"
-  ]
+  "extractedKeywords": []
 }

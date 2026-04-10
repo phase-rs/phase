@@ -1241,8 +1241,9 @@ pub(crate) fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerD
 
 /// CR 608.2k: Extract the trigger subject from condition text for pronoun context.
 /// Reuses `parse_trigger_subject` but only needs the `TargetFilter`, not the remainder.
-/// For phase triggers ("at the beginning of..."), the subject is unrecognized and
-/// `resolve_it_pronoun` will fall back to `SelfRef`.
+/// For phase triggers ("at the beginning of...") and player-action triggers ("you cast..."),
+/// there is no object subject — return `Any` silently so `resolve_it_pronoun` falls back
+/// to `SelfRef`.
 fn extract_trigger_subject_for_context(condition_text: &str) -> TargetFilter {
     let lower = condition_text.to_lowercase();
     let after_keyword = alt((
@@ -1252,6 +1253,21 @@ fn extract_trigger_subject_for_context(condition_text: &str) -> TargetFilter {
     .parse(lower.as_str())
     .map(|(rest, _)| rest)
     .unwrap_or(&lower);
+
+    // Phase triggers and player-action triggers have no object subject — early-out
+    // without calling parse_trigger_subject (which would warn on the unrecognized text).
+    if alt((
+        value((), tag::<_, _, VerboseError<&str>>("at the beginning of ")),
+        value((), tag("at end of ")),
+        value((), tag("at the end of ")),
+        value((), tag("you ")),
+    ))
+    .parse(after_keyword)
+    .is_ok()
+    {
+        return TargetFilter::Any;
+    }
+
     let (subject, _) = parse_trigger_subject(after_keyword);
     subject
 }
