@@ -286,11 +286,22 @@ impl<'a> PlannerServices<'a> {
             state.waiting_for,
             engine::types::game_state::WaitingFor::Priority { .. }
         );
+        // DecideOptionalCost { pay: false } is always legal — declining an optional
+        // cost cannot fail since it just proceeds with the base cost.
+        let is_optional_cost = matches!(
+            state.waiting_for,
+            engine::types::game_state::WaitingFor::OptionalCostChoice { .. }
+        );
         candidates
             .into_iter()
             .filter(|candidate| match &candidate.action {
                 engine::types::actions::GameAction::PassPriority if pass_always_valid => true,
                 engine::types::actions::GameAction::ChooseTarget { .. } => true,
+                engine::types::actions::GameAction::DecideOptionalCost { pay: false }
+                    if is_optional_cost =>
+                {
+                    true
+                }
                 _ => {
                     let mut sim = state.clone();
                     apply(&mut sim, candidate.action.clone()).is_ok()

@@ -382,9 +382,73 @@ pub(crate) fn deterministic_choice(
         }
     }
 
-    // OptionalCostChoice (kicker etc.) is handled by the normal search pipeline —
-    // validate_candidates filters out unaffordable options, and search/scoring
-    // decides between pay/decline based on value.
+    // CR 702.33a: Kicker and other optional additional costs.
+    // Pay the additional mana cost only if affordable AND the extra mana is a good
+    // deal relative to the effect upgrade. For pure mana kickers, check that the
+    // player has enough mana to pay the combined cost after auto-tapping, and that
+    // paying it doesn't over-commit mana (leave at least 1 land untapped when
+    // possible, since holding mana open for instant-speed interaction is valuable).
+    if let WaitingFor::OptionalCostChoice {
+        player,
+        cost: additional_cost,
+        pending_cast,
+    } = &state.waiting_for
+    {
+        let pay = match additional_cost {
+            engine::types::ability::AdditionalCost::Optional(
+                engine::types::ability::AbilityCost::Mana { cost: extra_mana },
+            ) => {
+                let combined =
+                    engine::game::restrictions::add_mana_cost(&pending_cast.cost, extra_mana);
+                let affordable = engine::game::casting::can_pay_cost_after_auto_tap(
+                    state,
+                    *player,
+                    pending_cast.object_id,
+                    &combined,
+                );
+                if !affordable {
+                    false
+                } else {
+                    // Pay kicker only if it doesn't tap us out completely.
+                    // Count total untapped mana sources to gauge remaining resources.
+                    let total_untapped = state
+                        .objects
+                        .values()
+                        .filter(|o| {
+                            o.controller == *player
+                                && o.zone == engine::types::zones::Zone::Battlefield
+                                && !o.tapped
+                                && o.card_types
+                                    .core_types
+                                    .contains(&engine::types::card_type::CoreType::Land)
+                        })
+                        .count();
+                    let combined_cmc = match &combined {
+                        engine::types::mana::ManaCost::Cost { shards, generic } => {
+                            shards.len() + *generic as usize
+                        }
+                        _ => 0,
+                    };
+                    // Pay kicker if we'll have mana to spare afterward
+                    total_untapped > combined_cmc
+                }
+            }
+            // Non-mana optional costs: sacrifice → usually worth it for the upgrade
+            engine::types::ability::AdditionalCost::Optional(
+                engine::types::ability::AbilityCost::Sacrifice { .. },
+            ) => false, // Conservative: don't sacrifice unless search says so
+            engine::types::ability::AdditionalCost::Optional(
+                engine::types::ability::AbilityCost::PayLife { amount },
+            ) => {
+                let life = state.players[player.0 as usize].life;
+                life > (*amount as i32) * 3
+            }
+            engine::types::ability::AdditionalCost::Optional(_) => true,
+            engine::types::ability::AdditionalCost::Choice(_, _) => true,
+            engine::types::ability::AdditionalCost::Required(_) => true,
+        };
+        return Some(GameAction::DecideOptionalCost { pay });
+    }
 
     // CR 601.2b: Defiler — accept life payment when life cushion is sufficient.
     if let WaitingFor::DefilerPayment {
