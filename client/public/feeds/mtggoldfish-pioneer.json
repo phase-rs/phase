@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-04-23T00:00:00Z",
+  "updated": "2026-04-24T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -1430,7 +1430,7 @@
           "name": "Thornspire Verge"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Ramunap Ruins"
         },
         {
@@ -1450,7 +1450,7 @@
           "name": "Academic Dispute"
         },
         {
-          "count": 3,
+          "count": 4,
           "name": "Reckless Rage"
         },
         {
@@ -1458,20 +1458,16 @@
           "name": "Kumano Faces Kakkazan"
         },
         {
-          "count": 4,
-          "name": "Cori-Steel Cutter"
+          "count": 2,
+          "name": "Screaming Nemesis"
         },
         {
           "count": 2,
           "name": "Thornspire Verge"
         },
         {
-          "count": 2,
-          "name": "Screaming Nemesis"
-        },
-        {
-          "count": 2,
-          "name": "Monstrous Rage"
+          "count": 4,
+          "name": "Cori-Steel Cutter"
         }
       ],
       "sideboard": [

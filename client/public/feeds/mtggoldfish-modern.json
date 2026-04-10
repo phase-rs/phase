@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-04-23T00:00:00Z",
+  "updated": "2026-04-24T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -737,60 +737,12 @@
       ],
       "main": [
         {
-          "count": 4,
-          "name": "Karn, the Great Creator"
-        },
-        {
-          "count": 4,
-          "name": "Devourer of Destiny"
-        },
-        {
-          "count": 2,
-          "name": "Dismember"
-        },
-        {
-          "count": 4,
-          "name": "Ugin's Labyrinth"
-        },
-        {
-          "count": 4,
-          "name": "Glaring Fleshraker"
-        },
-        {
-          "count": 4,
-          "name": "Kozilek's Command"
-        },
-        {
           "count": 1,
-          "name": "Swamp"
+          "name": "Chalice of the Void"
         },
         {
-          "count": 4,
-          "name": "Ugin, Eye of the Storms"
-        },
-        {
-          "count": 4,
-          "name": "Urza's Tower"
-        },
-        {
-          "count": 2,
-          "name": "Sire of Seven Deaths"
-        },
-        {
-          "count": 4,
-          "name": "Thought-Knot Seer"
-        },
-        {
-          "count": 4,
-          "name": "Urza's Power Plant"
-        },
-        {
-          "count": 4,
-          "name": "Urza's Mine"
-        },
-        {
-          "count": 4,
-          "name": "Expedition Map"
+          "count": 3,
+          "name": "Devourer of Destiny"
         },
         {
           "count": 4,
@@ -798,7 +750,27 @@
         },
         {
           "count": 2,
-          "name": "Chalice of the Void"
+          "name": "Sire of Seven Deaths"
+        },
+        {
+          "count": 4,
+          "name": "Urza's Tower"
+        },
+        {
+          "count": 3,
+          "name": "Glaring Fleshraker"
+        },
+        {
+          "count": 4,
+          "name": "Karn, the Great Creator"
+        },
+        {
+          "count": 4,
+          "name": "Kozilek's Command"
+        },
+        {
+          "count": 4,
+          "name": "Urza's Power Plant"
         },
         {
           "count": 1,
@@ -806,25 +778,85 @@
         },
         {
           "count": 4,
+          "name": "Urza's Mine"
+        },
+        {
+          "count": 4,
+          "name": "Thought-Knot Seer"
+        },
+        {
+          "count": 1,
+          "name": "Trinisphere"
+        },
+        {
+          "count": 4,
+          "name": "Ugin's Labyrinth"
+        },
+        {
+          "count": 4,
+          "name": "Ugin, Eye of the Storms"
+        },
+        {
+          "count": 1,
+          "name": "Ulamog, the Ceaseless Hunger"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
+        },
+        {
+          "count": 4,
           "name": "Mind Stone"
+        },
+        {
+          "count": 4,
+          "name": "Expedition Map"
+        },
+        {
+          "count": 1,
+          "name": "Vexing Bauble"
+        },
+        {
+          "count": 2,
+          "name": "Dismember"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Chalice of the Void"
-        },
-        {
-          "count": 1,
           "name": "Cityscape Leveler"
         },
         {
+          "count": 2,
+          "name": "Disruptor Flute"
+        },
+        {
           "count": 1,
-          "name": "The Stone Brain"
+          "name": "Ensnaring Bridge"
+        },
+        {
+          "count": 1,
+          "name": "Extinguisher Battleship"
         },
         {
           "count": 1,
           "name": "Tormod's Crypt"
+        },
+        {
+          "count": 1,
+          "name": "Relic of Progenitus"
+        },
+        {
+          "count": 1,
+          "name": "Skysovereign, Consul Flagship"
+        },
+        {
+          "count": 1,
+          "name": "The Filigree Sylex"
+        },
+        {
+          "count": 1,
+          "name": "The Stone Brain"
         },
         {
           "count": 1,
@@ -836,35 +868,15 @@
         },
         {
           "count": 1,
-          "name": "Ensnaring Bridge"
-        },
-        {
-          "count": 1,
-          "name": "Walking Ballista"
-        },
-        {
-          "count": 2,
           "name": "Trinisphere"
         },
         {
           "count": 1,
-          "name": "The Filigree Sylex"
-        },
-        {
-          "count": 1,
-          "name": "Extinguisher Battleship"
-        },
-        {
-          "count": 1,
-          "name": "Disruptor Flute"
-        },
-        {
-          "count": 1,
-          "name": "Soulless Jailer"
-        },
-        {
-          "count": 1,
           "name": "Vexing Bauble"
+        },
+        {
+          "count": 1,
+          "name": "Walking Ballista"
         }
       ]
     },
@@ -1334,48 +1346,31 @@
       ]
     },
     {
-      "name": "Temur Prowess",
+      "name": "Izzet Prowess",
       "author": "MTGGoldfish",
       "colors": [
-        "U",
         "R",
-        "G"
+        "U"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 3,
-          "name": "Bloodstained Mire"
+          "count": 4,
+          "name": "Mishra's Bauble"
         },
         {
           "count": 4,
-          "name": "Cori-Steel Cutter"
-        },
-        {
-          "count": 4,
-          "name": "Expressive Iteration"
-        },
-        {
-          "count": 1,
-          "name": "Fiery Islet"
-        },
-        {
-          "count": 4,
-          "name": "Lava Dart"
+          "name": "Dragon's Rage Channeler"
         },
         {
           "count": 4,
           "name": "Monastery Swiftspear"
         },
         {
-          "count": 2,
-          "name": "Mutagenic Growth"
-        },
-        {
           "count": 4,
-          "name": "Scalding Tarn"
+          "name": "Lightning Bolt"
         },
         {
           "count": 4,
@@ -1383,73 +1378,69 @@
         },
         {
           "count": 3,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 2,
-          "name": "Violent Urge"
-        },
-        {
-          "count": 3,
-          "name": "Wooded Foothills"
-        },
-        {
-          "count": 4,
-          "name": "Mishra's Bauble"
-        },
-        {
-          "count": 1,
-          "name": "Thundering Falls"
+          "name": "Mutagenic Growth"
         },
         {
           "count": 4,
           "name": "Preordain"
         },
         {
-          "count": 4,
-          "name": "Dragon's Rage Channeler"
-        },
-        {
           "count": 1,
           "name": "Unholy Heat"
         },
         {
           "count": 4,
-          "name": "Lightning Bolt"
+          "name": "Expressive Iteration"
         },
         {
-          "count": 1,
-          "name": "Surgical Extraction"
+          "count": 4,
+          "name": "Cori-Steel Cutter"
         },
         {
-          "count": 1,
-          "name": "Stomping Ground"
+          "count": 4,
+          "name": "Lava Dart"
         },
         {
           "count": 2,
+          "name": "Violent Urge"
+        },
+        {
+          "count": 2,
+          "name": "Fiery Islet"
+        },
+        {
+          "count": 3,
           "name": "Mountain"
+        },
+        {
+          "count": 3,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 1,
+          "name": "Thundering Falls"
+        },
+        {
+          "count": 3,
+          "name": "Bloodstained Mire"
+        },
+        {
+          "count": 1,
+          "name": "Wooded Foothills"
+        },
+        {
+          "count": 2,
+          "name": "Scalding Tarn"
+        },
+        {
+          "count": 3,
+          "name": "Arid Mesa"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
-          "name": "Spell Pierce"
-        },
-        {
           "count": 3,
           "name": "Unholy Heat"
-        },
-        {
-          "count": 1,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 1,
-          "name": "Murktide Regent"
-        },
-        {
-          "count": 2,
-          "name": "Meltdown"
         },
         {
           "count": 3,
@@ -1457,11 +1448,27 @@
         },
         {
           "count": 2,
-          "name": "Heritage Reclamation"
+          "name": "Meltdown"
         },
         {
           "count": 1,
-          "name": "Obsidian Charmaw"
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 1,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 1,
+          "name": "Into the Flood Maw"
+        },
+        {
+          "count": 2,
+          "name": "Surgical Extraction"
+        },
+        {
+          "count": 2,
+          "name": "Abhorrent Oculus"
         }
       ]
     }

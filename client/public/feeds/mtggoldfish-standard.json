@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-04-23T00:00:00Z",
+  "updated": "2026-04-24T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -1127,52 +1127,23 @@
       ]
     },
     {
-      "name": "Bant Ouroboroid",
+      "name": "Selesnya Ouroboroid",
       "author": "MTGGoldfish",
       "colors": [
         "G",
-        "W",
-        "U"
+        "W"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 1,
-          "name": "Craterhoof Behemoth"
-        },
-        {
-          "count": 1,
-          "name": "Forest"
-        },
-        {
           "count": 3,
-          "name": "Mockingbird"
+          "name": "Abandoned Air Temple"
         },
         {
-          "count": 4,
-          "name": "Starting Town"
-        },
-        {
-          "count": 4,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 1,
-          "name": "Keen-Eyed Curator"
-        },
-        {
-          "count": 3,
-          "name": "Seam Rip"
-        },
-        {
-          "count": 1,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 4,
-          "name": "Llanowar Elves"
+          "count": 2,
+          "name": "Hushwood Verge"
         },
         {
           "count": 4,
@@ -1180,73 +1151,101 @@
         },
         {
           "count": 2,
-          "name": "Brightglass Gearhulk"
+          "name": "Hushwood Verge"
         },
         {
           "count": 4,
           "name": "Gene Pollinator"
         },
         {
-          "count": 4,
-          "name": "Breeding Pool"
-        },
-        {
-          "count": 4,
-          "name": "Nature's Rhythm"
-        },
-        {
           "count": 1,
-          "name": "Meltstrider's Resolve"
-        },
-        {
-          "count": 4,
-          "name": "Multiversal Passage"
-        },
-        {
-          "count": 4,
-          "name": "Hushwood Verge"
-        },
-        {
-          "count": 1,
-          "name": "Unable to Scream"
+          "name": "Insidious Fungus"
         },
         {
           "count": 4,
           "name": "Spider Manifestation"
         },
         {
+          "count": 1,
+          "name": "Llanowar Elves"
+        },
+        {
+          "count": 1,
+          "name": "Meltstrider's Resolve"
+        },
+        {
           "count": 2,
-          "name": "Ouroboroid"
+          "name": "Multiversal Passage"
+        },
+        {
+          "count": 8,
+          "name": "Forest"
+        },
+        {
+          "count": 1,
+          "name": "Nurturing Pixie"
         },
         {
           "count": 4,
-          "name": "Quantum Riddler"
+          "name": "Ouroboroid"
+        },
+        {
+          "count": 1,
+          "name": "Craterhoof Behemoth"
+        },
+        {
+          "count": 4,
+          "name": "Brightglass Gearhulk"
+        },
+        {
+          "count": 2,
+          "name": "Archdruid's Charm"
+        },
+        {
+          "count": 2,
+          "name": "Llanowar Elves"
+        },
+        {
+          "count": 1,
+          "name": "Llanowar Elves"
+        },
+        {
+          "count": 4,
+          "name": "Nature's Rhythm"
+        },
+        {
+          "count": 2,
+          "name": "Plains"
+        },
+        {
+          "count": 2,
+          "name": "Seam Rip"
+        },
+        {
+          "count": 1,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 4,
+          "name": "Temple Garden"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Disdainful Stroke"
-        },
-        {
-          "count": 1,
-          "name": "Unable to Scream"
+          "name": "Surrak, Elusive Hunter"
         },
         {
           "count": 2,
-          "name": "Oko, Lorwyn Liege"
-        },
-        {
-          "count": 1,
-          "name": "Beza, the Bounding Spring"
-        },
-        {
-          "count": 3,
-          "name": "Sage of the Skies"
+          "name": "Get Lost"
         },
         {
           "count": 2,
-          "name": "Spider-Sense"
+          "name": "Leatherhead, Swamp Stalker"
+        },
+        {
+          "count": 1,
+          "name": "Meltstrider's Resolve"
         },
         {
           "count": 1,
@@ -1254,15 +1253,23 @@
         },
         {
           "count": 1,
-          "name": "Focus Fire"
+          "name": "Seam Rip"
+        },
+        {
+          "count": 3,
+          "name": "Sage of the Skies"
         },
         {
           "count": 2,
-          "name": "Rest in Peace"
+          "name": "Pawpatch Formation"
         },
         {
           "count": 1,
-          "name": "Insidious Fungus"
+          "name": "Beza, the Bounding Spring"
+        },
+        {
+          "count": 1,
+          "name": "Seam Rip"
         }
       ]
     }
