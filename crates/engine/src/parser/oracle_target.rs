@@ -359,8 +359,12 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         "the chosen cards",
         "the rest",
         "the other",
+        "those land cards",
+        "those permanent cards",
+        "those creature cards",
         "those lands",
         "those tokens",
+        "those auras",
         "the revealed cards",
         "those cards",
         "those permanents",
@@ -448,6 +452,10 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
                 TargetFilter::ParentTargetController,
                 tag::<_, _, nom_language::error::VerboseError<&str>>("the creature's controller"),
             ),
+            value(
+                TargetFilter::ParentTargetController,
+                tag("the source's controller"),
+            ),
             value(TargetFilter::ParentTargetController, tag("its controller")),
             value(TargetFilter::ParentTarget, tag("the player")),
             value(TargetFilter::ParentTarget, tag("the creature")),
@@ -457,6 +465,16 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         .parse(input)
     }) {
         return (filter, rest);
+    }
+    // Generic "the [noun]'s controller" — any possessive ending in "'s controller"
+    // catches subtypes like "the Wall's controller" and similar.
+    if let Ok((after_the, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("the ").parse(lower.as_str())
+    {
+        if let Some(pos) = after_the.find("'s controller") {
+            let consumed = "the ".len() + pos + "'s controller".len();
+            return (TargetFilter::ParentTargetController, &text[consumed..]);
+        }
     }
     // "the [type] card" / "the enchanted [type] card" — definite reference to a
     // previously-mentioned typed card. Must come after tracked-set phrases.
@@ -2178,8 +2196,8 @@ fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilt
         return None;
     };
 
-    // Optional number: "three ", "two ", etc. — skip it, we only care about the zone.
-    let after_number = if let Ok((rest, _)) = nom_primitives::parse_number(after_position) {
+    // Optional number: "three ", "two ", "x ", etc. — skip it, we only care about the zone.
+    let after_number = if let Ok((rest, _)) = nom_primitives::parse_number_or_x(after_position) {
         rest.trim_start()
     } else {
         after_position
@@ -2198,22 +2216,43 @@ fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilt
         after_number
     };
 
-    // Required "card " or "cards "
-    let after_card = if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("cards ").parse(after_type)
+    // Required "card"/"cards" — may be followed by " of [zone]" or be standalone
+    let (after_card, card_is_terminal) = if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("cards").parse(after_type)
     {
-        rest
+        (
+            rest,
+            rest.trim_start().is_empty() || !rest.trim_start().starts_with("of "),
+        )
     } else if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("card ").parse(after_type)
+        tag::<_, _, nom_language::error::VerboseError<&str>>("card").parse(after_type)
     {
-        rest
+        (
+            rest,
+            rest.trim_start().is_empty() || !rest.trim_start().starts_with("of "),
+        )
     } else {
         return None;
     };
 
-    // Required "of "
+    // Standalone "the top [N] cards" — default to your library
+    if card_is_terminal {
+        let consumed = lower.len() - after_card.len();
+        return Some((
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Library,
+                }],
+                ..Default::default()
+            }),
+            &text[consumed..],
+        ));
+    }
+
+    // "of " followed by possessive + zone
     let after_of = tag::<_, _, nom_language::error::VerboseError<&str>>("of ")
-        .parse(after_card)
+        .parse(after_card.trim_start())
         .ok()?
         .0;
 
