@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use engine::game::combat::AttackTarget;
 use engine::game::players;
 use engine::types::ability::{Effect, QuantityExpr, QuantityRef, TargetFilter};
@@ -6,6 +8,7 @@ use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
+use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
@@ -92,7 +95,8 @@ pub fn choose_attackers_with_targets_with_profile(
 
         let has_evasion = obj.has_keyword(&Keyword::Flying)
             || obj.has_keyword(&Keyword::Menace)
-            || obj.has_keyword(&Keyword::Shadow);
+            || obj.has_keyword(&Keyword::Shadow)
+            || has_cant_be_blocked(obj);
         // CR 702.20b: Attacking with vigilance doesn't cause the creature to tap,
         // so it has zero defensive cost — always include vigilance creatures.
         let has_vigilance = obj.has_keyword(&Keyword::Vigilance);
@@ -353,7 +357,7 @@ pub fn choose_blockers(
     player: PlayerId,
     attacker_ids: &[ObjectId],
 ) -> Vec<(ObjectId, ObjectId)> {
-    choose_blockers_with_profile(state, player, attacker_ids, &AiProfile::default())
+    choose_blockers_with_profile(state, player, attacker_ids, &AiProfile::default(), None)
 }
 
 pub fn choose_blockers_with_profile(
@@ -361,6 +365,7 @@ pub fn choose_blockers_with_profile(
     player: PlayerId,
     attacker_ids: &[ObjectId],
     profile: &AiProfile,
+    valid_block_targets: Option<&HashMap<ObjectId, Vec<ObjectId>>>,
 ) -> Vec<(ObjectId, ObjectId)> {
     let mut assignments = Vec::new();
     let mut used_blockers = Vec::new();
@@ -409,7 +414,14 @@ pub fn choose_blockers_with_profile(
                 Some(b) => b,
                 None => return false,
             };
-            blocker.has_keyword(&Keyword::Deathtouch) && can_block_check(blocker, attacker)
+            blocker.has_keyword(&Keyword::Deathtouch)
+                && can_block_with_engine_map(
+                    bid,
+                    attacker_id,
+                    blocker,
+                    attacker,
+                    valid_block_targets,
+                )
         }) {
             let blocker_id = available_blockers[pos];
             assignments.push((blocker_id, attacker_id));
@@ -440,7 +452,15 @@ pub fn choose_blockers_with_profile(
                     && state
                         .objects
                         .get(&bid)
-                        .map(|b| can_block_check(b, attacker))
+                        .map(|b| {
+                            can_block_with_engine_map(
+                                bid,
+                                attacker_id,
+                                b,
+                                attacker,
+                                valid_block_targets,
+                            )
+                        })
                         .unwrap_or(false)
             })
             .filter_map(|&bid| {
@@ -538,7 +558,15 @@ pub fn choose_blockers_with_profile(
                     && state
                         .objects
                         .get(&bid)
-                        .map(|b| can_block_check(b, attacker))
+                        .map(|b| {
+                            can_block_with_engine_map(
+                                bid,
+                                attacker_id,
+                                b,
+                                attacker,
+                                valid_block_targets,
+                            )
+                        })
                         .unwrap_or(false)
             })
             .filter_map(|&bid| {
@@ -689,8 +717,13 @@ pub fn choose_blockers_with_profile(
                             .objects
                             .get(&bid)
                             .map(|b| {
-                                can_block_check(b, attacker)
-                                    && !has_damage_reflection_to_controller(b)
+                                can_block_with_engine_map(
+                                    bid,
+                                    attacker_id,
+                                    b,
+                                    attacker,
+                                    valid_block_targets,
+                                ) && !has_damage_reflection_to_controller(b)
                             })
                             .unwrap_or(false)
                 }) {
@@ -985,11 +1018,29 @@ fn can_attack(state: &GameState, obj_id: ObjectId) -> bool {
         .is_some_and(|etb| etb < state.turn_number)
 }
 
-/// Check if a blocker can legally block an attacker (flying/reach, shadow checks).
+/// Check if a creature has the absolute "can't be blocked" static ability.
+/// Intentionally excludes CantBeBlockedExceptBy / CantBeBlockedBy — those creatures
+/// can still be blocked by matching creatures and should go through normal evaluation.
+fn has_cant_be_blocked(obj: &engine::game::game_object::GameObject) -> bool {
+    obj.static_definitions
+        .iter()
+        .any(|sd| sd.mode == StaticMode::CantBeBlocked)
+}
+
+/// Check if a blocker can legally block an attacker.
+/// Checks: CantBeBlocked, flying/reach, shadow.
+/// Note: This is a heuristic fallback for contexts where the engine's
+/// `valid_block_targets` map is unavailable (e.g. crackback estimation, tests).
+/// In real blocker assignment, prefer `can_block_with_engine_map`.
 pub(crate) fn can_block_check(
     blocker: &engine::game::game_object::GameObject,
     attacker: &engine::game::game_object::GameObject,
 ) -> bool {
+    // CR 509.1b: Creatures with "can't be blocked" can never be blocked
+    if has_cant_be_blocked(attacker) {
+        return false;
+    }
+
     // Flying check
     if attacker.has_keyword(&Keyword::Flying)
         && !blocker.has_keyword(&Keyword::Flying)
@@ -1006,6 +1057,26 @@ pub(crate) fn can_block_check(
     }
 
     true
+}
+
+/// Check if a blocker can legally block an attacker, using the engine's pre-validated
+/// `valid_block_targets` map when available. This map accounts for all blocking
+/// restrictions (CantBeBlocked, CantBeBlockedExceptBy, CantBeBlockedBy, Protection,
+/// flying/reach, shadow, menace minimums, etc.) so the AI never needs to re-derive them.
+/// Falls back to `can_block_check` when the map is not provided.
+fn can_block_with_engine_map(
+    blocker_id: ObjectId,
+    attacker_id: ObjectId,
+    blocker: &engine::game::game_object::GameObject,
+    attacker: &engine::game::game_object::GameObject,
+    valid_block_targets: Option<&HashMap<ObjectId, Vec<ObjectId>>>,
+) -> bool {
+    if let Some(map) = valid_block_targets {
+        map.get(&blocker_id)
+            .is_some_and(|targets| targets.contains(&attacker_id))
+    } else {
+        can_block_check(blocker, attacker)
+    }
 }
 
 /// Evaluate whether a single blocker kills the attacker and/or survives combat,

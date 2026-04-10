@@ -523,11 +523,20 @@ pub(crate) fn deterministic_choice(
         return Some(GameAction::DeclareAttackers { attacks });
     }
 
-    if let WaitingFor::DeclareBlockers { .. } = &state.waiting_for {
+    if let WaitingFor::DeclareBlockers {
+        valid_block_targets,
+        ..
+    } = &state.waiting_for
+    {
         if let Some(combat) = &state.combat {
             let attacker_ids: Vec<_> = combat.attackers.iter().map(|a| a.object_id).collect();
-            let assignments =
-                choose_blockers_with_profile(state, ai_player, &attacker_ids, &config.profile);
+            let assignments = choose_blockers_with_profile(
+                state,
+                ai_player,
+                &attacker_ids,
+                &config.profile,
+                Some(valid_block_targets),
+            );
             return Some(GameAction::DeclareBlockers { assignments });
         }
         return Some(GameAction::DeclareBlockers {
@@ -551,11 +560,20 @@ fn deterministic_combat_choice(
         return Some(GameAction::DeclareAttackers { attacks });
     }
 
-    if let WaitingFor::DeclareBlockers { .. } = &state.waiting_for {
+    if let WaitingFor::DeclareBlockers {
+        valid_block_targets,
+        ..
+    } = &state.waiting_for
+    {
         if let Some(combat) = &state.combat {
             let attacker_ids: Vec<_> = combat.attackers.iter().map(|a| a.object_id).collect();
-            let assignments =
-                choose_blockers_with_profile(state, ai_player, &attacker_ids, profile);
+            let assignments = choose_blockers_with_profile(
+                state,
+                ai_player,
+                &attacker_ids,
+                profile,
+                Some(valid_block_targets),
+            );
             return Some(GameAction::DeclareBlockers { assignments });
         }
         return Some(GameAction::DeclareBlockers {
