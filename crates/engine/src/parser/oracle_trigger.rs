@@ -17,7 +17,7 @@ use super::oracle_util::{
     parse_ordinal, parse_subtype, strip_after, strip_reminder_text, TextPair,
     SELF_REF_PARSE_ONLY_PHRASES,
 };
-use crate::parser::oracle_warnings::push_warning;
+use crate::parser::oracle_warnings::{push_warning, take_warnings};
 use crate::types::ability::{
     AbilityKind, Comparator, ControllerRef, DamageKindFilter, FilterProp, NinjutsuVariant,
     QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition, TriggerConstraint,
@@ -1221,17 +1221,32 @@ pub(crate) fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerD
     // Scan the full subject text (not just the start) because compound subjects like
     // "~ and/or one or more other creatures" place "one or more" after the first branch.
     let is_batched = scan_contains(after_keyword, "one or more ");
+
+    // Drain warnings before subject parsing — if the trigger ends up as Unknown,
+    // the subject warning is redundant (the coverage system already tracks Unknown triggers).
+    // Only re-emit warnings when the event verb parses successfully (meaning the trigger
+    // works but has a degraded subject filter).
+    let pre_warnings = take_warnings();
     let (subject, rest) = parse_trigger_subject(after_keyword);
+    let subject_warnings = take_warnings();
+    // Restore pre-existing warnings
+    for w in pre_warnings {
+        push_warning(w);
+    }
 
     // Parse event verb from the remaining text
     if let Some((mode, mut def)) = try_parse_event(&subject, rest, &lower) {
+        // Re-emit subject warnings — the trigger parsed but the subject degraded to Any.
+        for w in subject_warnings {
+            push_warning(w);
+        }
         if is_batched {
             def.batched = true;
         }
         return (mode, def);
     }
 
-    // --- Fallback ---
+    // --- Fallback: discard subject_warnings (trigger is Unknown, redundant) ---
     let mut def = make_base();
     let mode = TriggerMode::Unknown(condition.to_string());
     def.mode = mode.clone();
@@ -1254,13 +1269,31 @@ fn extract_trigger_subject_for_context(condition_text: &str) -> TargetFilter {
     .map(|(rest, _)| rest)
     .unwrap_or(&lower);
 
-    // Phase triggers and player-action triggers have no object subject — early-out
-    // without calling parse_trigger_subject (which would warn on the unrecognized text).
+    // Trigger patterns with no object subject — early-out without calling
+    // parse_trigger_subject (which would warn on the unrecognized text).
+    // Covers: phase triggers, player-action triggers, game mechanic triggers,
+    // passive-voice counter placement, and replacement-style "as ~ enters".
     if alt((
         value((), tag::<_, _, VerboseError<&str>>("at the beginning of ")),
         value((), tag("at end of ")),
         value((), tag("at the end of ")),
         value((), tag("you ")),
+        value((), tag("you'")),
+        // Game mechanic triggers without object subjects
+        value((), tag("chaos ensues")),
+        value((), tag("the ring tempts ")),
+        value((), tag("day becomes ")),
+        value((), tag("night becomes ")),
+        // Passive voice counter placement: "one or more counters are put on"
+        value((), tag("one or more ")),
+        // Replacement-style triggers
+        value((), tag("as ~ enters")),
+        // Enchanted-X triggers
+        value((), tag("enchanted ")),
+        // Ability-based triggers
+        value((), tag("ability ")),
+        // State-based triggers
+        value((), tag("there are ")),
     ))
     .parse(after_keyword)
     .is_ok()
