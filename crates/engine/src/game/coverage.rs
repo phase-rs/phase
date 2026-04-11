@@ -1021,6 +1021,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             filter,
             count,
             reveal,
+            ..
         } => {
             d.push(("find".into(), fmt_target(filter)));
             if *count != 1 {

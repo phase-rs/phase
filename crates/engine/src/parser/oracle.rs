@@ -5783,6 +5783,7 @@ mod tests {
                 filter,
                 count,
                 reveal,
+                ..
             } => {
                 assert_eq!(*count, 1);
                 assert!(*reveal);
@@ -5815,6 +5816,7 @@ mod tests {
                 filter,
                 count,
                 reveal,
+                ..
             } => {
                 assert_eq!(*count, 1);
                 assert!(*reveal);

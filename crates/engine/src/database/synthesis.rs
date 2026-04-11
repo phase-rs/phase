@@ -449,6 +449,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
                         filter,
                         count: 1,
                         reveal: true,
+                        target_player: None,
                     },
                 )
                 .cost(composite_cost);

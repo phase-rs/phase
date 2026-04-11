@@ -912,6 +912,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
             }),
             count: 1,
             reveal: false,
+            target_player: None,
         },
         sub_ability: Some(Box::new(change_zone_ability)),
         ..ResolvedAbility::new(
@@ -925,6 +926,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
                 }),
                 count: 1,
                 reveal: false,
+                target_player: None,
             },
             vec![],
             source_id,
@@ -1231,6 +1233,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             }),
             count: 1,
             reveal: false,
+            target_player: None,
         },
         sub_ability: Some(Box::new(change_zone_ability)),
         ..ResolvedAbility::new(
@@ -1244,6 +1247,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
                 }),
                 count: 1,
                 reveal: false,
+                target_player: None,
             },
             vec![],
             enchantment_id,

@@ -1,5 +1,5 @@
 use crate::game::filter::matches_target_filter_controlled;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, WaitingFor};
 
@@ -10,19 +10,38 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (filter, count, reveal) = match &ability.effect {
+    let (filter, count, reveal, has_target_player) = match &ability.effect {
         Effect::SearchLibrary {
             filter,
             count,
             reveal,
-        } => (filter.clone(), *count as usize, *reveal),
-        _ => (TargetFilter::Any, 1, false),
+            target_player,
+        } => (filter.clone(), *count as usize, *reveal, target_player.is_some()),
+        _ => (TargetFilter::Any, 1, false, false),
+    };
+
+    // CR 701.23a: When target_player is set, search that player's library.
+    // The target player is resolved from ability.targets (player targets).
+    let search_player_id = if has_target_player {
+        ability
+            .targets
+            .iter()
+            .find_map(|t| {
+                if let TargetRef::Player(pid) = t {
+                    Some(*pid)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(ability.controller)
+    } else {
+        ability.controller
     };
 
     let player = state
         .players
         .iter()
-        .find(|p| p.id == ability.controller)
+        .find(|p| p.id == search_player_id)
         .ok_or(EffectError::PlayerNotFound)?;
     events.push(GameEvent::PlayerPerformedAction {
         player_id: ability.controller,
@@ -91,6 +110,7 @@ mod tests {
                 filter,
                 count,
                 reveal: false,
+                target_player: None,
             },
             vec![],
             ObjectId(100),
@@ -275,6 +295,7 @@ mod tests {
                 filter: TargetFilter::Typed(TypedFilter::creature()),
                 count: 1,
                 reveal: true,
+                target_player: None,
             },
             vec![],
             ObjectId(100),

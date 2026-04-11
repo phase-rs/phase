@@ -608,12 +608,17 @@ pub(super) fn parse_search_and_creation_ast(
             enter_tapped: details.enter_tapped,
         });
     }
-    if starts_with_possessive(lower, "search", "library") {
+    if starts_with_possessive(lower, "search", "library")
+        || lower.starts_with("search target opponent's library")
+        || lower.starts_with("search target player's library")
+        || lower.starts_with("search an opponent's library")
+    {
         let details = super::parse_search_library_details(lower);
         return Some(SearchCreationImperativeAst::SearchLibrary {
             filter: details.filter,
             count: details.count,
             reveal: details.reveal,
+            target_player: details.target_player,
         });
     }
     // CR 701.16a + CR 701.20a: "look at the top N" (private) and "reveal the top N" (public)
@@ -709,10 +714,12 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             filter,
             count,
             reveal,
+            target_player,
         } => Effect::SearchLibrary {
             filter,
             count,
             reveal,
+            target_player,
         },
         SearchCreationImperativeAst::Dig { count, reveal } => Effect::Dig {
             count,

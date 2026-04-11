@@ -885,6 +885,7 @@ fn search_basic_land(source_id: ObjectId, controller: PlayerId) -> ResolvedAbili
             }),
             count: 1,
             reveal: true,
+            target_player: None,
         },
         source_id,
         controller,

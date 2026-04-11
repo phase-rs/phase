@@ -64,6 +64,8 @@ pub(super) struct SearchLibraryDetails {
     pub(super) filter: TargetFilter,
     pub(super) count: u32,
     pub(super) reveal: bool,
+    /// CR 701.23a: When set, search this player's library instead of controller's.
+    pub(super) target_player: Option<TargetFilter>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -458,6 +460,8 @@ pub(super) enum SearchCreationImperativeAst {
         filter: TargetFilter,
         count: u32,
         reveal: bool,
+        /// CR 701.23a: When set, search this player's library instead of controller's.
+        target_player: Option<TargetFilter>,
     },
     Dig {
         count: QuantityExpr,

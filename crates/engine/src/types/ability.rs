@@ -2452,6 +2452,10 @@ pub enum Effect {
         /// Whether to reveal the found card(s) to all players.
         #[serde(default)]
         reveal: bool,
+        /// CR 701.23a: When set, search this player's library instead of the controller's.
+        /// Used by Bribery, Acquire, Praetor's Grasp, etc.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_player: Option<TargetFilter>,
     },
     RevealHand {
         #[serde(default = "default_target_filter_any")]
@@ -3117,7 +3121,6 @@ impl Effect {
             | Effect::Clash
             | Effect::Cleanup { .. }
             | Effect::Mana { .. }
-            | Effect::SearchLibrary { .. }
             | Effect::RevealTop { .. }
             | Effect::Choose { .. }
             | Effect::SolveCase
@@ -3164,6 +3167,8 @@ impl Effect {
             | Effect::RuntimeHandled { .. }
             | Effect::Conjure { .. }
             | Effect::Unimplemented { .. } => None,
+            // CR 701.23a: SearchLibrary has an optional player target for opponent search.
+            Effect::SearchLibrary { target_player, .. } => target_player.as_ref(),
         }
     }
 }

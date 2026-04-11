@@ -2,6 +2,7 @@ use nom::bytes::complete::tag;
 use nom::Parser;
 use nom_language::error::VerboseError;
 
+use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_target::{parse_mana_value_suffix, parse_type_phrase};
 use super::super::oracle_util::{contains_possessive, strip_after};
@@ -9,12 +10,16 @@ use super::types::{SearchLibraryDetails, SeekDetails};
 use super::{capitalize, scan_contains_phrase};
 use crate::parser::oracle_warnings::push_warning;
 use crate::types::ability::{
-    FilterProp, QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+    ControllerRef, FilterProp, QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::zones::Zone;
 
 pub(super) fn parse_search_library_details(lower: &str) -> SearchLibraryDetails {
     let reveal = scan_contains_phrase(lower, "reveal");
+
+    // CR 701.23a: Detect "search target opponent's/player's library" patterns.
+    // These target a player, searching that player's library instead of the controller's.
+    let target_player = parse_search_target_player(lower);
 
     // Extract count from "up to N" (must be done before filter extraction since
     // "for up to five creature cards" needs to skip the count to find the type).
@@ -28,7 +33,12 @@ pub(super) fn parse_search_library_details(lower: &str) -> SearchLibraryDetails 
             (1, None)
         }
     } else {
-        (1, None)
+        // Check for explicit count like "for three cards" or "for N cards"
+        let count = strip_after(lower, "for ")
+            .and_then(|after_for| nom_primitives::parse_number.parse(after_for).ok())
+            .map(|(_, n)| n)
+            .unwrap_or(1);
+        (count, None)
     };
 
     // Extract the type filter from after "for a/an" or "for up to N".
@@ -47,7 +57,36 @@ pub(super) fn parse_search_library_details(lower: &str) -> SearchLibraryDetails 
         filter,
         count,
         reveal,
+        target_player,
     }
+}
+
+/// CR 701.23a: Detect player-targeting search patterns like "search target opponent's library"
+/// or "search target player's library". Returns a TargetFilter for the player.
+fn parse_search_target_player(lower: &str) -> Option<TargetFilter> {
+    use nom::branch::alt;
+    use nom::combinator::value;
+
+    let after_search = lower.strip_prefix("search ")?.trim_start();
+
+    let (filter, _rest) = nom_on_lower(after_search, after_search, |i| {
+        alt((
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                tag("target opponent's library"),
+            ),
+            value(
+                TargetFilter::Player,
+                tag("target player's library"),
+            ),
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                tag("an opponent's library"),
+            ),
+        ))
+        .parse(i)
+    })?;
+    Some(filter)
 }
 
 /// Parse "seek [count] [filter] card(s) [and put onto battlefield [tapped]]".
@@ -378,5 +417,60 @@ pub(super) fn parse_search_destination(lower: &str) -> Zone {
         Zone::Graveyard
     } else {
         Zone::Hand
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_target_opponent_library() {
+        let details = parse_search_library_details(
+            "search target opponent's library for a creature card and put that card onto the battlefield under your control",
+        );
+        assert!(details.target_player.is_some());
+        let tp = details.target_player.unwrap();
+        match tp {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+            }
+            other => panic!("expected Typed with Opponent controller, got {other:?}"),
+        }
+        // Filter should be creature
+        match details.filter {
+            TargetFilter::Typed(tf) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            }
+            other => panic!("expected creature filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn search_target_player_library() {
+        let details = parse_search_library_details(
+            "search target player's library for a card and exile it",
+        );
+        assert!(details.target_player.is_some());
+        assert_eq!(details.target_player.unwrap(), TargetFilter::Player);
+    }
+
+    #[test]
+    fn search_target_player_library_for_three() {
+        // Jester's Cap: "search target player's library for three cards and exile them"
+        let details = parse_search_library_details(
+            "search target player's library for three cards and exile them",
+        );
+        assert!(details.target_player.is_some());
+        assert_eq!(details.count, 3);
+    }
+
+    #[test]
+    fn search_your_library_no_target_player() {
+        let details = parse_search_library_details(
+            "search your library for a basic land card, reveal it, put it into your hand",
+        );
+        assert!(details.target_player.is_none());
+        assert!(details.reveal);
     }
 }
