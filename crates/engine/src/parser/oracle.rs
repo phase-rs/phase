@@ -6097,4 +6097,73 @@ mod tests {
             other => panic!("expected ConditionInstead on sub, got: {other:?}"),
         }
     }
+
+    /// CR 205.3a: "[Subtype] [CoreType]" subject-predicate patterns like
+    /// "Wizard creatures gain flying until end of turn" — the subtype+type compound
+    /// must be fully consumed by parse_type_phrase so the subject-predicate parser
+    /// can extract the filter.
+    #[test]
+    fn test_subtype_creatures_gain_keyword() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::{ContinuousModification, Duration, TargetFilter, TypeFilter};
+        use crate::types::keywords::Keyword;
+
+        let def = parse_effect_chain(
+            "wizard creatures gain flying until end of turn",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert_eq!(
+                    *duration,
+                    Some(Duration::UntilEndOfTurn),
+                    "duration should be UntilEndOfTurn"
+                );
+                assert_eq!(static_abilities.len(), 1);
+                let sa = &static_abilities[0];
+                // Affected filter should include both Creature and Subtype("Wizard")
+                if let Some(TargetFilter::Typed(tf)) = &sa.affected {
+                    assert!(
+                        tf.type_filters
+                            .contains(&TypeFilter::Subtype("Wizard".to_string())),
+                        "should contain Wizard subtype, got {:?}",
+                        tf.type_filters
+                    );
+                    assert!(
+                        tf.type_filters.contains(&TypeFilter::Creature),
+                        "should contain Creature type, got {:?}",
+                        tf.type_filters
+                    );
+                } else {
+                    panic!("expected Typed filter, got {:?}", sa.affected);
+                }
+                assert!(sa.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddKeyword { keyword }
+                        if *keyword == Keyword::Flying
+                )));
+            }
+            other => panic!("expected GenericEffect, got {:?}", other),
+        }
+    }
+
+    /// "Goblin creatures get +1/+1 until end of turn" — same [Subtype] [CoreType] pattern
+    /// with a pump predicate instead of keyword grant.
+    #[test]
+    fn test_subtype_creatures_get_pump() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "goblin creatures get +1/+1 until end of turn",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::PumpAll { .. } => {}
+            other => panic!("expected PumpAll, got {:?}", other),
+        }
+    }
 }

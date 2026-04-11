@@ -326,6 +326,7 @@ pub fn resolve(
         enters_attacking,
         fallback_supertypes,
         token_statics,
+        etb_counters,
     ) = match &ability.effect {
         Effect::Token {
             name,
@@ -340,6 +341,7 @@ pub fn resolve(
             enters_attacking,
             supertypes,
             static_abilities,
+            enter_with_counters,
             ..
         } => (
             name.clone(),
@@ -354,6 +356,7 @@ pub fn resolve(
             *enters_attacking,
             supertypes.clone(),
             static_abilities.clone(),
+            enter_with_counters.clone(),
         ),
         _ => (
             "Token".to_string(),
@@ -366,6 +369,7 @@ pub fn resolve(
             1,
             &TargetFilter::Controller,
             false,
+            vec![],
             vec![],
             vec![],
         ),
@@ -484,6 +488,28 @@ pub fn resolve(
                             ability.source_id,
                             ability.controller,
                         );
+                    }
+
+                    // CR 122.1a: Place counters on the token as it enters the battlefield.
+                    // Used by "The token enters with X +1/+1 counters on it" patterns.
+                    for (counter_type_str, qty_expr) in &etb_counters {
+                        let counter_count = resolve_quantity(
+                            state,
+                            qty_expr,
+                            ability.controller,
+                            ability.source_id,
+                        )
+                        .max(0) as u32;
+                        if counter_count > 0 {
+                            let ct = crate::types::counter::parse_counter_type(counter_type_str);
+                            super::counters::add_counter_with_replacement(
+                                state,
+                                obj_id,
+                                ct,
+                                counter_count,
+                                events,
+                            );
+                        }
                     }
 
                     // CR 111.10a–v: Inject predefined abilities for known token subtypes.
@@ -972,6 +998,7 @@ mod tests {
                 enters_attacking: false,
                 supertypes: vec![],
                 static_abilities: vec![],
+                enter_with_counters: vec![],
             },
             vec![],
             ObjectId(100),
@@ -1055,6 +1082,7 @@ mod tests {
                 enters_attacking: false,
                 supertypes: vec![],
                 static_abilities: vec![],
+                enter_with_counters: vec![],
             },
             vec![],
             ObjectId(100),
@@ -1109,6 +1137,7 @@ mod tests {
                 enters_attacking: false,
                 supertypes: vec![],
                 static_abilities: vec![],
+                enter_with_counters: vec![],
             },
             vec![],
             ObjectId(100),
@@ -1153,6 +1182,7 @@ mod tests {
                 enters_attacking: false,
                 supertypes: vec![],
                 static_abilities: vec![],
+                enter_with_counters: vec![],
             },
             vec![],
             ObjectId(100),
@@ -1187,6 +1217,7 @@ mod tests {
                 enters_attacking: false,
                 supertypes: vec![],
                 static_abilities: vec![],
+                enter_with_counters: vec![],
             },
             vec![],
             ObjectId(100),
@@ -1219,6 +1250,7 @@ mod tests {
                 enters_attacking: false,
                 supertypes: vec![],
                 static_abilities: vec![],
+                enter_with_counters: vec![],
             },
             vec![],
             ObjectId(100),
@@ -1277,6 +1309,7 @@ mod tests {
                 enters_attacking: false,
                 supertypes: vec![],
                 static_abilities: vec![],
+                enter_with_counters: vec![],
             },
             vec![TargetRef::Object(target_id)],
             ObjectId(100),

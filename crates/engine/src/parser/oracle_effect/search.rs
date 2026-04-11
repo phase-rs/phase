@@ -76,10 +76,7 @@ fn parse_search_target_player(lower: &str) -> Option<TargetFilter> {
                     TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
                     tag("target opponent's library"),
                 ),
-                value(
-                    TargetFilter::Player,
-                    tag("target player's library"),
-                ),
+                value(TargetFilter::Player, tag("target player's library")),
                 value(
                     TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
                     tag("an opponent's library"),
@@ -450,9 +447,8 @@ mod tests {
 
     #[test]
     fn search_target_player_library() {
-        let details = parse_search_library_details(
-            "search target player's library for a card and exile it",
-        );
+        let details =
+            parse_search_library_details("search target player's library for a card and exile it");
         assert!(details.target_player.is_some());
         assert_eq!(details.target_player.unwrap(), TargetFilter::Player);
     }

@@ -1509,6 +1509,8 @@ mod tests {
 
     #[test]
     fn starts_with_subject_prefix_any_number_of() {
-        assert!(starts_with_subject_prefix("any number of target creatures each get +1/+1"));
+        assert!(starts_with_subject_prefix(
+            "any number of target creatures each get +1/+1"
+        ));
     }
 }

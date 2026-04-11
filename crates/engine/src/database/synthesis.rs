@@ -218,6 +218,7 @@ pub fn synthesize_mobilize(face: &mut CardFace) {
                 enters_attacking: true,
                 supertypes: vec![],
                 static_abilities: vec![],
+                enter_with_counters: vec![],
             };
 
             face.triggers.push(

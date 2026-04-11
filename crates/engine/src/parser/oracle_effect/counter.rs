@@ -130,22 +130,22 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &ParseContext) -> Optio
 
     // Try matching "counter(s)" directly (untyped: "remove all counters from ...").
     // If that fails, parse a type word first, then "counter(s)".
-    let (counter_type, after_counter_word) =
-        if let Some(((), after_cw)) = nom_on_lower(rest, rest, |i| {
+    let (counter_type, after_counter_word) = if let Some(((), after_cw)) =
+        nom_on_lower(rest, rest, |i| {
             value((), alt((tag("counters"), tag("counter")))).parse(i)
         }) {
-            // No type specified — empty string signals "all types" to the handler.
-            (String::new(), after_cw)
-        } else {
-            let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-            let raw_type = &rest[..type_end];
-            let counter_type = normalize_counter_type(raw_type);
-            let after_type = rest[type_end..].trim_start();
-            let ((), after_cw) = nom_on_lower(after_type, after_type, |i| {
-                value((), alt((tag("counters"), tag("counter")))).parse(i)
-            })?;
-            (counter_type, after_cw)
-        };
+        // No type specified — empty string signals "all types" to the handler.
+        (String::new(), after_cw)
+    } else {
+        let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+        let raw_type = &rest[..type_end];
+        let counter_type = normalize_counter_type(raw_type);
+        let after_type = rest[type_end..].trim_start();
+        let ((), after_cw) = nom_on_lower(after_type, after_type, |i| {
+            value((), alt((tag("counters"), tag("counter")))).parse(i)
+        })?;
+        (counter_type, after_cw)
+    };
     let after_counter_word = after_counter_word.trim_start();
 
     let ((), target_text) = nom_on_lower(after_counter_word, after_counter_word, |i| {
@@ -257,21 +257,21 @@ pub(super) fn try_parse_move_counters_from(lower: &str, ctx: &ParseContext) -> O
     };
 
     // Try matching "counter(s)" directly (untyped), or parse a type first.
-    let (counter_type, after_counter_word) =
-        if let Some(((), after_cw)) = nom_on_lower(rest, rest, |i| {
+    let (counter_type, after_counter_word) = if let Some(((), after_cw)) =
+        nom_on_lower(rest, rest, |i| {
             value((), alt((tag("counters"), tag("counter")))).parse(i)
         }) {
-            (None, after_cw)
-        } else {
-            let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-            let raw_type = &rest[..type_end];
-            let ct = normalize_counter_type(raw_type);
-            let after_type = rest[type_end..].trim_start();
-            let ((), after_cw) = nom_on_lower(after_type, after_type, |i| {
-                value((), alt((tag("counters"), tag("counter")))).parse(i)
-            })?;
-            (Some(ct), after_cw)
-        };
+        (None, after_cw)
+    } else {
+        let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+        let raw_type = &rest[..type_end];
+        let ct = normalize_counter_type(raw_type);
+        let after_type = rest[type_end..].trim_start();
+        let ((), after_cw) = nom_on_lower(after_type, after_type, |i| {
+            value((), alt((tag("counters"), tag("counter")))).parse(i)
+        })?;
+        (Some(ct), after_cw)
+    };
     let after_counter_word = after_counter_word.trim_start();
 
     // Expect "from "
@@ -466,8 +466,14 @@ mod tests {
     #[test]
     fn remove_counter_untyped_all() {
         // Vampire Hexmage: "remove all counters from target permanent"
-        let result = try_parse_remove_counter("remove all counters from target permanent", &default_ctx());
-        let Some(Effect::RemoveCounter { counter_type, count, target }) = result else {
+        let result =
+            try_parse_remove_counter("remove all counters from target permanent", &default_ctx());
+        let Some(Effect::RemoveCounter {
+            counter_type,
+            count,
+            target,
+        }) = result
+        else {
             panic!("expected RemoveCounter, got {result:?}");
         };
         assert!(counter_type.is_empty(), "untyped should be empty string");
@@ -478,8 +484,16 @@ mod tests {
     #[test]
     fn remove_counter_untyped_single() {
         // Thrull Parasite: "remove a counter from target nonland permanent"
-        let result = try_parse_remove_counter("remove a counter from target nonland permanent", &default_ctx());
-        let Some(Effect::RemoveCounter { counter_type, count, .. }) = result else {
+        let result = try_parse_remove_counter(
+            "remove a counter from target nonland permanent",
+            &default_ctx(),
+        );
+        let Some(Effect::RemoveCounter {
+            counter_type,
+            count,
+            ..
+        }) = result
+        else {
             panic!("expected RemoveCounter, got {result:?}");
         };
         assert!(counter_type.is_empty());
@@ -489,8 +503,16 @@ mod tests {
     #[test]
     fn remove_counter_up_to_n() {
         // Heartless Act mode 2: "remove up to three counters from target creature"
-        let result = try_parse_remove_counter("remove up to three counters from target creature", &default_ctx());
-        let Some(Effect::RemoveCounter { counter_type, count, .. }) = result else {
+        let result = try_parse_remove_counter(
+            "remove up to three counters from target creature",
+            &default_ctx(),
+        );
+        let Some(Effect::RemoveCounter {
+            counter_type,
+            count,
+            ..
+        }) = result
+        else {
             panic!("expected RemoveCounter, got {result:?}");
         };
         assert!(counter_type.is_empty());
@@ -501,7 +523,12 @@ mod tests {
     fn remove_counter_typed_still_works() {
         // Existing pattern: "remove a +1/+1 counter from ~"
         let result = try_parse_remove_counter("remove a +1/+1 counter from ~", &default_ctx());
-        let Some(Effect::RemoveCounter { counter_type, count, .. }) = result else {
+        let Some(Effect::RemoveCounter {
+            counter_type,
+            count,
+            ..
+        }) = result
+        else {
             panic!("expected RemoveCounter, got {result:?}");
         };
         assert_eq!(counter_type, "P1P1");
@@ -515,7 +542,12 @@ mod tests {
             "move a +1/+1 counter from this creature onto target creature",
             &default_ctx(),
         );
-        let Some(Effect::MoveCounters { source, counter_type, target }) = result else {
+        let Some(Effect::MoveCounters {
+            source,
+            counter_type,
+            target,
+        }) = result
+        else {
             panic!("expected MoveCounters, got {result:?}");
         };
         assert!(matches!(source, TargetFilter::SelfRef));
@@ -543,7 +575,12 @@ mod tests {
             "move a +1/+1 counter from target creature you control onto this creature",
             &default_ctx(),
         );
-        let Some(Effect::MoveCounters { source, counter_type, target }) = result else {
+        let Some(Effect::MoveCounters {
+            source,
+            counter_type,
+            target,
+        }) = result
+        else {
             panic!("expected MoveCounters, got {result:?}");
         };
         assert!(matches!(source, TargetFilter::Typed { .. }));

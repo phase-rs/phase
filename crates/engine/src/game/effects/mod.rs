@@ -27,6 +27,7 @@ pub mod cast_from_zone;
 pub mod change_targets;
 pub mod change_zone;
 pub mod choose;
+pub mod choose_and_sacrifice_rest;
 pub mod choose_card;
 pub mod choose_from_zone;
 pub mod clash;
@@ -286,6 +287,9 @@ pub fn resolve_effect(
         Effect::ReduceNextSpellCost { .. } => {
             resolve_reduce_next_spell_cost(state, ability, events)
         }
+        Effect::GrantNextSpellAbility { .. } => {
+            resolve_grant_next_spell_ability(state, ability, events)
+        }
         Effect::AddPendingETBCounters { .. } => {
             resolve_add_pending_etb_counters(state, ability, events)
         }
@@ -301,6 +305,9 @@ pub fn resolve_effect(
         Effect::RingTemptsYou => ring::resolve(state, ability, events),
         Effect::GrantCastingPermission { .. } => grant_permission::resolve(state, ability, events),
         Effect::ChooseFromZone { .. } => choose_from_zone::resolve(state, ability, events),
+        Effect::ChooseAndSacrificeRest { .. } => {
+            choose_and_sacrifice_rest::resolve(state, ability, events)
+        }
         Effect::Exploit { .. } => exploit::resolve(state, ability, events),
         Effect::GainEnergy { .. } => energy::resolve_gain(state, ability, events),
         Effect::GivePlayerCounter { .. } => player_counter::resolve(state, ability, events),
@@ -1064,6 +1071,7 @@ pub fn resolve_ability_chain(
                 | WaitingFor::ManifestDreadChoice { .. }
                 | WaitingFor::DiscardChoice { .. }
                 | WaitingFor::EffectZoneChoice { .. }
+                | WaitingFor::CategoryChoice { .. }
                 | WaitingFor::LearnChoice { .. }
                 | WaitingFor::PopulateChoice { .. }
         ) {
@@ -1416,6 +1424,38 @@ fn resolve_reduce_next_spell_cost(
         });
     events.push(GameEvent::EffectResolved {
         kind: crate::types::ability::EffectKind::ReduceNextSpellCost,
+        source_id: ability.source_id,
+    });
+    Ok(())
+}
+
+/// CR 601.2f: Register a pending next-spell modifier (keyword grant, uncounterability, flash).
+/// Consumed when the player casts their next qualifying spell.
+fn resolve_grant_next_spell_ability(
+    state: &mut GameState,
+    ability: &crate::types::ability::ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), crate::types::ability::EffectError> {
+    let (modifier, spell_filter) = match &ability.effect {
+        Effect::GrantNextSpellAbility {
+            modifier,
+            spell_filter,
+        } => (modifier.clone(), spell_filter.clone()),
+        _ => {
+            return Err(crate::types::ability::EffectError::MissingParam(
+                "GrantNextSpellAbility".to_string(),
+            ))
+        }
+    };
+    state
+        .pending_next_spell_modifiers
+        .push(crate::types::game_state::PendingNextSpellModifier {
+            player: ability.controller,
+            modifier,
+            spell_filter,
+        });
+    events.push(GameEvent::EffectResolved {
+        kind: crate::types::ability::EffectKind::GrantNextSpellAbility,
         source_id: ability.source_id,
     });
     Ok(())

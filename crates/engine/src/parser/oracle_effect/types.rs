@@ -187,6 +187,12 @@ pub(super) enum ContinuationAst {
     /// Absorbs into preceding CopyTokenOf, Token, or ChangeZone by setting
     /// enters_attacking and tapped/enter_tapped flags.
     EntersTappedAttacking,
+    /// CR 122.1a: "The token enters with X +1/+1 counters on it, where X is ..."
+    /// Absorbs into the preceding Token effect by populating `enter_with_counters`.
+    TokenEntersWithCounters {
+        counter_type: String,
+        count: QuantityExpr,
+    },
     /// "After that turn, that player takes an extra turn." after a controlled-turn effect.
     GrantExtraTurnAfterControlledTurn,
     /// CR 701.20a: "Put that card [onto the battlefield / into your hand]" after RevealUntil —
@@ -537,6 +543,13 @@ pub(super) enum ChooseImperativeAst {
     FromTrackedSet {
         count: u32,
         chooser: crate::types::ability::Chooser,
+    },
+    /// "choose from among the permanents ... an artifact, a creature, ..." —
+    /// multi-category selection where each player keeps one per type, then sacrifices the rest.
+    /// Lowered to `Effect::ChooseAndSacrificeRest`.
+    CategoryAndSacrificeRest {
+        categories: Vec<crate::types::card_type::CoreType>,
+        chooser_scope: crate::types::ability::CategoryChooserScope,
     },
 }
 

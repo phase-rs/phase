@@ -164,8 +164,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.extra_phases.clear();
     // CR 700.14: Reset cumulative mana spent on spells for Expend triggers.
     state.mana_spent_on_spells_this_turn.clear();
-    // CR 601.2f: Clear one-shot cost reductions from the previous turn.
+    // CR 601.2f: Clear one-shot cost reductions and spell modifiers from the previous turn.
     state.pending_spell_cost_reductions.clear();
+    state.pending_next_spell_modifiers.clear();
     // CR 614.1c: Pending ETB counters are turn-scoped (e.g., "this turn" effects).
     state.pending_etb_counters.clear();
     state.modal_modes_chosen_this_turn.clear();

@@ -426,6 +426,61 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                     .collect()
             }
         }
+        // CR 101.4: Generate all valid per-category permanent assignments.
+        WaitingFor::CategoryChoice {
+            player,
+            eligible_per_category,
+            ..
+        } => {
+            // Generate all valid combinations: one choice per category (or None if empty).
+            // For AI simplicity, enumerate the Cartesian product of per-category options.
+            let mut all_combos: Vec<Vec<Option<ObjectId>>> = vec![vec![]];
+            for category_eligible in eligible_per_category {
+                let mut new_combos = Vec::new();
+                let options: Vec<Option<ObjectId>> = if category_eligible.is_empty() {
+                    vec![None]
+                } else {
+                    category_eligible.iter().map(|&id| Some(id)).collect()
+                };
+                for existing in &all_combos {
+                    for opt in &options {
+                        // Skip if this object was already chosen in a prior category.
+                        if let Some(_id) = opt {
+                            if existing.iter().any(|prev| prev == opt) {
+                                // Allow None duplicates, but not object duplicates.
+                                // However, also need None as fallback if all are taken.
+                                continue;
+                            }
+                        }
+                        let mut combo = existing.clone();
+                        combo.push(*opt);
+                        new_combos.push(combo);
+                    }
+                    // If all options for this category conflict, allow None.
+                    if category_eligible
+                        .iter()
+                        .all(|id| existing.contains(&Some(*id)))
+                    {
+                        let mut combo = existing.clone();
+                        combo.push(None);
+                        new_combos.push(combo);
+                    }
+                }
+                all_combos = new_combos;
+            }
+            // Cap at a reasonable number to avoid combinatorial explosion.
+            all_combos.truncate(100);
+            all_combos
+                .into_iter()
+                .map(|choices| {
+                    candidate(
+                        GameAction::SelectCategoryPermanents { choices },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
+                })
+                .collect()
+        }
         WaitingFor::BetweenGamesSideboard { player, .. } => sideboard_actions(state, *player),
         WaitingFor::NamedChoice {
             player,

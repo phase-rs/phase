@@ -1326,6 +1326,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Cleanup { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
+        | Effect::GrantNextSpellAbility { .. }
         | Effect::CreateEmblem { .. }
         | Effect::PayCost { .. }
         | Effect::LoseTheGame
@@ -1348,7 +1349,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Incubate { .. }
         | Effect::TimeTravel
         | Effect::Conjure { .. }
-        | Effect::AddPendingETBCounters { .. } => {}
+        | Effect::AddPendingETBCounters { .. }
+        | Effect::ChooseAndSacrificeRest { .. } => {}
     }
     d
 }
@@ -2042,8 +2044,13 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         // Append parse-warning gaps so they appear in per-card gap reporting.
         for warning in &face.parse_warnings {
             if warning.starts_with("target-fallback") {
+                let handler = if warning.contains("trigger subject") {
+                    "ParseWarning:trigger-subject".to_string()
+                } else {
+                    "ParseWarning:target-fallback".to_string()
+                };
                 gap_details.push(GapDetail {
-                    handler: "ParseWarning:target-fallback".to_string(),
+                    handler,
                     source_text: Some(warning.clone()),
                 });
             }

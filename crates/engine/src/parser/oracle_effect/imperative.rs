@@ -17,11 +17,12 @@ use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_static::parse_continuous_modifications;
 use crate::parser::oracle_warnings::push_warning;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Chooser, ContinuousModification, ControllerRef, Duration,
-    Effect, GainLifePlayer, LibraryPosition, MultiTargetSpec, PaymentCost, PreventionAmount,
-    PreventionScope, PtValue, QuantityExpr, QuantityRef, RoundingMode, StaticDefinition,
-    TargetFilter, TypedFilter,
+    AbilityDefinition, AbilityKind, CategoryChooserScope, Chooser, ContinuousModification,
+    ControllerRef, Duration, Effect, GainLifePlayer, LibraryPosition, MultiTargetSpec, PaymentCost,
+    PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef, RoundingMode,
+    StaticDefinition, TargetFilter, TypedFilter,
 };
+use crate::types::card_type::CoreType;
 use crate::types::player::PlayerCounterKind;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -755,6 +756,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             enters_attacking: false,
             supertypes: vec![],
             static_abilities: token.static_abilities,
+            enter_with_counters: vec![],
         },
         SearchCreationImperativeAst::Seek {
             filter,
@@ -850,6 +852,14 @@ pub(super) fn parse_choose_ast(text: &str, lower: &str) -> Option<ChooseImperati
         nom_on_lower(text, lower, |input| value((), tag("choose ")).parse(input))
     {
         let rest_lower = &lower[lower.len() - rest.len()..];
+
+        // CR 101.4 + CR 701.21a: "choose from among ... an artifact, a creature, ..."
+        // or "choose an artifact, a creature, ... from among ..."
+        // Must be checked before is_choose_as_targeting since these are NOT targeting.
+        if let Some(ast) = parse_category_and_sacrifice_rest(rest_lower) {
+            return Some(ast);
+        }
+
         if super::is_choose_as_targeting(rest_lower) {
             let inner = super::parse_effect(rest);
             if !matches!(inner, Effect::Unimplemented { .. }) {
@@ -924,6 +934,152 @@ fn parse_choose_anaphoric(lower: &str) -> Option<(u32, Chooser)> {
     Some((count, chooser))
 }
 
+/// Public entry for Tragic Arrogance-style patterns where the chooser_scope is ControllerForAll.
+/// Called from `parse_effect_clause` when "for each player, you choose " prefix is detected.
+pub(super) fn parse_category_and_sacrifice_rest_pub(
+    rest_lower: &str,
+) -> Option<ChooseImperativeAst> {
+    parse_category_and_sacrifice_rest(rest_lower).map(|ast| match ast {
+        ChooseImperativeAst::CategoryAndSacrificeRest { categories, .. } => {
+            ChooseImperativeAst::CategoryAndSacrificeRest {
+                categories,
+                chooser_scope: CategoryChooserScope::ControllerForAll,
+            }
+        }
+        other => other,
+    })
+}
+
+/// CR 101.4 + CR 701.21a: Parse the "from among ... an artifact, a creature, ..."
+/// or "an artifact, a creature, ... from among ..." pattern after "choose " has been stripped.
+///
+/// Handles two word orders:
+/// 1. "from among the permanents they control an artifact, a creature, ..." (Cataclysm)
+/// 2. "an artifact, a creature, ... from among ..." (Cataclysmic Gearhulk)
+///
+/// Parser structure (nom combinators):
+/// - `tag("from among")` detects pattern 1
+/// - `take_until("from among")` + category parsing for pattern 2
+/// - Category list: `parse_category_item` composed with comma + "and" separator
+fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativeAst> {
+    type E<'a> = VerboseError<&'a str>;
+
+    // Pattern 1: "from among the permanents [they/that player] control[s] an artifact, ..."
+    if let Ok((after_from_among, _)) = tag::<_, _, E>("from among ").parse(rest_lower) {
+        // Skip past "the permanents they control" / "the permanents that player controls"
+        // to find the category list.
+        let categories_text = skip_permanent_clause(after_from_among)?;
+        let categories = parse_category_list(categories_text)?;
+        return Some(ChooseImperativeAst::CategoryAndSacrificeRest {
+            categories,
+            chooser_scope: CategoryChooserScope::EachPlayerSelf,
+        });
+    }
+
+    // Pattern 2: "an artifact, a creature, ... from among [the nonland] permanents they control"
+    if let Ok((_, before_from)) = take_until::<_, _, E>("from among").parse(rest_lower) {
+        let categories = parse_category_list(before_from.trim())?;
+        return Some(ChooseImperativeAst::CategoryAndSacrificeRest {
+            categories,
+            chooser_scope: CategoryChooserScope::EachPlayerSelf,
+        });
+    }
+
+    None
+}
+
+/// Skip past "the permanents they control" / "the [nonland] permanents that player controls"
+/// clauses to find the category list that follows.
+fn skip_permanent_clause(input: &str) -> Option<&str> {
+    type E<'a> = VerboseError<&'a str>;
+
+    // "the permanents they control " / "the permanents that player controls "
+    // / "the nonland permanents they control "
+    let (rest, _) = tag::<_, _, E>("the ").parse(input).ok()?;
+
+    // Optional "nonland " modifier
+    let rest = tag::<_, _, E>("nonland ")
+        .parse(rest)
+        .map(|(r, _)| r)
+        .unwrap_or(rest);
+
+    let (rest, _) = tag::<_, _, E>("permanents ").parse(rest).ok()?;
+
+    // "they control" / "that player controls"
+    let rest = if let Ok((r, _)) = tag::<_, _, E>("they control").parse(rest) {
+        r
+    } else if let Ok((r, _)) = tag::<_, _, E>("that player controls").parse(rest) {
+        r
+    } else {
+        return None;
+    };
+
+    // Strip optional trailing space/comma
+    let rest = rest.trim_start_matches(' ');
+    if rest.is_empty() {
+        return None;
+    }
+    Some(rest)
+}
+
+/// Parse a comma-separated category list: "an artifact, a creature, an enchantment, and a land"
+/// Uses nom combinators for each category item.
+fn parse_category_list(input: &str) -> Option<Vec<CoreType>> {
+    type E<'a> = VerboseError<&'a str>;
+
+    let mut categories = Vec::new();
+    let mut remaining = input.trim();
+
+    loop {
+        // Strip optional leading ", " or ", and " or "and "
+        if let Ok((r, _)) = tag::<_, _, E>(", and ").parse(remaining) {
+            remaining = r;
+        } else if let Ok((r, _)) = tag::<_, _, E>(", ").parse(remaining) {
+            remaining = r;
+        } else if let Ok((r, _)) = tag::<_, _, E>("and ").parse(remaining) {
+            remaining = r;
+        }
+
+        // Parse article + type: "an artifact" / "a creature" / "a land" / "a planeswalker" / "an enchantment"
+        let (after_article, _) = alt((tag::<_, _, E>("an "), tag("a ")))
+            .parse(remaining)
+            .ok()?;
+
+        let (rest, core_type) = parse_core_type_name(after_article)?;
+        categories.push(core_type);
+        remaining = rest.trim();
+
+        if remaining.is_empty()
+            || tag::<_, _, E>(", then ").parse(remaining).is_ok()
+            || tag::<_, _, E>(". then ").parse(remaining).is_ok()
+            || tag::<_, _, E>("from among").parse(remaining).is_ok()
+        {
+            break;
+        }
+    }
+
+    if categories.is_empty() {
+        return None;
+    }
+    Some(categories)
+}
+
+/// Parse a core type name from lowercase text using nom combinators.
+fn parse_core_type_name(input: &str) -> Option<(&str, CoreType)> {
+    type E<'a> = VerboseError<&'a str>;
+
+    // Ordered longest-first to prevent prefix collisions.
+    alt((
+        value(CoreType::Planeswalker, tag::<_, _, E>("planeswalker")),
+        value(CoreType::Enchantment, tag("enchantment")),
+        value(CoreType::Artifact, tag("artifact")),
+        value(CoreType::Creature, tag("creature")),
+        value(CoreType::Land, tag("land")),
+    ))
+    .parse(input)
+    .ok()
+}
+
 pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
     match ast {
         ChooseImperativeAst::TargetOnly { target } => Effect::TargetOnly { target },
@@ -943,6 +1099,14 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             count,
             zone: Zone::Exile,
             chooser,
+        },
+        // CR 101.4 + CR 701.21a: Multi-category permanent selection + sacrifice rest.
+        ChooseImperativeAst::CategoryAndSacrificeRest {
+            categories,
+            chooser_scope,
+        } => Effect::ChooseAndSacrificeRest {
+            categories,
+            chooser_scope,
         },
     }
 }
@@ -1553,7 +1717,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
 }
 
 /// Wrap an effect with a `Shuffle` sub_ability for compound "X into library" operations.
-fn with_shuffle_sub_ability(effect: Effect) -> ParsedEffectClause {
+pub(super) fn with_shuffle_sub_ability(effect: Effect) -> ParsedEffectClause {
     let shuffle = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Shuffle {
@@ -3774,18 +3938,62 @@ mod tests {
     }
 
     #[test]
-    fn parse_choose_from_among_remains_unhandled() {
-        // Cataclysm pattern: "from among" should NOT be treated as targeting
+    fn parse_choose_from_among_cataclysm_pattern() {
+        // Cataclysm: "choose from among the permanents they control an artifact, ..."
         let text =
             "choose from among the permanents they control an artifact, a creature, an enchantment, and a land";
         let lower = text.to_lowercase();
         let result = parse_choose_ast(text, &lower);
-        // Should return None (falls through to Unimplemented) since "from among"
-        // multi-category selection is not yet supported.
-        assert!(
-            result.is_none(),
-            "Expected None for 'from among' pattern, got {result:?}"
-        );
+        match result {
+            Some(ChooseImperativeAst::CategoryAndSacrificeRest {
+                categories,
+                chooser_scope,
+            }) => {
+                assert_eq!(
+                    categories,
+                    vec![
+                        CoreType::Artifact,
+                        CoreType::Creature,
+                        CoreType::Enchantment,
+                        CoreType::Land
+                    ]
+                );
+                assert_eq!(
+                    chooser_scope,
+                    crate::types::ability::CategoryChooserScope::EachPlayerSelf
+                );
+            }
+            other => panic!("Expected CategoryAndSacrificeRest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_choose_from_among_gearhulk_pattern() {
+        // Cataclysmic Gearhulk: "choose an artifact, a creature, ... from among ..."
+        let text = "choose an artifact, a creature, an enchantment, and a planeswalker from among the nonland permanents they control";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower);
+        match result {
+            Some(ChooseImperativeAst::CategoryAndSacrificeRest {
+                categories,
+                chooser_scope,
+            }) => {
+                assert_eq!(
+                    categories,
+                    vec![
+                        CoreType::Artifact,
+                        CoreType::Creature,
+                        CoreType::Enchantment,
+                        CoreType::Planeswalker
+                    ]
+                );
+                assert_eq!(
+                    chooser_scope,
+                    crate::types::ability::CategoryChooserScope::EachPlayerSelf
+                );
+            }
+            other => panic!("Expected CategoryAndSacrificeRest, got {other:?}"),
+        }
     }
 
     #[test]

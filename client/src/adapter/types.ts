@@ -483,7 +483,16 @@ export type WaitingFor =
   | { type: "LearnChoice"; data: { player: PlayerId; hand_cards: ObjectId[] } }
   | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][] } }
   | { type: "ChooseDungeon"; data: { player: PlayerId; options: DungeonId[] } }
-  | { type: "ChooseDungeonRoom"; data: { player: PlayerId; dungeon: DungeonId; options: number[]; option_names: string[] } };
+  | { type: "ChooseDungeonRoom"; data: { player: PlayerId; dungeon: DungeonId; options: number[]; option_names: string[] } }
+  | { type: "CategoryChoice"; data: {
+      player: PlayerId;
+      target_player: PlayerId;
+      categories: string[];
+      eligible_per_category: ObjectId[][];
+      source_id: ObjectId;
+      remaining_players: PlayerId[];
+      all_kept: ObjectId[];
+    } };
 
 // ── Learn ────────────────────────────────────────────────────────────────
 
@@ -585,7 +594,8 @@ export type GameAction =
   | { type: "RetargetSpell"; data: { new_targets: TargetRef[] } }
   | { type: "LearnDecision"; data: { choice: LearnOption } }
   | { type: "ChooseDungeon"; data: { dungeon: DungeonId } }
-  | { type: "ChooseDungeonRoom"; data: { room_index: number } };
+  | { type: "ChooseDungeonRoom"; data: { room_index: number } }
+  | { type: "SelectCategoryPermanents"; data: { choices: (ObjectId | null)[] } };
 
 // ── Game Events (discriminated union, tag="type", content="data") ────────
 

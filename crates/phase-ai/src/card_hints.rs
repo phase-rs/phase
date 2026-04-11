@@ -631,6 +631,7 @@ mod tests {
                 filter: TargetFilter::Any,
                 count: 1,
                 reveal: false,
+                target_player: None,
             })],
         );
 

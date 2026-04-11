@@ -339,6 +339,7 @@ mod tests {
                         enters_attacking: false,
                         supertypes: vec![],
                         static_abilities: vec![],
+                        enter_with_counters: vec![],
                     },
                 )],
                 ..Default::default()

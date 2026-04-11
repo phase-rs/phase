@@ -188,6 +188,12 @@ pub enum GameAction {
     LearnDecision {
         choice: LearnOption,
     },
+    /// CR 101.4 + CR 701.21a: Select one permanent per type category to keep;
+    /// the rest will be sacrificed. Each position corresponds to a category in
+    /// `WaitingFor::CategoryChoice::categories`. `None` = no permanent of that type.
+    SelectCategoryPermanents {
+        choices: Vec<Option<ObjectId>>,
+    },
 }
 
 /// CR 701.48a: Learn choice — rummage a specific card, or skip entirely.

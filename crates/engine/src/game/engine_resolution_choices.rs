@@ -1,5 +1,6 @@
 use crate::types::ability::{
-    ChoiceType, ChoiceValue, ChosenAttribute, EffectKind, ResolvedAbility, TargetRef,
+    CategoryChooserScope, ChoiceType, ChoiceValue, ChosenAttribute, EffectKind, ResolvedAbility,
+    TargetRef,
 };
 use crate::types::actions::{GameAction, LearnOption};
 use crate::types::events::GameEvent;
@@ -42,6 +43,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ChooseDungeon { .. }
             | WaitingFor::ChooseDungeonRoom { .. }
             | WaitingFor::ChooseLegend { .. }
+            | WaitingFor::CategoryChoice { .. }
     )
 }
 
@@ -886,6 +888,95 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
                 player: state.active_player,
             })
+        }
+        // CR 101.4 + CR 701.21a: Player selected one permanent per type category.
+        (
+            WaitingFor::CategoryChoice {
+                player,
+                target_player,
+                categories,
+                eligible_per_category,
+                source_id,
+                remaining_players,
+                mut all_kept,
+            },
+            GameAction::SelectCategoryPermanents { choices },
+        ) => {
+            // Validate: choices length must match categories length.
+            if choices.len() != categories.len() {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must provide exactly {} choices, got {}",
+                    categories.len(),
+                    choices.len()
+                )));
+            }
+
+            // Validate each choice is eligible for its category and no duplicates.
+            let mut chosen_this_round = Vec::new();
+            for (i, choice) in choices.iter().enumerate() {
+                if let Some(obj_id) = choice {
+                    if !eligible_per_category[i].contains(obj_id) {
+                        return Err(EngineError::InvalidAction(format!(
+                            "Object {:?} is not eligible for category {:?}",
+                            obj_id, categories[i]
+                        )));
+                    }
+                    if chosen_this_round.contains(obj_id) {
+                        return Err(EngineError::InvalidAction(format!(
+                            "Object {:?} chosen for multiple categories",
+                            obj_id
+                        )));
+                    }
+                    chosen_this_round.push(*obj_id);
+                }
+            }
+
+            // Accumulate kept permanents.
+            all_kept.extend(chosen_this_round);
+
+            // Determine chooser_scope from context: if player == target_player, it's EachPlayerSelf.
+            // If player != target_player for a non-first player, it's ControllerForAll.
+            let chooser_scope = if player == target_player {
+                CategoryChooserScope::EachPlayerSelf
+            } else {
+                CategoryChooserScope::ControllerForAll
+            };
+
+            // Advance to next player or sacrifice.
+            if remaining_players.is_empty() {
+                // All players have chosen — sacrifice everything not kept.
+                effects::choose_and_sacrifice_rest::sacrifice_unchosen_from_handler(
+                    state, &all_kept, source_id, events,
+                );
+                set_priority(state, player);
+                resume_with_error_propagation(state, events)?;
+                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+            } else {
+                match effects::choose_and_sacrifice_rest::advance_to_next_player(
+                    state,
+                    &categories,
+                    chooser_scope,
+                    player, // controller for ControllerForAll
+                    source_id,
+                    &remaining_players,
+                    all_kept,
+                    events,
+                ) {
+                    Ok(()) => {
+                        // If advance set a new WaitingFor, return it; otherwise priority.
+                        if matches!(state.waiting_for, WaitingFor::CategoryChoice { .. }) {
+                            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                        } else {
+                            set_priority(state, player);
+                            resume_with_error_propagation(state, events)?;
+                            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                        }
+                    }
+                    Err(e) => {
+                        return Err(EngineError::InvalidAction(format!("{:?}", e)));
+                    }
+                }
+            }
         }
         (waiting_for, action) => {
             return Err(EngineError::ActionNotAllowed(format!(

@@ -891,6 +891,46 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         subtype
     };
 
+    // CR 205.3a: "[Subtype] [CoreType]" patterns like "Wizard creatures",
+    // "Goblin creatures", "Elf Warriors" — when parse_core_type (via parse_type_filter_word)
+    // matched a subtype word, check if a concrete core type word follows. If so, promote
+    // the subtype to the subtype slot and the trailing core type to card_type.
+    // Excludes Card/Spell (handled by redundant suffix stripping) and subtypes.
+    let (card_type, subtype) =
+        if matches!(card_type, Some(TypeFilter::Subtype(_))) && subtype.is_none() {
+            let rest_after = lower[pos..].trim_start();
+            let ws = lower[pos..].len() - rest_after.len();
+            if let Ok((ct_rest, tf)) = nom_target::parse_type_filter_word(rest_after) {
+                let is_concrete_core_type = matches!(
+                    tf,
+                    TypeFilter::Creature
+                        | TypeFilter::Artifact
+                        | TypeFilter::Enchantment
+                        | TypeFilter::Instant
+                        | TypeFilter::Sorcery
+                        | TypeFilter::Planeswalker
+                        | TypeFilter::Land
+                        | TypeFilter::Battle
+                        | TypeFilter::Permanent
+                );
+                if is_concrete_core_type {
+                    let ct_len = rest_after.len() - ct_rest.len();
+                    pos += ws + ct_len;
+                    let sub_name = match card_type {
+                        Some(TypeFilter::Subtype(s)) => s,
+                        _ => unreachable!(),
+                    };
+                    (Some(tf), Some(sub_name))
+                } else {
+                    (card_type, subtype)
+                }
+            } else {
+                (card_type, subtype)
+            }
+        } else {
+            (card_type, subtype)
+        };
+
     // Skip redundant trailing "spell"/"spells"/"card"/"cards" after a specific type like
     // "sorcery spell", "creature card". When the core type is already Instant/Sorcery/etc.,
     // the word is informational — consuming it allows suffix parsers (e.g., "that targets only")
@@ -3936,14 +3976,19 @@ mod tests {
 
     #[test]
     fn parse_type_phrase_ninja_or_rogue_creatures_you_control() {
-        // parse_type_phrase doesn't handle "or" compound subtypes natively —
-        // it parses "ninja" as subtype and leaves "or rogue creatures you control" as remainder.
-        // The fix is in try_parse_one_or_more_combat_damage_to_player which manually splits on "or".
-        let (_filter, remainder) = parse_type_phrase("ninja or rogue creatures you control");
+        // CR 205.3a: "ninja or rogue creatures you control" — compound subtype+type phrase.
+        // parse_type_phrase handles "or" between subtypes when the second branch includes
+        // a core type ("rogue creatures"), producing an Or filter.
+        let (filter, remainder) = parse_type_phrase("ninja or rogue creatures you control");
         assert!(
-            !remainder.trim().is_empty(),
-            "parse_type_phrase unexpectedly consumed the whole phrase"
+            remainder.trim().is_empty(),
+            "remainder should be empty, got: '{remainder}'"
         );
+        if let TargetFilter::Or { filters } = &filter {
+            assert_eq!(filters.len(), 2, "expected 2 Or branches, got {filters:?}");
+        } else {
+            panic!("expected Or filter, got {filter:?}");
+        }
     }
 
     #[test]

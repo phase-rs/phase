@@ -1,5 +1,7 @@
 use crate::game::filter::matches_target_filter_controlled;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, WaitingFor};
 
@@ -16,7 +18,12 @@ pub fn resolve(
             count,
             reveal,
             target_player,
-        } => (filter.clone(), *count as usize, *reveal, target_player.is_some()),
+        } => (
+            filter.clone(),
+            *count as usize,
+            *reveal,
+            target_player.is_some(),
+        ),
         _ => (TargetFilter::Any, 1, false, false),
     };
 

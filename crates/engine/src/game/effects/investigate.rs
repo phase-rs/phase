@@ -30,6 +30,7 @@ pub fn resolve(
             enters_attacking: false,
             supertypes: vec![],
             static_abilities: vec![],
+            enter_with_counters: vec![],
         },
         ability.targets.clone(),
         ability.source_id,

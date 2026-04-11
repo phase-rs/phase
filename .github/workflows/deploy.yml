@@ -104,6 +104,16 @@ jobs:
       - name: Build WASM
         run: ./scripts/build-wasm.sh release
 
+      - name: Use preview icons
+        run: |
+          cp client/public/preview-icons/favicon.ico client/public/favicon.ico
+          cp client/public/preview-icons/favicon-16x16.png client/public/favicon-16x16.png
+          cp client/public/preview-icons/favicon-32x32.png client/public/favicon-32x32.png
+          cp client/public/preview-icons/logo.png client/public/logo.png
+          cp client/public/preview-icons/icons/icon-192.png client/public/icons/icon-192.png
+          cp client/public/preview-icons/icons/icon-512.png client/public/icons/icon-512.png
+          cp client/public/preview-icons/icons/apple-touch-icon.png client/public/icons/apple-touch-icon.png
+
       - name: Build frontend
         env:
           CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/card-data.json"

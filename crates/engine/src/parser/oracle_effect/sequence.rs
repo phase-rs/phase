@@ -8,8 +8,10 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_target::parse_target;
 use super::super::oracle_util::contains_possessive;
 use super::types::*;
+use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Chooser, Effect, StaticDefinition, TargetFilter,
+    AbilityDefinition, AbilityKind, Chooser, Effect, QuantityExpr, QuantityRef, StaticDefinition,
+    TargetFilter,
 };
 use crate::types::zones::Zone;
 
@@ -696,6 +698,22 @@ pub(super) fn apply_clause_continuation(
                 _ => {}
             }
         }
+        ContinuationAst::TokenEntersWithCounters {
+            counter_type,
+            count,
+        } => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            // CR 122.1a: Patch the preceding Token effect to enter with counters.
+            if let Effect::Token {
+                enter_with_counters,
+                ..
+            } = &mut *previous.effect
+            {
+                enter_with_counters.push((counter_type, count));
+            }
+        }
         ContinuationAst::RevealUntilKept {
             destination,
             enter_tapped: tapped,
@@ -752,6 +770,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::ChooseFromExile { .. } => true,
         ContinuationAst::SearchResultClauseHandled => true,
         ContinuationAst::EntersTappedAttacking => true,
+        ContinuationAst::TokenEntersWithCounters { .. } => true,
         ContinuationAst::DigFromAmong { .. } => true,
         ContinuationAst::GrantExtraTurnAfterControlledTurn => true,
         ContinuationAst::RevealUntilKept { .. } => true,
@@ -1186,8 +1205,96 @@ pub(super) fn parse_followup_continuation_ast(
         {
             Some(ContinuationAst::GrantExtraTurnAfterControlledTurn)
         }
+        // CR 122.1a: "The token enters with X +1/+1 counters on it, where X is ..."
+        // or "It enters with X +1/+1 counters on it, where X is ..."
+        // Absorbs into the preceding Token effect's `enter_with_counters` field.
+        Effect::Token { .. } => try_parse_token_enters_with_counters(&lower),
         _ => None,
     }
+}
+
+/// CR 122.1a: Parse "the token/it enters with X [counter type] counter(s) on it[, where X is ...]".
+/// Returns `TokenEntersWithCounters` continuation on success.
+fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> {
+    // Match subject prefix: "the token enters with " / "it enters with "
+    let (rest, _) = alt((
+        tag::<_, _, VerboseError<&str>>("the token enters with "),
+        tag("it enters with "),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    // Parse count: could be "x", a number, or "a number of"
+    let (rest, count_prefix) = alt((
+        // "x " — variable resolved later via "where X is"
+        value(None, tag::<_, _, VerboseError<&str>>("x ")),
+        // "a number of " — dynamic count resolved via suffix
+        value(None, tag("a number of ")),
+    ))
+    .parse(rest)
+    .unwrap_or_else(|_: nom::Err<VerboseError<&str>>| {
+        // Try parsing a fixed number
+        if let Ok((r, n)) = nom_primitives::parse_number(rest) {
+            let r = r.trim_start();
+            (r, Some(n))
+        } else {
+            (rest, None)
+        }
+    });
+
+    // Parse counter type: "+1/+1 " is the most common
+    let (rest, counter_type) = alt((
+        value(
+            "P1P1".to_string(),
+            tag::<_, _, VerboseError<&str>>("+1/+1 "),
+        ),
+        value("M1M1".to_string(), tag("-1/-1 ")),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    // Consume "counter(s) on it"
+    let (rest, _) = alt((
+        tag::<_, _, VerboseError<&str>>("counters on it"),
+        tag("counter on it"),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    // Parse optional ", where x is [quantity]"
+    let quantity = if let Ok((rest_where, _)) =
+        tag::<_, _, VerboseError<&str>>(", where x is ").parse(rest.trim_start_matches(['.', ' ']))
+    {
+        let qty_text = rest_where.trim().trim_end_matches('.');
+        parse_cda_quantity(qty_text)
+            .or_else(|| parse_quantity_ref(qty_text).map(|q| QuantityExpr::Ref { qty: q }))
+    } else if let Ok((rest_equal, _)) =
+        tag::<_, _, VerboseError<&str>>("equal to ").parse(rest.trim_start_matches(['.', ' ']))
+    {
+        let qty_text = rest_equal.trim().trim_end_matches('.');
+        parse_cda_quantity(qty_text)
+            .or_else(|| parse_quantity_ref(qty_text).map(|q| QuantityExpr::Ref { qty: q }))
+    } else {
+        None
+    };
+
+    let count = if let Some(qty) = quantity {
+        qty
+    } else if let Some(n) = count_prefix {
+        QuantityExpr::Fixed { value: n as i32 }
+    } else {
+        // X without "where X is" — variable resolved from spell payment at runtime
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }
+    };
+
+    Some(ContinuationAst::TokenEntersWithCounters {
+        counter_type,
+        count,
+    })
 }
 
 #[cfg(test)]
@@ -1661,5 +1768,60 @@ mod tests {
             chunks,
             vec!["at the beginning of the next end step, return it and lose 2 life"]
         );
+    }
+
+    // --- Token enters with counters continuation ---
+
+    #[test]
+    fn token_enters_with_x_counters_where_x_is() {
+        let result = try_parse_token_enters_with_counters(
+            "the token enters with x +1/+1 counters on it, where x is the number of other creatures you control",
+        );
+        assert!(result.is_some());
+        if let Some(ContinuationAst::TokenEntersWithCounters {
+            counter_type,
+            count,
+        }) = result
+        {
+            assert_eq!(counter_type, "P1P1");
+            // Should be an ObjectCount ref for "the number of other creatures you control"
+            assert!(matches!(count, QuantityExpr::Ref { .. }));
+        } else {
+            panic!("expected TokenEntersWithCounters");
+        }
+    }
+
+    #[test]
+    fn token_enters_with_it_prefix() {
+        let result = try_parse_token_enters_with_counters(
+            "it enters with x +1/+1 counters on it, where x is the number of creatures you control",
+        );
+        assert!(result.is_some());
+        if let Some(ContinuationAst::TokenEntersWithCounters { counter_type, .. }) = result {
+            assert_eq!(counter_type, "P1P1");
+        }
+    }
+
+    #[test]
+    fn token_enters_with_fixed_counters() {
+        let result = try_parse_token_enters_with_counters(
+            "the token enters with three +1/+1 counters on it",
+        );
+        assert!(result.is_some());
+        if let Some(ContinuationAst::TokenEntersWithCounters {
+            counter_type,
+            count,
+        }) = result
+        {
+            assert_eq!(counter_type, "P1P1");
+            assert_eq!(count, QuantityExpr::Fixed { value: 3 });
+        }
+    }
+
+    #[test]
+    fn token_enters_with_counters_no_match() {
+        // Should not match non-counter enters-with text
+        let result = try_parse_token_enters_with_counters("the token enters tapped and attacking");
+        assert!(result.is_none());
     }
 }

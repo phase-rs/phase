@@ -78,6 +78,7 @@ pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
         enters_attacking: false,
         supertypes: vec![],
         static_abilities: token.static_abilities,
+        enter_with_counters: vec![],
     })
 }
 

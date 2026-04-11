@@ -14,6 +14,7 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::value;
+use nom::sequence::preceded;
 use nom::Parser;
 use nom_language::error::VerboseError;
 
@@ -36,8 +37,9 @@ use crate::types::ability::{
     StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter, UnlessCost, ZoneRef,
 };
 use crate::types::card_type::{CoreType, Supertype};
-use crate::types::game_state::{DistributionUnit, RetargetScope};
+use crate::types::game_state::{DistributionUnit, NextSpellModifier, RetargetScope};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
+use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::statics::StaticMode;
@@ -494,6 +496,137 @@ fn try_parse_reduce_next_spell_cost(tp: TextPair) -> Option<ParsedEffectClause> 
     }))
 }
 
+/// CR 601.2f: Parse "the next [type] spell you cast this turn [has keyword/can't be countered/etc.]"
+///
+/// Handles patterns like:
+/// - "the next creature spell you cast this turn can't be countered"
+/// - "the next spell you cast this turn has convoke"
+/// - "the next sorcery spell you cast this turn can be cast as though it had flash"
+/// - "the next instant or sorcery spell you cast this turn has cascade"
+/// - "the next face-down creature spell you cast this turn costs {3} less to cast"
+fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause> {
+    // Must start with "the next "
+    let rest = tag::<_, _, VerboseError<&str>>("the next ")
+        .parse(tp.lower)
+        .ok()
+        .map(|(r, _)| r)?;
+
+    // Extract optional spell type filter before "spell you cast this turn"
+    // Patterns: "spell you cast this turn", "creature spell you cast this turn",
+    // "instant or sorcery spell you cast this turn", "noncreature spell you cast this turn",
+    // "face-down creature spell you cast this turn"
+    let (ability_text, filter_text) = nom::sequence::terminated(
+        take_until::<_, _, VerboseError<&str>>("spell"),
+        alt((
+            tag::<_, _, VerboseError<&str>>("spell you cast this turn "),
+            tag("spell of the chosen type you cast this turn "),
+        )),
+    )
+    .parse(rest)
+    .ok()?;
+
+    let mut spell_filter = None;
+    let filter_text = filter_text.trim();
+    if !filter_text.is_empty() {
+        // Parse the filter: "creature", "instant or sorcery", "noncreature", etc.
+        let (filter, _) = parse_type_phrase(filter_text);
+        if !matches!(filter, TargetFilter::Any) {
+            spell_filter = Some(filter);
+        }
+    }
+
+    // Now parse the ability: "can't be countered", "has convoke", "can be cast as though it had flash"
+    // CR 601.2f: "can't be countered"
+    if tag::<_, _, VerboseError<&str>>("can't be countered")
+        .parse(ability_text)
+        .is_ok()
+    {
+        return Some(parsed_clause(Effect::GrantNextSpellAbility {
+            modifier: NextSpellModifier::CantBeCountered,
+            spell_filter,
+        }));
+    }
+
+    // CR 601.2f: "can be cast as though it had flash"
+    if tag::<_, _, VerboseError<&str>>("can be cast as though it had flash")
+        .parse(ability_text)
+        .is_ok()
+    {
+        return Some(parsed_clause(Effect::GrantNextSpellAbility {
+            modifier: NextSpellModifier::CastAsThoughFlash,
+            spell_filter,
+        }));
+    }
+
+    // "can be cast without paying its mana cost" — requires casting infrastructure
+    // changes (alternative cost injection during casting). Deferred.
+    if tag::<_, _, VerboseError<&str>>("can be cast without paying its mana cost")
+        .parse(ability_text)
+        .is_ok()
+    {
+        return None; // Falls through to Unimplemented
+    }
+
+    // CR 601.2f: "has [keyword]"
+    if let Ok((_, keyword_text)) = preceded(
+        tag::<_, _, VerboseError<&str>>("has "),
+        nom::combinator::rest,
+    )
+    .parse(ability_text)
+    {
+        // Strip trailing period/reminder text
+        let keyword_text = keyword_text
+            .split('.')
+            .next()
+            .unwrap_or(keyword_text)
+            .trim();
+        let keyword = match keyword_text {
+            "convoke" => Some(Keyword::Convoke),
+            "cascade" => Some(Keyword::Cascade),
+            // CR 702.41a: "affinity for artifacts" — Affinity parameterized by artifact type
+            "affinity for artifacts" => Some(Keyword::Affinity(
+                crate::types::ability::TypedFilter::default()
+                    .with_type(crate::types::ability::TypeFilter::Artifact),
+            )),
+            "improvise" => Some(Keyword::Improvise),
+            _ => {
+                // Try parsing as a keyword
+                keyword_text.parse::<Keyword>().ok()
+            }
+        };
+        if let Some(kw) = keyword {
+            return Some(parsed_clause(Effect::GrantNextSpellAbility {
+                modifier: NextSpellModifier::HasKeyword { keyword: kw },
+                spell_filter,
+            }));
+        }
+    }
+
+    // "costs {N} less to cast" — delegate to the existing ReduceNextSpellCost for filtered variants
+    // e.g., "the next face-down creature spell you cast this turn costs {3} less to cast"
+    if let Ok((amount_rest, _)) = tag::<_, _, VerboseError<&str>>("costs ").parse(ability_text) {
+        if let Ok((after_amount, amount)) = nom::sequence::delimited(
+            tag::<_, _, VerboseError<&str>>("{"),
+            nom::character::complete::u32,
+            tag("}"),
+        )
+        .parse(amount_rest)
+        {
+            if tag::<_, _, VerboseError<&str>>(" less to cast")
+                .parse(after_amount)
+                .is_ok()
+            {
+                return Some(parsed_clause(Effect::ReduceNextSpellCost {
+                    amount,
+                    spell_filter,
+                }));
+            }
+        }
+    }
+
+    None
+}
+
 /// CR 614.16: Parse "Damage can't be prevented [this turn]" into Effect::AddRestriction.
 ///
 /// Handles variants:
@@ -849,6 +982,17 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
         return parsed_clause(Effect::RingTemptsYou);
     }
 
+    // CR 101.4 + CR 701.21a: "For each player, you choose from among the permanents that
+    // player controls an artifact, a creature, ..." — Tragic Arrogance pattern where
+    // the spell's controller chooses for all players.
+    if let Ok((after_prefix, _)) =
+        tag::<_, _, VerboseError<&str>>("for each player, you choose ").parse(tp.lower)
+    {
+        if let Some(ast) = imperative::parse_category_and_sacrifice_rest_pub(after_prefix) {
+            return parsed_clause(imperative::lower_choose_ast(ast));
+        }
+    }
+
     if tp.lower == "start your engines!" || tp.lower == "start your engines" {
         return parsed_clause(Effect::StartYourEngines {
             player_scope: PlayerFilter::Controller,
@@ -903,6 +1047,11 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
 
     // CR 601.2f: "the next spell you cast this turn costs {N} less to cast"
     if let Some(clause) = try_parse_reduce_next_spell_cost(tp) {
+        return clause;
+    }
+
+    // CR 601.2f: "the next [type] spell you cast this turn [has keyword/can't be countered/etc.]"
+    if let Some(clause) = try_parse_grant_next_spell_ability(tp) {
         return clause;
     }
 
@@ -1064,6 +1213,17 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
 
     // CR 401.4: "[target]'s owner puts it on their choice of the top or bottom of their library"
     if let Some(clause) = try_parse_put_on_top_or_bottom(tp) {
+        return clause;
+    }
+
+    // CR 701.24a + CR 400.3: "the owner of target [filter] shuffles it into their library"
+    if let Some(clause) = try_parse_owner_of_target_shuffle(tp) {
+        return clause;
+    }
+
+    // CR 401.4 + CR 400.3: "the owner of target [filter] puts it into their library second from
+    // the top or on the bottom"
+    if let Some(clause) = try_parse_owner_of_target_put_second(tp) {
         return clause;
     }
 
@@ -1491,6 +1651,103 @@ fn try_parse_put_on_top_or_bottom(tp: TextPair) -> Option<ParsedEffectClause> {
     None
 }
 
+/// CR 701.24a + CR 400.3: Parse "the owner of target [filter] shuffles it into their library".
+///
+/// Handles both subject forms:
+/// - "The owner of target permanent shuffles it into their library" (Chaos Warp)
+/// - "Target permanent's owner shuffles it into their library"
+///
+/// Produces a `ChangeZone` to Library with `owner_library: true` + a `Shuffle` sub_ability.
+fn try_parse_owner_of_target_shuffle(tp: TextPair) -> Option<ParsedEffectClause> {
+    let tp = tp.trim_end_matches('.');
+
+    // Must contain both "shuffle" and "library" to be a shuffle-into-library pattern
+    if !nom_primitives::scan_contains(tp.lower, "shuffle")
+        || !nom_primitives::scan_contains(tp.lower, "library")
+    {
+        return None;
+    }
+
+    let target = extract_owner_of_target(tp)?;
+
+    Some(imperative::with_shuffle_sub_ability(Effect::ChangeZone {
+        origin: None,
+        destination: Zone::Library,
+        target,
+        owner_library: true,
+        enter_transformed: false,
+        under_your_control: false,
+        enter_tapped: false,
+        enters_attacking: false,
+        up_to: false,
+    }))
+}
+
+/// CR 401.4 + CR 400.3: Parse "the owner of target [filter] puts it into their library
+/// second from the top or on the bottom".
+///
+/// Handles:
+/// - "The owner of target nonland permanent puts it into their library second from the top or on the bottom"
+/// - "The owner of target creature or enchantment puts it into their library second from the top or on the bottom"
+///
+/// The "second from the top or on the bottom" pattern is semantically PutOnTopOrBottom (the
+/// player chooses). We map it to the same `PutOnTopOrBottom` effect.
+fn try_parse_owner_of_target_put_second(tp: TextPair) -> Option<ParsedEffectClause> {
+    let tp = tp.trim_end_matches('.');
+
+    // Must contain the signature suffix
+    if !nom_primitives::scan_contains(tp.lower, "second from the top or on the bottom") {
+        return None;
+    }
+
+    let target = extract_owner_of_target(tp)?;
+
+    Some(parsed_clause(Effect::PutOnTopOrBottom { target }))
+}
+
+/// Shared helper: extract the target filter from "the owner of target [filter] [verb]s it ..."
+/// or "target [filter]'s owner [verb]s it ..." subject patterns.
+///
+/// Returns `Some(target_filter)` if the pattern matches, `None` otherwise.
+fn extract_owner_of_target(tp: TextPair) -> Option<TargetFilter> {
+    // Pattern 1: "target [filter]'s owner [verb]s it ..."
+    if let Some(idx) = tp.find("'s owner ") {
+        let target_text = &tp.original[..idx];
+        let (filter, remainder) = parse_target(target_text);
+        if !remainder.trim().is_empty() {
+            push_warning(format!(
+                "ignored-remainder: '{}' after target parse in owner-of-target",
+                remainder.trim()
+            ));
+        }
+        return Some(filter);
+    }
+
+    // Pattern 2: "the owner of target [filter] [verb]s it ..."
+    if let Some((_, rest_orig)) = nom_on_lower(tp.original, tp.lower, |i| {
+        value((), tag("the owner of ")).parse(i)
+    }) {
+        let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
+        let rest = TextPair::new(rest_orig, rest_lower);
+        // Find the verb boundary: " shuffles ", " puts ", " draws "
+        for verb in [" shuffles ", " puts ", " draws "] {
+            if let Some(idx) = rest.find(verb) {
+                let target_text = &rest.original[..idx];
+                let (filter, remainder) = parse_target(target_text);
+                if !remainder.trim().is_empty() {
+                    push_warning(format!(
+                        "ignored-remainder: '{}' after target parse in owner-of-target",
+                        remainder.trim()
+                    ));
+                }
+                return Some(filter);
+            }
+        }
+    }
+
+    None
+}
+
 fn try_parse_exile_from_top_until(tp: TextPair) -> Option<ParsedEffectClause> {
     // Match: "exile cards from the top of your library until you exile a/an {filter} card"
     let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, |i| {
@@ -1711,6 +1968,7 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
                 enters_attacking,
                 supertypes,
                 static_abilities,
+                enter_with_counters,
                 count: _,
             } => Effect::Token {
                 name,
@@ -1725,6 +1983,7 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
                 enters_attacking,
                 supertypes,
                 static_abilities,
+                enter_with_counters,
                 count: quantity,
             },
             other => other,
@@ -6152,6 +6411,7 @@ mod tests {
         Comparator, ContinuousModification, ControllerRef, DoublePTMode, Duration, FilterProp,
         GainLifePlayer, ManaProduction, NinjutsuVariant, PaymentCost, TypeFilter,
     };
+    use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
     use crate::types::zones::Zone;
 
@@ -11503,5 +11763,230 @@ mod tests {
             }
             other => panic!("expected TargetMatchesFilter condition, got: {other:?}"),
         }
+    }
+
+    // --- "The owner of target X" parser tests ---
+
+    #[test]
+    fn parse_owner_of_target_shuffles_into_library() {
+        // Chaos Warp pattern
+        let def = parse_effect_chain(
+            "The owner of target permanent shuffles it into their library",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Library,
+                    owner_library: true,
+                    ..
+                }
+            ),
+            "Expected ChangeZone to Library with owner_library, got {:?}",
+            def.effect
+        );
+        // Should have a Shuffle sub_ability
+        assert!(def.sub_ability.is_some(), "Expected Shuffle sub_ability");
+    }
+
+    #[test]
+    fn parse_owner_of_target_nonland_shuffles_into_library() {
+        // Oblation pattern
+        let def = parse_effect_chain(
+            "The owner of target nonland permanent shuffles it into their library",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Library,
+                    owner_library: true,
+                    ..
+                }
+            ),
+            "Expected ChangeZone to Library with owner_library, got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn parse_owner_of_target_puts_second_from_top() {
+        // Deem Inferior pattern
+        let def = parse_effect_chain(
+            "The owner of target nonland permanent puts it into their library second from the top or on the bottom",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::PutOnTopOrBottom { .. }),
+            "Expected PutOnTopOrBottom, got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn parse_possessive_owner_shuffles_into_library() {
+        // "target artifact or enchantment's owner shuffles it ..." pattern (if ever used)
+        let def = parse_effect_chain(
+            "Target permanent's owner shuffles it into their library",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Library,
+                    owner_library: true,
+                    ..
+                }
+            ),
+            "Expected ChangeZone to Library with owner_library, got {:?}",
+            def.effect
+        );
+    }
+
+    // --- "The next spell" parser tests ---
+
+    #[test]
+    fn parse_next_creature_spell_cant_be_countered() {
+        // Insist pattern
+        let def = parse_effect_chain(
+            "The next creature spell you cast this turn can't be countered",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::GrantNextSpellAbility {
+                    modifier: crate::types::game_state::NextSpellModifier::CantBeCountered,
+                    ..
+                }
+            ),
+            "Expected GrantNextSpellAbility(CantBeCountered), got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn parse_next_spell_has_convoke() {
+        // Wand of the Worldsoul pattern
+        let def = parse_effect_chain(
+            "The next spell you cast this turn has convoke",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::GrantNextSpellAbility {
+                    modifier: crate::types::game_state::NextSpellModifier::HasKeyword {
+                        keyword: Keyword::Convoke,
+                    },
+                    ..
+                }
+            ),
+            "Expected GrantNextSpellAbility(HasKeyword(Convoke)), got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn parse_next_sorcery_spell_flash() {
+        // Quicken pattern
+        let def = parse_effect_chain(
+            "The next sorcery spell you cast this turn can be cast as though it had flash",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::GrantNextSpellAbility {
+                    modifier: crate::types::game_state::NextSpellModifier::CastAsThoughFlash,
+                    ..
+                }
+            ),
+            "Expected GrantNextSpellAbility(CastAsThoughFlash), got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn parse_next_spell_has_cascade() {
+        // Dark Apostle pattern
+        let def = parse_effect_chain(
+            "The next noncreature spell you cast this turn has cascade",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::GrantNextSpellAbility {
+                    modifier: crate::types::game_state::NextSpellModifier::HasKeyword {
+                        keyword: Keyword::Cascade,
+                    },
+                    ..
+                }
+            ),
+            "Expected GrantNextSpellAbility(HasKeyword(Cascade)), got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn parse_next_spell_has_affinity() {
+        // Saheeli, the Gifted pattern
+        let def = parse_effect_chain(
+            "The next spell you cast this turn has affinity for artifacts",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::GrantNextSpellAbility {
+                    modifier: crate::types::game_state::NextSpellModifier::HasKeyword {
+                        keyword: Keyword::Affinity(..),
+                    },
+                    ..
+                }
+            ),
+            "Expected GrantNextSpellAbility(HasKeyword(Affinity)), got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn parse_next_face_down_creature_costs_less() {
+        // Panoptic Projektor pattern
+        let def = parse_effect_chain(
+            "The next face-down creature spell you cast this turn costs {3} less to cast",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::ReduceNextSpellCost { amount: 3, .. }),
+            "Expected ReduceNextSpellCost {{ amount: 3 }}, got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn parse_next_spell_has_improvise() {
+        // Archway of Innovation pattern
+        let def = parse_effect_chain(
+            "The next spell you cast this turn has improvise",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::GrantNextSpellAbility {
+                    modifier: crate::types::game_state::NextSpellModifier::HasKeyword {
+                        keyword: Keyword::Improvise,
+                    },
+                    ..
+                }
+            ),
+            "Expected GrantNextSpellAbility(HasKeyword(Improvise)), got {:?}",
+            def.effect
+        );
     }
 }

@@ -161,6 +161,32 @@ pub struct PendingSpellCostReduction {
     pub spell_filter: Option<TargetFilter>,
 }
 
+/// CR 601.2f: Describes a one-shot modification applied to the next qualifying spell a player
+/// casts. Created by effects like "the next spell you cast this turn has convoke" or "the next
+/// creature spell you cast this turn can't be countered."
+/// Consumed (removed) when the player casts their next qualifying spell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingNextSpellModifier {
+    pub player: PlayerId,
+    /// What modification to apply to the next spell.
+    pub modifier: NextSpellModifier,
+    /// Optional filter for which spells this applies to (None = any spell).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spell_filter: Option<TargetFilter>,
+}
+
+/// CR 601.2f: The kind of modification to apply to the next qualifying spell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum NextSpellModifier {
+    /// "The next spell you cast this turn can't be countered."
+    CantBeCountered,
+    /// "The next spell you cast this turn has [keyword]."
+    HasKeyword { keyword: Keyword },
+    /// "The next spell you cast this turn can be cast as though it had flash."
+    CastAsThoughFlash,
+}
+
 /// CR 400.7: Snapshot of an object's properties at the time of a zone change,
 /// enabling data-driven filtered counting at resolution time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -867,6 +893,23 @@ pub enum WaitingFor {
         /// Eligible permanents (with counters) and players (with poison/energy).
         eligible: Vec<TargetRef>,
     },
+    /// CR 101.4 + CR 701.21a: Player selects one permanent per type category
+    /// from among those they (or another player) control, then the rest are sacrificed.
+    /// Used by Cataclysm, Tragic Arrogance, Cataclysmic Gearhulk.
+    CategoryChoice {
+        player: PlayerId,
+        /// Whose permanents are being chosen from (may differ from `player` for Tragic Arrogance).
+        target_player: PlayerId,
+        /// Type categories to fill (e.g., [Artifact, Creature, Enchantment, Land]).
+        categories: Vec<CoreType>,
+        /// For each category, the eligible permanent IDs (battlefield objects matching that type).
+        eligible_per_category: Vec<Vec<ObjectId>>,
+        source_id: ObjectId,
+        /// Players still to choose after the current one (APNAP order).
+        remaining_players: Vec<PlayerId>,
+        /// Permanents chosen by previous players — protected from sacrifice.
+        all_kept: Vec<ObjectId>,
+    },
     /// CR 707.10c: When a spell is copied, the controller may choose new targets.
     /// Each slot shows the current target and legal alternatives.
     CopyRetarget {
@@ -1024,6 +1067,7 @@ impl WaitingFor {
             | WaitingFor::CompanionReveal { player, .. }
             | WaitingFor::ChooseLegend { player, .. }
             | WaitingFor::ProliferateChoice { player, .. }
+            | WaitingFor::CategoryChoice { player, .. }
             | WaitingFor::CopyRetarget { player, .. }
             | WaitingFor::AssignCombatDamage { player, .. }
             | WaitingFor::DistributeAmong { player, .. }
@@ -1424,6 +1468,10 @@ pub struct GameState {
     /// Consumed when the player casts their next qualifying spell.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_spell_cost_reductions: Vec<PendingSpellCostReduction>,
+    /// CR 601.2f: One-shot ability modifiers for the next spell cast.
+    /// Consumed when the player casts their next qualifying spell.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_next_spell_modifiers: Vec<PendingNextSpellModifier>,
     /// CR 614.1c: Pending ETB counters for objects that haven't entered yet.
     /// Added by delayed triggers like "that creature enters with an additional +1/+1 counter".
     /// Consumed when the object enters the battlefield. Each entry: (object_id, counter_type, count).
@@ -1720,6 +1768,7 @@ impl GameState {
             damage_dealt_this_turn: Vec::new(),
             mana_spent_on_spells_this_turn: HashMap::new(),
             pending_spell_cost_reductions: Vec::new(),
+            pending_next_spell_modifiers: Vec::new(),
             pending_etb_counters: Vec::new(),
             modal_modes_chosen_this_turn: HashSet::new(),
             modal_modes_chosen_this_game: HashSet::new(),
@@ -1879,6 +1928,7 @@ impl PartialEq for GameState {
             && self.battlefield_entries_this_turn == other.battlefield_entries_this_turn
             && self.damage_dealt_this_turn == other.damage_dealt_this_turn
             && self.pending_spell_cost_reductions == other.pending_spell_cost_reductions
+            && self.pending_next_spell_modifiers == other.pending_next_spell_modifiers
             && self.pending_etb_counters == other.pending_etb_counters
             && self.modal_modes_chosen_this_turn == other.modal_modes_chosen_this_turn
             && self.modal_modes_chosen_this_game == other.modal_modes_chosen_this_game

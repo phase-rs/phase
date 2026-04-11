@@ -438,6 +438,7 @@ pub fn room_effects(
                     // CR 205.4a: The Atropal is legendary.
                     supertypes: vec![crate::types::card_type::Supertype::Legendary],
                     static_abilities: vec![],
+                    enter_with_counters: vec![],
                 },
                 source_id,
                 controller,
@@ -867,6 +868,7 @@ fn creature_token(
         enters_attacking: false,
         supertypes: vec![],
         static_abilities: vec![],
+        enter_with_counters: vec![],
     }
 }
 
@@ -932,6 +934,7 @@ fn treasure_token() -> Effect {
         enters_attacking: false,
         supertypes: vec![],
         static_abilities: vec![],
+        enter_with_counters: vec![],
     }
 }
 

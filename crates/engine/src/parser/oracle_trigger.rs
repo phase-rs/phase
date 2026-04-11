@@ -1408,7 +1408,7 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
         }
     }
 
-    // CR 119.3 + CR 608.2k: Player subjects for pronoun resolution in trigger effects.
+    // CR 608.2k: Player subjects for pronoun resolution in trigger effects.
     // "an opponent", "a player", "each opponent" — these are player-type subjects,
     // not object types. Must fire before the generic "a "/"an " + parse_type_phrase
     // path, which would send "opponent" to parse_type_phrase and return Any.
