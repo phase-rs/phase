@@ -1,23 +1,30 @@
+use std::str::FromStr;
+
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::value;
+use nom::character::complete::char;
+use nom::combinator::{opt, value};
 use nom::Parser;
 use nom_language::error::VerboseError;
 
 use super::oracle_effect::{parse_effect_chain, try_parse_named_choice};
+use super::oracle_keyword::parse_keyword_from_oracle;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_quantity::capitalize_first;
+use super::oracle_static::split_keyword_list;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{
-    normalize_card_name_refs, parse_number, parse_ordinal, strip_after, strip_reminder_text,
-    TextPair,
+    canonicalize_subtype_name, normalize_card_name_refs, parse_number, parse_ordinal, strip_after,
+    strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChoiceType, CombatDamageScope, Comparator, ControllerRef,
-    DamageModification, DamageTargetFilter, Effect, FilterProp, PreventionAmount, QuantityExpr,
-    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode, TargetFilter,
-    TypeFilter, TypedFilter,
+    AbilityDefinition, AbilityKind, ChoiceType, CombatDamageScope, Comparator,
+    ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
+    DamageTargetFilter, Effect, FilterProp, PreventionAmount, QuantityExpr, QuantityRef,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, TargetFilter, TypeFilter,
+    TypedFilter,
 };
+use crate::types::card_type::CoreType;
 use crate::types::mana::ManaColor;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -358,25 +365,29 @@ fn parse_clone_replacement(norm_lower: &str, original_text: &str) -> Option<Repl
     }
 
     let after_copy = &copy_match["enter as a copy of ".len()..];
+    let (_, (type_text, suffix)) =
+        nom_primitives::split_once_on(after_copy, " on the battlefield").ok()?;
     // Strip "any " / "a " / "an " article before the type phrase
     let type_text = alt((
         tag::<_, _, VerboseError<&str>>("any "),
         tag("a "),
         tag("an "),
     ))
-    .parse(after_copy)
-    .map_or(after_copy, |(rest, _)| rest);
-
-    // Strip trailing "on the battlefield" and punctuation
-    let type_text = type_text
-        .trim_end_matches('.')
-        .trim_end_matches(" on the battlefield")
-        .trim();
+    .parse(type_text)
+    .map_or(type_text, |(rest, _)| rest)
+    .trim();
 
     let (filter, leftover) = parse_type_phrase(type_text);
     if !leftover.trim().is_empty() {
         return None;
     }
+
+    // CR 707.9 / CR 614.1c: The suffix carries any "except it's a {type}" and
+    // "it has {keyword}" modifications plus the optional mana-value ceiling.
+    // Unrecognized fragments degrade gracefully to `(None, vec![])` so the plain
+    // BecomeCopy replacement still registers — dropping the entire replacement
+    // for an unparsed suffix would lose the clone behaviour entirely.
+    let (mana_value_limit, additional_modifications) = parse_clone_suffix(suffix.trim());
 
     // CR 707.9a: The copy effect uses the chosen object's copiable values.
     // This is NOT targeting (hexproof/shroud don't apply).
@@ -385,8 +396,11 @@ fn parse_clone_replacement(norm_lower: &str, original_text: &str) -> Option<Repl
         Effect::BecomeCopy {
             target: filter,
             duration: None,
+            mana_value_limit,
+            additional_modifications,
         },
-    );
+    )
+    .description(original_text.to_string());
 
     Some(
         ReplacementDefinition::new(ReplacementEvent::Moved)
@@ -395,6 +409,183 @@ fn parse_clone_replacement(norm_lower: &str, original_text: &str) -> Option<Repl
             .valid_card(TargetFilter::SelfRef)
             .description(original_text.to_string()),
     )
+}
+
+/// Parse the suffix of a clone replacement, which carries the optional
+/// "with mana value ≤ cost" ceiling (CR 614.1c), any "except it's a(n) {type}"
+/// type/subtype additions, and any "and it has {keyword[,...]}" keyword grants
+/// (CR 707.9a).
+///
+/// The input is the already-lowercased, trimmed portion of the Oracle line
+/// after `"on the battlefield"`.
+///
+/// Fail-soft: the parser is **total** over the input. Any unrecognized leading
+/// fragment yields defaults (`None`, `vec![]`) so the caller can still register
+/// the plain `BecomeCopy` replacement. This preserves correctness for cards
+/// whose `except` clause is not yet understood (e.g. Phantasmal Image's inline
+/// gained ability, Vesuvan Doppelganger's "doesn't copy that creature's color")
+/// rather than dropping their clone behaviour entirely.
+fn parse_clone_suffix(suffix: &str) -> (Option<CopyManaValueLimit>, Vec<ContinuousModification>) {
+    // Absorb a trailing '.' (if any) once we've peeled off recognised clauses.
+    let (remaining, mana_value_limit) =
+        parse_mana_value_limit_clause(suffix).unwrap_or((suffix, None));
+    let (_remaining, modifications) =
+        parse_except_clause(remaining).unwrap_or((remaining, Vec::new()));
+
+    (mana_value_limit, modifications)
+}
+
+/// CR 614.1c: " with mana value less than or equal to the amount of mana spent to cast {self_ref}".
+/// Matches at the start of `suffix`; returns the remainder (still lowercase) and the typed limit.
+fn parse_mana_value_limit_clause(suffix: &str) -> Option<(&str, Option<CopyManaValueLimit>)> {
+    let (rest, _) = tag::<_, _, VerboseError<&str>>(
+        "with mana value less than or equal to the amount of mana spent to cast ",
+    )
+    .parse(suffix)
+    .ok()?;
+    // Self-reference: the normalizer rewrites the card name to "~" but
+    // Oracle text commonly also uses "this creature" verbatim.
+    let (rest, _) = alt((tag::<_, _, VerboseError<&str>>("this creature"), tag("~")))
+        .parse(rest)
+        .ok()?;
+    Some((rest, Some(CopyManaValueLimit::AmountSpentToCastSource)))
+}
+
+/// CR 707.9a: ", except {except_body} [and {except_body}]*[.]"
+///
+/// Each `except_body` independently contributes typed modifications. Bodies
+/// that don't match a known shape are silently skipped so we still keep the
+/// ones that do. The trailing '.' is optional and non-load-bearing.
+fn parse_except_clause(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
+    // ", except " — if missing, there are no modifications to extract.
+    let (mut rest, _) = tag::<_, _, VerboseError<&str>>(", except ")
+        .parse(input)
+        .ok()?;
+    let mut modifications = Vec::new();
+
+    loop {
+        let before = rest;
+        if let Some((after, mods)) = parse_except_body(rest) {
+            modifications.extend(mods);
+            rest = after;
+        } else {
+            // Unknown body — jump to the next " and " so recognised bodies
+            // that follow are not lost. If none exists, we're done.
+            rest = skip_to_next_conjunction(rest);
+        }
+
+        // Bodies are joined by " and " — consume it to parse another body.
+        if let Ok((after_and, _)) = tag::<_, _, VerboseError<&str>>(" and ").parse(rest) {
+            rest = after_and;
+        } else {
+            break;
+        }
+
+        // Safety: if nothing was consumed this iteration, stop.
+        if rest == before {
+            break;
+        }
+    }
+
+    let (rest, _) = opt(char::<_, VerboseError<&str>>('.')).parse(rest).ok()?;
+    Some((rest, modifications))
+}
+
+/// Parse a single "except it ..." body, producing zero or more modifications.
+/// Recognised shapes:
+///   - "it's a(n) {subtype} in addition to its other types"   → AddSubtype
+///   - "it's a(n) {core_type} in addition to its other types" → AddType
+///   - "it has {keyword[, keyword, ...]}"                     → AddKeyword per
+fn parse_except_body(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
+    if let Some((rest, subtype)) = parse_its_a_type_in_addition(input) {
+        return Some((rest, vec![subtype]));
+    }
+    if let Some((rest, keywords)) = parse_it_has_keywords(input) {
+        return Some((rest, keywords));
+    }
+    None
+}
+
+/// "it's a(n) {type_word} in addition to its other types"
+/// The type_word is either a core type (`"artifact"`, `"creature"`, ...) → `AddType`,
+/// or anything else → treated as a subtype and canonicalized.
+fn parse_its_a_type_in_addition(input: &str) -> Option<(&str, ContinuousModification)> {
+    let (rest, _) = alt((
+        tag::<_, _, VerboseError<&str>>("it's an "),
+        tag("it's a "),
+        tag("it\u{2019}s an "),
+        tag("it\u{2019}s a "),
+    ))
+    .parse(input)
+    .ok()?;
+    let (type_word, rest) = nom_primitives::split_once_on(rest, " in addition to its other types")
+        .ok()
+        .map(|(_, pair)| pair)?;
+    let type_word = type_word.trim();
+    if type_word.is_empty() {
+        return None;
+    }
+    // Try core type first (canonicalize capitalization before FromStr).
+    let canonical = canonicalize_subtype_name(type_word);
+    let modification = if let Ok(core_type) = CoreType::from_str(&canonical) {
+        ContinuousModification::AddType { core_type }
+    } else {
+        ContinuousModification::AddSubtype { subtype: canonical }
+    };
+    Some((rest, modification))
+}
+
+/// "it has {keyword[, keyword, ...]}" — each keyword becomes `AddKeyword`.
+/// Terminates at the next body separator (" and it ", end-of-string, or '.').
+fn parse_it_has_keywords(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("it has ")
+        .parse(input)
+        .ok()?;
+    // Keyword list terminates at " and it " (next body), the period, or end.
+    let (kw_text, remainder) = split_at_body_boundary(rest);
+    let mut modifications = Vec::new();
+    for part in split_keyword_list(kw_text) {
+        if let Some(keyword) = parse_keyword_from_oracle(part.trim()) {
+            modifications.push(ContinuousModification::AddKeyword { keyword });
+        }
+    }
+    if modifications.is_empty() {
+        return None;
+    }
+    Some((remainder, modifications))
+}
+
+/// Return `(body, remainder)` where `body` is the text up to the next
+/// body-level boundary (`" and it "`, `" and it's "`, or `"."`) and
+/// `remainder` still contains that boundary. Delegates to `split_once_on`
+/// (a nom-built primitive) for every boundary candidate and keeps the
+/// earliest match — purely structural position lookup, no dispatch logic.
+fn split_at_body_boundary(text: &str) -> (&str, &str) {
+    let candidates = [" and it ", " and it\u{2019}s ", " and it's ", "."];
+    let mut best: Option<usize> = None;
+    for pat in candidates {
+        if let Ok((_, (before, _))) = nom_primitives::split_once_on(text, pat) {
+            let pos = before.len();
+            best = Some(best.map_or(pos, |b| b.min(pos)));
+        }
+    }
+    match best {
+        Some(i) => (&text[..i], &text[i..]),
+        None => (text, ""),
+    }
+}
+
+/// Advance past the next " and " that starts a fresh body. Used to skip an
+/// unrecognised body so the rest of the except clause can still be parsed.
+/// `split_once_on` is a nom-built primitive — structural position lookup only.
+fn skip_to_next_conjunction(text: &str) -> &str {
+    match nom_primitives::split_once_on(text, " and ") {
+        Ok((_, (_, after))) => {
+            // Return the span starting at " and " so the caller can consume it.
+            &text[text.len() - after.len() - " and ".len()..]
+        }
+        Err(_) => "",
+    }
 }
 
 /// Parse check land pattern: "enters tapped unless you control a [LandType] or a [LandType]"
@@ -1618,6 +1809,7 @@ mod tests {
     use super::*;
     use crate::types::ability::{QuantityExpr, ShieldKind};
     use crate::types::card_type::Supertype;
+    use crate::types::keywords::Keyword;
 
     #[test]
     fn replacement_enters_tapped() {
@@ -2653,8 +2845,15 @@ mod tests {
         ));
         let execute = def.execute.as_ref().unwrap();
         match &*execute.effect {
-            Effect::BecomeCopy { target, duration } => {
+            Effect::BecomeCopy {
+                target,
+                duration,
+                mana_value_limit,
+                additional_modifications,
+            } => {
                 assert!(duration.is_none());
+                assert!(mana_value_limit.is_none());
+                assert!(additional_modifications.is_empty());
                 match target {
                     TargetFilter::Typed(tf) => {
                         assert!(tf.type_filters.contains(&TypeFilter::Creature));
@@ -2748,6 +2947,158 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert!(matches!(def.mode, ReplacementMode::Optional { .. }));
+    }
+
+    #[test]
+    fn mockingbird_clone_replacement_uses_typed_copy_metadata() {
+        let def = parse_replacement_line(
+            "You may have this creature enter as a copy of any creature on the battlefield with mana value less than or equal to the amount of mana spent to cast this creature, except it's a Bird in addition to its other types and it has flying.",
+            "Mockingbird",
+        )
+        .unwrap();
+
+        let execute = def.execute.as_ref().unwrap();
+        match &*execute.effect {
+            Effect::BecomeCopy {
+                mana_value_limit,
+                additional_modifications,
+                ..
+            } => {
+                assert_eq!(
+                    *mana_value_limit,
+                    Some(CopyManaValueLimit::AmountSpentToCastSource)
+                );
+                assert!(
+                    additional_modifications.contains(&ContinuousModification::AddSubtype {
+                        subtype: "Bird".to_string(),
+                    })
+                );
+                assert!(
+                    additional_modifications.contains(&ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    })
+                );
+            }
+            other => panic!("Expected BecomeCopy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plain_clone_replacement_has_no_modifications() {
+        // CR 707.9: Clone's suffix is the empty/period case — no mana-value
+        // ceiling and no typed modifications, but the BecomeCopy replacement
+        // must still register.
+        let def = parse_replacement_line(
+            "You may have this creature enter as a copy of any creature on the battlefield.",
+            "Clone",
+        )
+        .unwrap();
+        let execute = def.execute.as_ref().unwrap();
+        match &*execute.effect {
+            Effect::BecomeCopy {
+                mana_value_limit,
+                additional_modifications,
+                ..
+            } => {
+                assert_eq!(*mana_value_limit, None);
+                assert!(additional_modifications.is_empty());
+            }
+            other => panic!("Expected BecomeCopy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn phyrexian_metamorph_clone_replacement_adds_artifact_type() {
+        // CR 707.9a + CR 205.2a: "except it's an artifact" adds the Artifact
+        // core type (not a subtype) via `ContinuousModification::AddType`.
+        let def = parse_replacement_line(
+            "You may have this creature enter as a copy of any artifact or creature on the battlefield, except it's an artifact in addition to its other types.",
+            "Phyrexian Metamorph",
+        )
+        .unwrap();
+        let execute = def.execute.as_ref().unwrap();
+        match &*execute.effect {
+            Effect::BecomeCopy {
+                mana_value_limit,
+                additional_modifications,
+                ..
+            } => {
+                assert_eq!(*mana_value_limit, None);
+                assert!(
+                    additional_modifications.contains(&ContinuousModification::AddType {
+                        core_type: CoreType::Artifact,
+                    }),
+                    "expected AddType(Artifact), got {additional_modifications:?}"
+                );
+            }
+            other => panic!("Expected BecomeCopy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn phantasmal_image_clone_replacement_preserves_subtype_addition() {
+        // CR 707.9: Phantasmal Image's inline gained ability is not yet
+        // parsed, but the subtype addition must still be captured and the
+        // BecomeCopy replacement must still register.
+        let def = parse_replacement_line(
+            "You may have this creature enter as a copy of any creature on the battlefield, except it's an Illusion in addition to its other types and it has \"When this creature becomes the target of a spell or ability, sacrifice it.\"",
+            "Phantasmal Image",
+        )
+        .unwrap();
+        let execute = def.execute.as_ref().unwrap();
+        match &*execute.effect {
+            Effect::BecomeCopy {
+                additional_modifications,
+                ..
+            } => {
+                assert!(
+                    additional_modifications.contains(&ContinuousModification::AddSubtype {
+                        subtype: "Illusion".to_string(),
+                    }),
+                    "expected AddSubtype(Illusion), got {additional_modifications:?}"
+                );
+            }
+            other => panic!("Expected BecomeCopy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clone_suffix_multiple_keywords_produce_multiple_add_keyword() {
+        // Hypothetical clone: "except it's a Spirit in addition to its other
+        // types and it has flying, trample, and lifelink." Each keyword must
+        // become an `AddKeyword` modification.
+        let (mana_value_limit, modifications) = parse_clone_suffix(
+            "with mana value less than or equal to the amount of mana spent to cast ~, except it's a spirit in addition to its other types and it has flying, trample, and lifelink.",
+        );
+        assert_eq!(
+            mana_value_limit,
+            Some(CopyManaValueLimit::AmountSpentToCastSource)
+        );
+        assert!(modifications.contains(&ContinuousModification::AddSubtype {
+            subtype: "Spirit".to_string(),
+        }));
+        for keyword in [Keyword::Flying, Keyword::Trample, Keyword::Lifelink] {
+            assert!(
+                modifications.contains(&ContinuousModification::AddKeyword {
+                    keyword: keyword.clone(),
+                }),
+                "expected AddKeyword({keyword:?}) in {modifications:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn clone_replacement_unrecognized_suffix_still_registers() {
+        // CR 707.9: Quicksilver Gargantuan's "except it's 7/7." suffix is not
+        // yet understood, but the parser must still emit the plain
+        // BecomeCopy replacement rather than dropping the clone entirely.
+        let def = parse_replacement_line(
+            "You may have this creature enter as a copy of any creature on the battlefield, except it's 7/7.",
+            "Quicksilver Gargantuan",
+        )
+        .unwrap();
+        let execute = def.execute.as_ref().unwrap();
+        assert!(matches!(&*execute.effect, Effect::BecomeCopy { .. }));
     }
 
     // --- "Instead" clause pattern tests ---

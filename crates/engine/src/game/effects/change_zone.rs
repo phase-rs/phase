@@ -274,19 +274,21 @@ pub fn resolve(
         let scan_zone = origin
             .or_else(|| target_filter.extract_in_zone())
             .unwrap_or(Zone::Battlefield);
+        // Filter-controller override is primary here: when a filter like
+        // "creature you control" needs "you" to resolve to the *target* player
+        // (not the caster), we pass `filter_controller` explicitly. Use
+        // `from_source_with_controller` to honor this remapping.
+        let ctx = crate::game::filter::FilterContext::from_source_with_controller(
+            ability.source_id,
+            filter_controller,
+        );
         let eligible: Vec<ObjectId> = state
             .objects
             .iter()
             .filter(|(id, obj)| {
                 obj.zone == scan_zone
                     && !obj.is_emblem
-                    && crate::game::filter::matches_target_filter_controlled(
-                        state,
-                        **id,
-                        target_filter,
-                        ability.source_id,
-                        filter_controller,
-                    )
+                    && crate::game::filter::matches_target_filter(state, **id, target_filter, &ctx)
             })
             .map(|(id, _)| *id)
             .collect();
@@ -476,19 +478,19 @@ pub fn resolve_all(
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(ability, &effective_filter);
 
-    // Collect matching object IDs from the origin zone
+    // Collect matching object IDs from the origin zone.
+    // Explicit filter-controller override (e.g., "creature that player controls")
+    // — use `from_source_with_controller` to honor the remapping.
+    let ctx = crate::game::filter::FilterContext::from_source_with_controller(
+        ability.source_id,
+        filter_controller,
+    );
     let matching: Vec<_> = state
         .objects
         .iter()
         .filter(|(&id, obj)| {
             obj.zone == origin_zone
-                && crate::game::filter::matches_target_filter_controlled(
-                    state,
-                    id,
-                    &effective_filter,
-                    ability.source_id,
-                    filter_controller,
-                )
+                && crate::game::filter::matches_target_filter(state, id, &effective_filter, &ctx)
         })
         .map(|(id, _)| *id)
         .collect();

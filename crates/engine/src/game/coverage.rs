@@ -246,7 +246,11 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::CountersGE {
                 counter_type,
                 count,
-            } => parts.push(format!("{count}+ {} counters", counter_type.as_str())),
+            } => parts.push(format!(
+                "{}+ {} counters",
+                fmt_quantity(count),
+                counter_type.as_str()
+            )),
             FilterProp::CmcGE { value } => parts.push(format!("mv {}+", fmt_quantity(value))),
             FilterProp::CmcLE { value } => parts.push(format!("mv {}-", fmt_quantity(value))),
             FilterProp::CmcEQ { value } => parts.push(format!("mv {}", fmt_quantity(value))),
@@ -257,8 +261,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::EquippedBy => parts.push("equipped by self".into()),
             FilterProp::Another => parts.push("another".into()),
             FilterProp::HasColor { color } => parts.push(format!("{color:?}").to_lowercase()),
-            FilterProp::PowerLE { value } => parts.push(format!("power ≤{value}")),
-            FilterProp::PowerGE { value } => parts.push(format!("power ≥{value}")),
+            FilterProp::PowerLE { value } => parts.push(format!("power ≤{}", fmt_quantity(value))),
+            FilterProp::PowerGE { value } => parts.push(format!("power ≥{}", fmt_quantity(value))),
             FilterProp::Multicolored => parts.push("multicolored".into()),
             FilterProp::HasSupertype { value } => {
                 parts.push(format!("{value}").to_lowercase());
@@ -1024,8 +1028,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             ..
         } => {
             d.push(("find".into(), fmt_target(filter)));
-            if *count != 1 {
-                d.push(("count".into(), count.to_string()));
+            // Skip only when the count is exactly `Fixed { 1 }` — dynamic counts
+            // (e.g. `Variable("X")`) should always surface in the coverage breakdown.
+            if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
+                d.push(("count".into(), fmt_quantity(count)));
             }
             if *reveal {
                 d.push(("reveal".into(), "yes".into()));

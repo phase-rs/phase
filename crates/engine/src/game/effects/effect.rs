@@ -85,19 +85,13 @@ fn register_transient_effect(
         Some(TargetFilter::Player | TargetFilter::Controller | TargetFilter::None) | None => {}
         Some(filter) => {
             let filter = crate::game::effects::resolved_object_filter(ability, filter);
-            // Broadcast filter: find matching objects at resolution time and bind each
+            // Broadcast filter: find matching objects at resolution time and bind each.
+            // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+            let ctx = filter::FilterContext::from_ability(ability);
             let matching: Vec<ObjectId> = state
                 .battlefield
                 .iter()
-                .filter(|obj_id| {
-                    filter::matches_target_filter_controlled(
-                        state,
-                        **obj_id,
-                        &filter,
-                        ability.source_id,
-                        ability.controller,
-                    )
-                })
+                .filter(|obj_id| filter::matches_target_filter(state, **obj_id, &filter, &ctx))
                 .copied()
                 .collect();
             for obj_id in matching {

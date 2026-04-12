@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::game::filter::matches_target_filter;
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::layers::evaluate_condition;
 use crate::types::ability::{TargetFilter, TypedFilter};
 use crate::types::game_state::GameState;
@@ -461,7 +461,12 @@ pub(crate) fn static_filter_matches(
     source_id: ObjectId,
 ) -> bool {
     if let Some(target_id) = context.target_id {
-        return matches_target_filter(state, target_id, filter, source_id);
+        return matches_target_filter(
+            state,
+            target_id,
+            filter,
+            &FilterContext::from_source(state, source_id),
+        );
     }
 
     if let Some(player_id) = context.player_id {

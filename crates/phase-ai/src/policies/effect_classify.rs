@@ -1,6 +1,6 @@
 use engine::game::game_object::GameObject;
 use engine::types::ability::{
-    ContinuousModification, ControllerRef, Effect, PtValue, QuantityExpr, TargetFilter, TypeFilter,
+    ContinuousModification, Effect, PtValue, QuantityExpr, TargetFilter, TypeFilter,
 };
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
@@ -247,40 +247,13 @@ pub(crate) fn targeted_player_impact(ctx: &PolicyContext<'_>, player: PlayerId) 
         let Some(filter) = extract_target_filter(effect) else {
             continue;
         };
-        if local_player_matches_target_filter(filter, player, source_controller) {
+        if engine::game::filter::player_matches_target_filter(filter, player, source_controller) {
             found_targeted_effect = true;
             impact += player_impact(effect);
         }
     }
 
     found_targeted_effect.then_some(impact)
-}
-
-fn local_player_matches_target_filter(
-    filter: &TargetFilter,
-    player_id: PlayerId,
-    source_controller: Option<PlayerId>,
-) -> bool {
-    match filter {
-        TargetFilter::Any | TargetFilter::Player => true,
-        TargetFilter::SelfRef => false,
-        TargetFilter::Controller => source_controller == Some(player_id),
-        TargetFilter::Typed(typed) if typed.type_filters.is_empty() => match typed.controller {
-            Some(ControllerRef::You) => source_controller == Some(player_id),
-            Some(ControllerRef::Opponent) => {
-                source_controller.is_some_and(|ctrl| ctrl != player_id)
-            }
-            None => true,
-        },
-        TargetFilter::Typed(_) => false,
-        TargetFilter::Or { filters } => filters
-            .iter()
-            .any(|filter| local_player_matches_target_filter(filter, player_id, source_controller)),
-        TargetFilter::And { filters } => filters
-            .iter()
-            .all(|filter| local_player_matches_target_filter(filter, player_id, source_controller)),
-        _ => false,
-    }
 }
 
 fn player_impact(effect: &Effect) -> f64 {

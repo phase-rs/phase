@@ -2933,6 +2933,7 @@ mod tests {
                     card_id: CardId(1),
                     ability: None,
                     casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
                 },
             },
             &mut events,
@@ -2947,6 +2948,7 @@ mod tests {
                     card_id: CardId(2),
                     ability: None,
                     casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
                 },
             },
             &mut events,
@@ -4449,6 +4451,7 @@ mod tests {
                     card_id: CardId(99),
                     ability: None,
                     casting_variant: crate::types::game_state::CastingVariant::Normal,
+                    actual_mana_spent: 0,
                 },
             });
             let result = apply(
@@ -6404,6 +6407,7 @@ mod phase_trigger_regression_tests {
                 card_id: CardId(300),
                 ability: None,
                 casting_variant: crate::types::game_state::CastingVariant::Normal,
+                actual_mana_spent: 0,
             },
         });
 
@@ -7236,6 +7240,7 @@ mod phase_trigger_regression_tests {
             &mut state,
             &effect_def,
             Some(source_id),
+            None,
             &mut events,
         );
 
@@ -7324,6 +7329,29 @@ mod phase_trigger_regression_tests {
             clone.base_toughness = Some(0);
             clone.power = Some(0);
             clone.toughness = Some(0);
+            clone.replacement_definitions.push(
+                crate::types::ability::ReplacementDefinition::new(
+                    crate::types::replacements::ReplacementEvent::Moved,
+                )
+                .execute(crate::types::ability::AbilityDefinition::new(
+                    crate::types::ability::AbilityKind::Spell,
+                    crate::types::ability::Effect::BecomeCopy {
+                        target: TargetFilter::Any,
+                        duration: None,
+                        mana_value_limit: Some(
+                            crate::types::ability::CopyManaValueLimit::AmountSpentToCastSource,
+                        ),
+                        additional_modifications: vec![
+                            crate::types::ability::ContinuousModification::AddSubtype {
+                                subtype: "Bird".to_string(),
+                            },
+                            crate::types::ability::ContinuousModification::AddKeyword {
+                                keyword: crate::types::keywords::Keyword::Flying,
+                            },
+                        ],
+                    },
+                )),
+            );
         }
 
         // Set up CopyTargetChoice waiting state
@@ -7331,6 +7359,7 @@ mod phase_trigger_regression_tests {
             player: PlayerId(0),
             source_id: clone_id,
             valid_targets: vec![target_id],
+            max_mana_value: None,
         };
 
         // Player chooses to copy Grizzly Bears
@@ -7347,6 +7376,10 @@ mod phase_trigger_regression_tests {
         assert_eq!(clone.name, "Grizzly Bears");
         assert_eq!(clone.power, Some(2));
         assert_eq!(clone.toughness, Some(2));
+        assert!(clone.card_types.subtypes.contains(&"Bird".to_string()));
+        assert!(clone
+            .keywords
+            .contains(&crate::types::keywords::Keyword::Flying));
     }
 
     #[test]
@@ -7379,6 +7412,7 @@ mod phase_trigger_regression_tests {
             player: PlayerId(0),
             source_id: clone_id,
             valid_targets: vec![valid_id], // Bird is NOT in valid targets
+            max_mana_value: None,
         };
 
         // Try to choose invalid target

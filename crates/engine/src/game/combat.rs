@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::game_object::GameObject;
 use super::players;
-use crate::game::filter::matches_target_filter;
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::parser::oracle_target::parse_target;
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -374,7 +374,12 @@ pub fn validate_blockers(
         for sd in &attacker.static_definitions {
             if let StaticMode::CantBeBlockedExceptBy { filter } = &sd.mode {
                 let (target_filter, _) = parse_target(filter);
-                if !matches_target_filter(state, blocker_id, &target_filter, attacker_id) {
+                if !matches_target_filter(
+                    state,
+                    blocker_id,
+                    &target_filter,
+                    &FilterContext::from_source(state, attacker_id),
+                ) {
                     return Err(format!(
                         "{:?} cannot block {:?} (can't be blocked except by {})",
                         blocker_id, attacker_id, filter
@@ -386,7 +391,12 @@ pub fn validate_blockers(
         // CR 509.1b: "can't be blocked by X" — blocker matching the filter is prohibited.
         for sd in &attacker.static_definitions {
             if let StaticMode::CantBeBlockedBy { filter } = &sd.mode {
-                if matches_target_filter(state, blocker_id, filter, attacker_id) {
+                if matches_target_filter(
+                    state,
+                    blocker_id,
+                    filter,
+                    &FilterContext::from_source(state, attacker_id),
+                ) {
                     return Err(format!(
                         "{:?} cannot block {:?} (can't be blocked by {filter:?})",
                         blocker_id, attacker_id
@@ -1084,7 +1094,12 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
     for sd in &attacker.static_definitions {
         if let StaticMode::CantBeBlockedExceptBy { filter } = &sd.mode {
             let (target_filter, _) = parse_target(filter);
-            if !matches_target_filter(state, blocker_id, &target_filter, attacker_id) {
+            if !matches_target_filter(
+                state,
+                blocker_id,
+                &target_filter,
+                &FilterContext::from_source(state, attacker_id),
+            ) {
                 return false;
             }
         }
@@ -1092,7 +1107,12 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
     // CR 509.1b: "can't be blocked by X" — blocker matching the filter is prohibited.
     for sd in &attacker.static_definitions {
         if let StaticMode::CantBeBlockedBy { filter } = &sd.mode {
-            if matches_target_filter(state, blocker_id, filter, attacker_id) {
+            if matches_target_filter(
+                state,
+                blocker_id,
+                filter,
+                &FilterContext::from_source(state, attacker_id),
+            ) {
                 return false;
             }
         }

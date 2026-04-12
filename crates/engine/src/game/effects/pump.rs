@@ -91,19 +91,13 @@ pub fn resolve_all(
 
     let modifications = pt_modifications(power, toughness, state, ability);
 
-    // Collect matching object IDs first to avoid borrow conflicts
+    // Collect matching object IDs first to avoid borrow conflicts.
+    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+    let ctx = filter::FilterContext::from_ability(ability);
     let matching: Vec<ObjectId> = state
         .battlefield
         .iter()
-        .filter(|id| {
-            filter::matches_target_filter_controlled(
-                state,
-                **id,
-                &target_filter,
-                ability.source_id,
-                ability.controller,
-            )
-        })
+        .filter(|id| filter::matches_target_filter(state, **id, &target_filter, &ctx))
         .copied()
         .collect();
 
@@ -192,18 +186,12 @@ pub fn resolve_double_pt_all(
 
     let dur = ability.duration.clone().unwrap_or(Duration::UntilEndOfTurn);
 
+    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+    let ctx = filter::FilterContext::from_ability(ability);
     let matching: Vec<ObjectId> = state
         .battlefield
         .iter()
-        .filter(|id| {
-            filter::matches_target_filter_controlled(
-                state,
-                **id,
-                &target_filter,
-                ability.source_id,
-                ability.controller,
-            )
-        })
+        .filter(|id| filter::matches_target_filter(state, **id, &target_filter, &ctx))
         .copied()
         .collect();
 

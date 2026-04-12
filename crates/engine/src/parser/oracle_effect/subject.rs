@@ -824,6 +824,8 @@ fn build_become_clause(
             effect: Effect::BecomeCopy {
                 target,
                 duration: duration.clone(),
+                mana_value_limit: None,
+                additional_modifications: Vec::new(),
             },
             duration,
             sub_ability: None,

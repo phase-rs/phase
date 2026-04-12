@@ -855,7 +855,7 @@ pub enum FilterProp {
     },
     CountersGE {
         counter_type: CounterType,
-        count: u32,
+        count: QuantityExpr,
     },
     /// Matches objects with converted mana cost >= N (for "mana value N or greater").
     /// CR 202.3: Uses QuantityExpr to support both fixed and dynamic comparisons.
@@ -882,12 +882,14 @@ pub enum FilterProp {
         color: ManaColor,
     },
     /// Matches objects with power <= N (for "creature with power 2 or less").
+    /// CR 208.1: Uses QuantityExpr to support both fixed and dynamic comparisons.
     PowerLE {
-        value: i32,
+        value: QuantityExpr,
     },
     /// Matches objects with power >= N (for "creature with power 3 or greater").
+    /// CR 208.1: Uses QuantityExpr to support both fixed and dynamic comparisons.
     PowerGE {
-        value: i32,
+        value: QuantityExpr,
     },
     /// CR 509.1b: Matches objects whose power is strictly greater than the source object's power.
     /// Used for "creatures with greater power" blocking restrictions (relative comparison).
@@ -1984,6 +1986,11 @@ pub struct ConjureCard {
     pub count: QuantityExpr,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CopyManaValueLimit {
+    AmountSpentToCastSource,
+}
+
 /// The typed effect enum. Each variant corresponds to an effect handler.
 /// Zero HashMap<String, String> fields.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
@@ -2328,6 +2335,10 @@ pub enum Effect {
         target: TargetFilter,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration: Option<Duration>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mana_value_limit: Option<CopyManaValueLimit>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        additional_modifications: Vec<ContinuousModification>,
     },
     ChooseCard {
         #[serde(default)]
@@ -2470,9 +2481,10 @@ pub enum Effect {
     SearchLibrary {
         /// What cards can be found.
         filter: TargetFilter,
-        /// How many cards to find (usually 1).
-        #[serde(default = "default_one")]
-        count: u32,
+        /// How many cards to find (usually 1). `QuantityExpr` so the count can be
+        /// X (CR 107.3a) or a dynamic expression resolved at effect time.
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
         /// Whether to reveal the found card(s) to all players.
         #[serde(default)]
         reveal: bool,
@@ -5707,7 +5719,7 @@ mod tests {
             },
             FilterProp::CountersGE {
                 counter_type: CounterType::Plus1Plus1,
-                count: 3,
+                count: QuantityExpr::Fixed { value: 3 },
             },
             FilterProp::CmcGE {
                 value: QuantityExpr::Fixed { value: 4 },

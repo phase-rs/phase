@@ -63,19 +63,16 @@ pub fn find_legal_targets(
 
     let explicit_zones = extract_explicit_zones(filter);
 
+    let target_ctx =
+        super::filter::FilterContext::from_source_with_controller(source_id, source_controller);
     if !explicit_zones.is_empty() {
         // Explicit zone search: ONLY search the specified zones
         for zone in &explicit_zones {
             match zone {
                 Zone::Battlefield => {
                     for &obj_id in &state.battlefield {
-                        if super::filter::matches_target_filter_controlled(
-                            state,
-                            obj_id,
-                            filter,
-                            source_id,
-                            source_controller,
-                        ) {
+                        if super::filter::matches_target_filter(state, obj_id, filter, &target_ctx)
+                        {
                             let obj = match state.objects.get(&obj_id) {
                                 Some(o) => o,
                                 None => continue,
@@ -137,13 +134,8 @@ pub fn find_legal_targets(
                 Zone::Stack => {
                     for entry in &state.stack {
                         let obj_id = entry.id;
-                        if super::filter::matches_target_filter_controlled(
-                            state,
-                            obj_id,
-                            filter,
-                            source_id,
-                            source_controller,
-                        ) {
+                        if super::filter::matches_target_filter(state, obj_id, filter, &target_ctx)
+                        {
                             let obj = match state.objects.get(&obj_id) {
                                 Some(o) => o,
                                 None => continue,
@@ -164,13 +156,7 @@ pub fn find_legal_targets(
         }
 
         for &obj_id in &state.battlefield {
-            if super::filter::matches_target_filter_controlled(
-                state,
-                obj_id,
-                filter,
-                source_id,
-                source_controller,
-            ) {
+            if super::filter::matches_target_filter(state, obj_id, filter, &target_ctx) {
                 let obj = match state.objects.get(&obj_id) {
                     Some(o) => o,
                     None => continue,
@@ -364,14 +350,10 @@ fn add_zone_targets(
     require_full_targeting: bool,
     targets: &mut Vec<TargetRef>,
 ) {
+    let ctx =
+        super::filter::FilterContext::from_source_with_controller(source_id, source_controller);
     for &obj_id in object_ids {
-        if super::filter::matches_target_filter_controlled(
-            state,
-            obj_id,
-            filter,
-            source_id,
-            source_controller,
-        ) {
+        if super::filter::matches_target_filter(state, obj_id, filter, &ctx) {
             let obj = match state.objects.get(&obj_id) {
                 Some(o) => o,
                 None => continue,
@@ -413,13 +395,14 @@ fn add_stack_spells(
                 continue;
             }
         }
+        let bare_ctx = super::filter::FilterContext::from_source(state, source_id);
         // CR 115.9c: "that targets only [X]" — all targets must match the constraint filter.
         if let Some(ref constraint) = targets_only_constraint {
             let targets = entry.ability().map(|a| &a.targets[..]).unwrap_or(&[]);
             if targets.is_empty()
                 || !targets.iter().all(|t| match t {
                     TargetRef::Object(id) => {
-                        super::filter::matches_target_filter(state, *id, constraint, source_id)
+                        super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
                     }
                     TargetRef::Player(pid) => super::filter::player_matches_target_filter(
                         constraint,
@@ -437,7 +420,7 @@ fn add_stack_spells(
             if targets.is_empty()
                 || !targets.iter().any(|t| match t {
                     TargetRef::Object(id) => {
-                        super::filter::matches_target_filter(state, *id, constraint, source_id)
+                        super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
                     }
                     TargetRef::Player(pid) => super::filter::player_matches_target_filter(
                         constraint,
@@ -449,13 +432,9 @@ fn add_stack_spells(
                 continue;
             }
         }
-        if super::filter::matches_target_filter_controlled(
-            state,
-            entry.id,
-            filter,
-            source_id,
-            source_controller,
-        ) {
+        let controlled_ctx =
+            super::filter::FilterContext::from_source_with_controller(source_id, source_controller);
+        if super::filter::matches_target_filter(state, entry.id, filter, &controlled_ctx) {
             let obj = match state.objects.get(&entry.id) {
                 Some(o) => o,
                 None => continue,
@@ -1019,6 +998,7 @@ mod tests {
                 card_id: CardId(100),
                 ability: None,
                 casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
             },
         });
         let filter = TargetFilter::Typed(TypedFilter::card());
@@ -1056,6 +1036,7 @@ mod tests {
                 card_id: CardId(200),
                 ability: None,
                 casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
             },
         });
         let spell_obj = state.objects.get_mut(&spell_id).unwrap();
@@ -1098,6 +1079,7 @@ mod tests {
                 card_id: CardId(300),
                 ability: None,
                 casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
             },
         });
 

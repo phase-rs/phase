@@ -142,18 +142,12 @@ pub fn resolve_add_all(
     let target_filter = crate::game::effects::resolved_object_filter(ability, &target_filter);
 
     // Collect matching IDs first to avoid borrow conflict during mutation.
+    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
     let matching_ids: Vec<crate::types::identifiers::ObjectId> = state
         .battlefield
         .iter()
-        .filter(|id| {
-            crate::game::filter::matches_target_filter_controlled(
-                state,
-                **id,
-                &target_filter,
-                ability.source_id,
-                ability.controller,
-            )
-        })
+        .filter(|id| crate::game::filter::matches_target_filter(state, **id, &target_filter, &ctx))
         .copied()
         .collect();
 

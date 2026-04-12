@@ -8,7 +8,7 @@ use crate::types::zones::Zone;
 
 use super::effects::mana::resolve_mana_types;
 use super::engine::EngineError;
-use super::filter::matches_target_filter;
+use super::filter::{matches_target_filter, FilterContext};
 use super::mana_payment;
 use super::mana_sources;
 use super::sacrifice;
@@ -408,7 +408,12 @@ fn tap_creature_cost_choice(
             if obj.zone != Zone::Battlefield || obj.controller != player || obj.tapped {
                 return false;
             }
-            matches_target_filter(state, id, filter, source_id)
+            matches_target_filter(
+                state,
+                id,
+                filter,
+                &FilterContext::from_source(state, source_id),
+            )
         })
         .collect();
     Some((count as usize, creatures))
@@ -446,7 +451,12 @@ fn tap_selected_creature_for_mana_cost(
             "Selected creature is not an untapped creature you control".to_string(),
         ));
     }
-    if !matches_target_filter(state, chosen_id, filter, source_id) {
+    if !matches_target_filter(
+        state,
+        chosen_id,
+        filter,
+        &FilterContext::from_source(state, source_id),
+    ) {
         return Err(EngineError::ActionNotAllowed(
             "Selected creature does not satisfy mana ability cost".to_string(),
         ));

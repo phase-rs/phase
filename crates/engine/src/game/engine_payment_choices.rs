@@ -82,12 +82,14 @@ pub(super) fn handle_opponent_may_choice(
                             obj.zone == Zone::Battlefield
                                 && obj.controller == promptee
                                 && (!require_untapped || !obj.tapped)
-                                && filter::matches_target_filter_controlled(
+                                && filter::matches_target_filter(
                                     state,
                                     obj.id,
                                     target,
-                                    ability.source_id,
-                                    promptee,
+                                    &filter::FilterContext::from_source_with_controller(
+                                        ability.source_id,
+                                        promptee,
+                                    ),
                                 )
                         })
                         .map(|(id, _)| *id)
@@ -210,6 +212,9 @@ pub(super) fn handle_unless_payment(
             }
             UnlessCost::Sacrifice { count, ref filter } => {
                 let sac_source = pending_effect.source_id;
+                let ctx = crate::game::filter::FilterContext::from_source_with_controller(
+                    sac_source, player,
+                );
                 let eligible: Vec<ObjectId> = state
                     .battlefield
                     .iter()
@@ -220,8 +225,8 @@ pub(super) fn handle_unless_payment(
                             .map(|obj| {
                                 obj.controller == player
                                     && !obj.is_emblem
-                                    && crate::game::filter::matches_target_filter_controlled(
-                                        state, **id, filter, sac_source, player,
+                                    && crate::game::filter::matches_target_filter(
+                                        state, **id, filter, &ctx,
                                     )
                             })
                             .unwrap_or(false)

@@ -1,4 +1,4 @@
-use crate::game::filter::matches_target_filter;
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::zones;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
@@ -32,12 +32,16 @@ pub fn resolve(
     let library: Vec<ObjectId> = player.library.clone();
     let mut hit_id: Option<ObjectId> = None;
 
+    // CR 107.3a + CR 601.2b: ability-context evaluation so dynamic thresholds
+    // resolve against the resolving ability's `chosen_x`.
+    let ctx = FilterContext::from_ability(ability);
+
     for &obj_id in &library {
         // CR 702.84a: Exile each card one at a time.
         zones::move_to_zone(state, obj_id, Zone::Exile, events);
 
         // Check if the just-exiled card matches the hit filter.
-        if matches_target_filter(state, obj_id, filter, ability.source_id) {
+        if matches_target_filter(state, obj_id, filter, &ctx) {
             hit_id = Some(obj_id);
             break;
         }

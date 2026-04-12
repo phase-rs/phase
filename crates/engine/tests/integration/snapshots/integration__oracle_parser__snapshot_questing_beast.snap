@@ -98,7 +98,10 @@ expression: result
             "properties": [
               {
                 "type": "PowerLE",
-                "value": 2
+                "value": {
+                  "type": "Fixed",
+                  "value": 2
+                }
               }
             ]
           }

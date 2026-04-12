@@ -372,19 +372,13 @@ pub fn resolve_all(
 
     let target_filter = crate::game::effects::resolved_object_filter(ability, &target_filter);
 
-    // Collect matching object IDs
+    // Collect matching object IDs.
+    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+    let ctx = filter::FilterContext::from_ability(ability);
     let matching: Vec<_> = state
         .battlefield
         .iter()
-        .filter(|id| {
-            filter::matches_target_filter_controlled(
-                state,
-                **id,
-                &target_filter,
-                ability.source_id,
-                ability.controller,
-            )
-        })
+        .filter(|id| filter::matches_target_filter(state, **id, &target_filter, &ctx))
         .copied()
         .collect();
 

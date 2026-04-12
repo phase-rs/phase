@@ -329,7 +329,9 @@ mod tests {
     use crate::config::AiConfig;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, PtValue, TargetFilter};
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, PtValue, QuantityExpr, TargetFilter,
+    };
     use engine::types::card::CardFace;
     use engine::types::card_type::CardType;
     use engine::types::game_state::{GameState, PlayerDeckPool, WaitingFor};
@@ -401,7 +403,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::SearchLibrary {
                     filter: TargetFilter::Any,
-                    count: 1,
+                    count: QuantityExpr::Fixed { value: 1 },
                     reveal: false,
                     target_player: None,
                 },

@@ -142,7 +142,9 @@ pub fn resolve_all(
         crate::game::effects::resolved_object_filter(ability, &target_filter)
     };
 
-    // Collect matching object IDs that are on the battlefield and not indestructible
+    // Collect matching object IDs that are on the battlefield and not indestructible.
+    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
     let matching: Vec<_> = state
         .battlefield
         .iter()
@@ -153,13 +155,7 @@ pub fn resolve_all(
                 .map(|obj| obj.has_keyword(&crate::types::keywords::Keyword::Indestructible))
                 .unwrap_or(false);
             !is_indestructible
-                && crate::game::filter::matches_target_filter_controlled(
-                    state,
-                    **id,
-                    &effective_filter,
-                    ability.source_id,
-                    ability.controller,
-                )
+                && crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
         })
         .copied()
         .collect();

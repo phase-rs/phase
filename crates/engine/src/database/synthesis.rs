@@ -448,7 +448,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
                     AbilityKind::Activated,
                     Effect::SearchLibrary {
                         filter,
-                        count: 1,
+                        count: QuantityExpr::Fixed { value: 1 },
                         reveal: true,
                         target_player: None,
                     },
@@ -500,7 +500,9 @@ pub fn synthesize_casualty(face: &mut CardFace) {
         let sacrifice_filter =
             TargetFilter::Typed(
                 TypedFilter::creature().properties(vec![FilterProp::PowerGE {
-                    value: threshold as i32,
+                    value: QuantityExpr::Fixed {
+                        value: threshold as i32,
+                    },
                 }]),
             );
         face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Sacrifice {

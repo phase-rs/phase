@@ -263,6 +263,7 @@ mod tests {
                     PlayerId(0),
                 )),
                 casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
             },
         });
 

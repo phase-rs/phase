@@ -27,6 +27,30 @@ pub fn parse_quantity(input: &str) -> OracleResult<'_, QuantityExpr> {
     .parse(input)
 }
 
+/// Parse a literal number OR the variable `X` in filter-threshold contexts.
+///
+/// CR 107.3a + CR 601.2b: When a spell/ability has `{X}` in its cost, the caster
+/// announces the value of X as part of casting. While the spell is on the stack,
+/// any X in its text takes that announced value. This combinator emits the
+/// `QuantityRef::Variable { name: "X" }` shape that is later resolved at effect
+/// time against `ResolvedAbility::chosen_x` via `resolve_quantity_with_targets`.
+///
+/// Use this for filter-property thresholds ("with mana value X or less",
+/// "with power X or greater", "with X counters on it", "search for up to X
+/// cards"). Narrower than [`parse_quantity`] — does not recognize dynamic
+/// references like "the number of creatures you control".
+pub fn parse_quantity_expr_number(input: &str) -> OracleResult<'_, QuantityExpr> {
+    alt((
+        map(tag("x"), |_| QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }),
+        map(parse_number, |n| QuantityExpr::Fixed { value: n as i32 }),
+    ))
+    .parse(input)
+}
+
 /// Parse a dynamic quantity reference from Oracle text.
 ///
 /// Matches phrases like "the number of creatures you control", "its power",

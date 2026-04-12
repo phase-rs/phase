@@ -57,17 +57,18 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     }
 
     // Extract the resolved ability from the stack entry
-    let (ability, is_spell, casting_variant) = match &entry.kind {
+    let (ability, is_spell, casting_variant, actual_mana_spent) = match &entry.kind {
         StackEntryKind::Spell {
             ability,
             casting_variant,
+            actual_mana_spent,
             ..
-        } => (ability.clone(), true, *casting_variant),
+        } => (ability.clone(), true, *casting_variant, *actual_mana_spent),
         StackEntryKind::ActivatedAbility { ability, .. } => {
-            (Some(ability.clone()), false, CastingVariant::Normal)
+            (Some(ability.clone()), false, CastingVariant::Normal, 0)
         }
         StackEntryKind::TriggeredAbility { ability, .. } => {
-            (Some(ability.clone()), false, CastingVariant::Normal)
+            (Some(ability.clone()), false, CastingVariant::Normal, 0)
         }
     };
 
@@ -222,6 +223,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             casting_variant,
                             cast_from_zone,
                             spell_targets: spell_targets.clone(),
+                            actual_mana_spent,
                         });
                     state.waiting_for =
                         super::replacement::replacement_choice_waiting_for(player, state);
@@ -450,6 +452,7 @@ mod tests {
                 card_id: CardId(100),
                 ability: Some(resolved),
                 casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
             },
         });
 
@@ -667,6 +670,7 @@ mod tests {
                 card_id: CardId(60),
                 ability: None,
                 casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
             },
         });
 
@@ -754,6 +758,7 @@ mod tests {
                 card_id: CardId(72),
                 ability: Some(ability),
                 casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
             },
         });
 
@@ -822,6 +827,7 @@ mod tests {
                 card_id: CardId(1),
                 ability: None,
                 casting_variant: crate::types::game_state::CastingVariant::Warp,
+                actual_mana_spent: 0,
             },
         });
 
@@ -1006,6 +1012,7 @@ mod tests {
                 card_id,
                 ability: Some(resolved),
                 casting_variant: CastingVariant::Flashback,
+                actual_mana_spent: 0,
             },
         });
         obj_id
@@ -1082,6 +1089,7 @@ mod tests {
                 card_id,
                 ability: Some(resolved),
                 casting_variant: CastingVariant::Flashback,
+                actual_mana_spent: 0,
             },
         });
 

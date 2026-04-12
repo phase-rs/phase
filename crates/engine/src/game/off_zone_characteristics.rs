@@ -1,4 +1,4 @@
-use crate::game::filter::matches_target_filter_controlled;
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::layers::{
     active_continuous_effects_from_base_static_source, collect_shared_active_continuous_effects,
     order_active_continuous_effects,
@@ -68,12 +68,14 @@ fn collect_applicable_off_zone_keyword_effects(
         .filter(|effect| {
             effect.layer == Layer::Ability
                 && supports_off_zone_keyword_query(&effect.modification)
-                && matches_target_filter_controlled(
+                && matches_target_filter(
                     state,
                     object_id,
                     &effect.affected_filter,
-                    effect.source_id,
-                    effect.controller,
+                    &FilterContext::from_source_with_controller(
+                        effect.source_id,
+                        effect.controller,
+                    ),
                 )
         })
         .collect()

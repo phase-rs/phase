@@ -459,10 +459,9 @@ fn graveyard_objects_castable_by_permission(
         if *once_per_turn && state.graveyard_cast_permissions_used.contains(source_id) {
             continue;
         }
+        let ctx = super::filter::FilterContext::from_source_with_controller(*source_id, player);
         for &gy_obj_id in &player_data.graveyard {
-            if super::filter::matches_target_filter_controlled(
-                state, gy_obj_id, filter, *source_id, player,
-            ) {
+            if super::filter::matches_target_filter(state, gy_obj_id, filter, &ctx) {
                 results.push((gy_obj_id, *source_id));
             }
         }
@@ -492,8 +491,12 @@ fn graveyard_permission_source(
         if once_per_turn && state.graveyard_cast_permissions_used.contains(&src_id) {
             return None;
         }
-        if super::filter::matches_target_filter_controlled(state, object_id, filter, src_id, player)
-        {
+        if super::filter::matches_target_filter(
+            state,
+            object_id,
+            filter,
+            &super::filter::FilterContext::from_source_with_controller(src_id, player),
+        ) {
             Some((src_id, once_per_turn))
         } else {
             None
@@ -538,6 +541,7 @@ pub fn graveyard_lands_playable_by_permission(
         if *once_per_turn && state.graveyard_cast_permissions_used.contains(source_id) {
             continue;
         }
+        let ctx = super::filter::FilterContext::from_source_with_controller(*source_id, player);
         for &gy_obj_id in &player_data.graveyard {
             if let Some(obj) = state.objects.get(&gy_obj_id) {
                 // CR 305.1: Only lands can be "played" (non-land cards require "cast")
@@ -545,9 +549,7 @@ pub fn graveyard_lands_playable_by_permission(
                     .card_types
                     .core_types
                     .contains(&crate::types::card_type::CoreType::Land)
-                    && super::filter::matches_target_filter_controlled(
-                        state, gy_obj_id, filter, *source_id, player,
-                    )
+                    && super::filter::matches_target_filter(state, gy_obj_id, filter, &ctx)
                 {
                     results.push((gy_obj_id, *source_id));
                 }
@@ -574,8 +576,11 @@ fn has_hand_cast_free_permission(
         src_obj.static_definitions.iter().any(|s| {
             s.mode == StaticMode::CastFromHandFree
                 && s.affected.as_ref().is_some_and(|filter| {
-                    super::filter::matches_target_filter_controlled(
-                        state, obj.id, filter, src_id, player,
+                    super::filter::matches_target_filter(
+                        state,
+                        obj.id,
+                        filter,
+                        &super::filter::FilterContext::from_source_with_controller(src_id, player),
                     )
                 })
         })
@@ -1051,6 +1056,7 @@ fn apply_affinity_reduction(
     for kw in effective_spell_keywords(state, caster, spell_id) {
         if let Keyword::Affinity(ref type_filter) = kw {
             let filter = TargetFilter::Typed(type_filter.clone());
+            let ctx = super::filter::FilterContext::from_source(state, spell_id);
             let count = state
                 .battlefield
                 .iter()
@@ -1059,7 +1065,7 @@ fn apply_affinity_reduction(
                         return false;
                     };
                     obj.controller == caster
-                        && super::filter::matches_target_filter(state, id, &filter, spell_id)
+                        && super::filter::matches_target_filter(state, id, &filter, &ctx)
                 })
                 .count() as u32;
             apply_cost_mod_to_mana(mana_cost, &ManaCost::generic(1), count, false);
@@ -2077,7 +2083,12 @@ pub(super) fn find_eligible_sacrifice_targets(
             if obj.controller != player {
                 return false;
             }
-            super::filter::matches_target_filter(state, id, filter, source_id)
+            super::filter::matches_target_filter(
+                state,
+                id,
+                filter,
+                &super::filter::FilterContext::from_source(state, source_id),
+            )
         })
         .collect()
 }
@@ -2509,7 +2520,12 @@ fn is_blocked_from_casting_from_zone(
             }
             // The affected filter encodes zone restrictions via InAnyZone.
             if let Some(ref filter) = def.affected {
-                if super::filter::matches_target_filter(state, object_id, filter, bf_id) {
+                if super::filter::matches_target_filter(
+                    state,
+                    object_id,
+                    filter,
+                    &super::filter::FilterContext::from_source(state, bf_id),
+                ) {
                     return true;
                 }
             }
@@ -3852,6 +3868,7 @@ mod tests {
                 card_id: CardId(99),
                 ability: None,
                 casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
             },
         });
 
@@ -5284,6 +5301,7 @@ mod tests {
                     PlayerId(0),
                 )),
                 casting_variant: CastingVariant::Adventure,
+                actual_mana_spent: 0,
             },
         });
 
@@ -5333,6 +5351,7 @@ mod tests {
                     PlayerId(0),
                 )),
                 casting_variant: CastingVariant::Adventure,
+                actual_mana_spent: 0,
             },
         });
 
@@ -6087,6 +6106,7 @@ mod tests {
                 card_id: CardId(123),
                 ability: None,
                 casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
             },
         });
 

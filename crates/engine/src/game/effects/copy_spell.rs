@@ -110,6 +110,7 @@ mod tests {
                 card_id,
                 ability: Some(ability),
                 casting_variant: variant,
+                actual_mana_spent: 0,
             },
         });
     }

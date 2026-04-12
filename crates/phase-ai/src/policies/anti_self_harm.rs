@@ -1,5 +1,5 @@
 use engine::game::combat;
-use engine::game::filter::matches_target_filter;
+use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::keywords;
 use engine::game::mana_abilities;
 use engine::game::turn_control;
@@ -236,11 +236,11 @@ fn etb_trigger_has_valid_targets(
         while let Some(def) = node {
             if let Some(filter) = extract_target_filter(&def.effect) {
                 // Check if any battlefield object matches this filter
-                let has_match = ctx
-                    .state
-                    .battlefield
-                    .iter()
-                    .any(|&obj_id| matches_target_filter(ctx.state, obj_id, filter, source_id));
+                let filter_ctx = FilterContext::from_source(ctx.state, source_id);
+                let has_match =
+                    ctx.state.battlefield.iter().any(|&obj_id| {
+                        matches_target_filter(ctx.state, obj_id, filter, &filter_ctx)
+                    });
                 if has_match {
                     return true;
                 }
@@ -265,10 +265,11 @@ fn has_opponent_bounce_target(ctx: &PolicyContext<'_>, effects: &[&Effect]) -> b
             _ => None,
         })
         .any(|target| {
+            let filter_ctx = FilterContext::from_source(ctx.state, source.id);
             ctx.state.battlefield.iter().any(|&object_id| {
                 ctx.state.objects.get(&object_id).is_some_and(|object| {
                     object.controller != ctx.ai_player
-                        && matches_target_filter(ctx.state, object_id, target, source.id)
+                        && matches_target_filter(ctx.state, object_id, target, &filter_ctx)
                 })
             })
         })

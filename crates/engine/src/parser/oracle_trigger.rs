@@ -6169,9 +6169,12 @@ mod tests {
         // Should have PowerGE { value: 4 } in the filter props
         if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
             assert!(
-                tf.properties
-                    .iter()
-                    .any(|p| matches!(p, FilterProp::PowerGE { value: 4 })),
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::PowerGE {
+                        value: QuantityExpr::Fixed { value: 4 }
+                    }
+                )),
                 "Expected PowerGE(4) in properties, got {:?}",
                 tf.properties
             );

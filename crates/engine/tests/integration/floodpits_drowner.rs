@@ -158,7 +158,7 @@ fn activated_shuffle_both_into_owners_libraries() {
                 controller: None,
                 properties: vec![FilterProp::CountersGE {
                     counter_type: engine::types::counter::CounterType::Stun,
-                    count: 1,
+                    count: QuantityExpr::Fixed { value: 1 },
                 }],
             }),
             owner_library: true,

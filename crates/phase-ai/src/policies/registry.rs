@@ -3,6 +3,7 @@ use super::board_development::BoardDevelopmentPolicy;
 use super::board_wipe_telegraph::BoardWipeTelegraphPolicy;
 use super::card_advantage::CardAdvantagePolicy;
 use super::context::PolicyContext;
+use super::copy_value::CopyValuePolicy;
 use super::effect_timing::EffectTimingPolicy;
 use super::etb_value::EtbValuePolicy;
 use super::evasion_removal_priority::EvasionRemovalPriorityPolicy;
@@ -43,6 +44,7 @@ impl Default for PolicyRegistry {
                 Box::new(AntiSelfHarmPolicy),
                 Box::new(BoardDevelopmentPolicy),
                 Box::new(EtbValuePolicy),
+                Box::new(CopyValuePolicy),
                 Box::new(TutorPolicy),
                 Box::new(HandDisruptionPolicy),
                 Box::new(InteractionReservationPolicy),

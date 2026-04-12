@@ -90,20 +90,16 @@ fn collect_explorers(
             .into_iter()
             .filter(|obj_id| state.objects.contains_key(obj_id))
             .collect(),
-        _ => state
-            .battlefield
-            .iter()
-            .copied()
-            .filter(|obj_id| {
-                filter::matches_target_filter_controlled(
-                    state,
-                    *obj_id,
-                    filter_spec,
-                    ability.source_id,
-                    ability.controller,
-                )
-            })
-            .collect(),
+        _ => {
+            // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+            let ctx = filter::FilterContext::from_ability(ability);
+            state
+                .battlefield
+                .iter()
+                .copied()
+                .filter(|obj_id| filter::matches_target_filter(state, *obj_id, filter_spec, &ctx))
+                .collect()
+        }
     }
 }
 

@@ -1315,17 +1315,24 @@ fn evaluate_condition(
                             _ => true,
                         }
                     } else {
-                        // Object still exists — check current state
+                        // Object still exists — check current state.
+                        // CR 107.3a + CR 601.2b: ability-context filter evaluation.
                         crate::game::filter::matches_target_filter(
                             state,
                             id,
                             filter,
-                            ability.source_id,
+                            &crate::game::filter::FilterContext::from_ability(ability),
                         )
                     }
                 } else {
-                    // Check current state for present-tense conditions
-                    crate::game::filter::matches_target_filter(state, id, filter, ability.source_id)
+                    // Check current state for present-tense conditions.
+                    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+                    crate::game::filter::matches_target_filter(
+                        state,
+                        id,
+                        filter,
+                        &crate::game::filter::FilterContext::from_ability(ability),
+                    )
                 }
             } else {
                 false
@@ -1333,11 +1340,12 @@ fn evaluate_condition(
         }
         // CR 608.2c: "If this creature/permanent is a [type]" — check source object.
         AbilityCondition::SourceMatchesFilter { filter } => {
+            // CR 107.3a + CR 601.2b: ability-context filter evaluation.
             crate::game::filter::matches_target_filter(
                 state,
                 ability.source_id,
                 filter,
-                ability.source_id,
+                &crate::game::filter::FilterContext::from_ability(ability),
             )
         }
         // CR 608.2c: "If it's your turn" — check active player against controller.
@@ -1348,15 +1356,12 @@ fn evaluate_condition(
         // object matches the type filter. For optional-targeting parents with no targets
         // chosen, last_zone_changed_ids is empty → returns false.
         AbilityCondition::ZoneChangedThisWay { filter } => {
-            state.last_zone_changed_ids.iter().any(|&id| {
-                crate::game::filter::matches_target_filter_controlled(
-                    state,
-                    id,
-                    filter,
-                    ability.source_id,
-                    ability.controller,
-                )
-            })
+            // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+            let ctx = crate::game::filter::FilterContext::from_ability(ability);
+            state
+                .last_zone_changed_ids
+                .iter()
+                .any(|&id| crate::game::filter::matches_target_filter(state, id, filter, &ctx))
         }
         // CR 611.2b: "if this creature/permanent is tapped/untapped" — check source object.
         AbilityCondition::SourceIsTapped { negated } => {

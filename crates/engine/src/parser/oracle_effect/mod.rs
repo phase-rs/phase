@@ -7846,7 +7846,7 @@ mod tests {
                 reveal,
                 ..
             } => {
-                assert_eq!(count, 1);
+                assert_eq!(count, QuantityExpr::Fixed { value: 1 });
                 assert!(reveal);
                 match filter {
                     TargetFilter::Typed(tf) => {
@@ -10000,7 +10000,7 @@ mod tests {
     fn search_library_details_up_to_five() {
         let details =
             parse_search_library_details("search your library for up to five creature cards");
-        assert_eq!(details.count, 5);
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 5 });
         let TargetFilter::Typed(tf) = &details.filter else {
             panic!("Expected Typed filter, got {:?}", details.filter);
         };
@@ -10025,7 +10025,7 @@ mod tests {
         else {
             panic!("Expected SearchLibrary, got {effect:?}");
         };
-        assert_eq!(count, 2);
+        assert_eq!(count, QuantityExpr::Fixed { value: 2 });
         assert!(reveal);
         let TargetFilter::Or { filters } = filter else {
             panic!("Expected Or filter, got {filter:?}");

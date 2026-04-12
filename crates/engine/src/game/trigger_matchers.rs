@@ -513,9 +513,12 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::HasChosenName
-        | TargetFilter::Named { .. } => {
-            super::filter::matches_target_filter(state, object_id, filter, source_id)
-        }
+        | TargetFilter::Named { .. } => super::filter::matches_target_filter(
+            state,
+            object_id,
+            filter,
+            &super::filter::FilterContext::from_source(state, source_id),
+        ),
     }
 }
 
@@ -2031,10 +2034,9 @@ fn stack_entry_targets_only(
         return false;
     }
     let source_controller = state.objects.get(&source_id).map(|o| o.controller);
+    let ctx = super::filter::FilterContext::from_source(state, source_id);
     ability.targets.iter().all(|t| match t {
-        TargetRef::Object(id) => {
-            super::filter::matches_target_filter(state, *id, constraint, source_id)
-        }
+        TargetRef::Object(id) => super::filter::matches_target_filter(state, *id, constraint, &ctx),
         TargetRef::Player(pid) => {
             super::filter::player_matches_target_filter(constraint, *pid, source_controller)
         }
@@ -2060,10 +2062,9 @@ fn stack_entry_targets_any(
         return false;
     }
     let source_controller = state.objects.get(&source_id).map(|o| o.controller);
+    let ctx = super::filter::FilterContext::from_source(state, source_id);
     ability.targets.iter().any(|t| match t {
-        TargetRef::Object(id) => {
-            super::filter::matches_target_filter(state, *id, constraint, source_id)
-        }
+        TargetRef::Object(id) => super::filter::matches_target_filter(state, *id, constraint, &ctx),
         TargetRef::Player(pid) => {
             super::filter::player_matches_target_filter(constraint, *pid, source_controller)
         }
@@ -3073,6 +3074,7 @@ mod tests {
                     PlayerId(0),
                 )),
                 casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
             },
         });
         (state, spell_id)

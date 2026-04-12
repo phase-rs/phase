@@ -7,10 +7,10 @@ use std::collections::HashSet;
 
 use crate::game::combat;
 use crate::game::game_object::GameObject;
-use crate::game::quantity::resolve_quantity;
+use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
 use crate::types::ability::{
-    ChosenAttribute, ControllerRef, FilterProp, QuantityExpr, SharedQuality, TargetFilter,
-    TargetRef, TypeFilter, TypedFilter,
+    ChosenAttribute, ControllerRef, FilterProp, QuantityExpr, ResolvedAbility, SharedQuality,
+    TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{GameState, SpellCastRecord};
@@ -72,32 +72,75 @@ pub fn normalize_contextual_filter(
     }
 }
 
-/// Check if an object matches a typed TargetFilter.
+/// Context bundle passed into filter evaluation.
 ///
-/// `source_id` is the object that owns the ability (used for SelfRef/Other resolution).
-/// The source's controller is looked up from `state` (for You/Opponent).
+/// Bundles the source object, its controller, and — when available — the resolving
+/// ability, so dynamic filter thresholds (e.g. `CmcLE { value: QuantityExpr::Ref
+/// { Variable("X") } }`) can resolve against `ResolvedAbility::chosen_x` and
+/// `ResolvedAbility::targets`.
+///
+/// Construct via one of the three associated functions — don't build the struct
+/// literal directly; the constructors encode the correct defaults.
+pub struct FilterContext<'a> {
+    pub source_id: ObjectId,
+    pub source_controller: Option<PlayerId>,
+    pub ability: Option<&'a ResolvedAbility>,
+}
+
+impl<'a> FilterContext<'a> {
+    /// Bare context: source object known, controller derived from state.
+    /// Use when no activating ability is in scope (combat restrictions, layer
+    /// predicates, passive trigger condition checks).
+    pub fn from_source(state: &GameState, source_id: ObjectId) -> Self {
+        let source_controller = state.objects.get(&source_id).map(|o| o.controller);
+        Self {
+            source_id,
+            source_controller,
+            ability: None,
+        }
+    }
+
+    /// Controller explicit (source may have left play).
+    /// Use for stack-resolving effects whose source is sacrificed as a cost,
+    /// replacement-effect matching, etc.
+    pub fn from_source_with_controller(source_id: ObjectId, controller: PlayerId) -> Self {
+        Self {
+            source_id,
+            source_controller: Some(controller),
+            ability: None,
+        }
+    }
+
+    /// CR 107.3a + CR 601.2b: Full ability context. Dynamic thresholds
+    /// (`QuantityRef::Variable { "X" }`, `TargetPower`, etc.) resolve against
+    /// `chosen_x` and `targets` captured at cast time.
+    pub fn from_ability(ability: &'a ResolvedAbility) -> Self {
+        Self {
+            source_id: ability.source_id,
+            source_controller: Some(ability.controller),
+            ability: Some(ability),
+        }
+    }
+}
+
+/// Check if an object matches a typed TargetFilter against the given context.
+///
+/// This is the unified entry point for filter evaluation. Build a
+/// [`FilterContext`] via one of its constructors, then pass it here.
 pub fn matches_target_filter(
     state: &GameState,
     object_id: ObjectId,
     filter: &TargetFilter,
-    source_id: ObjectId,
+    ctx: &FilterContext<'_>,
 ) -> bool {
-    let source_controller = state.objects.get(&source_id).map(|o| o.controller);
-    filter_inner(state, object_id, filter, source_id, source_controller)
-}
-
-/// Like [`matches_target_filter`], but with an explicit controller.
-///
-/// Use this when resolving effects from the stack where the source object
-/// may no longer exist (e.g. sacrificed as a cost).
-pub fn matches_target_filter_controlled(
-    state: &GameState,
-    object_id: ObjectId,
-    filter: &TargetFilter,
-    source_id: ObjectId,
-    controller: PlayerId,
-) -> bool {
-    filter_inner(state, object_id, filter, source_id, Some(controller))
+    filter_inner(
+        state,
+        object_id,
+        filter,
+        ctx.source_id,
+        ctx.source_controller,
+        ctx.ability,
+    )
 }
 
 fn filter_inner(
@@ -106,6 +149,7 @@ fn filter_inner(
     filter: &TargetFilter,
     source_id: ObjectId,
     source_controller: Option<PlayerId>,
+    ability: Option<&ResolvedAbility>,
 ) -> bool {
     match filter {
         TargetFilter::None => false,
@@ -158,20 +202,26 @@ fn filter_inner(
                 attached_to: source_attached_to,
                 chosen_creature_type: source_chosen_creature_type.as_deref(),
                 chosen_attributes: source_chosen_attributes,
+                ability,
             };
             properties
                 .iter()
                 .all(|p| matches_filter_prop(p, state, obj, object_id, &source_ctx))
         }
-        TargetFilter::Not { filter: inner } => {
-            !filter_inner(state, object_id, inner, source_id, source_controller)
-        }
+        TargetFilter::Not { filter: inner } => !filter_inner(
+            state,
+            object_id,
+            inner,
+            source_id,
+            source_controller,
+            ability,
+        ),
         TargetFilter::Or { filters } => filters
             .iter()
-            .any(|f| filter_inner(state, object_id, f, source_id, source_controller)),
+            .any(|f| filter_inner(state, object_id, f, source_id, source_controller, ability)),
         TargetFilter::And { filters } => filters
             .iter()
-            .all(|f| filter_inner(state, object_id, f, source_id, source_controller)),
+            .all(|f| filter_inner(state, object_id, f, source_id, source_controller, ability)),
         // StackAbility/StackSpell targeting is handled directly at call sites, not via filter
         TargetFilter::StackAbility | TargetFilter::StackSpell => false,
         TargetFilter::SpecificObject { id: target_id } => object_id == *target_id,
@@ -534,6 +584,33 @@ struct SourceContext<'a> {
     attached_to: Option<ObjectId>,
     chosen_creature_type: Option<&'a str>,
     chosen_attributes: &'a [crate::types::ability::ChosenAttribute],
+    /// CR 107.3a + CR 601.2b: The resolving ability, when one is in scope.
+    /// Dynamic filter thresholds (`QuantityRef::Variable { "X" }`, `TargetPower`, etc.)
+    /// resolve against this ability's `chosen_x` and `targets`. `None` for contexts
+    /// without a resolving ability (combat restrictions, layer predicates); in that
+    /// case, per CR 107.2, any `Variable("X")` fallback resolves to 0.
+    ability: Option<&'a ResolvedAbility>,
+}
+
+/// Resolve a dynamic filter threshold against the source context.
+///
+/// When the filter evaluation has an ability in scope (e.g. SearchLibrary resolving
+/// off the stack), delegate to `resolve_quantity_with_targets` so `chosen_x` and
+/// targets are available. Otherwise fall back to the bare resolver (X → 0 per CR 107.2).
+fn resolve_filter_threshold(
+    state: &GameState,
+    expr: &QuantityExpr,
+    source: &SourceContext<'_>,
+) -> i32 {
+    match source.ability {
+        Some(ability) => resolve_quantity_with_targets(state, expr, ability),
+        None => resolve_quantity(
+            state,
+            expr,
+            source.controller.unwrap_or(PlayerId(0)),
+            source.id,
+        ),
+    }
 }
 
 /// Check if an object satisfies a single FilterProp.
@@ -576,28 +653,30 @@ fn matches_filter_prop(
         FilterProp::WithoutKeywordKind { value } => {
             !crate::game::keywords::object_has_effective_keyword_kind(state, object_id, *value)
         }
+        // CR 122.1: Counter count threshold. Dynamic thresholds
+        // (`QuantityRef::Variable { "X" }`) resolve against the ability's
+        // `chosen_x` when a `ResolvedAbility` is in scope via `FilterContext::from_ability`.
         FilterProp::CountersGE {
             counter_type,
             count,
-        } => obj.counters.get(counter_type).copied().unwrap_or(0) >= *count,
+        } => {
+            let actual = obj.counters.get(counter_type).copied().unwrap_or(0) as i32;
+            actual >= resolve_filter_threshold(state, count, source)
+        }
+        // CR 202.3: Mana value threshold comparisons. Dynamic thresholds
+        // (`QuantityRef::Variable { "X" }`) resolve against the ability's
+        // `chosen_x` when a `ResolvedAbility` is in scope via `FilterContext::from_ability`.
         FilterProp::CmcGE { value } => {
             let cmc = obj.mana_cost.mana_value() as i32;
-            let controller = source.controller.unwrap_or(PlayerId(0));
-            let threshold = resolve_quantity(state, value, controller, source.id);
-            cmc >= threshold
+            cmc >= resolve_filter_threshold(state, value, source)
         }
         FilterProp::CmcLE { value } => {
             let cmc = obj.mana_cost.mana_value() as i32;
-            let controller = source.controller.unwrap_or(PlayerId(0));
-            let threshold = resolve_quantity(state, value, controller, source.id);
-            cmc <= threshold
+            cmc <= resolve_filter_threshold(state, value, source)
         }
-        // CR 202.3: Exact mana value match.
         FilterProp::CmcEQ { value } => {
             let cmc = obj.mana_cost.mana_value() as i32;
-            let controller = source.controller.unwrap_or(PlayerId(0));
-            let threshold = resolve_quantity(state, value, controller, source.id);
-            cmc == threshold
+            cmc == resolve_filter_threshold(state, value, source)
         }
         // CR 201.2: Name matching is exact (case-insensitive comparison).
         FilterProp::Named { name } => obj.name.eq_ignore_ascii_case(name),
@@ -621,8 +700,15 @@ fn matches_filter_prop(
         FilterProp::EquippedBy => source.attached_to == Some(object_id),
         FilterProp::Another => object_id != source.id,
         FilterProp::HasColor { color } => obj.color.contains(color),
-        FilterProp::PowerLE { value } => obj.power.unwrap_or(0) <= *value,
-        FilterProp::PowerGE { value } => obj.power.unwrap_or(0) >= *value,
+        // CR 208.1: Power comparison against a dynamic threshold. Dynamic thresholds
+        // (`QuantityRef::Variable { "X" }`) resolve against the ability's `chosen_x`
+        // when a `ResolvedAbility` is in scope via `FilterContext::from_ability`.
+        FilterProp::PowerLE { value } => {
+            obj.power.unwrap_or(0) <= resolve_filter_threshold(state, value, source)
+        }
+        FilterProp::PowerGE { value } => {
+            obj.power.unwrap_or(0) >= resolve_filter_threshold(state, value, source)
+        }
         // CR 509.1b: Object's power is strictly greater than the source object's power.
         FilterProp::PowerGTSource => {
             let source_power = state
@@ -679,14 +765,13 @@ fn matches_filter_prop(
         // Match objects whose name differs from all controlled battlefield objects matching the filter.
         FilterProp::DifferentNameFrom { filter } => {
             let controller = source.controller.unwrap_or(PlayerId(0));
+            let nested_ctx = FilterContext::from_source_with_controller(source.id, controller);
             let controlled_names: Vec<&str> = state
                 .battlefield
                 .iter()
                 .filter_map(|&bid| state.objects.get(&bid))
                 .filter(|bobj| bobj.controller == controller)
-                .filter(|bobj| {
-                    matches_target_filter_controlled(state, bobj.id, filter, source.id, controller)
-                })
+                .filter(|bobj| matches_target_filter(state, bobj.id, filter, &nested_ctx))
                 .map(|bobj| bobj.name.as_str())
                 .collect();
             !controlled_names.contains(&obj.name.as_str())
@@ -875,7 +960,7 @@ pub(crate) fn extract_targets(filter: &TargetFilter) -> Option<TargetFilter> {
 
 /// Check if a player target matches a TargetFilter constraint.
 /// CR 115.9c: Used to validate player targets in "that targets only [X]" checks.
-pub(crate) fn player_matches_target_filter(
+pub fn player_matches_target_filter(
     filter: &TargetFilter,
     player_id: PlayerId,
     source_controller: Option<PlayerId>,
@@ -912,6 +997,44 @@ mod tests {
     use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    /// Terse 4-arg wrapper for filter-matching tests.
+    ///
+    /// Builds a bare `FilterContext::from_source` and delegates. Shadows the
+    /// public `matches_target_filter` (which takes a `&FilterContext`) so the
+    /// existing test bodies remain compact.
+    #[allow(clippy::module_name_repetitions)]
+    fn matches_target_filter(
+        state: &GameState,
+        object_id: ObjectId,
+        filter: &TargetFilter,
+        source_id: ObjectId,
+    ) -> bool {
+        super::matches_target_filter(
+            state,
+            object_id,
+            filter,
+            &FilterContext::from_source(state, source_id),
+        )
+    }
+
+    /// Explicit-controller variant used by tests that exercise stack-resolving
+    /// paths where the source has left play.
+    #[allow(dead_code)]
+    fn matches_target_filter_controlled(
+        state: &GameState,
+        object_id: ObjectId,
+        filter: &TargetFilter,
+        source_id: ObjectId,
+        controller: PlayerId,
+    ) -> bool {
+        super::matches_target_filter(
+            state,
+            object_id,
+            filter,
+            &FilterContext::from_source_with_controller(source_id, controller),
+        )
+    }
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
@@ -1673,5 +1796,207 @@ mod tests {
             &filter,
             PlayerId(0),
         ));
+    }
+
+    fn add_battlefield_creature_with_cmc(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        cmc: u32,
+    ) -> ObjectId {
+        use crate::types::mana::ManaCost;
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            Zone::Library,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.mana_cost = ManaCost::generic(cmc);
+        id
+    }
+
+    /// CR 107.3a + CR 601.2b: `CmcLE { Variable("X") }` with `chosen_x = Some(4)`
+    /// matches only objects with CMC ≤ 4.
+    #[test]
+    fn filter_context_from_ability_resolves_x_in_cmc_le() {
+        use crate::types::ability::{
+            Effect, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TypedFilter,
+        };
+        let mut state = setup();
+        let cmc2 = add_battlefield_creature_with_cmc(&mut state, PlayerId(0), "Small", 2);
+        let cmc4 = add_battlefield_creature_with_cmc(&mut state, PlayerId(0), "Mid", 4);
+        let cmc5 = add_battlefield_creature_with_cmc(&mut state, PlayerId(0), "Big", 5);
+        let cmc8 = add_battlefield_creature_with_cmc(&mut state, PlayerId(0), "Huge", 8);
+
+        let filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::CmcLE {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            }]));
+        let mut ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: String::new(),
+                description: None,
+            },
+            vec![],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        ability.chosen_x = Some(4);
+        let ctx = FilterContext::from_ability(&ability);
+
+        assert!(super::matches_target_filter(&state, cmc2, &filter, &ctx));
+        assert!(super::matches_target_filter(&state, cmc4, &filter, &ctx));
+        assert!(!super::matches_target_filter(&state, cmc5, &filter, &ctx));
+        assert!(!super::matches_target_filter(&state, cmc8, &filter, &ctx));
+    }
+
+    /// CR 208.1 + CR 107.3a: `PowerLE { Variable("X") }` + `chosen_x = Some(3)`
+    /// matches only power-≤-3 creatures.
+    #[test]
+    fn filter_context_from_ability_resolves_x_in_power_le() {
+        use crate::types::ability::{
+            Effect, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TypedFilter,
+        };
+        let mut state = setup();
+        let weak = add_creature(&mut state, PlayerId(0), "Weak");
+        state.objects.get_mut(&weak).unwrap().power = Some(2);
+        let strong = add_creature(&mut state, PlayerId(0), "Strong");
+        state.objects.get_mut(&strong).unwrap().power = Some(5);
+
+        let filter =
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::PowerLE {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                }]),
+            );
+        let mut ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: String::new(),
+                description: None,
+            },
+            vec![],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        ability.chosen_x = Some(3);
+        let ctx = FilterContext::from_ability(&ability);
+
+        assert!(super::matches_target_filter(&state, weak, &filter, &ctx));
+        assert!(!super::matches_target_filter(&state, strong, &filter, &ctx));
+    }
+
+    /// CR 107.2: Bare context (no ability in scope) — `Variable("X")` resolves to 0,
+    /// so `CmcLE { Variable("X") }` matches nothing with non-zero CMC.
+    #[test]
+    fn filter_context_bare_resolves_x_to_zero_per_cr_107_2() {
+        use crate::types::ability::{QuantityExpr, QuantityRef, TargetFilter, TypedFilter};
+        let mut state = setup();
+        let cmc2 = add_battlefield_creature_with_cmc(&mut state, PlayerId(0), "Small", 2);
+
+        let filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::CmcLE {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            }]));
+        let ctx = FilterContext::from_source_with_controller(ObjectId(999), PlayerId(0));
+        assert!(!super::matches_target_filter(&state, cmc2, &filter, &ctx));
+    }
+
+    /// CR 122.1: `CountersGE { count: Variable("X") }` + `chosen_x = Some(2)` matches
+    /// only objects with ≥2 counters of the tracked type.
+    #[test]
+    fn filter_context_from_ability_resolves_x_in_counters_ge() {
+        use crate::types::ability::{
+            Effect, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TypedFilter,
+        };
+        use crate::types::counter::CounterType;
+        let mut state = setup();
+        let three = add_creature(&mut state, PlayerId(0), "Three");
+        state
+            .objects
+            .get_mut(&three)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 3);
+        let one = add_creature(&mut state, PlayerId(0), "One");
+        state
+            .objects
+            .get_mut(&one)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+
+        let filter =
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::CountersGE {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                }]),
+            );
+        let mut ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: String::new(),
+                description: None,
+            },
+            vec![],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        ability.chosen_x = Some(2);
+        let ctx = FilterContext::from_ability(&ability);
+
+        assert!(super::matches_target_filter(&state, three, &filter, &ctx));
+        assert!(!super::matches_target_filter(&state, one, &filter, &ctx));
+    }
+
+    /// Serde round-trip for widened `FilterProp::PowerLE.value: QuantityExpr`,
+    /// `CountersGE.count: QuantityExpr`, and `Effect::SearchLibrary.count: QuantityExpr`.
+    #[test]
+    fn widened_numeric_fields_roundtrip_through_json() {
+        use crate::types::ability::{Effect, QuantityExpr, TargetFilter, TypedFilter};
+        use crate::types::counter::CounterType;
+
+        let power_filter = FilterProp::PowerLE {
+            value: QuantityExpr::Fixed { value: 3 },
+        };
+        let json = serde_json::to_string(&power_filter).unwrap();
+        let restored: FilterProp = serde_json::from_str(&json).unwrap();
+        assert_eq!(power_filter, restored);
+
+        let counters_filter = FilterProp::CountersGE {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 2 },
+        };
+        let json = serde_json::to_string(&counters_filter).unwrap();
+        let restored: FilterProp = serde_json::from_str(&json).unwrap();
+        assert_eq!(counters_filter, restored);
+
+        let search = Effect::SearchLibrary {
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            count: QuantityExpr::Fixed { value: 2 },
+            reveal: true,
+            target_player: None,
+        };
+        let json = serde_json::to_string(&search).unwrap();
+        let restored: Effect = serde_json::from_str(&json).unwrap();
+        assert_eq!(search, restored);
     }
 }

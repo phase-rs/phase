@@ -7,7 +7,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 
-use super::filter::{matches_target_filter, matches_target_filter_controlled};
+use super::filter::{matches_target_filter, FilterContext};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingReplacement, WaitingFor};
 use crate::types::identifiers::ObjectId;
@@ -1064,12 +1064,13 @@ fn evaluate_replacement_condition(
         // N or fewer other lands; condition evaluated as the replacement applies.
         ReplacementCondition::UnlessControlsOtherLeq { count, filter } => {
             let target_filter = TargetFilter::Typed(filter.clone());
+            let ctx = FilterContext::from_source(state, source_id);
             let matching_count = state
                 .objects
                 .values()
                 .filter(|o| {
                     o.zone == Zone::Battlefield
-                        && matches_target_filter(state, o.id, &target_filter, source_id)
+                        && matches_target_filter(state, o.id, &target_filter, &ctx)
                 })
                 .count() as u32;
             // "unless you control N or fewer" → suppressed when count ≤ N
@@ -1080,10 +1081,11 @@ fn evaluate_replacement_condition(
         // has a matching permanent on the battlefield. ControllerRef::You is pre-set
         // in the filter by the parser.
         ReplacementCondition::UnlessControlsMatching { filter } => {
+            let ctx = FilterContext::from_source_with_controller(source_id, controller);
             let controls_any = state.objects.values().any(|o| {
                 o.zone == Zone::Battlefield
                     && o.id != source_id
-                    && matches_target_filter_controlled(state, o.id, filter, source_id, controller)
+                    && matches_target_filter(state, o.id, filter, &ctx)
             });
             !controls_any
         }
@@ -1104,15 +1106,14 @@ fn evaluate_replacement_condition(
         // CR 614.1d — "unless you control N or more [type]" → suppressed if controller
         // has at least `minimum` matching permanents on the battlefield.
         ReplacementCondition::UnlessControlsCountMatching { minimum, filter } => {
+            let ctx = FilterContext::from_source_with_controller(source_id, controller);
             let matching_count = state
                 .objects
                 .values()
                 .filter(|o| {
                     o.zone == Zone::Battlefield
                         && o.id != source_id
-                        && matches_target_filter_controlled(
-                            state, o.id, filter, source_id, controller,
-                        )
+                        && matches_target_filter(state, o.id, filter, &ctx)
                 })
                 .count();
             matching_count < *minimum as usize
@@ -1252,11 +1253,10 @@ pub fn find_applicable_replacements(
                     // Enforce valid_card filter: if set, the event's affected object
                     // must match the filter (e.g., SelfRef means only this card's own events)
                     if let Some(ref filter) = repl_def.valid_card {
+                        let ctx = FilterContext::from_source(state, obj.id);
                         let matches = event
                             .affected_object_id()
-                            .map(|oid| {
-                                super::filter::matches_target_filter(state, oid, filter, obj.id)
-                            })
+                            .map(|oid| matches_target_filter(state, oid, filter, &ctx))
                             .unwrap_or(false);
                         if !matches {
                             continue;
@@ -1288,8 +1288,12 @@ pub fn find_applicable_replacements(
                     // CR 614.1a: Damage source filter — matches the damage *source* object against the filter.
                     if let Some(ref sf) = repl_def.damage_source_filter {
                         if let ProposedEvent::Damage { source_id, .. } = event {
-                            if !super::filter::matches_target_filter(state, *source_id, sf, obj.id)
-                            {
+                            if !matches_target_filter(
+                                state,
+                                *source_id,
+                                sf,
+                                &FilterContext::from_source(state, obj.id),
+                            ) {
                                 continue;
                             }
                         }
@@ -1383,8 +1387,12 @@ pub fn find_applicable_replacements(
                 // against the filter (e.g., "sources of the chosen color").
                 if let Some(ref sf) = repl_def.damage_source_filter {
                     if let ProposedEvent::Damage { source_id, .. } = event {
-                        if !super::filter::matches_target_filter(state, *source_id, sf, ObjectId(0))
-                        {
+                        if !matches_target_filter(
+                            state,
+                            *source_id,
+                            sf,
+                            &FilterContext::from_source(state, ObjectId(0)),
+                        ) {
                             continue;
                         }
                     }

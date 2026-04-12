@@ -267,7 +267,7 @@ mod tests {
             ResolvedAbility::new(
                 Effect::SearchLibrary {
                     filter: TargetFilter::Typed(TypedFilter::land()),
-                    count: 1,
+                    count: QuantityExpr::Fixed { value: 1 },
                     reveal: true,
                     target_player: None,
                 },
@@ -387,7 +387,7 @@ mod tests {
         ability.sub_ability = Some(Box::new(ResolvedAbility::new(
             Effect::SearchLibrary {
                 filter: TargetFilter::Typed(TypedFilter::land()),
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 reveal: true,
                 target_player: None,
             },

@@ -1,5 +1,7 @@
 use crate::parser::oracle_util::canonicalize_subtype_name;
-use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter};
+use crate::types::ability::{
+    ControllerRef, FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+};
 use crate::types::keywords::Keyword;
 use crate::types::Zone;
 
@@ -186,10 +188,14 @@ fn parse_pt_predicate(seg: &str) -> Option<FilterProp> {
 
     if let Some(val_str) = rest.strip_prefix("GE") {
         let val: i32 = val_str.parse().ok()?;
-        Some(FilterProp::PowerGE { value: val })
+        Some(FilterProp::PowerGE {
+            value: QuantityExpr::Fixed { value: val },
+        })
     } else if let Some(val_str) = rest.strip_prefix("LE") {
         let val: i32 = val_str.parse().ok()?;
-        Some(FilterProp::PowerLE { value: val })
+        Some(FilterProp::PowerLE {
+            value: QuantityExpr::Fixed { value: val },
+        })
     } else {
         None
     }
@@ -241,7 +247,9 @@ mod tests {
         let result = translate_filter("Creature.powerGE4").unwrap();
         match result {
             TargetFilter::Typed(tf) => {
-                assert!(tf.properties.contains(&FilterProp::PowerGE { value: 4 }));
+                assert!(tf.properties.contains(&FilterProp::PowerGE {
+                    value: QuantityExpr::Fixed { value: 4 }
+                }));
             }
             other => panic!("expected Typed, got {other:?}"),
         }

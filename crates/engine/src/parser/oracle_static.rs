@@ -4132,7 +4132,7 @@ fn is_text_based_cost_prefix(lower_prefix: &str) -> bool {
 }
 
 /// CR 702: Split a keyword list like "flying and first strike" into individual keywords.
-fn split_keyword_list(text: &str) -> Vec<Cow<'_, str>> {
+pub(crate) fn split_keyword_list(text: &str) -> Vec<Cow<'_, str>> {
     let text = text.trim().trim_end_matches('.');
     // Split on ", and/or ", ", and ", " and ", or ", " — longest-match-first
     // ordering prevents ", and " from consuming the prefix of ", and/or ".
@@ -5163,7 +5163,7 @@ mod tests {
             matches!(
                 &def.mode,
                 StaticMode::CantBeBlockedBy { filter }
-                if matches!(filter, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::PowerLE { value: 2 }))
+                if matches!(filter, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::PowerLE { value: QuantityExpr::Fixed { value: 2 } }))
             ),
             "Expected CantBeBlockedBy with PowerLE(2), got {:?}",
             def.mode
@@ -5181,7 +5181,7 @@ mod tests {
             matches!(
                 &def.mode,
                 StaticMode::CantBeBlockedBy { filter }
-                if matches!(filter, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::PowerGE { value: 3 }))
+                if matches!(filter, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::PowerGE { value: QuantityExpr::Fixed { value: 3 } }))
             ),
             "Expected CantBeBlockedBy with PowerGE(3), got {:?}",
             def.mode
@@ -6122,7 +6122,7 @@ mod tests {
             Some(TargetFilter::Typed(TypedFilter::creature().properties(
                 vec![FilterProp::CountersGE {
                     counter_type: crate::types::counter::CounterType::Generic("ice".to_string()),
-                    count: 1,
+                    count: QuantityExpr::Fixed { value: 1 },
                 },]
             )))
         );
@@ -6703,7 +6703,7 @@ mod tests {
                     p,
                     FilterProp::CountersGE {
                         counter_type: crate::types::counter::CounterType::Plus1Plus1,
-                        count: 1,
+                        count: QuantityExpr::Fixed { value: 1 },
                     }
                 )));
             }
@@ -6732,7 +6732,7 @@ mod tests {
                     p,
                     FilterProp::CountersGE {
                         counter_type: crate::types::counter::CounterType::Plus1Plus1,
-                        count: 1,
+                        count: QuantityExpr::Fixed { value: 1 },
                     }
                 )));
             }
@@ -6760,7 +6760,7 @@ mod tests {
                     p,
                     FilterProp::CountersGE {
                         counter_type: crate::types::counter::CounterType::Plus1Plus1,
-                        count: 1,
+                        count: QuantityExpr::Fixed { value: 1 },
                     }
                 )));
             }

@@ -1,4 +1,4 @@
-use engine::game::filter::matches_target_filter;
+use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::players;
 use engine::types::ability::{Effect, TargetFilter};
 use engine::types::actions::GameAction;
@@ -82,7 +82,12 @@ pub(crate) fn disruption_window_score(
                 continue;
             };
             let legal_hit = card_filter.is_none_or(|filter| {
-                matches_target_filter(state, *object_id, filter, facts.object.id)
+                matches_target_filter(
+                    state,
+                    *object_id,
+                    filter,
+                    &FilterContext::from_source(state, facts.object.id),
+                )
             });
             if legal_hit {
                 visible_legal_hits += 1;

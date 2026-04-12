@@ -374,6 +374,7 @@ mod tests {
                     PlayerId(1),
                 )),
                 casting_variant: engine::types::game_state::CastingVariant::Normal,
+                actual_mana_spent: 0,
             },
         });
         let card_id = add_spell_to_hand(
@@ -629,7 +630,7 @@ mod tests {
             CoreType::Sorcery,
             vec![make_ability(Effect::SearchLibrary {
                 filter: TargetFilter::Any,
-                count: 1,
+                count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
                 reveal: false,
                 target_player: None,
             })],

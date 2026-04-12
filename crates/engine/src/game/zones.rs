@@ -328,7 +328,12 @@ fn is_blocked_from_entering_battlefield(state: &GameState, obj: &GameObject) -> 
             // The affected filter encodes both card type and zone restrictions
             // (e.g., Creature + InAnyZone[Graveyard, Library]).
             if let Some(ref filter) = def.affected {
-                if super::filter::matches_target_filter(state, object_id, filter, bf_id) {
+                if super::filter::matches_target_filter(
+                    state,
+                    object_id,
+                    filter,
+                    &super::filter::FilterContext::from_source(state, bf_id),
+                ) {
                     return true;
                 }
             }

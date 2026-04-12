@@ -39,20 +39,18 @@ pub fn resolve(
                 .get(id)
                 .cloned()
                 .unwrap_or_default(),
-            other => state
-                .objects
-                .keys()
-                .copied()
-                .filter(|obj_id| {
-                    crate::game::filter::matches_target_filter_controlled(
-                        state,
-                        *obj_id,
-                        other,
-                        ability.source_id,
-                        ability.controller,
-                    )
-                })
-                .collect(),
+            other => {
+                // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+                let ctx = crate::game::filter::FilterContext::from_ability(ability);
+                state
+                    .objects
+                    .keys()
+                    .copied()
+                    .filter(|obj_id| {
+                        crate::game::filter::matches_target_filter(state, *obj_id, other, &ctx)
+                    })
+                    .collect()
+            }
         }
     } else {
         ability

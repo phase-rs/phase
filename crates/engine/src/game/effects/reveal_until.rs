@@ -1,6 +1,6 @@
 use rand::seq::SliceRandom;
 
-use crate::game::filter::matches_target_filter;
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::zones;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
@@ -41,12 +41,16 @@ pub fn resolve(
     let mut revealed_misses: Vec<ObjectId> = Vec::new();
     let mut hit_card: Option<ObjectId> = None;
 
+    // CR 107.3a + CR 601.2b: Evaluate the filter with the ability in scope so
+    // dynamic thresholds (e.g. `Variable("X")`) resolve correctly.
+    let ctx = FilterContext::from_ability(ability);
+
     // CR 701.20a: Reveal cards one at a time.
     for &card_id in &library {
         // Mark as revealed (CR 701.20b: card stays in library zone during reveal).
         state.revealed_cards.insert(card_id);
 
-        if matches_target_filter(state, card_id, filter, ability.source_id) {
+        if matches_target_filter(state, card_id, filter, &ctx) {
             hit_card = Some(card_id);
             break;
         } else {

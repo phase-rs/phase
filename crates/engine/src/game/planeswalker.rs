@@ -437,6 +437,7 @@ mod tests {
                 card_id: CardId(99),
                 ability: None,
                 casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
             },
         });
         let result = handle_activate_loyalty(&mut state, PlayerId(0), pw, 0, &mut events);

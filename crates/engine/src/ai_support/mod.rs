@@ -1,5 +1,6 @@
 mod candidates;
 mod context;
+mod copy;
 
 use std::collections::{HashMap, HashSet};
 
@@ -17,6 +18,10 @@ pub use candidates::{
     CandidateAction, TacticalClass,
 };
 pub use context::{build_decision_context, AiDecisionContext};
+pub use copy::{
+    copy_effect_adds_flying, copy_target_filter, copy_target_mana_value_ceiling,
+    project_copy_mana_spent_for_x,
+};
 
 pub fn validated_candidate_actions(state: &GameState) -> Vec<CandidateAction> {
     candidate_actions(state)
@@ -611,6 +616,8 @@ mod tests {
                 Effect::BecomeCopy {
                     target: TargetFilter::Any,
                     duration: Some(crate::types::ability::Duration::UntilEndOfTurn),
+                    mana_value_limit: None,
+                    additional_modifications: Vec::new(),
                 },
             ));
         }

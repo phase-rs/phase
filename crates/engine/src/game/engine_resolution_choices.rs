@@ -347,7 +347,12 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
             if !matches!(filter, crate::types::ability::TargetFilter::Any)
-                && !super::filter::matches_target_filter(state, chosen_id, &filter, chosen_id)
+                && !super::filter::matches_target_filter(
+                    state,
+                    chosen_id,
+                    &filter,
+                    &super::filter::FilterContext::from_source(state, chosen_id),
+                )
             {
                 return Err(EngineError::InvalidAction(
                     "Selected card does not match the required filter".to_string(),
@@ -572,7 +577,10 @@ pub(super) fn handle_resolution_choice(
                 chosen.len() == 1
                     && chosen.iter().all(|&card_id| {
                         crate::game::filter::matches_target_filter(
-                            state, card_id, filter, source_id,
+                            state,
+                            card_id,
+                            filter,
+                            &crate::game::filter::FilterContext::from_source(state, source_id),
                         )
                     })
             });

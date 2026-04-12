@@ -1,5 +1,5 @@
 use crate::game::devotion::count_devotion;
-use crate::game::filter::matches_target_filter;
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::printed_cards::{apply_copiable_values, intrinsic_copiable_values};
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
@@ -138,10 +138,13 @@ pub(crate) fn evaluate_condition(
             count_devotion(state, controller, colors) >= *threshold
         }
         StaticCondition::IsPresent { filter } => match filter {
-            Some(f) => state
-                .objects
-                .keys()
-                .any(|&id| matches_target_filter(state, id, f, source_id)),
+            Some(f) => {
+                let ctx = FilterContext::from_source(state, source_id);
+                state
+                    .objects
+                    .keys()
+                    .any(|&id| matches_target_filter(state, id, f, &ctx))
+            }
             None => true,
         },
         StaticCondition::ChosenColorIs { color } => state
@@ -237,9 +240,12 @@ pub(crate) fn evaluate_condition(
             .get(&source_id)
             .is_some_and(|obj| obj.zone == *zone),
         // CR 608.2c: Check if the source object matches a type filter (leveler gates).
-        StaticCondition::SourceMatchesFilter { filter } => {
-            crate::game::filter::matches_target_filter(state, source_id, filter, source_id)
-        }
+        StaticCondition::SourceMatchesFilter { filter } => matches_target_filter(
+            state,
+            source_id,
+            filter,
+            &FilterContext::from_source(state, source_id),
+        ),
         // CR 509.1b: True when the defending player controls a permanent matching the filter.
         // Only meaningful during combat — finds the defending player from the source's
         // attacker info in the CombatState.
@@ -254,11 +260,10 @@ pub(crate) fn evaluate_condition(
                     .map(|a| a.defending_player)
             })
             .is_some_and(|defending| {
+                let ctx = FilterContext::from_source(state, source_id);
                 state.objects.values().any(|obj| {
                     obj.controller == defending
-                        && crate::game::filter::matches_target_filter(
-                            state, obj.id, filter, source_id,
-                        )
+                        && matches_target_filter(state, obj.id, filter, &ctx)
                 })
             }),
         // CR 506.5: True when the source creature is the only attacking creature.
@@ -779,9 +784,10 @@ fn order_by_timestamp(effects: &[&ActiveContinuousEffect]) -> Vec<ActiveContinuo
 fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffect) {
     // Find affected objects
     let bf_ids: Vec<ObjectId> = state.battlefield.clone();
+    let ctx = FilterContext::from_source(state, effect.source_id);
     let affected_ids: Vec<ObjectId> = bf_ids
         .iter()
-        .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, effect.source_id))
+        .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, &ctx))
         .copied()
         .collect();
 
@@ -1034,7 +1040,12 @@ pub(crate) fn compute_current_copiable_values(
         gather_active_effects_for_layer(state, Layer::Copy)
             .into_iter()
             .filter(|effect| {
-                matches_target_filter(state, object_id, &effect.affected_filter, effect.source_id)
+                matches_target_filter(
+                    state,
+                    object_id,
+                    &effect.affected_filter,
+                    &FilterContext::from_source(state, effect.source_id),
+                )
             })
             .collect();
     copy_effects = order_active_continuous_effects(Layer::Copy, &copy_effects, state);

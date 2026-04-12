@@ -1,4 +1,4 @@
-use crate::game::filter::matches_target_filter;
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
@@ -73,12 +73,14 @@ pub fn resolve(
         card_names,
     });
 
-    // Filter to only eligible cards for the choice (e.g. "nonland card")
+    // Filter to only eligible cards for the choice (e.g. "nonland card").
+    // CR 107.3a + CR 601.2b: ability-context evaluation for dynamic thresholds.
     let eligible: Vec<_> = if matches!(card_filter, TargetFilter::Any) {
         hand
     } else {
+        let ctx = FilterContext::from_ability(ability);
         hand.into_iter()
-            .filter(|&id| matches_target_filter(state, id, &card_filter, ability.source_id))
+            .filter(|&id| matches_target_filter(state, id, &card_filter, &ctx))
             .collect()
     };
 

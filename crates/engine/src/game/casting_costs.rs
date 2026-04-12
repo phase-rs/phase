@@ -894,7 +894,10 @@ fn pay_additional_cost(
                                 state,
                                 obj.id,
                                 filter,
-                                pending.object_id,
+                                &super::filter::FilterContext::from_source(
+                                    state,
+                                    pending.object_id,
+                                ),
                             )
                     })
                 })
@@ -1142,6 +1145,7 @@ pub(super) fn finalize_cast(
                 card_id,
                 ability: stack_ability,
                 casting_variant,
+                actual_mana_spent,
             },
         },
         events,

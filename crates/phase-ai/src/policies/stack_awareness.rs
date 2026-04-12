@@ -329,6 +329,7 @@ mod tests {
                 ability: Some(ability),
                 card_id: CardId(999),
                 casting_variant: Default::default(),
+                actual_mana_spent: 0,
             },
         });
         state.next_object_id += 1;

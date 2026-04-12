@@ -162,7 +162,10 @@ fn assess_pre_cast(ctx: &PolicyContext<'_>) -> GateDecision {
                     ability_def.condition
                 {
                     if !engine::game::filter::matches_target_filter(
-                        ctx.state, *source_id, filter, *source_id,
+                        ctx.state,
+                        *source_id,
+                        filter,
+                        &engine::game::filter::FilterContext::from_source(ctx.state, *source_id),
                     ) {
                         return GateDecision::Reject;
                     }
@@ -645,6 +648,7 @@ mod tests {
                 )),
                 card_id: CardId(201),
                 casting_variant: Default::default(),
+                actual_mana_spent: 0,
             },
         });
         let decision = AiDecisionContext {

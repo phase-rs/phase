@@ -464,6 +464,8 @@ pub enum WaitingFor {
         source_id: ObjectId,
         /// Legal permanents on the battlefield that can be copied.
         valid_targets: Vec<ObjectId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_mana_value: Option<u32>,
     },
     /// CR 701.44d: Player chooses which of their remaining permanents explores next.
     ExploreChoice {
@@ -1227,6 +1229,8 @@ pub enum StackEntryKind {
         /// exile permissions, delayed triggers).
         #[serde(default)]
         casting_variant: CastingVariant,
+        #[serde(default)]
+        actual_mana_spent: u32,
     },
     ActivatedAbility {
         source_id: ObjectId,
@@ -1683,6 +1687,8 @@ pub struct PendingSpellResolution {
     pub casting_variant: CastingVariant,
     pub cast_from_zone: Option<crate::types::zones::Zone>,
     pub spell_targets: Vec<crate::types::ability::TargetRef>,
+    #[serde(default)]
+    pub actual_mana_spent: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2278,6 +2284,7 @@ mod tests {
                 card_id: CardId(100),
                 ability: None,
                 casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
             },
         };
         assert_eq!(entry.id, ObjectId(1));

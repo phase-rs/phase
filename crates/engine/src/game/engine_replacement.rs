@@ -1,3 +1,4 @@
+use crate::ai_support::copy_target_mana_value_ceiling;
 use crate::types::ability::{AbilityDefinition, Effect, ResolvedAbility, TargetFilter, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -17,6 +18,7 @@ pub(super) fn handle_replacement_choice(
     match super::replacement::continue_replacement(state, index, events) {
         super::replacement::ReplacementResult::Execute(event) => {
             let mut zone_change_object_id = None;
+            let mut enters_battlefield = false;
             if let crate::types::proposed_event::ProposedEvent::ZoneChange {
                 object_id,
                 to,
@@ -70,16 +72,8 @@ pub(super) fn handle_replacement_choice(
                 if to == Zone::Battlefield || from == Zone::Battlefield {
                     state.layers_dirty = true;
                 }
+                enters_battlefield = to == Zone::Battlefield;
                 zone_change_object_id = Some(object_id);
-
-                // CR 608.3: Complete post-resolution work for pending spell resolution.
-                // Always consume pending_spell_resolution to prevent stale context leaking
-                // when a replacement redirects the destination away from Battlefield.
-                if let Some(ctx) = state.pending_spell_resolution.take() {
-                    if to == Zone::Battlefield {
-                        apply_pending_spell_resolution(state, &ctx);
-                    }
-                }
             }
 
             let mut waiting_for = WaitingFor::Priority {
@@ -87,10 +81,22 @@ pub(super) fn handle_replacement_choice(
             };
             state.waiting_for = waiting_for.clone();
 
+            let mut replacement_ctx = None;
+            if let Some(ctx) = state.pending_spell_resolution.take() {
+                if enters_battlefield {
+                    apply_pending_spell_resolution(state, &ctx);
+                }
+                replacement_ctx = Some(ctx);
+            }
+
             if let Some(effect_def) = state.post_replacement_effect.take() {
-                if let Some(next_waiting_for) =
-                    apply_post_replacement_effect(state, &effect_def, zone_change_object_id, events)
-                {
+                if let Some(next_waiting_for) = apply_post_replacement_effect(
+                    state,
+                    &effect_def,
+                    zone_change_object_id,
+                    replacement_ctx.as_ref(),
+                    events,
+                ) {
                     waiting_for = next_waiting_for;
                 }
             }
@@ -130,6 +136,7 @@ pub(super) fn handle_copy_target_choice(
         player,
         source_id,
         valid_targets,
+        ..
     } = waiting_for
     else {
         return Err(EngineError::InvalidAction(
@@ -146,15 +153,28 @@ pub(super) fn handle_copy_target_choice(
         }
     };
 
-    let ability = ResolvedAbility::new(
-        Effect::BecomeCopy {
-            target: TargetFilter::Any,
-            duration: None,
-        },
-        vec![TargetRef::Object(target_id)],
-        source_id,
-        player,
-    );
+    let ability = copy_effect_for_source(state, source_id)
+        .map(|effect_def| {
+            resolved_ability_from_definition(
+                effect_def,
+                source_id,
+                player,
+                vec![TargetRef::Object(target_id)],
+            )
+        })
+        .unwrap_or_else(|| {
+            ResolvedAbility::new(
+                Effect::BecomeCopy {
+                    target: TargetFilter::Any,
+                    duration: None,
+                    mana_value_limit: None,
+                    additional_modifications: Vec::new(),
+                },
+                vec![TargetRef::Object(target_id)],
+                source_id,
+                player,
+            )
+        });
     let _ = effects::resolve_ability_chain(state, &ability, events, 0);
     state.layers_dirty = true;
     if let Some(cont) = state.pending_continuation.take() {
@@ -165,6 +185,16 @@ pub(super) fn handle_copy_target_choice(
     })
 }
 
+fn copy_effect_for_source(state: &GameState, source_id: ObjectId) -> Option<&AbilityDefinition> {
+    state
+        .objects
+        .get(&source_id)?
+        .replacement_definitions
+        .iter()
+        .filter_map(|replacement| replacement.execute.as_deref())
+        .find(|effect_def| matches!(&*effect_def.effect, Effect::BecomeCopy { .. }))
+}
+
 /// Apply a post-replacement side effect after a zone change has been executed.
 /// Used by Optional replacements (e.g., shock lands: pay life on accept, tap on decline).
 /// CR 707.9: For "enter as a copy" replacements, sets up CopyTargetChoice instead of
@@ -173,6 +203,7 @@ pub(super) fn apply_post_replacement_effect(
     state: &mut GameState,
     effect_def: &AbilityDefinition,
     object_id: Option<ObjectId>,
+    spell_resolution: Option<&crate::types::game_state::PendingSpellResolution>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
     let (source_id, controller) = object_id
@@ -185,7 +216,9 @@ pub(super) fn apply_post_replacement_effect(
         .unwrap_or((ObjectId(0), state.active_player));
 
     if let Effect::BecomeCopy { ref target, .. } = *effect_def.effect {
-        let valid_targets = find_copy_targets(state, target, source_id, controller);
+        let max_mana_value = spell_resolution
+            .and_then(|ctx| copy_target_mana_value_ceiling(ctx.actual_mana_spent, effect_def));
+        let valid_targets = find_copy_targets(state, target, source_id, controller, max_mana_value);
         if valid_targets.is_empty() {
             return None;
         }
@@ -193,6 +226,7 @@ pub(super) fn apply_post_replacement_effect(
             player: controller,
             source_id,
             valid_targets,
+            max_mana_value,
         });
     }
 
@@ -273,16 +307,17 @@ fn find_copy_targets(
     filter: &TargetFilter,
     source_id: ObjectId,
     controller: PlayerId,
+    max_mana_value: Option<u32>,
 ) -> Vec<ObjectId> {
+    let ctx = super::filter::FilterContext::from_source_with_controller(source_id, controller);
     state
         .objects
         .iter()
         .filter(|(id, obj)| {
             obj.zone == Zone::Battlefield
                 && **id != source_id
-                && super::filter::matches_target_filter_controlled(
-                    state, **id, filter, source_id, controller,
-                )
+                && max_mana_value.is_none_or(|max| obj.mana_cost.mana_value() <= max)
+                && super::filter::matches_target_filter(state, **id, filter, &ctx)
         })
         .map(|(id, _)| *id)
         .collect()

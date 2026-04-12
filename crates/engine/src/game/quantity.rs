@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use crate::game::filter::{
-    matches_target_filter_controlled, spell_record_matches_filter, type_filter_matches,
+    matches_target_filter, spell_record_matches_filter, type_filter_matches, FilterContext,
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
@@ -33,7 +33,9 @@ pub fn resolve_quantity(
 ) -> i32 {
     match expr {
         QuantityExpr::Fixed { value } => *value,
-        QuantityExpr::Ref { qty } => resolve_ref(state, qty, controller, source_id, &[], None),
+        QuantityExpr::Ref { qty } => {
+            resolve_ref(state, qty, controller, source_id, &[], None, None)
+        }
         QuantityExpr::HalfRounded { inner, rounding } => {
             let base = resolve_quantity(state, inner, controller, source_id);
             half_rounded(base, *rounding)
@@ -64,6 +66,7 @@ pub fn resolve_quantity_with_targets(
             ability.source_id,
             &ability.targets,
             ability.chosen_x,
+            Some(ability),
         ),
         QuantityExpr::HalfRounded { inner, rounding } => {
             let base = resolve_quantity_with_targets(state, inner, ability);
@@ -92,7 +95,9 @@ pub(crate) fn resolve_quantity_scoped(
 ) -> i32 {
     match expr {
         QuantityExpr::Fixed { value } => *value,
-        QuantityExpr::Ref { qty } => resolve_ref(state, qty, scope_player, source_id, &[], None),
+        QuantityExpr::Ref { qty } => {
+            resolve_ref(state, qty, scope_player, source_id, &[], None, None)
+        }
         QuantityExpr::HalfRounded { inner, rounding } => {
             let base = resolve_quantity_scoped(state, inner, source_id, scope_player);
             half_rounded(base, *rounding)
@@ -121,7 +126,16 @@ fn resolve_ref(
     source_id: ObjectId,
     targets: &[TargetRef],
     chosen_x: Option<u32>,
+    ability: Option<&ResolvedAbility>,
 ) -> i32 {
+    // Build a FilterContext that preserves ability scope (for `chosen_x`/targets
+    // in nested filter thresholds) when available, falling back to the controller
+    // override used by `resolve_quantity_scoped`. CR 107.2 governs the fallback
+    // path when no ability is in scope (X → 0).
+    let filter_ctx = match ability {
+        Some(a) => FilterContext::from_ability(a),
+        None => FilterContext::from_source_with_controller(source_id, controller),
+    };
     let player = state.players.iter().find(|p| p.id == controller);
     match qty {
         QuantityRef::HandSize => player.map_or(0, |p| p.hand.len() as i32),
@@ -143,9 +157,7 @@ fn resolve_ref(
                 .unwrap_or(crate::types::zones::Zone::Battlefield);
             crate::game::targeting::zone_object_ids(state, zone)
                 .iter()
-                .filter(|&&id| {
-                    matches_target_filter_controlled(state, id, filter, source_id, controller)
-                })
+                .filter(|&&id| matches_target_filter(state, id, filter, &filter_ctx))
                 .count() as i32
         }
         QuantityRef::PlayerCount { filter } => resolve_player_count(state, filter, controller),
@@ -157,12 +169,13 @@ fn resolve_ref(
                 obj.counters.get(&ct).copied().unwrap_or(0) as i32
             })
             .unwrap_or(0),
-        // CR 107.1b + CR 601.2f: "X" resolves exclusively to the value chosen at
-        // cast time, carried on the resolving ability's `chosen_x`. Any path that
-        // reaches this branch without `chosen_x` set indicates a bug (missed
-        // propagation, non-ability-context resolver, or a casting flow that
-        // bypassed `ChooseXValue`) — returning 0 surfaces it visibly rather than
-        // masking via `last_named_choice`.
+        // CR 107.3a + CR 601.2b + CR 107.3i: "X" resolves exclusively to the value
+        // chosen at cast time, carried on the resolving ability's `chosen_x`
+        // (CR 601.2b announcement; CR 107.3i makes all instances share the value).
+        // Any path that reaches this branch without `chosen_x` set indicates a
+        // bug (missed propagation, non-ability-context resolver, or a casting
+        // flow that bypassed `ChooseXValue`) — returning 0 surfaces it visibly
+        // rather than masking via `last_named_choice`.
         //
         // Other named variables (set by `NamedChoice` handlers for things like
         // "chosen number") keep their single-responsibility path through
@@ -208,7 +221,7 @@ fn resolve_ref(
                 .unwrap_or(crate::types::zones::Zone::Battlefield);
             let zone_ids = crate::game::targeting::zone_object_ids(state, zone);
             let values = zone_ids.iter().filter_map(|&id| {
-                if matches_target_filter_controlled(state, id, filter, source_id, controller) {
+                if matches_target_filter(state, id, filter, &filter_ctx) {
                     state.objects.get(&id).map(|obj| match property {
                         ObjectProperty::Power => obj.power.unwrap_or(0),
                         ObjectProperty::Toughness => obj.toughness.unwrap_or(0),
@@ -480,7 +493,7 @@ fn resolve_ref(
             .filter(|o| {
                 o.zone == crate::types::zones::Zone::Battlefield
                     && o.entered_battlefield_turn == Some(state.turn_number)
-                    && crate::game::filter::matches_target_filter(state, o.id, filter, source_id)
+                    && matches_target_filter(state, o.id, filter, &filter_ctx)
             })
             .count() as i32,
         // CR 710.2: Crimes committed this turn — uses tracked counter on player.
@@ -1355,5 +1368,56 @@ mod tests {
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
             -5
         );
+    }
+
+    /// CR 107.3a + CR 601.2b: `ObjectCount` with an inner filter that references X
+    /// must resolve X against the resolving ability's `chosen_x`. Regression for
+    /// the latent bug where `resolve_ref` passed bare context to the filter matcher
+    /// (X → 0) — only reachable through `resolve_quantity_with_targets`.
+    #[test]
+    fn object_count_filter_resolves_x_against_chosen_x() {
+        use crate::types::ability::{QuantityExpr, QuantityRef, ResolvedAbility};
+        use crate::types::mana::ManaCost;
+        let mut state = GameState::new_two_player(42);
+        // Build three on-battlefield creatures of varying CMCs.
+        for (i, cmc) in [(1u64, 1u32), (2, 3), (3, 7)].into_iter() {
+            let id = create_object(
+                &mut state,
+                CardId(i),
+                PlayerId(0),
+                format!("CMC {}", cmc),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::generic(cmc);
+        }
+
+        let inner_filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::CmcLE {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            }]));
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: inner_filter,
+            },
+        };
+        let mut ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: String::new(),
+                description: None,
+            },
+            vec![],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        ability.chosen_x = Some(3);
+
+        // With X=3, only CMC-1 and CMC-3 match — count is 2.
+        assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 2);
     }
 }

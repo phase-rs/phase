@@ -1,7 +1,7 @@
 use rand::seq::SliceRandom;
 
 use crate::game::effects::change_zone;
-use crate::game::filter::matches_target_filter_controlled;
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zones;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
@@ -37,19 +37,13 @@ pub fn resolve(
         .find(|p| p.id == ability.controller)
         .ok_or(EffectError::PlayerNotFound)?;
 
-    // Collect library objects that match the filter
+    // Collect library objects that match the filter.
+    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+    let ctx = FilterContext::from_ability(ability);
     let mut matching: Vec<_> = player
         .library
         .iter()
-        .filter(|&&obj_id| {
-            matches_target_filter_controlled(
-                state,
-                obj_id,
-                &filter,
-                ability.source_id,
-                ability.controller,
-            )
-        })
+        .filter(|&&obj_id| matches_target_filter(state, obj_id, &filter, &ctx))
         .copied()
         .collect();
 

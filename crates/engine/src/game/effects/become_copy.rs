@@ -12,12 +12,22 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let duration = match &ability.effect {
-        Effect::BecomeCopy { duration, .. } => duration
-            .clone()
-            .or(ability.duration.clone())
-            .unwrap_or(Duration::Permanent),
-        _ => ability.duration.clone().unwrap_or(Duration::Permanent),
+    let (duration, additional_modifications) = match &ability.effect {
+        Effect::BecomeCopy {
+            duration,
+            additional_modifications,
+            ..
+        } => (
+            duration
+                .clone()
+                .or(ability.duration.clone())
+                .unwrap_or(Duration::Permanent),
+            additional_modifications.clone(),
+        ),
+        _ => (
+            ability.duration.clone().unwrap_or(Duration::Permanent),
+            Vec::new(),
+        ),
     };
 
     let target_id = ability
@@ -32,6 +42,11 @@ pub fn resolve(
     let values = compute_current_copiable_values(state, target_id)
         .ok_or(EffectError::ObjectNotFound(target_id))?;
 
+    let mut modifications = vec![ContinuousModification::CopyValues {
+        values: Box::new(values),
+    }];
+    modifications.extend(additional_modifications);
+
     state.add_transient_continuous_effect(
         ability.source_id,
         ability.controller,
@@ -39,9 +54,7 @@ pub fn resolve(
         TargetFilter::SpecificObject {
             id: ability.source_id,
         },
-        vec![ContinuousModification::CopyValues {
-            values: Box::new(values),
-        }],
+        modifications,
         None,
     );
 
@@ -106,6 +119,8 @@ mod tests {
             Effect::BecomeCopy {
                 target: TargetFilter::Any,
                 duration,
+                mana_value_limit: None,
+                additional_modifications: Vec::new(),
             },
             vec![TargetRef::Object(target_id)],
             source_id,
@@ -160,6 +175,8 @@ mod tests {
             Effect::BecomeCopy {
                 target: TargetFilter::Any,
                 duration: None,
+                mana_value_limit: None,
+                additional_modifications: Vec::new(),
             },
             vec![TargetRef::Object(target_id)],
             source_id,
@@ -224,6 +241,8 @@ mod tests {
             Effect::BecomeCopy {
                 target: TargetFilter::Any,
                 duration: Some(Duration::UntilEndOfTurn),
+                mana_value_limit: None,
+                additional_modifications: Vec::new(),
             },
             vec![TargetRef::Object(target_id)],
             source_id,
@@ -264,6 +283,8 @@ mod tests {
             Effect::BecomeCopy {
                 target: TargetFilter::Any,
                 duration: None,
+                mana_value_limit: None,
+                additional_modifications: Vec::new(),
             },
             vec![TargetRef::Object(target_id)],
             source_id,
@@ -277,6 +298,77 @@ mod tests {
         move_to_zone(&mut state, source_id, Zone::Battlefield, &mut events);
         evaluate_layers(&mut state);
         assert_eq!(state.objects[&source_id].name, "Copy Source");
+    }
+
+    #[test]
+    fn become_copy_preserves_additional_modifications() {
+        let mut state = GameState::new_two_player(42);
+        let target_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Target Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let target = state.objects.get_mut(&target_id).unwrap();
+            target.base_name = "Target Bear".to_string();
+            target.base_power = Some(2);
+            target.base_toughness = Some(2);
+            target.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Bear".to_string()],
+            };
+        }
+        let source_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Mockingbird".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_name = "Mockingbird".to_string();
+            source.base_power = Some(1);
+            source.base_toughness = Some(1);
+            source.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Bird".to_string()],
+            };
+            source.base_keywords = vec![Keyword::Flying];
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![
+                    ContinuousModification::AddSubtype {
+                        subtype: "Bird".to_string(),
+                    },
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    },
+                ],
+            },
+            vec![TargetRef::Object(target_id)],
+            source_id,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        let source = state.objects.get(&source_id).unwrap();
+        assert_eq!(source.name, "Target Bear");
+        assert!(source.card_types.subtypes.contains(&"Bear".to_string()));
+        assert!(source.card_types.subtypes.contains(&"Bird".to_string()));
+        assert!(source.keywords.contains(&Keyword::Flying));
     }
 
     // ── Plan test 3/8: Chained copies ─────────────────────────────────────

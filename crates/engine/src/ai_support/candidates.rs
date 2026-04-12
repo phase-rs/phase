@@ -662,10 +662,10 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             // Guard: skip when count == 1, since combinations already covers all singles.
             if *count > 1 && !*up_to {
                 if let Some(filter) = unless_filter {
+                    let ctx = crate::game::filter::FilterContext::from_source(state, *source_id);
                     for &card_id in cards {
-                        if crate::game::filter::matches_target_filter(
-                            state, card_id, filter, *source_id,
-                        ) {
+                        if crate::game::filter::matches_target_filter(state, card_id, filter, &ctx)
+                        {
                             actions.push(candidate(
                                 GameAction::SelectCards {
                                     cards: vec![card_id],

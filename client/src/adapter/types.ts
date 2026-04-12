@@ -352,7 +352,7 @@ export interface ResolvedAbility {
 // ── Stack ────────────────────────────────────────────────────────────────
 
 export type StackEntryKind =
-  | { type: "Spell"; data: { card_id: CardId; ability?: ResolvedAbility } }
+  | { type: "Spell"; data: { card_id: CardId; ability?: ResolvedAbility; actual_mana_spent?: number } }
   | { type: "ActivatedAbility"; data: { source_id: ObjectId; ability: ResolvedAbility } }
   | { type: "TriggeredAbility"; data: { source_id: ObjectId; ability: ResolvedAbility; description?: string } };
 
@@ -424,7 +424,7 @@ export type WaitingFor =
   | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]> } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
   | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidate_descriptions?: string[] } }
-  | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[] } }
+  | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null } }
   | { type: "ExploreChoice"; data: { player: PlayerId; source_id: ObjectId; choosable: ObjectId[]; remaining: ObjectId[]; pending_effect: unknown } }
   | { type: "EquipTarget"; data: { player: PlayerId; equipment_id: ObjectId; valid_targets: ObjectId[] } }
   | { type: "CrewVehicle"; data: { player: PlayerId; vehicle_id: ObjectId; crew_power: number; eligible_creatures: ObjectId[] } }

@@ -885,7 +885,7 @@ fn search_basic_land(source_id: ObjectId, controller: PlayerId) -> ResolvedAbili
                     value: Supertype::Basic,
                 }],
             }),
-            count: 1,
+            count: fixed(1),
             reveal: true,
             target_player: None,
         },
@@ -1405,7 +1405,7 @@ mod tests {
             matches!(
                 ability.effect,
                 Effect::SearchLibrary {
-                    count: 1,
+                    count: QuantityExpr::Fixed { value: 1 },
                     reveal: true,
                     ..
                 }

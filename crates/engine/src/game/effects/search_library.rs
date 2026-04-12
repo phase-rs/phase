@@ -1,4 +1,5 @@
-use crate::game::filter::matches_target_filter_controlled;
+use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
@@ -12,6 +13,8 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 107.3a + CR 601.2b: Resolve the count expression against the ability so
+    // `Variable("X")` picks up the caster's announced X. Fixed counts are unaffected.
     let (filter, count, reveal, has_target_player) = match &ability.effect {
         Effect::SearchLibrary {
             filter,
@@ -20,7 +23,7 @@ pub fn resolve(
             target_player,
         } => (
             filter.clone(),
-            *count as usize,
+            resolve_quantity_with_targets(state, count, ability).max(0) as usize,
             *reveal,
             target_player.is_some(),
         ),
@@ -58,19 +61,14 @@ pub fn resolve(
         .players_who_searched_library_this_turn
         .insert(ability.controller);
 
-    // Collect library objects that match the filter
+    // CR 107.3a + CR 601.2b: Evaluate the filter with the resolving ability
+    // in scope so dynamic thresholds (e.g. `CmcLE { value: Variable("X") }`
+    // for Nature's Rhythm) resolve against the caster's announced X.
+    let filter_ctx = FilterContext::from_ability(ability);
     let matching: Vec<_> = player
         .library
         .iter()
-        .filter(|&&obj_id| {
-            matches_target_filter_controlled(
-                state,
-                obj_id,
-                &filter,
-                ability.source_id,
-                ability.controller,
-            )
-        })
+        .filter(|&&obj_id| matches_target_filter(state, obj_id, &filter, &filter_ctx))
         .copied()
         .collect();
 
@@ -105,17 +103,17 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::TypedFilter;
+    use crate::types::ability::{QuantityExpr, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
-    fn make_search_ability(filter: TargetFilter, count: u32) -> ResolvedAbility {
+    fn make_search_ability(filter: TargetFilter, count: i32) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::SearchLibrary {
                 filter,
-                count,
+                count: QuantityExpr::Fixed { value: count },
                 reveal: false,
                 target_player: None,
             },
@@ -300,7 +298,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::SearchLibrary {
                 filter: TargetFilter::Typed(TypedFilter::creature()),
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 reveal: true,
                 target_player: None,
             },
@@ -314,6 +312,152 @@ mod tests {
         match &state.waiting_for {
             WaitingFor::SearchChoice { reveal, .. } => {
                 assert!(*reveal);
+            }
+            other => panic!("Expected SearchChoice, got {:?}", other),
+        }
+    }
+
+    fn add_library_creature_with_cmc(
+        state: &mut GameState,
+        card_id: u64,
+        owner: PlayerId,
+        name: &str,
+        cmc: u32,
+    ) -> ObjectId {
+        use crate::types::mana::ManaCost;
+        let id = create_object(
+            state,
+            CardId(card_id),
+            owner,
+            name.to_string(),
+            Zone::Library,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.mana_cost = ManaCost::generic(cmc);
+        id
+    }
+
+    /// CR 107.3a + CR 601.2b: Nature's Rhythm — search for a creature card with mana
+    /// value X or less. With X=4, only CMC-≤-4 creatures should be selectable,
+    /// regardless of what's in the library.
+    #[test]
+    fn natures_rhythm_x_mana_value_restricts_search_targets() {
+        use crate::types::ability::{FilterProp, QuantityExpr, QuantityRef};
+        let mut state = GameState::new_two_player(42);
+        let cmc2 = add_library_creature_with_cmc(&mut state, 1, PlayerId(0), "Small", 2);
+        let cmc4 = add_library_creature_with_cmc(&mut state, 2, PlayerId(0), "Mid", 4);
+        add_library_creature_with_cmc(&mut state, 3, PlayerId(0), "Large", 5);
+        add_library_creature_with_cmc(&mut state, 4, PlayerId(0), "Behemoth", 8);
+
+        let filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::CmcLE {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            }]));
+        let mut ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter,
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.chosen_x = Some(4);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { cards, .. } => {
+                assert_eq!(cards.len(), 2, "Expected only CMC-2 and CMC-4 creatures");
+                assert!(cards.contains(&cmc2));
+                assert!(cards.contains(&cmc4));
+            }
+            other => panic!("Expected SearchChoice, got {:?}", other),
+        }
+    }
+
+    /// CR 107.3b: X=0 restricts to CMC-0 creatures only.
+    #[test]
+    fn natures_rhythm_x_zero_restricts_to_cmc_zero_creatures() {
+        use crate::types::ability::{FilterProp, QuantityExpr, QuantityRef};
+        let mut state = GameState::new_two_player(42);
+        let zero_cmc = add_library_creature_with_cmc(&mut state, 1, PlayerId(0), "Zero", 0);
+        add_library_creature_with_cmc(&mut state, 2, PlayerId(0), "NonZero", 2);
+
+        let filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::CmcLE {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            }]));
+        let mut ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter,
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.chosen_x = Some(0);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { cards, .. } => {
+                assert_eq!(cards.len(), 1);
+                assert!(cards.contains(&zero_cmc));
+            }
+            other => panic!("Expected SearchChoice, got {:?}", other),
+        }
+    }
+
+    /// CR 107.3a: `SearchLibrary.count = Variable("X")` with `chosen_x = 3` →
+    /// `pick_count == 3`.
+    #[test]
+    fn search_library_with_x_count_picks_x_cards() {
+        use crate::types::ability::{QuantityExpr, QuantityRef};
+        let mut state = GameState::new_two_player(42);
+        for i in 0..5 {
+            add_library_creature(&mut state, 1 + i as u64, PlayerId(0), &format!("C{i}"));
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                reveal: false,
+                target_player: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.chosen_x = Some(3);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { count, .. } => {
+                assert_eq!(*count, 3);
             }
             other => panic!("Expected SearchChoice, got {:?}", other),
         }

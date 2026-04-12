@@ -1,3 +1,4 @@
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
 use crate::types::events::GameEvent;
@@ -70,19 +71,15 @@ pub fn resolve(
     }
 
     // Pre-compute selectable cards by evaluating the filter against each card.
+    // CR 107.3a + CR 601.2b: Use ability context so dynamic thresholds (e.g.
+    // `CmcLE { Variable("X") }`) resolve against the caster's announced X.
     let selectable_cards = if matches!(filter, TargetFilter::Any) {
         cards.clone()
     } else {
+        let ctx = FilterContext::from_ability(ability);
         cards
             .iter()
-            .filter(|&&card_id| {
-                crate::game::filter::matches_target_filter(
-                    state,
-                    card_id,
-                    &filter,
-                    ability.source_id,
-                )
-            })
+            .filter(|&&card_id| matches_target_filter(state, card_id, &filter, &ctx))
             .copied()
             .collect()
     };
@@ -179,5 +176,67 @@ mod tests {
         let result = resolve(&mut state, &ability, &mut events);
         assert!(result.is_ok());
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    /// CR 107.3a + CR 601.2b: Dig's filter evaluation must flow through
+    /// `FilterContext::from_ability`, so dynamic thresholds (e.g. `CmcLE { X }`)
+    /// resolve against the caster's announced `chosen_x`. Bucket-B regression test
+    /// for the filter-context migration — ensures Dig doesn't lose X resolution.
+    #[test]
+    fn dig_filter_resolves_x_against_chosen_x() {
+        use crate::types::ability::{FilterProp, QuantityExpr, QuantityRef, TypedFilter};
+        use crate::types::card_type::CoreType;
+        use crate::types::mana::ManaCost;
+        let mut state = GameState::new_two_player(42);
+        // Build three creatures of different CMCs in the library.
+        for (i, cmc) in [(1u64, 1u32), (2, 3), (3, 6)].into_iter() {
+            let id = create_object(
+                &mut state,
+                CardId(i),
+                PlayerId(0),
+                format!("CMC {}", cmc),
+                Zone::Library,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::generic(cmc);
+        }
+
+        let filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::CmcLE {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            }]));
+        let mut ability = ResolvedAbility::new(
+            Effect::Dig {
+                count: QuantityExpr::Fixed { value: 3 },
+                destination: None,
+                keep_count: Some(1),
+                up_to: false,
+                filter,
+                rest_destination: None,
+                reveal: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.chosen_x = Some(3);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::DigChoice {
+                selectable_cards, ..
+            } => {
+                // Selectable set should be exactly the CMC-1 and CMC-3 creatures.
+                assert_eq!(selectable_cards.len(), 2);
+            }
+            other => panic!("Expected DigChoice, got {:?}", other),
+        }
     }
 }

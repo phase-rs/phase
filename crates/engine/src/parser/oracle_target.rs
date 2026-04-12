@@ -17,6 +17,7 @@ use crate::types::zones::Zone;
 
 use super::oracle_nom::filter as nom_filter;
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
 use super::oracle_quantity::capitalize_first;
 use super::oracle_util::{
@@ -1485,26 +1486,19 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
     let (rest, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("with power ")
         .parse(trimmed)
         .ok()?;
-    let (rest, value) = nom_primitives::parse_number(rest).ok()?;
+    // CR 208.1 + CR 107.3a: Accept literal N or the variable X — X emits
+    // `QuantityRef::Variable { "X" }` resolved at effect time against the
+    // resolving ability's `chosen_x` via `FilterContext::from_ability`.
+    let (rest, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
     let after_num = rest.trim_start();
     let (prop, after) = if let Ok((a, _)) =
         tag::<_, _, nom_language::error::VerboseError<&str>>("or less").parse(after_num)
     {
-        (
-            FilterProp::PowerLE {
-                value: value as i32,
-            },
-            a,
-        )
+        (FilterProp::PowerLE { value }, a)
     } else if let Ok((a, _)) =
         tag::<_, _, nom_language::error::VerboseError<&str>>("or greater").parse(after_num)
     {
-        (
-            FilterProp::PowerGE {
-                value: value as i32,
-            },
-            a,
-        )
+        (FilterProp::PowerGE { value }, a)
     } else {
         return None;
     };
@@ -1591,87 +1585,91 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
         }
     }
 
-    // Static "N or less" / "N or greater"
-    let (after_num_raw, value) = nom_primitives::parse_number(rest).ok()?;
+    // Static "N or less" / "N or greater" — also accepts literal X via
+    // `parse_quantity_expr_number`, which emits `QuantityRef::Variable { "X" }`
+    // resolved at effect time against the resolving ability's `chosen_x`.
+    // CR 107.3a + CR 601.2b: X announced at cast, read at resolution.
+    let (after_num_raw, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
     let after_num = after_num_raw.trim_start();
 
     let (prop, after) = if let Ok((a, _)) =
         tag::<_, _, nom_language::error::VerboseError<&str>>("or greater").parse(after_num)
     {
-        (
-            FilterProp::CmcGE {
-                value: QuantityExpr::Fixed {
-                    value: value as i32,
-                },
-            },
-            a,
-        )
+        (FilterProp::CmcGE { value }, a)
     } else if let Ok((a, _)) =
         tag::<_, _, nom_language::error::VerboseError<&str>>("or less").parse(after_num)
     {
-        (
-            FilterProp::CmcLE {
-                value: QuantityExpr::Fixed {
-                    value: value as i32,
-                },
-            },
-            a,
-        )
+        (FilterProp::CmcLE { value }, a)
     } else {
         // CR 202.3: Exact mana value match — "with mana value N" (no "or less"/"or greater").
-        (
-            FilterProp::CmcEQ {
-                value: QuantityExpr::Fixed {
-                    value: value as i32,
-                },
-            },
-            after_num,
-        )
+        (FilterProp::CmcEQ { value }, after_num)
     };
     Some((prop, text.len() - after.len()))
 }
 
-/// Parse "with [counter] counter(s) on it/them".
+/// Parse "with [count] [counter] counter(s) on it/them" using pure nom combinators.
 /// Returns (FilterProp, bytes consumed from the original text).
+///
+/// Grammar: `"with " <count> <counter_type> (" counter" | " counters") " on " ("it" | "them")`
+/// where `<count>` is either an article ("a"/"an", implying 1) or a quantity
+/// expression (literal N or variable X). Supports both "with a stun counter on it"
+/// (fixed 1) and "with X +1/+1 counters on it" (dynamic — resolves against
+/// `chosen_x` via `FilterContext::from_ability`).
+///
+/// CR 107.3a + CR 601.2b: X counts resolve at effect time against
+/// `ResolvedAbility::chosen_x` via `FilterContext::from_ability`.
 pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
+    use nom::branch::alt;
+    use nom::bytes::complete::{tag as tag_e, take_until};
+    use nom::combinator::{opt, value};
+
     let trimmed = text.trim_start();
-    let (rest, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("with ")
+    let (rest, _) = tag_e::<_, _, nom_language::error::VerboseError<&str>>("with ")
         .parse(trimmed)
         .ok()?;
 
+    // Parse count: optional article ("a"/"an" → implicit 1) or an explicit
+    // quantity expression followed by a space. Neither branch matching means
+    // the counter type follows "with " directly (e.g. "with ice counters on them"),
+    // which is implicit count 1.
+    let count_parser = alt((
+        value(
+            QuantityExpr::Fixed { value: 1 },
+            alt((tag_e("an "), tag_e("a "))),
+        ),
+        |input| {
+            let (input, expr) = nom_quantity::parse_quantity_expr_number(input)?;
+            let (input, _) =
+                tag_e::<_, _, nom_language::error::VerboseError<&str>>(" ").parse(input)?;
+            Ok((input, expr))
+        },
+    ));
+    let (rest, count_opt) = opt(count_parser).parse(rest).ok()?;
+    let count = count_opt.unwrap_or(QuantityExpr::Fixed { value: 1 });
+
+    // Try each counter suffix; pick the first that matches via `take_until`.
+    // `take_until` is pure nom — the counter-type text is everything before the
+    // first occurrence of the target suffix.
     for suffix in [
         " counters on them",
         " counters on it",
         " counter on them",
         " counter on it",
     ] {
-        let Some(counter_end) = rest.find(suffix) else {
+        let Ok((after, counter_text)) =
+            take_until::<_, _, nom_language::error::VerboseError<&str>>(suffix).parse(rest)
+        else {
             continue;
         };
-        let mut counter_type = rest[..counter_end].trim();
-        // Strip leading article "an " or "a " via nom tag.
-        counter_type = if let Ok((r, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("an ").parse(counter_type)
-        {
-            r
-        } else if let Ok((r, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("a ").parse(counter_type)
-        {
-            r
-        } else {
-            counter_type
-        }
-        .trim();
-
+        let counter_type = counter_text.trim();
         if counter_type.is_empty() {
             continue;
         }
-
-        let consumed = text.len() - rest[counter_end + suffix.len()..].len();
+        let consumed = text.len() - after.len() + suffix.len();
         return Some((
             FilterProp::CountersGE {
                 counter_type: crate::types::counter::parse_counter_type(counter_type),
-                count: 1,
+                count,
             },
             consumed,
         ));
@@ -2814,6 +2812,39 @@ mod tests {
         );
     }
 
+    /// CR 107.3a + CR 601.2b: Nature's Rhythm — "creature card with mana value X
+    /// or less". The literal X must produce a `QuantityRef::Variable { "X" }`,
+    /// resolved at effect time against the spell's announced X.
+    #[test]
+    fn creature_with_mana_value_x_or_less() {
+        let (f, _) = parse_type_phrase("creature card with mana value x or less");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::CmcLE {
+                value: QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            }]))
+        );
+    }
+
+    #[test]
+    fn spell_with_mana_value_x_or_greater() {
+        let (f, _) = parse_type_phrase("spell with mana value x or greater");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::CmcGE {
+                value: QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            }]))
+        );
+    }
+
     #[test]
     fn creature_you_control_with_power_2_or_less() {
         let (f, rest) = parse_type_phrase("creature you control with power 2 or less enter");
@@ -2822,7 +2853,9 @@ mod tests {
             TargetFilter::Typed(
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::PowerLE { value: 2 }])
+                    .properties(vec![FilterProp::PowerLE {
+                        value: QuantityExpr::Fixed { value: 2 }
+                    }])
             )
         );
         // Remaining text should be the event verb
@@ -2835,8 +2868,42 @@ mod tests {
         assert_eq!(
             f,
             TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::PowerGE { value: 3 }])
+                TypedFilter::creature().properties(vec![FilterProp::PowerGE {
+                    value: QuantityExpr::Fixed { value: 3 }
+                }])
             )
+        );
+    }
+
+    #[test]
+    fn creature_with_power_x_or_less() {
+        // CR 107.3a + CR 601.2b: X is announced at cast; the filter retains the
+        // `Variable("X")` marker so it can resolve against `chosen_x` at effect time.
+        let (prop, _) = parse_power_suffix("with power x or less").expect("parses");
+        assert_eq!(
+            prop,
+            FilterProp::PowerLE {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn creature_with_power_x_or_greater() {
+        let (prop, _) = parse_power_suffix("with power x or greater").expect("parses");
+        assert_eq!(
+            prop,
+            FilterProp::PowerGE {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                }
+            }
         );
     }
 
@@ -2848,7 +2915,7 @@ mod tests {
             TargetFilter::Typed(
                 TypedFilter::creature().properties(vec![FilterProp::CountersGE {
                     counter_type: CounterType::Generic("ice".to_string()),
-                    count: 1,
+                    count: QuantityExpr::Fixed { value: 1 },
                 },])
             )
         );
@@ -3397,7 +3464,7 @@ mod tests {
             prop,
             FilterProp::CountersGE {
                 counter_type: CounterType::Stun,
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
             }
         ));
     }
@@ -3411,7 +3478,7 @@ mod tests {
             prop,
             FilterProp::CountersGE {
                 counter_type: CounterType::Generic(ref s),
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
             } if s == "oil"
         ));
     }
@@ -3432,7 +3499,7 @@ mod tests {
                     p,
                     FilterProp::CountersGE {
                         ref counter_type,
-                        count: 1,
+                        count: QuantityExpr::Fixed { value: 1 },
                     } if *counter_type == CounterType::Stun
                 )));
             }
@@ -4612,9 +4679,12 @@ mod tests {
         if let TargetFilter::Typed(tf) = &filter {
             assert!(tf.type_filters.contains(&TypeFilter::Creature));
             assert!(
-                tf.properties
-                    .iter()
-                    .any(|p| matches!(p, FilterProp::PowerGE { value: 3 })),
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::PowerGE {
+                        value: QuantityExpr::Fixed { value: 3 }
+                    }
+                )),
                 "Expected PowerGE(3) in {:?}",
                 tf.properties
             );

@@ -5884,7 +5884,7 @@ mod tests {
                 reveal,
                 ..
             } => {
-                assert_eq!(*count, 1);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
                 assert!(*reveal);
                 match filter {
                     TargetFilter::Typed(tf) => {
@@ -5917,7 +5917,7 @@ mod tests {
                 reveal,
                 ..
             } => {
-                assert_eq!(*count, 1);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
                 assert!(*reveal);
                 match filter {
                     TargetFilter::Or { filters } => {

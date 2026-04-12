@@ -1,4 +1,4 @@
-use engine::game::filter::matches_target_filter;
+use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::game::players;
 use engine::types::ability::{Effect, TargetFilter};
@@ -131,6 +131,7 @@ pub(crate) fn targetable_threat_value(
     source_id: ObjectId,
 ) -> f64 {
     let opponents = players::opponents(state, ai_player);
+    let ctx = FilterContext::from_source(state, source_id);
     state
         .battlefield
         .iter()
@@ -138,7 +139,7 @@ pub(crate) fn targetable_threat_value(
             let object = state.objects.get(&id)?;
             if opponents.contains(&object.controller)
                 && object.card_types.core_types.contains(&CoreType::Creature)
-                && matches_target_filter(state, id, filter, source_id)
+                && matches_target_filter(state, id, filter, &ctx)
             {
                 let creature_value = evaluate_creature(state, id);
                 let threat_weight = threat_level(state, ai_player, object.controller) + 0.5;

@@ -3,6 +3,7 @@ mod board_development;
 mod board_wipe_telegraph;
 mod card_advantage;
 pub(crate) mod context;
+mod copy_value;
 mod downside_awareness;
 pub(crate) mod effect_classify;
 mod effect_timing;

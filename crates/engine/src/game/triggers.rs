@@ -20,7 +20,7 @@ use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 use super::ability_utils::build_resolved_from_def;
-use super::filter::{matches_target_filter, spell_record_matches_filter};
+use super::filter::{matches_target_filter, spell_record_matches_filter, FilterContext};
 use super::speed::{
     effective_speed, has_max_speed, mark_speed_trigger_used, speed_key_source,
     speed_trigger_available,
@@ -867,7 +867,12 @@ fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTrigger>) 
             // CR 603.2d: If the doubler specifies an affected filter (e.g. "creature you
             // control of the chosen type"), only double triggers from matching sources.
             if let Some(filter) = affected {
-                if !matches_target_filter(state, trigger.source_id, filter, *doubler_id) {
+                if !matches_target_filter(
+                    state,
+                    trigger.source_id,
+                    filter,
+                    &FilterContext::from_source(state, *doubler_id),
+                ) {
                     continue;
                 }
             }
@@ -1128,12 +1133,11 @@ fn delayed_trigger_event(
                 ) && matches!(
                     e,
                     GameEvent::ZoneChanged { object_id, .. }
-                        if crate::game::filter::matches_target_filter_controlled(
+                        if crate::game::filter::matches_target_filter(
                             state,
                             *object_id,
                             filter,
-                            source_id,
-                            controller,
+                            &FilterContext::from_source_with_controller(source_id, controller),
                         )
                 )
             })
@@ -1354,23 +1358,21 @@ pub(crate) fn check_trigger_condition(
             .and_then(|id| state.lki_cache.get(&id))
             .is_some_and(|lki| lki.card_types.contains(card_type)),
         // "if you control a [type]" — check for presence of matching permanent.
-        TriggerCondition::ControlsType { filter } => state.battlefield.iter().any(|id| {
-            crate::game::filter::matches_target_filter(
-                state,
-                *id,
-                filter,
-                source_id.unwrap_or(ObjectId(0)),
-            )
-        }),
+        TriggerCondition::ControlsType { filter } => {
+            let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
+            state
+                .battlefield
+                .iter()
+                .any(|id| matches_target_filter(state, *id, filter, &ctx))
+        }
         // CR 603.8: "when you control no [type]" — true when no permanents match the filter.
-        TriggerCondition::ControlsNone { filter } => !state.battlefield.iter().any(|id| {
-            crate::game::filter::matches_target_filter(
-                state,
-                *id,
-                filter,
-                source_id.unwrap_or(ObjectId(0)),
-            )
-        }),
+        TriggerCondition::ControlsNone { filter } => {
+            let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
+            !state
+                .battlefield
+                .iter()
+                .any(|id| matches_target_filter(state, *id, filter, &ctx))
+        }
         // CR 603.4: "if no spells were cast last turn" — check previous turn spell count.
         TriggerCondition::NoSpellsCastLastTurn => state.spells_cast_last_turn.unwrap_or(0) == 0,
         // CR 603.4: "if two or more spells were cast last turn"
@@ -1387,18 +1389,14 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::NotYourTurn => state.active_player != controller,
         // CR 603.4: "if you control N or more [type]" — generalized control count.
         TriggerCondition::ControlCount { minimum, filter } => {
+            let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
             let count = state
                 .battlefield
                 .iter()
                 .filter(|id| {
                     state.objects.get(id).is_some_and(|obj| {
                         obj.controller == controller
-                            && crate::game::filter::matches_target_filter(
-                                state,
-                                **id,
-                                filter,
-                                source_id.unwrap_or(ObjectId(0)),
-                            )
+                            && matches_target_filter(state, **id, filter, &ctx)
                     })
                 })
                 .count();
@@ -1453,16 +1451,12 @@ pub(crate) fn check_trigger_condition(
                     .iter()
                     .map(|a| a.defending_player)
                     .collect();
+                let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
                 defenders.iter().all(|&def_pid| {
                     !state.battlefield.iter().any(|id| {
                         state.objects.get(id).is_some_and(|obj| {
                             obj.controller == def_pid
-                                && crate::game::filter::matches_target_filter(
-                                    state,
-                                    *id,
-                                    filter,
-                                    source_id.unwrap_or(ObjectId(0)),
-                                )
+                                && matches_target_filter(state, *id, filter, &ctx)
                         })
                     })
                 })
@@ -1597,7 +1591,12 @@ fn evaluate_solve_condition(
                 .filter(|&&id| {
                     state.objects.get(&id).is_some_and(|obj| {
                         obj.controller == controller
-                            && super::filter::matches_target_filter(state, id, filter, id)
+                            && matches_target_filter(
+                                state,
+                                id,
+                                filter,
+                                &FilterContext::from_source(state, id),
+                            )
                     })
                 })
                 .count() as i32;
@@ -1730,7 +1729,7 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::game::filter::matches_target_filter;
+    use crate::game::filter::{matches_target_filter, FilterContext};
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, FilterProp,
@@ -1853,24 +1852,10 @@ pub mod tests {
 
         let creature_filter = TargetFilter::Typed(TypedFilter::creature());
         let land_filter = TargetFilter::Typed(TypedFilter::land());
-        assert!(matches_target_filter(
-            &state,
-            id,
-            &creature_filter,
-            ObjectId(99)
-        ));
-        assert!(!matches_target_filter(
-            &state,
-            id,
-            &land_filter,
-            ObjectId(99)
-        ));
-        assert!(matches_target_filter(
-            &state,
-            id,
-            &TargetFilter::Any,
-            ObjectId(99)
-        ));
+        let ctx = FilterContext::from_source(&state, ObjectId(99));
+        assert!(matches_target_filter(&state, id, &creature_filter, &ctx));
+        assert!(!matches_target_filter(&state, id, &land_filter, &ctx));
+        assert!(matches_target_filter(&state, id, &TargetFilter::Any, &ctx));
     }
 
     #[test]
@@ -1914,17 +1899,18 @@ pub mod tests {
 
         let creature_you_ctrl =
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        let ctx = FilterContext::from_source(&state, source);
         assert!(matches_target_filter(
             &state,
             target,
             &creature_you_ctrl,
-            source
+            &ctx
         ));
         assert!(!matches_target_filter(
             &state,
             opp_target,
             &creature_you_ctrl,
-            source
+            &ctx
         ));
     }
 
@@ -1942,7 +1928,7 @@ pub mod tests {
             &state,
             obj,
             &TargetFilter::SelfRef,
-            obj
+            &FilterContext::from_source(&state, obj),
         ));
         let other = create_object(
             &mut state,
@@ -1955,7 +1941,7 @@ pub mod tests {
             &state,
             obj,
             &TargetFilter::SelfRef,
-            other
+            &FilterContext::from_source(&state, other),
         ));
     }
 
@@ -2882,6 +2868,7 @@ pub mod tests {
                     PlayerId(0),
                 )),
                 casting_variant: crate::types::game_state::CastingVariant::Normal,
+                actual_mana_spent: 0,
             },
         });
         state.spells_cast_this_turn_by_player.insert(
@@ -3108,6 +3095,7 @@ pub mod tests {
                 card_id: CardId(20),
                 ability: None,
                 casting_variant: crate::types::game_state::CastingVariant::Normal,
+                actual_mana_spent: 0,
             },
         });
 
@@ -3178,6 +3166,7 @@ pub mod tests {
                 card_id: CardId(20),
                 ability: None,
                 casting_variant: crate::types::game_state::CastingVariant::Normal,
+                actual_mana_spent: 0,
             },
         });
 
@@ -3230,6 +3219,7 @@ pub mod tests {
                 card_id: CardId(20),
                 ability: None,
                 casting_variant: crate::types::game_state::CastingVariant::Normal,
+                actual_mana_spent: 0,
             },
         });
 
@@ -3281,6 +3271,7 @@ pub mod tests {
                 card_id: CardId(20),
                 ability: None,
                 casting_variant: crate::types::game_state::CastingVariant::Normal,
+                actual_mana_spent: 0,
             },
         });
 

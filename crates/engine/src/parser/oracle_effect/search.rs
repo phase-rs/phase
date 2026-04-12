@@ -4,6 +4,7 @@ use nom_language::error::VerboseError;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
+use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_target::{parse_mana_value_suffix, parse_type_phrase};
 use super::super::oracle_util::{
     contains_possessive, infer_core_type_for_subtype, split_around, strip_after,
@@ -12,10 +13,43 @@ use super::types::{SearchLibraryDetails, SeekDetails};
 use super::{capitalize, scan_contains_phrase};
 use crate::parser::oracle_warnings::push_warning;
 use crate::types::ability::{
-    ControllerRef, FilterProp, QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+    ControllerRef, FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::zones::Zone;
+
+/// Scan `lower` at word boundaries for `tag_prefix`, then apply `combinator` to the
+/// remainder. Returns `(parsed_value, byte_offset_in_lower_of_tail)` on first match.
+///
+/// Prefer this over `strip_after` + nom for composable multi-position parsing —
+/// matches start-of-string, spaces, commas, or semicolons as word boundaries.
+fn scan_preceded<'a, T>(
+    lower: &'a str,
+    tag_prefix: &'static str,
+    mut combinator: impl FnMut(&'a str) -> Result<(&'a str, T), nom::Err<VerboseError<&'a str>>>,
+) -> Option<(T, usize)> {
+    let mut search_from = 0;
+    while search_from <= lower.len() {
+        let idx = lower[search_from..]
+            .find(tag_prefix)
+            .map(|i| search_from + i)?;
+        // Word-boundary check: must be at start or preceded by whitespace/punctuation.
+        let at_boundary = idx == 0
+            || matches!(
+                lower.as_bytes()[idx - 1],
+                b' ' | b',' | b';' | b'(' | b'.' | b'\n' | b'\t'
+            );
+        if at_boundary {
+            let after_prefix = &lower[idx + tag_prefix.len()..];
+            if let Ok((rest, val)) = combinator(after_prefix) {
+                let offset = lower.len() - rest.len();
+                return Some((val, offset));
+            }
+        }
+        search_from = idx + 1;
+    }
+    None
+}
 
 pub(super) fn parse_search_library_details(lower: &str) -> SearchLibraryDetails {
     let reveal = scan_contains_phrase(lower, "reveal");
@@ -24,27 +58,29 @@ pub(super) fn parse_search_library_details(lower: &str) -> SearchLibraryDetails 
     // These target a player, searching that player's library instead of the controller's.
     let target_player = parse_search_target_player(lower);
 
-    // Extract count from "up to N" (must be done before filter extraction since
-    // "for up to five creature cards" needs to skip the count to find the type).
-    // Delegate to nom combinator (input already lowercase).
-    let (count, count_end_in_for) = if let Some(after_up_to) = strip_after(lower, "up to ") {
-        if let Ok((rest, n)) = nom_primitives::parse_number.parse(after_up_to) {
-            // Calculate the byte offset where the type text begins after "up to N "
-            let type_start = lower.len() - rest.len();
-            (n, Some(type_start))
-        } else {
-            (1, None)
-        }
+    // Extract count from "up to N" / "up to X" (must be done before filter extraction
+    // since "for up to five creature cards" needs to skip the count to find the type).
+    // CR 107.3a + CR 601.2b: X resolves to the caster's announced value at cast time.
+    let up_to_match = scan_preceded(lower, "up to ", nom_quantity::parse_quantity_expr_number);
+
+    // Fallback: "for N cards" / "for X cards" without "up to".
+    let for_match = if up_to_match.is_none() {
+        scan_preceded(lower, "for ", nom_quantity::parse_quantity_expr_number)
+            // Require a word break after the number (" cards" / " creature ...").
+            // Guards against matching "for a", "for an", etc. where parse_number fails
+            // (good) but also avoids partial matches like "for the".
+            .filter(|(_, off)| lower.as_bytes().get(*off).is_some_and(|b| *b == b' '))
     } else {
-        // Check for explicit count like "for three cards" or "for N cards"
-        let count = strip_after(lower, "for ")
-            .and_then(|after_for| nom_primitives::parse_number.parse(after_for).ok())
-            .map(|(_, n)| n)
-            .unwrap_or(1);
-        (count, None)
+        None
     };
 
-    // Extract the type filter from after "for a/an" or "for up to N".
+    let (count, count_end_in_for) = match (up_to_match, for_match) {
+        (Some((expr, off)), _) => (expr, Some(off)),
+        (None, Some((expr, _))) => (expr, None),
+        (None, None) => (QuantityExpr::Fixed { value: 1 }, None),
+    };
+
+    // Extract the type filter from after "for a/an" or from the tail after "up to N".
     let filter = if let Some(after_for) = strip_after(lower, "for a ") {
         parse_search_filter(after_for)
     } else if let Some(after_for) = strip_after(lower, "for an ") {
@@ -114,23 +150,14 @@ pub(super) fn parse_seek_details(lower: &str) -> SeekDetails {
         }
     };
 
-    // Extract count: "two nonland cards" → (2, "nonland cards")
-    // Delegate to nom combinator (input already lowercase).
-    let (count, remaining) = if let Ok((rest, n)) = nom_primitives::parse_number.parse(filter_text)
-    {
-        (QuantityExpr::Fixed { value: n as i32 }, rest.trim_start())
-    } else if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("x ").parse(filter_text) {
-        (
-            QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "X".to_string(),
-                },
-            },
-            rest.trim_start(),
-        )
-    } else {
-        (QuantityExpr::Fixed { value: 1 }, filter_text)
-    };
+    // Extract count: "two nonland cards" → (2, "nonland cards"); "x cards" → (X, "cards").
+    // CR 107.3a + CR 601.2b: X resolves to the caster's announced value at cast time.
+    let (count, remaining) =
+        if let Ok((rest, expr)) = nom_quantity::parse_quantity_expr_number(filter_text) {
+            (expr, rest.trim_start())
+        } else {
+            (QuantityExpr::Fixed { value: 1 }, filter_text)
+        };
 
     // Strip leading article "a "/"an "
     let remaining = nom_primitives::parse_article
@@ -449,6 +476,13 @@ fn parse_search_filter_suffixes(text: &str, properties: &mut Vec<FilterProp>) {
             continue;
         }
 
+        // Dispatch-loop diagnostic: unmatched trailing text indicates a parser gap
+        // (e.g., novel "with …" suffix phrasing). Emit a warning so gaps surface
+        // in coverage output instead of silently dropping filter constraints.
+        push_warning(format!(
+            "target-fallback: search-filter-suffix unmatched: '{}'",
+            remaining
+        ));
         break;
     }
 }
@@ -510,7 +544,7 @@ mod tests {
             "search target player's library for three cards and exile them",
         );
         assert!(details.target_player.is_some());
-        assert_eq!(details.count, 3);
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 3 });
     }
 
     #[test]
@@ -520,6 +554,33 @@ mod tests {
         );
         assert!(details.target_player.is_none());
         assert!(details.reveal);
+    }
+
+    #[test]
+    fn search_up_to_x_cards_emits_variable_count() {
+        // CR 107.3a + CR 601.2b: `up to X` emits `QuantityRef::Variable` so the
+        // resolver can pick up the caster's announced X at effect time.
+        use crate::types::ability::QuantityRef;
+        let details =
+            parse_search_library_details("search your library for up to x creature cards");
+        assert_eq!(
+            details.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string()
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn search_for_three_cards_emits_fixed_count_regression() {
+        // Regression: numeric word counts still parse as `Fixed` — this is the
+        // pre-widening behavior the switch to nom + `parse_quantity_expr_number`
+        // must preserve.
+        let details =
+            parse_search_library_details("search your library for three cards and exile them");
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 3 });
     }
 
     #[test]

@@ -312,6 +312,7 @@ mod tests {
                 card_id: CardId(1),
                 ability: None,
                 casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
             },
         });
 

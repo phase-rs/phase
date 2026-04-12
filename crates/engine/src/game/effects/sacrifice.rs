@@ -28,6 +28,8 @@ pub fn resolve(
         .collect();
 
     if targeted_objects.is_empty() {
+        // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+        let ctx = crate::game::filter::FilterContext::from_ability(ability);
         let eligible: Vec<ObjectId> = state
             .battlefield
             .iter()
@@ -36,13 +38,7 @@ pub fn resolve(
                 state.objects.get(id).is_some_and(|obj| {
                     obj.controller == ability.controller
                         && !obj.is_emblem
-                        && crate::game::filter::matches_target_filter_controlled(
-                            state,
-                            *id,
-                            filter,
-                            ability.source_id,
-                            ability.controller,
-                        )
+                        && crate::game::filter::matches_target_filter(state, *id, filter, &ctx)
                 })
             })
             .collect();

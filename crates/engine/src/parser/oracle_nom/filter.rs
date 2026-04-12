@@ -12,8 +12,9 @@ use nom::sequence::preceded;
 use nom::Parser;
 
 use super::error::OracleResult;
-use super::primitives::{parse_article, parse_number, parse_pt_modifier};
-use crate::types::ability::{ControllerRef, FilterProp};
+use super::primitives::{parse_article, parse_pt_modifier};
+use super::quantity::parse_quantity_expr_number;
+use crate::types::ability::{ControllerRef, FilterProp, QuantityExpr};
 use crate::types::counter::CounterType;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
@@ -101,17 +102,22 @@ fn parse_with_inner(input: &str) -> OracleResult<'_, FilterProp> {
     .parse(input)
 }
 
-/// Parse "power N or greater" / "power N or less" from a "with" clause.
+/// Parse "power N or greater" / "power X or less" from a "with" clause.
+/// CR 208.1 + CR 107.3a: Accepts both literal integers and the variable X,
+/// emitting a `QuantityExpr` so dynamic thresholds resolve at effect time.
 fn parse_with_power_constraint(input: &str) -> OracleResult<'_, FilterProp> {
     let (rest, _) = tag("power ").parse(input)?;
-    let (rest, n) = parse_number(rest)?;
+    let (rest, value) = parse_quantity_expr_number(rest)?;
     let (rest, _) = tag(" or ").parse(rest)?;
     alt((
-        map(tag("greater"), move |_| FilterProp::PowerGE {
-            value: n as i32,
+        map(tag("greater"), {
+            let value = value.clone();
+            move |_| FilterProp::PowerGE {
+                value: value.clone(),
+            }
         }),
         map(tag("less"), move |_| FilterProp::PowerLE {
-            value: n as i32,
+            value: value.clone(),
         }),
     ))
     .parse(rest)
@@ -144,7 +150,7 @@ fn parse_with_counter_property(input: &str) -> OracleResult<'_, FilterProp> {
         rest,
         FilterProp::CountersGE {
             counter_type,
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
         },
     ))
 }
@@ -255,12 +261,41 @@ mod tests {
     #[test]
     fn test_parse_with_power() {
         let (rest, p) = parse_with_property("with power 3 or greater").unwrap();
-        assert_eq!(p, FilterProp::PowerGE { value: 3 });
+        assert_eq!(
+            p,
+            FilterProp::PowerGE {
+                value: QuantityExpr::Fixed { value: 3 }
+            }
+        );
         assert_eq!(rest, "");
 
         let (rest2, p2) = parse_with_property("with power 2 or less and").unwrap();
-        assert_eq!(p2, FilterProp::PowerLE { value: 2 });
+        assert_eq!(
+            p2,
+            FilterProp::PowerLE {
+                value: QuantityExpr::Fixed { value: 2 }
+            }
+        );
         assert_eq!(rest2, " and");
+    }
+
+    #[test]
+    fn test_parse_with_power_x_or_greater() {
+        // CR 107.3a + CR 601.2b: `with power X or greater` emits `QuantityRef::Variable`
+        // — resolves against `chosen_x` at effect time via `FilterContext::from_ability`.
+        use crate::types::ability::QuantityRef;
+        let (rest, p) = parse_with_property("with power x or greater").unwrap();
+        assert_eq!(
+            p,
+            FilterProp::PowerGE {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                }
+            }
+        );
+        assert_eq!(rest, "");
     }
 
     #[test]
@@ -273,7 +308,7 @@ mod tests {
                 count,
             } => {
                 assert_eq!(counter_type, CounterType::Plus1Plus1);
-                assert_eq!(count, 1);
+                assert_eq!(count, QuantityExpr::Fixed { value: 1 });
             }
             _ => panic!("expected CountersGE"),
         }
