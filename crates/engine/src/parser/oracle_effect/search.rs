@@ -428,6 +428,34 @@ fn parse_search_filter_suffixes(text: &str, properties: &mut Vec<FilterProp>) {
 
     while !remaining.is_empty() {
         remaining = remaining.trim_start();
+
+        // Consume redundant "card(s)" re-declaration left by parse_type_phrase.
+        // parse_type_phrase extracts only the type word (e.g. "creature"), so the
+        // literal " card" / " cards" token remains and carries no filter meaning.
+        if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("cards").parse(remaining) {
+            remaining = rest.trim_start();
+        } else if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("card").parse(remaining) {
+            remaining = rest.trim_start();
+        }
+
+        // End-of-filter sentinel: punctuation or a "then …" connector means the
+        // search filter has ended and what follows (reveal, put onto battlefield,
+        // shuffle, etc.) is the action chain handled by the downstream sequence
+        // parser. Not a filter-suffix gap — break without warning.
+        if remaining.is_empty()
+            || tag::<_, _, VerboseError<&str>>(",")
+                .parse(remaining)
+                .is_ok()
+            || tag::<_, _, VerboseError<&str>>(".")
+                .parse(remaining)
+                .is_ok()
+            || tag::<_, _, VerboseError<&str>>("then ")
+                .parse(remaining)
+                .is_ok()
+        {
+            break;
+        }
+
         if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("and ").parse(remaining) {
             remaining = rest.trim_start();
         }
@@ -581,6 +609,52 @@ mod tests {
         let details =
             parse_search_library_details("search your library for three cards and exile them");
         assert_eq!(details.count, QuantityExpr::Fixed { value: 3 });
+    }
+
+    #[test]
+    fn action_chain_continuation_does_not_warn() {
+        // Regression: filter parser must not emit "search-filter-suffix unmatched"
+        // for legitimate action-chain continuations. The filter is already
+        // extracted by parse_type_phrase; what follows the filter clause
+        // (", put it onto the battlefield, then shuffle") is handled by the
+        // downstream sequence parser — not a filter-suffix gap.
+        use crate::parser::oracle_warnings::{clear_warnings, take_warnings};
+        for text in [
+            "creature card, put it onto the battlefield, then shuffle",
+            "land card, reveal it, put it into your hand, then shuffle",
+            "card, put it onto the battlefield tapped",
+            "creature card. exile it",
+        ] {
+            clear_warnings();
+            let _ = parse_search_filter(text);
+            let warnings = take_warnings();
+            assert!(
+                !warnings
+                    .iter()
+                    .any(|w| w.contains("search-filter-suffix unmatched")),
+                "unexpected filter-suffix warning for {text:?}: {warnings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn genuine_filter_suffix_gap_still_warns() {
+        // Diagnostic preserved: when the suffix parser is handed text that
+        // doesn't match any known filter-suffix pattern AND doesn't look like an
+        // action-chain continuation (no leading comma / period / "then"), a
+        // warning must still fire so coverage reports surface parser gaps.
+        use crate::parser::oracle_warnings::{clear_warnings, take_warnings};
+        clear_warnings();
+        let mut props = vec![];
+        // Invented suffix that won't hit any existing filter-suffix pattern.
+        parse_search_filter_suffixes(" with unrecognized flibbertigibbet suffix", &mut props);
+        let warnings = take_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("search-filter-suffix unmatched")),
+            "expected filter-suffix warning for novel grammar, got {warnings:?}"
+        );
     }
 
     #[test]
