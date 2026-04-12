@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-04-25T00:00:00Z",
+  "updated": "2026-04-26T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -21,27 +21,27 @@
       "main": [
         {
           "count": 4,
-          "name": "Godless Shrine"
+          "name": "Concealed Courtyard"
         },
         {
-          "count": 3,
-          "name": "Guardian of New Benalia"
+          "count": 2,
+          "name": "Brightclimb Pathway"
         },
         {
           "count": 1,
           "name": "Cling to Dust"
         },
         {
-          "count": 1,
-          "name": "Swamp"
+          "count": 4,
+          "name": "Godless Shrine"
         },
         {
           "count": 1,
           "name": "Eiganjo, Seat of the Empire"
         },
         {
-          "count": 1,
-          "name": "Plains"
+          "count": 4,
+          "name": "Fatal Push"
         },
         {
           "count": 4,
@@ -53,11 +53,19 @@
         },
         {
           "count": 4,
-          "name": "Fatal Push"
+          "name": "The Mycosynth Gardens"
         },
         {
-          "count": 2,
-          "name": "Brightclimb Pathway"
+          "count": 4,
+          "name": "Greasefang, Okiba Boss"
+        },
+        {
+          "count": 3,
+          "name": "Guardian of New Benalia"
+        },
+        {
+          "count": 4,
+          "name": "Iron-Shield Elf"
         },
         {
           "count": 1,
@@ -65,51 +73,43 @@
         },
         {
           "count": 4,
-          "name": "Parhelion II"
-        },
-        {
-          "count": 4,
-          "name": "The Mycosynth Gardens"
-        },
-        {
-          "count": 4,
-          "name": "Concealed Courtyard"
-        },
-        {
-          "count": 4,
-          "name": "Greasefang, Okiba Boss"
-        },
-        {
-          "count": 1,
-          "name": "Takenuma, Abandoned Mire"
-        },
-        {
-          "count": 3,
-          "name": "Vanishing Verse"
-        },
-        {
-          "count": 1,
-          "name": "Urborg, Tomb of Yawgmoth"
-        },
-        {
-          "count": 4,
-          "name": "Iron-Shield Elf"
-        },
-        {
-          "count": 4,
           "name": "Monument to Endurance"
         },
         {
-          "count": 2,
-          "name": "Bleachbone Verge"
+          "count": 4,
+          "name": "Parhelion II"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
         },
         {
           "count": 2,
           "name": "Shadowy Backstreet"
         },
         {
+          "count": 1,
+          "name": "Swamp"
+        },
+        {
+          "count": 1,
+          "name": "Takenuma, Abandoned Mire"
+        },
+        {
           "count": 4,
           "name": "Thoughtseize"
+        },
+        {
+          "count": 1,
+          "name": "Urborg, Tomb of Yawgmoth"
+        },
+        {
+          "count": 3,
+          "name": "Vanishing Verse"
+        },
+        {
+          "count": 2,
+          "name": "Bleachbone Verge"
         }
       ],
       "sideboard": [
@@ -118,28 +118,28 @@
           "name": "Bitter Triumph"
         },
         {
-          "count": 1,
-          "name": "Loran of the Third Path"
+          "count": 2,
+          "name": "Duress"
         },
         {
-          "count": 3,
+          "count": 2,
           "name": "Pest Control"
         },
         {
-          "count": 3,
-          "name": "Doorkeeper Thrull"
+          "count": 2,
+          "name": "High Noon"
+        },
+        {
+          "count": 2,
+          "name": "Loran of the Third Path"
         },
         {
           "count": 2,
           "name": "Soul-Guide Lantern"
         },
         {
-          "count": 2,
-          "name": "Duress"
-        },
-        {
-          "count": 2,
-          "name": "High Noon"
+          "count": 3,
+          "name": "Doorkeeper Thrull"
         }
       ]
     },
@@ -1244,11 +1244,11 @@
         },
         {
           "count": 4,
-          "name": "Temple Garden"
+          "name": "Thoughtseize"
         },
         {
-          "count": 1,
-          "name": "Boseiju, Who Endures"
+          "count": 4,
+          "name": "Temple Garden"
         },
         {
           "count": 1,
@@ -1268,7 +1268,7 @@
         },
         {
           "count": 1,
-          "name": "Voice of Victory"
+          "name": "Emptiness"
         },
         {
           "count": 4,
@@ -1319,12 +1319,12 @@
           "name": "Takenuma, Abandoned Mire"
         },
         {
-          "count": 3,
-          "name": "Blooming Marsh"
+          "count": 1,
+          "name": "Boseiju, Who Endures"
         },
         {
-          "count": 4,
-          "name": "Thoughtseize"
+          "count": 3,
+          "name": "Blooming Marsh"
         },
         {
           "count": 2,
@@ -1332,7 +1332,7 @@
         },
         {
           "count": 1,
-          "name": "Emptiness"
+          "name": "Voice of Victory"
         },
         {
           "count": 3,
@@ -1341,11 +1341,11 @@
       ],
       "sideboard": [
         {
-          "count": 2,
+          "count": 3,
           "name": "Duress"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Ashiok, Dream Render"
         },
         {
@@ -1361,16 +1361,12 @@
           "name": "Knight of Autumn"
         },
         {
-          "count": 1,
-          "name": "Necromentia"
-        },
-        {
           "count": 2,
           "name": "Pest Control"
         },
         {
           "count": 1,
-          "name": "Tear Asunder"
+          "name": "Sheoldred, the Apocalypse"
         },
         {
           "count": 1,
@@ -1379,10 +1375,6 @@
         {
           "count": 1,
           "name": "Vanishing Verse"
-        },
-        {
-          "count": 1,
-          "name": "Duress"
         }
       ]
     },
@@ -1422,7 +1414,7 @@
           "name": "Copperline Gorge"
         },
         {
-          "count": 6,
+          "count": 7,
           "name": "Mountain"
         },
         {
@@ -1450,7 +1442,7 @@
           "name": "Academic Dispute"
         },
         {
-          "count": 4,
+          "count": 2,
           "name": "Reckless Rage"
         },
         {
@@ -1458,7 +1450,7 @@
           "name": "Kumano Faces Kakkazan"
         },
         {
-          "count": 2,
+          "count": 3,
           "name": "Screaming Nemesis"
         },
         {
