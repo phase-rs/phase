@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-04-26T00:00:00Z",
+  "updated": "2026-04-27T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -426,15 +426,15 @@
       "main": [
         {
           "count": 4,
-          "name": "Blooming Marsh"
+          "name": "Thoughtseize"
         },
         {
           "count": 4,
           "name": "Badgermole Cub"
         },
         {
-          "count": 2,
-          "name": "Preacher of the Schism"
+          "count": 1,
+          "name": "Swamp"
         },
         {
           "count": 1,
@@ -450,23 +450,11 @@
         },
         {
           "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 4,
           "name": "Overgrown Tomb"
         },
         {
           "count": 4,
-          "name": "Llanowar Elves"
-        },
-        {
-          "count": 1,
-          "name": "Go for the Throat"
-        },
-        {
-          "count": 1,
-          "name": "Liliana of the Veil"
+          "name": "Fatal Push"
         },
         {
           "count": 4,
@@ -477,8 +465,32 @@
           "name": "Llanowar Wastes"
         },
         {
+          "count": 2,
+          "name": "Graveyard Trespasser"
+        },
+        {
           "count": 4,
-          "name": "Thoughtseize"
+          "name": "Llanowar Elves"
+        },
+        {
+          "count": 1,
+          "name": "Liliana of the Veil"
+        },
+        {
+          "count": 1,
+          "name": "Go for the Throat"
+        },
+        {
+          "count": 1,
+          "name": "Forest"
+        },
+        {
+          "count": 1,
+          "name": "Forest"
+        },
+        {
+          "count": 2,
+          "name": "Preacher of the Schism"
         },
         {
           "count": 3,
@@ -486,19 +498,15 @@
         },
         {
           "count": 1,
+          "name": "Duress"
+        },
+        {
+          "count": 1,
           "name": "Takenuma, Abandoned Mire"
         },
         {
           "count": 4,
-          "name": "Unholy Annex // Ritual Chamber"
-        },
-        {
-          "count": 1,
-          "name": "Urborg, Tomb of Yawgmoth"
-        },
-        {
-          "count": 2,
-          "name": "Forest"
+          "name": "Blooming Marsh"
         },
         {
           "count": 4,
@@ -506,15 +514,11 @@
         },
         {
           "count": 1,
-          "name": "Duress"
+          "name": "Urborg, Tomb of Yawgmoth"
         },
         {
-          "count": 2,
-          "name": "Graveyard Trespasser"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
+          "count": 4,
+          "name": "Unholy Annex // Ritual Chamber"
         }
       ],
       "sideboard": [
@@ -523,24 +527,24 @@
           "name": "Culling Ritual"
         },
         {
+          "count": 1,
+          "name": "Duress"
+        },
+        {
           "count": 3,
           "name": "Go Blank"
         },
         {
-          "count": 2,
-          "name": "Kalitas, Traitor of Ghet"
-        },
-        {
-          "count": 2,
+          "count": 1,
           "name": "Duress"
         },
         {
-          "count": 1,
-          "name": "Go for the Throat"
+          "count": 2,
+          "name": "Invoke Despair"
         },
         {
           "count": 2,
-          "name": "Unlicensed Hearse"
+          "name": "Kalitas, Traitor of Ghet"
         },
         {
           "count": 1,
@@ -548,7 +552,11 @@
         },
         {
           "count": 2,
-          "name": "Invoke Despair"
+          "name": "Unlicensed Hearse"
+        },
+        {
+          "count": 1,
+          "name": "Go for the Throat"
         }
       ]
     },
@@ -924,52 +932,16 @@
       ],
       "main": [
         {
-          "count": 4,
-          "name": "Floodfarm Verge"
-        },
-        {
-          "count": 1,
-          "name": "Elspeth, Storm Slayer"
-        },
-        {
-          "count": 2,
-          "name": "Fountainport"
-        },
-        {
-          "count": 2,
-          "name": "Beza, the Bounding Spring"
-        },
-        {
-          "count": 1,
-          "name": "Three Steps Ahead"
-        },
-        {
-          "count": 3,
-          "name": "Get Lost"
-        },
-        {
-          "count": 4,
-          "name": "No More Lies"
-        },
-        {
           "count": 2,
           "name": "Island"
         },
         {
           "count": 2,
-          "name": "Restless Anchorage"
+          "name": "Plains"
         },
         {
           "count": 2,
-          "name": "Stock Up"
-        },
-        {
-          "count": 3,
-          "name": "Pinnacle Starcage"
-        },
-        {
-          "count": 1,
-          "name": "Eiganjo, Seat of the Empire"
+          "name": "Supreme Verdict"
         },
         {
           "count": 4,
@@ -977,14 +949,6 @@
         },
         {
           "count": 2,
-          "name": "Supreme Verdict"
-        },
-        {
-          "count": 2,
-          "name": "Teferi, Hero of Dominaria"
-        },
-        {
-          "count": 1,
           "name": "Field of Ruin"
         },
         {
@@ -994,6 +958,10 @@
         {
           "count": 1,
           "name": "Hall of Storm Giants"
+        },
+        {
+          "count": 2,
+          "name": "Teferi, Hero of Dominaria"
         },
         {
           "count": 3,
@@ -1013,19 +981,15 @@
         },
         {
           "count": 1,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 2,
-          "name": "Plains"
+          "name": "Eiganjo, Seat of the Empire"
         },
         {
           "count": 1,
-          "name": "Field of Ruin"
+          "name": "Otawara, Soaring City"
         },
         {
-          "count": 4,
-          "name": "Consult the Star Charts"
+          "count": 3,
+          "name": "Temporary Lockdown"
         },
         {
           "count": 1,
@@ -1033,29 +997,53 @@
         },
         {
           "count": 2,
+          "name": "Restless Anchorage"
+        },
+        {
+          "count": 3,
+          "name": "Get Lost"
+        },
+        {
+          "count": 4,
+          "name": "No More Lies"
+        },
+        {
+          "count": 2,
           "name": "Meticulous Archive"
-        }
-      ],
-      "sideboard": [
+        },
+        {
+          "count": 1,
+          "name": "Three Steps Ahead"
+        },
+        {
+          "count": 2,
+          "name": "Fountainport"
+        },
         {
           "count": 2,
           "name": "Beza, the Bounding Spring"
         },
         {
-          "count": 1,
-          "name": "Get Lost"
+          "count": 4,
+          "name": "Floodfarm Verge"
+        },
+        {
+          "count": 2,
+          "name": "Stock Up"
         },
         {
           "count": 1,
-          "name": "Farewell"
+          "name": "Elspeth, Storm Slayer"
         },
         {
-          "count": 1,
-          "name": "Kaheera, the Orphanguard"
-        },
+          "count": 4,
+          "name": "Consult the Star Charts"
+        }
+      ],
+      "sideboard": [
         {
-          "count": 1,
-          "name": "Dovin's Veto"
+          "count": 2,
+          "name": "Rest in Peace"
         },
         {
           "count": 2,
@@ -1063,19 +1051,35 @@
         },
         {
           "count": 1,
-          "name": "Pinnacle Starcage"
+          "name": "Dovin's Veto"
         },
         {
-          "count": 2,
-          "name": "Rest in Peace"
+          "count": 1,
+          "name": "Kaheera, the Orphanguard"
+        },
+        {
+          "count": 1,
+          "name": "Farewell"
         },
         {
           "count": 1,
           "name": "The Wandering Emperor"
         },
         {
+          "count": 1,
+          "name": "Temporary Lockdown"
+        },
+        {
           "count": 3,
           "name": "Kutzil's Flanker"
+        },
+        {
+          "count": 1,
+          "name": "Get Lost"
+        },
+        {
+          "count": 2,
+          "name": "Beza, the Bounding Spring"
         }
       ]
     },

@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-04-26T00:00:00Z",
+  "updated": "2026-04-27T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -1346,129 +1346,138 @@
       ]
     },
     {
-      "name": "Izzet Prowess",
+      "name": "Belcher",
       "author": "MTGGoldfish",
-      "colors": [
-        "R",
-        "U"
-      ],
+      "colors": [],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 4,
-          "name": "Mishra's Bauble"
+          "count": 1,
+          "name": "Beyeen Veil"
         },
         {
           "count": 4,
-          "name": "Dragon's Rage Channeler"
-        },
-        {
-          "count": 4,
-          "name": "Monastery Swiftspear"
-        },
-        {
-          "count": 4,
-          "name": "Lightning Bolt"
-        },
-        {
-          "count": 4,
-          "name": "Slickshot Show-Off"
+          "name": "Disrupting Shoal"
         },
         {
           "count": 3,
-          "name": "Mutagenic Growth"
+          "name": "Flare of Denial"
         },
         {
           "count": 4,
-          "name": "Preordain"
-        },
-        {
-          "count": 1,
-          "name": "Unholy Heat"
+          "name": "Goblin Charbelcher"
         },
         {
           "count": 4,
-          "name": "Expressive Iteration"
+          "name": "Hydroelectric Specimen"
+        },
+        {
+          "count": 3,
+          "name": "Jwari Disruption"
         },
         {
           "count": 4,
-          "name": "Cori-Steel Cutter"
+          "name": "Lotus Bloom"
         },
         {
           "count": 4,
-          "name": "Lava Dart"
+          "name": "Sea Gate Restoration"
+        },
+        {
+          "count": 4,
+          "name": "Sink into Stupor"
         },
         {
           "count": 2,
-          "name": "Violent Urge"
+          "name": "Stern Scolding"
+        },
+        {
+          "count": 4,
+          "name": "Suppression Ray"
+        },
+        {
+          "count": 4,
+          "name": "Tameshi, Reality Architect"
+        },
+        {
+          "count": 4,
+          "name": "Whir of Invention"
+        },
+        {
+          "count": 4,
+          "name": "Thundertrap Trainer"
         },
         {
           "count": 2,
-          "name": "Fiery Islet"
-        },
-        {
-          "count": 3,
-          "name": "Mountain"
-        },
-        {
-          "count": 3,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 1,
-          "name": "Thundering Falls"
-        },
-        {
-          "count": 3,
-          "name": "Bloodstained Mire"
-        },
-        {
-          "count": 1,
-          "name": "Wooded Foothills"
-        },
-        {
-          "count": 2,
-          "name": "Scalding Tarn"
-        },
-        {
-          "count": 3,
-          "name": "Arid Mesa"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 3,
-          "name": "Unholy Heat"
-        },
-        {
-          "count": 3,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 2,
-          "name": "Meltdown"
-        },
-        {
-          "count": 1,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 1,
           "name": "Spell Snare"
+        },
+        {
+          "count": 1,
+          "name": "Strix Serenade"
+        },
+        {
+          "count": 3,
+          "name": "Waterlogged Teachings"
+        },
+        {
+          "count": 1,
+          "name": "Force of Negation"
         },
         {
           "count": 1,
           "name": "Into the Flood Maw"
         },
         {
+          "count": 3,
+          "name": "Fallaji Archaeologist"
+        }
+      ],
+      "sideboard": [
+        {
           "count": 2,
-          "name": "Surgical Extraction"
+          "name": "Harbinger of the Seas"
         },
         {
           "count": 2,
-          "name": "Abhorrent Oculus"
+          "name": "Mystical Dispute"
+        },
+        {
+          "count": 3,
+          "name": "Consign to Memory"
+        },
+        {
+          "count": 1,
+          "name": "Unable to Scream"
+        },
+        {
+          "count": 1,
+          "name": "Into the Flood Maw"
+        },
+        {
+          "count": 1,
+          "name": "Engineered Explosives"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 1,
+          "name": "Tezzeret the Seeker"
+        },
+        {
+          "count": 1,
+          "name": "Engineered Explosives"
+        },
+        {
+          "count": 1,
+          "name": "Grafdigger's Cage"
+        },
+        {
+          "count": 1,
+          "name": "Spell Pierce"
         }
       ]
     }
