@@ -73,7 +73,8 @@ impl MulliganPolicy for AggroKeepablesMulligan {
             }
         }
 
-        // Slow: no early drops → can't apply pressure. CR 302.6.
+        // Slow: no early drops → can't apply pressure. (Tactical heuristic;
+        // the engine's summoning-sickness check at CR 302.6 is downstream.)
         if early_drops == 0 {
             return MulliganScore::Score {
                 delta: -1.2,

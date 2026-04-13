@@ -5,7 +5,8 @@
 //!   `crates/engine/src/types/card_type.rs:74-77` (CR 302).
 //! - `CardFace.mana_cost: ManaCost` at `crates/engine/src/types/card.rs:51`;
 //!   `ManaCost::mana_value()` at `mana.rs:468` (CR 202.3).
-//! - `CardFace.keywords: Vec<Keyword>` at `card.rs:60` (CR 702.2).
+//! - `CardFace.keywords: Vec<Keyword>` at `card.rs:60` (CR 702.1: keywords
+//!   are named ability shorthands; reminder text summarizes their rules).
 //! - Evasion keyword variants: `Keyword::Flying` (CR 702.9), `Keyword::Haste`
 //!   (CR 702.10), `Keyword::Menace` (CR 702.111), `Keyword::Trample` (CR 702.19),
 //!   `Keyword::Skulk` (CR 702.118), `Keyword::Shadow` (CR 702.28),

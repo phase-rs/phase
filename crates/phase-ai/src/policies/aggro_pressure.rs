@@ -195,7 +195,7 @@ fn count_eligible_attackers(ctx: &PolicyContext<'_>) -> usize {
 }
 
 /// Minimum life total among the AI's opponents. Returns `None` if there are
-/// no opponents (shouldn't happen in a real game). CR 800.4.
+/// no opponents (shouldn't happen in a real game).
 fn min_opponent_life(state: &GameState, ai_player: PlayerId) -> Option<i32> {
     players::opponents(state, ai_player)
         .into_iter()
