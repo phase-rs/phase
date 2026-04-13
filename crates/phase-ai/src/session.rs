@@ -17,7 +17,8 @@ use engine::types::player::PlayerId;
 
 use crate::deck_profile::{ArchetypeClassification, DeckProfile};
 use crate::features::{
-    aggro_pressure, aristocrats, control, landfall, mana_ramp, tokens_wide, tribal, DeckFeatures,
+    aggro_pressure, aristocrats, control, landfall, mana_ramp, plus_one_counters, tokens_wide,
+    tribal, DeckFeatures,
 };
 use crate::plan::{derive_snapshot, PlanSnapshot};
 use crate::policies::registry::PolicyId;
@@ -41,6 +42,7 @@ fn features_for(deck: &[DeckEntry]) -> DeckFeatures {
         aristocrats: aristocrats::detect(deck),
         aggro_pressure: aggro_pressure::detect(deck),
         tokens_wide: tokens_wide::detect(deck),
+        plus_one_counters: plus_one_counters::detect(deck),
     }
 }
 

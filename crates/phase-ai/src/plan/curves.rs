@@ -74,6 +74,11 @@ fn tempo_class_for(features: &DeckFeatures) -> TempoClass {
     if features.aristocrats.commitment > 0.5 {
         return TempoClass::Midrange;
     }
+    // +1/+1 counter decks are grindy midrange — they win by scaling creatures
+    // over multiple turns, not by burst tempo or going wide.
+    if features.plus_one_counters.commitment > 0.5 {
+        return TempoClass::Midrange;
+    }
     match features.archetype {
         DeckArchetype::Aggro => TempoClass::Aggro,
         DeckArchetype::Control => TempoClass::Control,

@@ -21,6 +21,7 @@ mod lethality_awareness;
 mod life_total_resource;
 mod mana_efficiency;
 pub mod mulligan;
+mod plus_one_counters;
 mod ramp_timing;
 mod recursion_awareness;
 pub mod registry;
