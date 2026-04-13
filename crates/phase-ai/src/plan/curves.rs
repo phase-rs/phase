@@ -7,6 +7,9 @@
 //! Phase B).
 
 use crate::deck_profile::DeckArchetype;
+use crate::features::tribal::{
+    AGGRO_TEMPO_FLOOR as TRIBAL_AGGRO_TEMPO_FLOOR, MULLIGAN_FLOOR as TRIBAL_MULLIGAN_FLOOR,
+};
 use crate::features::DeckFeatures;
 
 use super::{PlanSnapshot, TempoClass};
@@ -39,7 +42,7 @@ fn tempo_class_for(features: &DeckFeatures) -> TempoClass {
     // A tribal deck with high commitment plays aggressively — the lord-anthem
     // pattern means threat density and attack pressure dominate the game plan.
     // Placed AFTER the ramp branch so a tribal+ramp hybrid reads as Ramp.
-    if features.tribal.commitment > 0.55 {
+    if features.tribal.commitment > TRIBAL_AGGRO_TEMPO_FLOOR {
         return TempoClass::Aggro;
     }
     // A control deck with high commitment AND meaningful reactive_tempo reads
@@ -128,7 +131,7 @@ fn expected_threats_for(features: &DeckFeatures) -> [u8; SCHEDULE_LEN] {
     // Tribal decks with meaningful commitment front-load creature deployment
     // on turns 2–4 — each lord or tribe member now matters, so threat density
     // peaks early to maximize lord anthem value.
-    if features.tribal.commitment > 0.4 {
+    if features.tribal.commitment > TRIBAL_MULLIGAN_FLOOR {
         for (turn_idx, slot) in threats.iter_mut().enumerate() {
             let turn = turn_idx + 1;
             if (2..=4).contains(&turn) {

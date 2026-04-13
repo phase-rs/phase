@@ -15,12 +15,9 @@ use engine::types::zones::Zone;
 
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
-use crate::features::tribal::statics_are_lord_for;
+use crate::features::tribal::{statics_are_lord_for, LORD_PRIORITY_FLOOR};
 use crate::features::DeckFeatures;
 use engine::parser::oracle_util::canonicalize_subtype_name;
-
-/// Activation floor — only engage for genuine tribal decks.
-const COMMITMENT_FLOOR: f32 = 0.3;
 
 /// Bonus for casting an on-tribe lord.
 /// CR 613.4c: lords grant layer 7c P/T modifications to other tribe members.
@@ -49,7 +46,7 @@ impl TacticalPolicy for TribalLordPriorityPolicy {
     ) -> Option<f32> {
         // CR 205.3: tribal commitment must exceed the floor before lord-prioritization
         // makes sense — incidental subtypes don't warrant re-ordering casts.
-        if features.tribal.commitment < COMMITMENT_FLOOR {
+        if features.tribal.commitment < LORD_PRIORITY_FLOOR {
             None
         } else {
             Some(features.tribal.commitment)

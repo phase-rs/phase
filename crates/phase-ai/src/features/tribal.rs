@@ -51,6 +51,21 @@ const DOMINANCE_FLOOR: f32 = 0.25;
 /// Maximum number of `TribeEntry` records retained (ranked by commitment desc).
 const MAX_TRIBES: usize = 4;
 
+/// Tactical lord-priority floor — `TribalLordPriorityPolicy` engages at or
+/// above this `commitment`. Below it, lord re-ordering is unwarranted because
+/// the deck has only incidental tribal subtypes. CR 205.3.
+pub const LORD_PRIORITY_FLOOR: f32 = 0.3;
+
+/// Mulligan-and-planning floor — `TribalDensityMulligan` engages at or above
+/// this commitment, and `expected_threats_for` front-loads creature
+/// deployment on turns 2–4 to capture early lord anthem value.
+pub const MULLIGAN_FLOOR: f32 = 0.4;
+
+/// Tempo-class floor — at or above this commitment the deck is classified as
+/// `TempoClass::Aggro`. Tribal anthems compress threat density into early
+/// turns, so the game plan reads as aggro regardless of coarse `archetype`.
+pub const AGGRO_TEMPO_FLOOR: f32 = 0.55;
+
 /// Per-tribe structural data — computed once per game from the deck list.
 #[derive(Debug, Clone, Default)]
 pub struct TribeEntry {

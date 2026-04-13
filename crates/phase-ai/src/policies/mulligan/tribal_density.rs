@@ -5,22 +5,20 @@
 //! hands with a dense mix of tribe members and payoffs are strongly preferred
 //! over sparse hands where the tribal plan can't execute.
 //!
-//! Opts out for decks where `features.tribal.commitment < 0.4` — below that
-//! threshold the baseline `KeepablesByLandCount` policy is the sole voice.
+//! Opts out for decks where `features.tribal.commitment <
+//! tribal::MULLIGAN_FLOOR` (0.4) — below that threshold the baseline
+//! `KeepablesByLandCount` policy is the sole voice.
 
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 
-use crate::features::tribal::statics_are_lord_for;
+use crate::features::tribal::{statics_are_lord_for, MULLIGAN_FLOOR};
 use crate::features::DeckFeatures;
 use crate::plan::PlanSnapshot;
 use crate::policies::registry::{PolicyId, PolicyReason};
 use engine::parser::oracle_util::canonicalize_subtype_name;
 
 use super::{MulliganPolicy, MulliganScore, TurnOrder};
-
-/// Commitment floor below which this policy opts out.
-const COMMITMENT_THRESHOLD: f32 = 0.4;
 
 pub struct TribalDensityMulligan;
 
@@ -39,7 +37,7 @@ impl MulliganPolicy for TribalDensityMulligan {
         _mulligans_taken: u8,
     ) -> MulliganScore {
         let commitment = features.tribal.commitment;
-        if commitment < COMMITMENT_THRESHOLD {
+        if commitment < MULLIGAN_FLOOR {
             return MulliganScore::Score {
                 delta: 0.0,
                 reason: PolicyReason::new("tribal_opener_na")

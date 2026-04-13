@@ -277,7 +277,12 @@ fn is_spot_removal_effect(e: &&Effect) -> bool {
 /// draw abilities (e.g., on artifacts) and land-activated cantrips are excluded.
 /// Lands are excluded by the caller's `!is_land` gate.
 ///
-/// CR 120.1: drawing cards replenishes hand and provides card advantage.
+/// CR 120.1: drawing cards replenishes hand and provides card advantage. An
+/// `Effect::Dig` whose kept-card destination is `Exile` is impulse-cast (e.g.,
+/// Outpost Siege "exile, you may play it this turn") — it doesn't move cards
+/// to hand and doesn't satisfy CR 120.1's definition of card draw, so it is
+/// excluded. Dig variants whose destination is `None` (defaults to Hand) or
+/// explicitly `Hand` are accepted.
 fn is_card_draw(face: &CardFace) -> bool {
     face.abilities.iter().any(|ability| {
         ability.kind == AbilityKind::Spell
@@ -287,7 +292,8 @@ fn is_card_draw(face: &CardFace) -> bool {
                 // ("draw X cards") are accepted as net-positive draws since
                 // X is normally ≥ 1 at resolution.
                 Effect::Draw { count } => !matches!(count, QuantityExpr::Fixed { value: 0 }),
-                Effect::Dig { .. } => true,
+                // Impulse-to-exile is tempo, not card advantage — excluded.
+                Effect::Dig { destination, .. } => !matches!(destination, Some(Zone::Exile)),
                 _ => false,
             })
     })
@@ -480,6 +486,52 @@ mod tests {
 
         let feature = detect(&deck);
         assert_eq!(feature.card_draw_count, 4);
+    }
+
+    #[test]
+    fn detects_dig_to_hand_as_card_draw() {
+        // Dig with destination = None defaults to Hand → counts as card draw.
+        let mut face = card_face_with_types("Brainstorm-shape", vec![CoreType::Instant]);
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Dig {
+                count: QuantityExpr::Fixed { value: 3 },
+                destination: None,
+                keep_count: Some(3),
+                up_to: false,
+                filter: TargetFilter::Any,
+                rest_destination: None,
+                reveal: false,
+            },
+        ));
+        let deck = vec![entry(face, 4)];
+
+        let feature = detect(&deck);
+        assert_eq!(feature.card_draw_count, 4);
+    }
+
+    #[test]
+    fn impulse_dig_to_exile_excluded_from_card_draw() {
+        // CR 120.1: card draw moves cards to hand. A Dig whose kept-card
+        // destination is Exile is impulse-cast (e.g., Outpost Siege variant) —
+        // it must NOT count as card draw.
+        let mut face = card_face_with_types("Outpost-shape", vec![CoreType::Sorcery]);
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Dig {
+                count: QuantityExpr::Fixed { value: 1 },
+                destination: Some(Zone::Exile),
+                keep_count: Some(1),
+                up_to: false,
+                filter: TargetFilter::Any,
+                rest_destination: None,
+                reveal: false,
+            },
+        ));
+        let deck = vec![entry(face, 4)];
+
+        let feature = detect(&deck);
+        assert_eq!(feature.card_draw_count, 0);
     }
 
     #[test]

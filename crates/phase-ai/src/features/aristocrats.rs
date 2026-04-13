@@ -56,9 +56,12 @@ pub struct AristocratsFeature {
     pub fodder_source_count: u32,
     /// `0.0..=1.0` — geometric-mean commitment. Missing pillars zero out.
     pub commitment: f32,
-    /// Names of detected sacrifice outlets, used as battlefield identifiers in
-    /// `FreeOutletActivationPolicy` to answer "is an outlet on my board?" at
-    /// decision time (identity lookup, not name-classification).
+    /// Names of detected sacrifice outlets, used by `AristocratsKeepablesMulligan`
+    /// as identity lookup against opening-hand objects (where structural
+    /// re-classification can't run because abilities aren't resolved yet).
+    /// `FreeOutletActivationPolicy` re-classifies the live ability structurally
+    /// at activation time and does NOT consume this list — when the live
+    /// ability is in hand, identity is the only handle the mulligan layer has.
     pub outlet_names: Vec<String>,
     /// Names of detected death-trigger payoffs, used by the mulligan policy to
     /// answer "is a payoff in the deck?" and by the activation policy to count
