@@ -29,8 +29,11 @@ Determine which skill(s) apply to this task. Read each one that applies:
 | `/add-trigger` | Triggered abilities |
 | `/add-static-ability` | Static/continuous effects |
 | `/add-replacement-effect` | Replacement effects |
-| `/add-interactive-effect` | Effects requiring player choices |
+| `/add-interactive-effect` | Effects requiring player choices (WaitingFor + GameAction continuations) |
 | `/casting-stack-conditions` | Casting flow or stack changes |
+| `/add-ai-feature-policy` | Deck-aware AI features — new `DeckFeatures` axis + `TacticalPolicy`/`MulliganPolicy` wiring in `phase-ai` |
+| `/add-frontend-component` | React components for WaitingFor overlays, board elements, or any UI that dispatches `GameAction`s |
+| `/add-card-data-pipeline` | Card export shape changes, synthesis functions, coverage-report changes, or debugging runtime card-data shape |
 
 Use the skill checklist(s) as the skeleton of your plan. Every checklist step must appear in the final plan.
 

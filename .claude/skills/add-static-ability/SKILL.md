@@ -283,7 +283,7 @@ rg -q "fn gather_active_continuous_effects" crates/engine/src/game/layers.rs && 
 rg -q "fn apply_continuous_effect" crates/engine/src/game/layers.rs && \
 rg -q "fn parse_static_line" crates/engine/src/parser/oracle_static.rs && \
 rg -q "fn parse_continuous_modifications" crates/engine/src/parser/oracle_static.rs && \
-rg -q "fn is_static_pattern" crates/engine/src/parser/oracle.rs && \
+rg -q "fn is_static_pattern" crates/engine/src/parser/oracle_classifier.rs && \
 rg -q "enum ContinuousModification" crates/engine/src/types/ability.rs && \
 rg -q "struct StaticDefinition" crates/engine/src/types/ability.rs && \
 rg -q "enum StaticCondition" crates/engine/src/types/ability.rs && \

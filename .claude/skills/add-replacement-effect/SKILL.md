@@ -7,7 +7,7 @@ description: Use when adding or modifying replacement effects — ETB-tapped, sh
 
 Replacement effects modify or prevent game events before they happen (MTG Rule 614.1). They are **not** triggered abilities — they don't use the stack. This skill covers wiring a new replacement through the pipeline: definition → parser → registry → handler → engine.
 
-**Before you start:** Trace how shock lands work end-to-end. They're the most complete example: `parse_shock_land()` in `oracle_replacement.rs` → `ReplacementDefinition` with `Optional` mode → replacement pipeline → `post_replacement_effect` → `apply_post_replacement_effect` in `engine.rs`.
+**Before you start:** Trace how shock lands work end-to-end. They're the most complete example: `parse_shock_land()` in `oracle_replacement.rs` → `ReplacementDefinition` with `Optional` mode → replacement pipeline → `handle_replacement_choice()` in `engine_replacement.rs` delivers the accept/decline effect inline → `apply_post_replacement_effect()` handles any remaining copy-target follow-up.
 
 > **CR Verification Rule:** Every CR number in annotations MUST be verified by grepping `docs/MagicCompRules.txt` before writing. Do NOT rely on memory — 701.x and 702.x numbers are arbitrary sequential assignments that LLMs consistently hallucinate. Run `grep -n "^614.1" docs/MagicCompRules.txt` (etc.) for every number. If you cannot find it, do not write the annotation.
 
@@ -91,11 +91,17 @@ Re-enter pipeline_loop() → check for cascading replacements
 ReplacementResult::Execute(modified_event) → caller processes the event
 ```
 
-### `post_replacement_effect` Lifecycle
+### Delivery Lifecycle — Where Effects Actually Run
 
-Stored on `GameState` as `Option<Box<AbilityDefinition>>`. Set by `continue_replacement()`, consumed in `engine.rs` after the zone change completes. Currently handles `LoseLife` and `Tap` in `apply_post_replacement_effect()`.
+**Non-ZoneChange events deliver inline.** When `handle_replacement_choice()` in `engine_replacement.rs` receives the accepted `ProposedEvent`, its exhaustive match delivers the event directly: `Damage`, `Draw`, `LifeGain`/`LifeLoss`, `AddCounter`/`RemoveCounter`, `Tap`/`Untap`, `Discard`, `Destroy`, `Sacrifice`, `CreateToken`, `ProduceMana` — all execute in their match arm before the function returns. The replacement pipeline does not defer these through a separate "post-replacement" phase.
 
-**Important**: This runs *after* the zone change. For effects that must happen *before* the zone change (like "choose a basic land type"), see Interactive Replacements below.
+**ZoneChange events** route through `move_to_zone()` and then apply `enter_tapped`, `enter_with_counters`, `controller_override`, `enter_transformed` flags set by the replacement pipeline (see `handle_replacement_choice()` match arm for `ProposedEvent::ZoneChange`).
+
+**`apply_post_replacement_effect()`** (in `engine_replacement.rs`) is the general-purpose side-effect resolver used *after* the event is delivered. It:
+- Handles `Effect::BecomeCopy` specially by returning `WaitingFor::CopyTargetChoice` (CR 707.9 — "enter as a copy").
+- Delegates everything else to `effects::resolve_ability_chain()`, so any `AbilityDefinition` variant is supported as a follow-up — not just a hand-picked pair.
+
+**For effects that must happen *before* the zone change** (like "choose a basic land type" — CR 614.16), see Interactive Replacements below. Those pause the pipeline mid-flight rather than using the post-delivery lifecycle.
 
 ---
 
@@ -209,7 +215,8 @@ rg -q "fn replace_event" crates/engine/src/game/replacement.rs && \
 rg -q "fn continue_replacement" crates/engine/src/game/replacement.rs && \
 rg -q "fn find_applicable_replacements" crates/engine/src/game/replacement.rs && \
 rg -q "fn pipeline_loop" crates/engine/src/game/replacement.rs && \
-rg -q "fn apply_post_replacement_effect" crates/engine/src/game/engine.rs && \
+rg -q "fn apply_post_replacement_effect" crates/engine/src/game/engine_replacement.rs && \
+rg -q "fn handle_replacement_choice" crates/engine/src/game/engine_replacement.rs && \
 rg -q "fn build_replacement_registry" crates/engine/src/game/replacement.rs && \
 rg -q "struct ReplacementDefinition" crates/engine/src/types/ability.rs && \
 rg -q "enum ReplacementMode" crates/engine/src/types/ability.rs && \

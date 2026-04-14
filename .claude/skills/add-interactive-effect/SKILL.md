@@ -79,8 +79,15 @@ if matches!(state.waiting_for,
 ### `pending_continuation` storage — `crates/engine/src/types/game_state.rs`
 
 ```rust
-pub pending_continuation: Option<Box<ResolvedAbility>>,
+pub pending_continuation: Option<PendingContinuation>,
+
+pub struct PendingContinuation {
+    pub chain: Box<ResolvedAbility>,
+    pub parent_kind: Option<EffectKind>, // used to re-emit parent EffectResolved on drain
+}
 ```
+
+The `parent_kind` field is set when the continuation is stashed so that draining the continuation re-emits the parent `EffectResolved` event (see commit `e69173e2f` — required for fight / `DamageAll` / `DamageEachPlayer` paths that pause mid-delivery).
 
 ### Target propagation
 

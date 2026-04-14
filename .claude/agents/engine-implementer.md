@@ -40,11 +40,12 @@ Implement the reviewed plan step by step.
 
 ### Rules
 
-1. **Re-read before editing.** Before modifying any file, re-read it to get current state.
-2. **Use Edit, not Write** for existing files. Targeted `old_string` → `new_string` replacements only.
-3. **Nom combinators from the first line** for any parser code. No `find()`, `split_once()`, `contains()`, `starts_with()` for parsing dispatch.
-4. **CR annotations verified.** Run `grep -n "^{rule_number}" docs/MagicCompRules.txt` for every CR number before writing it into code.
-5. **Architecture checkpoint.** If at any point something doesn't slot cleanly into existing patterns — **STOP**. Do not hack around it. Revise the approach to find the architecturally correct path, then continue. If the revision is non-trivial, message the planner for guidance.
+1. **Re-read before editing.** Before modifying any file, re-read it to get current state. If a file changed since you last read it (another agent may be working concurrently), re-read it again before your next edit — the new content is intentional.
+2. **Use Edit, not Write** for existing files. Targeted `old_string` → `new_string` replacements only. Whole-file rewrites destroy concurrent work from other agents.
+3. **Multi-agent safety (CLAUDE.md:35-44).** Never revert, overwrite, or rewrite unfamiliar code you didn't author — it is another agent's in-progress work. Never use `git stash` for any reason (it can destroy in-progress work on pop). Never `git checkout`, `git restore`, or `git reset --hard` files you didn't modify. If you need pre-existing state, use `git show` or `git diff` against a commit ref.
+4. **Nom combinators from the first line** for any parser code. No `find()`, `split_once()`, `contains()`, `starts_with()` for parsing dispatch.
+5. **CR annotations verified.** Run `grep -n "^{rule_number}" docs/MagicCompRules.txt` for every CR number before writing it into code. The `/validate-cr-annotations` skill and `mtg-rules-auditor` agent are the canonical tools for bulk verification and retroactive audits.
+6. **Architecture checkpoint.** If at any point something doesn't slot cleanly into existing patterns — **STOP**. Do not hack around it. Revise the approach to find the architecturally correct path, then continue. If the revision is non-trivial, message the planner for guidance.
 
 ### Verification
 
@@ -52,7 +53,7 @@ Run these commands after implementation and fix any failures:
 
 ```bash
 cargo fmt --all
-cargo clippy --all-targets -- -D warnings
+cargo clippy-strict
 cargo test -p engine
 ```
 
@@ -61,7 +62,18 @@ If parser changes were made, also run:
 ```bash
 ./scripts/gen-card-data.sh
 cargo coverage
+cargo semantic-audit
 ```
+
+`cargo coverage` reports newly-supported cards and `Unimplemented` gaps. `cargo semantic-audit` catches misparses (wrong-but-parsed structures) that coverage cannot see — always run both after parser changes.
+
+If frontend changes were made (anything under `client/`), also run:
+
+```bash
+cd client && pnpm type-check && pnpm lint
+```
+
+TypeScript errors and lint failures must not be committed.
 
 ### Nom Combinator Gate (parser files only)
 

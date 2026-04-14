@@ -251,7 +251,7 @@ If your overlay is a card choice type, integrate into the existing `CardChoiceMo
 
 | Directory | Purpose | Examples |
 |-----------|---------|---------|
-| `components/modal/` | Interactive overlays for WaitingFor states | CardChoiceModal, ModeChoiceModal, ReplacementModal, ChoiceModal, NamedChoiceModal |
+| `components/modal/` | Interactive overlays for WaitingFor states | CardChoiceModal, ModeChoiceModal, ReplacementModal, ChoiceModal, NamedChoiceModal, BattleProtectorModal, TributeModal, CombatTaxModal |
 | `components/board/` | Battlefield elements | PermanentCard, GameBoard, PlayerArea, CommandDisplay |
 | `components/card/` | Card rendering | CardImage, CardPreview, ArtCropCard |
 | `components/combat/` | Combat interaction | AttackerControls, BlockerControls, DamageAssignmentModal |

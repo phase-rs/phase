@@ -52,7 +52,7 @@ pub struct TriggerDefinition {
 
 ### `TriggerMode` — `crates/engine/src/types/triggers.rs`
 
-The event discriminant. ~220 variants organized by category:
+The event discriminant. ~160 variants organized by category:
 
 | Category | Example Modes | Typical Event |
 |----------|--------------|---------------|

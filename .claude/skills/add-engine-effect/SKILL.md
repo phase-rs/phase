@@ -270,7 +270,7 @@ Only needed if the effect reveals or hides information (hands, face-down cards, 
 
 | Mistake | Consequence | Fix |
 |---------|-------------|-----|
-| Missing `extract_target_filter_from_effect` arm | Triggered abilities skip targeting — resolve with no targets, hit `MissingParam` error | Add the variant to the match in `triggers.rs:409` |
+| Missing `extract_target_filter_from_effect` arm | Triggered abilities skip targeting — resolve with no targets, hit `MissingParam` error | Add the variant to the match in `extract_target_filter_from_effect()` in `game/triggers.rs` |
 | Missing `extract_target_filter_from_effect` arm in `stack.rs` | Spells don't fizzle when targets become illegal | Ensure the effect's `TargetFilter` is returned by `extract_target_filter_from_effect` |
 | Creating a mega-effect instead of composing | One-off solution that handles one card pattern | Decompose into building blocks with `sub_ability` chains |
 | Boolean flags on `Effect` variants | Undefined combinations, unclear intent | Use enum variants (see `DamageAmount`, `LifeAmount`) |
