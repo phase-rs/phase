@@ -74,6 +74,10 @@ export function PlayerArea({
   const player = gameState.players[playerId];
   const isCommander = gameState.format_config?.format === "Commander";
   const isEliminated = player?.is_eliminated ?? false;
+  // CR 702.26-style player phasing: while phased out, dim the player area
+  // to mirror the engine-side exclusion (targeting/damage/attack/SBA). Use
+  // the same visual treatment as elimination for consistency.
+  const isPhasedOut = player?.status?.type === "PhasedOut";
   const isMirrored = mode === "focused";
   const partitioned = battlefieldView;
 
@@ -130,8 +134,11 @@ export function PlayerArea({
 
   return (
     <div
-      className={`relative flex min-h-0 flex-1 overflow-visible ${isEliminated ? "opacity-40 grayscale" : ""}`}
+      className={`relative flex min-h-0 flex-1 overflow-visible ${
+        isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""
+      }`}
       data-testid={`player-area-${playerId}`}
+      data-phased-out={isPhasedOut ? "true" : undefined}
     >
       <div
         className={`flex min-w-0 flex-1 flex-col gap-2 px-1 ${
@@ -174,6 +181,14 @@ export function PlayerArea({
         <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">
           <span className="rounded-lg bg-red-900/80 px-4 py-2 text-lg font-bold text-red-200">
             Eliminated
+          </span>
+        </div>
+      )}
+      {/* Phased-out badge (CR 702.26-style player phasing) */}
+      {isPhasedOut && !isEliminated && (
+        <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">
+          <span className="rounded-lg bg-indigo-900/80 px-4 py-2 text-lg font-bold text-indigo-200">
+            Phased Out
           </span>
         </div>
       )}

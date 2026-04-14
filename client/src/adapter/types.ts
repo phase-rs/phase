@@ -286,6 +286,16 @@ export interface CompanionInfo {
 
 // ── Player ───────────────────────────────────────────────────────────────
 
+/**
+ * Player-level phasing status (mirrors Rust `PlayerStatus`).
+ * Serde output: `{ "type": "Active" }` / `{ "type": "PhasedOut" }`.
+ * While `PhasedOut`, the player is excluded from targeting/attack/damage/
+ * SBA-loss filter choke points in the engine.
+ */
+export type PlayerStatus =
+  | { type: "Active" }
+  | { type: "PhasedOut" };
+
 export interface Player {
   id: PlayerId;
   life: number;
@@ -301,6 +311,12 @@ export interface Player {
   companion?: CompanionInfo;
   /** CR 122.1: Player's energy counter total. */
   energy?: number;
+  /**
+   * Player phasing status (serde-default `Active` for replay compat).
+   * When `PhasedOut`, the engine treats the player as excluded from
+   * targeting, attacking, damage, and SBA-loss checks.
+   */
+  status?: PlayerStatus;
 }
 
 // ── Target Filter ───────────────────────────────────────────────────────
@@ -389,6 +405,21 @@ export interface TargetSelectionProgress {
 export type TargetSelectionConstraint =
   | { type: "DifferentTargetPlayers" };
 
+// ── Combat Tax (CR 508.1d + 508.1h + 509.1c + 509.1d) ────────────────────
+
+/** Which combat step a `WaitingFor::CombatTaxPayment` belongs to.
+ * Serde output: `{ "type": "Attacking" }` / `{ "type": "Blocking" }`. */
+export type CombatTaxContext =
+  | { type: "Attacking" }
+  | { type: "Blocking" };
+
+/** The declaration paused awaiting a combat-tax decision. Serde
+ * `tag = "type", content = "data"`. Rust tuples (ObjectId, AttackTarget)
+ * and (ObjectId, ObjectId) serialize as JSON arrays. */
+export type CombatTaxPending =
+  | { type: "Attack"; data: { attacks: [ObjectId, AttackTarget][] } }
+  | { type: "Block"; data: { assignments: [ObjectId, ObjectId][] } };
+
 // ── Additional Costs (kicker, blight, "or pay") ─────────────────────────
 
 export type AdditionalCost =
@@ -462,6 +493,9 @@ export type WaitingFor =
   | { type: "TopOrBottomChoice"; data: { player: PlayerId; object_id: ObjectId } }
   | { type: "CompanionReveal"; data: { player: PlayerId; eligible_companions: [string, number][] } }
   | { type: "ChooseLegend"; data: { player: PlayerId; legend_name: string; candidates: ObjectId[] } }
+  | { type: "BattleProtectorChoice"; data: { player: PlayerId; battle_id: ObjectId; candidates: PlayerId[] } }
+  | { type: "TributeChoice"; data: { player: PlayerId; source_id: ObjectId; count: number } }
+  | { type: "CombatTaxPayment"; data: { player: PlayerId; context: CombatTaxContext; total_cost: ManaCost; per_creature: [ObjectId, ManaCost][]; pending: CombatTaxPending } }
   | { type: "AssignCombatDamage"; data: { player: PlayerId; attacker_id: ObjectId; total_damage: number; blockers: { blocker_id: ObjectId; lethal_minimum: number }[]; trample: TrampleKind | null; defending_player: PlayerId; attack_target: AttackTarget; pw_loyalty?: number; pw_controller?: PlayerId } }
   | { type: "DistributeAmong"; data: { player: PlayerId; total: number; targets: TargetRef[]; unit: DistributionUnit } }
   | { type: "ChooseFromZoneChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; up_to?: boolean; constraint?: ChooseFromZoneConstraint | null; source_id: ObjectId } }
@@ -586,6 +620,8 @@ export type GameAction =
   | { type: "PayUnlessCost"; data: { pay: boolean } }
   | { type: "ChooseRingBearer"; data: { target: ObjectId } }
   | { type: "ChooseLegend"; data: { keep: ObjectId } }
+  | { type: "ChooseBattleProtector"; data: { protector: PlayerId } }
+  | { type: "PayCombatTax"; data: { accept: boolean } }
   | { type: "HarmonizeTap"; data: { creature_id: ObjectId | null } }
   | { type: "DeclareCompanion"; data: { card_index: number | null } }
   | { type: "CompanionToHand" }

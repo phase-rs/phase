@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { PlayerId } from "../../adapter/types.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
@@ -11,12 +11,20 @@ import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { StatusBadge } from "./HudBadges.tsx";
 import { HudPlate } from "./HudPlate.tsx";
+import { KickConfirmDialog } from "./KickConfirmDialog.tsx";
 
 interface OpponentHudProps {
   opponentName?: string | null;
+  /**
+   * P2P host-only callback to kick a player. When provided AND the game is
+   * 3+ players, an inline kick button appears on each opponent tab. The
+   * adapter handles auto-concede + denylist + wire broadcast.
+   */
+  onKickPlayer?: (playerId: PlayerId) => void;
 }
 
-export function OpponentHud({ opponentName }: OpponentHudProps) {
+export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
+  const [kickTarget, setKickTarget] = useState<PlayerId | null>(null);
   const playerId = usePerspectivePlayerId();
   const focusedOpponent = useUiStore((s) => s.focusedOpponent) as PlayerId | null;
   const setFocusedOpponent = useUiStore((s) => s.setFocusedOpponent);
@@ -85,18 +93,27 @@ export function OpponentHud({ opponentName }: OpponentHudProps) {
     const opponentCompanion = gameState?.players[opponentId]?.companion;
     const opponentSpeed = gameState?.players[opponentId]?.speed ?? 0;
     const isDisconnected = isOnline && disconnectedPlayers.has(opponentId);
+    const isOpponentPhasedOut =
+      gameState?.players[opponentId]?.status?.type === "PhasedOut";
     const label = opponentName ?? `Opp ${opponentId + 1}`;
 
     const hudTone = isValidTarget ? "cyan" : isOpponentTurn ? "rose" : "neutral";
 
     return (
-      <div data-player-hud={String(opponentId)} className="relative flex items-center py-1">
+      <div
+        data-player-hud={String(opponentId)}
+        data-phased-out={isOpponentPhasedOut ? "true" : undefined}
+        className={`relative flex items-center py-1 ${
+          isOpponentPhasedOut ? "opacity-40 grayscale" : ""
+        }`}
+      >
         <HudPlate
           label={label}
           tone={hudTone}
           onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
-          trailing={opponentSpeed > 0 || opponentCompanion || isOnline ? (
+          trailing={opponentSpeed > 0 || opponentCompanion || isOnline || isOpponentPhasedOut ? (
             <>
+              {isOpponentPhasedOut ? <StatusBadge label="Phased Out" tone="neutral" /> : null}
               {opponentSpeed > 0 ? <StatusBadge label="Speed" value={opponentSpeed} tone={opponentSpeed >= 4 ? "amber" : "neutral"} /> : null}
               {opponentCompanion ? <StatusBadge label="Companion" /> : null}
               {isOnline ? <ConnectionDotInline disconnected={isDisconnected} /> : null}
@@ -114,6 +131,7 @@ export function OpponentHud({ opponentName }: OpponentHudProps) {
 
   // Multiplayer: tabbed opponent selector
   const focusedId = focusedOpponent ?? liveOpponents[0];
+  const targetLabel = kickTarget != null ? `Opp ${kickTarget + 1}` : "";
 
   return (
     <div className="flex items-center justify-center gap-2 px-2 py-1">
@@ -127,8 +145,22 @@ export function OpponentHud({ opponentName }: OpponentHudProps) {
           isValidTarget={validPlayerTargetIds.includes(opId)}
           showMana={focusedId === opId}
           onClick={() => validPlayerTargetIds.includes(opId) ? handlePlayerTarget(opId) : setFocusedOpponent(opId)}
+          onKick={
+            onKickPlayer && !eliminated.includes(opId)
+              ? () => setKickTarget(opId)
+              : undefined
+          }
         />
       ))}
+      <KickConfirmDialog
+        isOpen={kickTarget !== null}
+        playerLabel={targetLabel}
+        onConfirm={() => {
+          if (kickTarget !== null && onKickPlayer) onKickPlayer(kickTarget);
+          setKickTarget(null);
+        }}
+        onCancel={() => setKickTarget(null)}
+      />
       <button
         type="button"
         aria-pressed={followActiveOpponent}
@@ -158,9 +190,11 @@ interface OpponentTabProps {
   isValidTarget: boolean;
   showMana: boolean;
   onClick: () => void;
+  /** Host-only: when provided, render a small kick affordance on the tab. */
+  onKick?: () => void;
 }
 
-function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isValidTarget, showMana, onClick }: OpponentTabProps) {
+function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isValidTarget, showMana, onClick, onKick }: OpponentTabProps) {
   const gameState = useGameStore((s) => s.gameState);
   const isTheirTurn = gameState?.active_player === playerId;
   const player = gameState?.players[playerId];
@@ -185,6 +219,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
 
   const handCount = player.hand.length;
   const speed = player.speed ?? 0;
+  const isPhasedOut = player.status?.type === "PhasedOut";
 
   const label = ally ? "Ally" : `Opp ${playerId + 1}`;
 
@@ -205,7 +240,8 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
       type="button"
       onClick={onClick}
       disabled={isEliminated}
-      className={`flex items-center gap-3 rounded-[18px] border px-3 py-2 backdrop-blur-xl transition-all duration-200 ${borderClass} ${isEliminated ? "opacity-40 grayscale" : ""}`}
+      data-phased-out={isPhasedOut ? "true" : undefined}
+      className={`flex items-center gap-3 rounded-[18px] border px-3 py-2 backdrop-blur-xl transition-all duration-200 ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
     >
       <div className="flex min-w-[4.5rem] flex-col items-start leading-none">
         <span className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-white/48">
@@ -234,6 +270,36 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
 
       {isEliminated && (
         <span className="rounded-full bg-red-900/60 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-red-300">Out</span>
+      )}
+
+      {isPhasedOut && !isEliminated && (
+        <span className="rounded-full bg-indigo-900/60 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-indigo-200">Phased</span>
+      )}
+
+      {onKick && !isEliminated && (
+        // Stop propagation so clicking the kick affordance doesn't also fire
+        // the parent button's `onClick` (which sets focused opponent or
+        // selects a target).
+        <span
+          role="button"
+          tabIndex={0}
+          aria-label={`Kick player ${playerId + 1}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onKick();
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.stopPropagation();
+              e.preventDefault();
+              onKick();
+            }
+          }}
+          className="ml-1 flex h-5 w-5 cursor-pointer items-center justify-center rounded-full bg-red-900/40 text-[11px] font-bold text-red-300 ring-1 ring-red-500/30 transition hover:bg-red-700/60 hover:text-red-100"
+          title="Kick player (forfeit)"
+        >
+          ×
+        </span>
       )}
     </button>
   );

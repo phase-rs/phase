@@ -38,6 +38,7 @@ export function CompactStrip({ playerId, onClick, isActive }: CompactStripProps)
   if (!player) return null;
 
   const isEliminated = player.is_eliminated ?? false;
+  const isPhasedOut = player.status?.type === "PhasedOut";
   const handCount = player.hand.length;
   const lifeColor =
     player.life >= 10
@@ -50,7 +51,7 @@ export function CompactStrip({ playerId, onClick, isActive }: CompactStripProps)
     <button
       type="button"
       onClick={onClick}
-      className={`flex items-center gap-3 rounded-lg border-2 px-3 py-2 shadow-md transition-all duration-300 hover:border-gray-400 hover:bg-gray-800/80 ${isTheirTurn ? "border-red-400 bg-black/60 ring-2 ring-red-400/40 shadow-[0_0_12px_rgba(248,113,113,0.4)]" : isActive ? "border-amber-400 bg-gray-800/90 ring-2 ring-amber-400/40 shadow-amber-500/20" : "border-gray-500 bg-gray-900/80 shadow-black/30"} ${isEliminated ? "opacity-40 grayscale" : ""}`}
+      className={`flex items-center gap-3 rounded-lg border-2 px-3 py-2 shadow-md transition-all duration-300 hover:border-gray-400 hover:bg-gray-800/80 ${isTheirTurn ? "border-red-400 bg-black/60 ring-2 ring-red-400/40 shadow-[0_0_12px_rgba(248,113,113,0.4)]" : isActive ? "border-amber-400 bg-gray-800/90 ring-2 ring-amber-400/40 shadow-amber-500/20" : "border-gray-500 bg-gray-900/80 shadow-black/30"} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
       data-testid={`compact-strip-${playerId}`}
     >
       {/* Player name and life */}

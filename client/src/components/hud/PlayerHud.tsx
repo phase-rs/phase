@@ -12,6 +12,9 @@ export function PlayerHud() {
   const playerId = usePerspectivePlayerId();
   const isMyTurn = useGameStore((s) => s.gameState?.active_player === playerId);
   const speed = useGameStore((s) => s.gameState?.players[playerId]?.speed ?? 0);
+  const isPhasedOut = useGameStore(
+    (s) => s.gameState?.players[playerId]?.status?.type === "PhasedOut",
+  );
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
 
@@ -33,14 +36,22 @@ export function PlayerHud() {
   return (
     <div
       data-player-hud={playerId}
-      className="relative z-20 flex shrink-0 flex-row flex-nowrap items-center justify-center gap-1.5 px-1 py-1 lg:gap-2 lg:px-2"
+      data-phased-out={isPhasedOut ? "true" : undefined}
+      className={`relative z-20 flex shrink-0 flex-row flex-nowrap items-center justify-center gap-1.5 px-1 py-1 lg:gap-2 lg:px-2 ${
+        isPhasedOut ? "opacity-40 grayscale" : ""
+      }`}
     >
       <PhaseIndicatorLeft />
       <HudPlate
         label={`Player ${playerId + 1}`}
         tone={hudTone}
         onClick={isValidTarget ? handleTargetClick : undefined}
-        trailing={speed > 0 ? <StatusBadge label="Speed" value={speed} tone={speed >= 4 ? "amber" : "neutral"} /> : undefined}
+        trailing={
+          <>
+            {isPhasedOut ? <StatusBadge label="Phased Out" tone="neutral" /> : null}
+            {speed > 0 ? <StatusBadge label="Speed" value={speed} tone={speed >= 4 ? "amber" : "neutral"} /> : null}
+          </>
+        }
       >
         <div className="flex min-w-0 items-center gap-2">
           <LifeTotal playerId={playerId} size="lg" hideLabel />
