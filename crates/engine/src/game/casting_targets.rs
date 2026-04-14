@@ -1,7 +1,8 @@
-use crate::types::ability::{Effect, QuantityExpr, TargetRef};
+use crate::types::ability::{Effect, ModalChoice, QuantityExpr, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 
 use super::ability_utils::{
@@ -44,26 +45,11 @@ pub(crate) fn handle_select_modes(
     // Spells resolve once — no cross-resolution mode constraints apply.
     validate_modal_indices(&modal, &indices, &[])?;
 
-    // CR 702.172b: Spree mode costs are additional costs — sum chosen modes and add to base cost.
-    // TODO CR 702.172b: When "cast without paying mana cost" is implemented, Spree mode costs
-    // must be paid separately (additional costs are not waived). Refactor to separate cost tracking.
-    let mut total_cost = if modal.mode_costs.is_empty() {
-        pending.cost.clone()
-    } else {
-        let spree_total = indices
-            .iter()
-            .fold(crate::types::mana::ManaCost::zero(), |acc, &idx| {
-                restrictions::add_mana_cost(&acc, &modal.mode_costs[idx])
-            });
-        restrictions::add_mana_cost(&pending.cost, &spree_total)
-    };
-
-    // CR 702.42a: Entwine — add entwine cost when all modes are chosen.
-    if indices.len() == modal.mode_count {
-        if let Some(ref entwine_cost) = modal.entwine_cost {
-            total_cost = restrictions::add_mana_cost(&total_cost, entwine_cost);
-        }
-    }
+    // CR 702.172a + CR 601.2f: Spree mode costs (and entwine, CR 702.42a) are additional
+    // costs layered on top of the base cost. `restrictions::add_mana_cost` treats `NoCost`/
+    // zero as identity, so a cast-without-paying path (`pending.cost == zero`) yields exactly
+    // the additional costs — alternative-cost permissions never waive them.
+    let total_cost = compute_modal_total_cost(&pending.cost, &modal, &indices);
 
     // Get the card's abilities to build combined resolved ability from chosen modes
     let obj = state
@@ -346,6 +332,36 @@ pub(crate) fn handle_choose_target(
     }
 }
 
+/// CR 702.172a + CR 601.2f + CR 702.42a: Compose a modal spell's total cost.
+///
+/// Sums the base cost with any Spree mode costs and, when all modes are chosen, the entwine
+/// cost. Because `restrictions::add_mana_cost` treats zero/`NoCost` as identity, a base of
+/// `ManaCost::zero()` (from a cast-without-paying permission) yields exactly the additional
+/// costs — never waiving them.
+pub(crate) fn compute_modal_total_cost(
+    base: &ManaCost,
+    modal: &ModalChoice,
+    indices: &[usize],
+) -> ManaCost {
+    let mut total = if modal.mode_costs.is_empty() {
+        base.clone()
+    } else {
+        let spree_total = indices.iter().fold(ManaCost::zero(), |acc, &idx| {
+            restrictions::add_mana_cost(&acc, &modal.mode_costs[idx])
+        });
+        restrictions::add_mana_cost(base, &spree_total)
+    };
+
+    // CR 702.42a: Entwine — add entwine cost when all modes are chosen.
+    if indices.len() == modal.mode_count {
+        if let Some(ref entwine_cost) = modal.entwine_cost {
+            total = restrictions::add_mana_cost(&total, entwine_cost);
+        }
+    }
+
+    total
+}
+
 /// CR 601.2d: Extract a fixed distribution total from an effect's amount field.
 /// Returns `None` if the amount depends on X or other runtime values (deferred to post-payment).
 fn extract_fixed_distribution_total(effect: &Effect) -> Option<u32> {
@@ -363,5 +379,86 @@ fn extract_fixed_distribution_total(effect: &Effect) -> Option<u32> {
             ..
         } => Some(*value as u32),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::mana::ManaCost;
+
+    fn spree_modal(mode_costs: Vec<ManaCost>) -> ModalChoice {
+        ModalChoice {
+            min_choices: 1,
+            max_choices: mode_costs.len(),
+            mode_count: mode_costs.len(),
+            mode_costs,
+            ..ModalChoice::default()
+        }
+    }
+
+    /// CR 702.172a + CR 601.2f: Spree mode costs are additional costs that survive a
+    /// cast-without-paying permission (zero base cost).
+    #[test]
+    fn spree_mode_cost_survives_cast_without_paying() {
+        let modal = spree_modal(vec![ManaCost::generic(1), ManaCost::generic(2)]);
+        let base = ManaCost::zero();
+
+        // One mode selected (cost {1}) → total = {1}.
+        assert_eq!(
+            compute_modal_total_cost(&base, &modal, &[0]),
+            ManaCost::generic(1),
+        );
+
+        // Both modes selected ({1} + {2}) → total = {3}.
+        assert_eq!(
+            compute_modal_total_cost(&base, &modal, &[0, 1]),
+            ManaCost::generic(3),
+        );
+    }
+
+    /// Sanity: with a normal (non-zero) base, mode costs add to the base.
+    #[test]
+    fn spree_mode_cost_pays_full_amount_with_normal_base_cost() {
+        let modal = spree_modal(vec![ManaCost::generic(1), ManaCost::generic(2)]);
+        let base = ManaCost::generic(2);
+
+        // Base {2} + mode {1} → total = {3}.
+        assert_eq!(
+            compute_modal_total_cost(&base, &modal, &[0]),
+            ManaCost::generic(3),
+        );
+
+        // Base {2} + both modes ({1} + {2}) → total = {5}.
+        assert_eq!(
+            compute_modal_total_cost(&base, &modal, &[0, 1]),
+            ManaCost::generic(5),
+        );
+    }
+
+    /// CR 702.42a: Entwine cost applies when all modes are chosen and is preserved
+    /// through a zero-base cast-without-paying path.
+    #[test]
+    fn entwine_cost_survives_cast_without_paying_when_all_modes_chosen() {
+        let modal = ModalChoice {
+            min_choices: 1,
+            max_choices: 2,
+            mode_count: 2,
+            entwine_cost: Some(ManaCost::generic(2)),
+            ..ModalChoice::default()
+        };
+        let base = ManaCost::zero();
+
+        // One of two modes: entwine does NOT apply → total = {0}.
+        assert_eq!(
+            compute_modal_total_cost(&base, &modal, &[0]),
+            ManaCost::zero(),
+        );
+
+        // Both modes: entwine applies → total = {2}.
+        assert_eq!(
+            compute_modal_total_cost(&base, &modal, &[0, 1]),
+            ManaCost::generic(2),
+        );
     }
 }
