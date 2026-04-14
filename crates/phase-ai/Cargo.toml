@@ -25,4 +25,8 @@ path = "src/bin/ai_duel.rs"
 name = "ai-tune"
 path = "src/bin/ai_tune.rs"
 
+[[bin]]
+name = "ai-commander"
+path = "src/bin/ai_commander.rs"
+
 [dev-dependencies]
