@@ -1022,10 +1022,8 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
     // and `StaticMode::CantWinTheGame` (effects/win_lose.rs::resolve_win).
     // The replacement-pipeline stub here is redundant but kept registered
     // so the parser's replacement-path output doesn't hit a dispatch miss.
-    let stub_events: Vec<ReplacementEvent> = vec![
-        ReplacementEvent::GameLoss,
-        ReplacementEvent::GameWin,
-    ];
+    let stub_events: Vec<ReplacementEvent> =
+        vec![ReplacementEvent::GameLoss, ReplacementEvent::GameWin];
     for ev in stub_events {
         registry.insert(ev, stub());
     }

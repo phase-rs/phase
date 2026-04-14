@@ -196,7 +196,7 @@ fn scan_mana_abilities(
 
         let sacrifice = cost_requires_sacrifice(&ability.cost);
         let life_payment = cost_requires_life_payment(&ability.cost);
-        for mana_type in mana_options_from_ability(state, controller, ability) {
+        for mana_type in mana_options_from_ability(state, controller, object_id, ability) {
             let option = ManaSourceOption {
                 object_id,
                 ability_index: Some(ability_index),
@@ -236,17 +236,19 @@ pub(crate) fn activation_condition_satisfied(
 fn mana_options_from_ability(
     state: &GameState,
     controller: PlayerId,
+    object_id: ObjectId,
     ability: &AbilityDefinition,
 ) -> Vec<ManaType> {
     let Effect::Mana { produced, .. } = &*ability.effect else {
         return Vec::new();
     };
-    mana_options_from_production(state, controller, produced)
+    mana_options_from_production(state, controller, object_id, produced)
 }
 
 fn mana_options_from_production(
     state: &GameState,
     controller: PlayerId,
+    object_id: ObjectId,
     produced: &ManaProduction,
 ) -> Vec<ManaType> {
     match produced {
@@ -272,9 +274,15 @@ fn mana_options_from_production(
             }
             options
         }
-        // TODO: resolve from object's chosen_attributes when mana source analysis
-        // gets access to the source object's state
-        ManaProduction::ChosenColor { .. } => Vec::new(),
+        // CR 106.1a: Resolve the source permanent's chosen color. If the
+        // permanent has no chosen color yet (e.g., still in library / sideboard
+        // preview), return empty so it isn't offered as a mana source.
+        ManaProduction::ChosenColor { .. } => state
+            .objects
+            .get(&object_id)
+            .and_then(|obj| obj.chosen_color())
+            .map(|color| vec![mana_color_to_type(&color)])
+            .unwrap_or_default(),
         // CR 106.7: Compute colors dynamically from opponent-controlled lands.
         ManaProduction::OpponentLandColors { .. } => opponent_land_color_options(state, controller),
     }
@@ -292,7 +300,7 @@ pub(crate) fn opponent_land_color_options(
 ) -> Vec<ManaType> {
     let opponents = super::players::opponents(state, controller);
     let mut options = Vec::new();
-    for obj in state.objects.values() {
+    for (object_id, obj) in state.objects.iter() {
         if obj.zone != Zone::Battlefield {
             continue;
         }
@@ -320,7 +328,7 @@ pub(crate) fn opponent_land_color_options(
             if matches!(produced, ManaProduction::OpponentLandColors { .. }) {
                 continue;
             }
-            for mana_type in mana_options_from_production(state, controller, produced) {
+            for mana_type in mana_options_from_production(state, controller, *object_id, produced) {
                 if !options.contains(&mana_type) {
                     options.push(mana_type);
                 }

@@ -46,7 +46,9 @@ pub fn check_day_night_transition(state: &mut GameState, events: &mut Vec<GameEv
         })
         .collect();
 
-    // TODO(CR 702.145c/f): Daybound/Nightbound permanents should immediately transform when entering while the opposite designation is active.
+    // CR 702.145c + CR 702.145f: Daybound/Nightbound permanents entering under
+    // the opposite designation are handled at ETB time in zones::move_to_zone,
+    // not here. This loop only handles on-transition transforms.
     for id in to_transform {
         let _ = transform::transform_permanent(state, id, events);
     }

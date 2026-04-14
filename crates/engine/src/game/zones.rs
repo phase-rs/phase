@@ -203,6 +203,33 @@ pub fn move_to_zone(
         state.layers_dirty = true;
     }
 
+    // CR 702.145c + CR 702.145f: Daybound/Nightbound permanents entering under
+    // the opposite day/night designation transform immediately. Runs after
+    // battlefield-entry bookkeeping but before the ZoneChanged event is emitted
+    // so the record reflects the face the object entered with. Skipped when
+    // day/night is uninitialized.
+    if to == Zone::Battlefield {
+        if let Some(designation) = state.day_night {
+            let needs_transform =
+                state
+                    .objects
+                    .get(&object_id)
+                    .is_some_and(|obj| match designation {
+                        crate::types::game_state::DayNight::Night => {
+                            obj.has_keyword(&crate::types::keywords::Keyword::Daybound)
+                                && !obj.transformed
+                        }
+                        crate::types::game_state::DayNight::Day => {
+                            obj.has_keyword(&crate::types::keywords::Keyword::Nightbound)
+                                && obj.transformed
+                        }
+                    });
+            if needs_transform {
+                let _ = super::transform::transform_permanent(state, object_id, events);
+            }
+        }
+    }
+
     super::restrictions::record_zone_change(state, zone_change_record.clone());
 
     events.push(GameEvent::ZoneChanged {
