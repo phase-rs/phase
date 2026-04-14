@@ -500,6 +500,69 @@ impl Default for ManaCost {
     }
 }
 
+/// CR 601.2h: Per-color tally of mana spent to cast an object.
+/// Populated during cost payment (see `casting::pay_mana_cost`) and
+/// consumed by trigger conditions like Adamant (CR 207.2c) and any
+/// future "if at least N of [color] was spent" checks.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColoredManaCount {
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub white: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub blue: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub black: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub red: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub green: u32,
+}
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
+}
+
+impl ColoredManaCount {
+    pub fn get(&self, color: ManaColor) -> u32 {
+        match color {
+            ManaColor::White => self.white,
+            ManaColor::Blue => self.blue,
+            ManaColor::Black => self.black,
+            ManaColor::Red => self.red,
+            ManaColor::Green => self.green,
+        }
+    }
+
+    pub fn add(&mut self, color: ManaColor, n: u32) {
+        match color {
+            ManaColor::White => self.white += n,
+            ManaColor::Blue => self.blue += n,
+            ManaColor::Black => self.black += n,
+            ManaColor::Red => self.red += n,
+            ManaColor::Green => self.green += n,
+        }
+    }
+
+    /// Tally a ManaUnit's color into the count. Colorless mana is ignored
+    /// (Adamant and related checks only care about the five colors, per
+    /// CR 207.2c's "of [color]" wording).
+    pub fn add_unit(&mut self, unit: &ManaUnit) {
+        let color = match unit.color {
+            ManaType::White => ManaColor::White,
+            ManaType::Blue => ManaColor::Blue,
+            ManaType::Black => ManaColor::Black,
+            ManaType::Red => ManaColor::Red,
+            ManaType::Green => ManaColor::Green,
+            ManaType::Colorless => return,
+        };
+        self.add(color, 1);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.white == 0 && self.blue == 0 && self.black == 0 && self.red == 0 && self.green == 0
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManaPool {
     pub mana: Vec<ManaUnit>,
@@ -965,5 +1028,30 @@ mod tests {
             generic: 0,
         };
         assert_eq!(cost.mana_value(), 2);
+    }
+
+    #[test]
+    fn test_colored_mana_count_add_unit_ignores_colorless() {
+        // CR 207.2c: Adamant checks "of [color]" — colorless mana does not count
+        // toward any color tally.
+        let mut count = ColoredManaCount::default();
+        let source = ObjectId(1);
+
+        count.add_unit(&ManaUnit::new(ManaType::Red, source, false, vec![]));
+        count.add_unit(&ManaUnit::new(ManaType::Red, source, false, vec![]));
+        count.add_unit(&ManaUnit::new(ManaType::Colorless, source, false, vec![]));
+        count.add_unit(&ManaUnit::new(ManaType::Colorless, source, false, vec![]));
+
+        assert_eq!(count.get(ManaColor::Red), 2);
+        assert_eq!(count.get(ManaColor::White), 0);
+        assert_eq!(count.get(ManaColor::Blue), 0);
+        assert_eq!(count.get(ManaColor::Black), 0);
+        assert_eq!(count.get(ManaColor::Green), 0);
+        assert!(!count.is_empty());
+
+        // An all-colorless tally is considered empty for the "of [color]" check.
+        let mut colorless_only = ColoredManaCount::default();
+        colorless_only.add_unit(&ManaUnit::new(ManaType::Colorless, source, false, vec![]));
+        assert!(colorless_only.is_empty());
     }
 }

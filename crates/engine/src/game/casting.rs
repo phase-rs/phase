@@ -1946,11 +1946,15 @@ pub(super) fn pay_mana_cost(
     // CR 106.6: Apply mana spell grants to the spell being cast.
     apply_mana_spell_grants(state, source_id, &spent_units);
 
-    // CR 601.2h: Track whether mana was actually spent to cast this spell.
-    // Used by trigger conditions like "if no mana was spent to cast it".
+    // CR 601.2h: Track whether mana was actually spent to cast this spell,
+    // and the per-color breakdown for Adamant-style intervening-if checks
+    // (CR 207.2c).
     if !spent_units.is_empty() {
         if let Some(obj) = state.objects.get_mut(&source_id) {
             obj.mana_spent_to_cast = true;
+            for unit in &spent_units {
+                obj.colors_spent_to_cast.add_unit(unit);
+            }
         }
     }
 

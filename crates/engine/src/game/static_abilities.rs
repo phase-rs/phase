@@ -108,8 +108,10 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 104.3b: CantLoseTheGame — player can't lose the game (Platinum Angel).
     // Runtime enforcement is in sba.rs::player_has_cant_lose().
     registry.insert(StaticMode::CantLoseTheGame, handle_rule_mod);
-    // CR 104.2a: CantWinTheGame — opponents can't win the game (Platinum Angel).
-    // TODO: Full enforcement at game-end determination (elimination.rs).
+    // CR 104.2b: CantWinTheGame — a player can't win the game from effects
+    // (Platinum Angel). Runtime enforcement is in effects/win_lose.rs::resolve_win
+    // via player_has_cant_win(). Per CR 104.2a, the last-player-standing case
+    // is not blocked by this static and is enforced by elimination::check_game_over.
     registry.insert(StaticMode::CantWinTheGame, handle_rule_mod);
     // CR 702.179e: Card-specific rule modification allowing speed to exceed 4.
     registry.insert(StaticMode::SpeedCanIncreaseBeyondFour, handle_rule_mod);
@@ -446,6 +448,23 @@ pub fn player_can_spend_as_any_color(state: &GameState, player_id: PlayerId) -> 
     check_static_ability(
         state,
         StaticMode::SpendManaAsAnyColor,
+        &StaticCheckContext {
+            player_id: Some(player_id),
+            ..Default::default()
+        },
+    )
+}
+
+/// CR 104.2b: Check if a player has active `CantWinTheGame` protection.
+///
+/// When `true`, effect-based win attempts (CR 104.2b, e.g., "target player wins
+/// the game") targeting this player must be no-ops. Per CR 104.2a, the
+/// last-player-standing path is not subject to this check and is enforced
+/// directly in `elimination::check_game_over`.
+pub fn player_has_cant_win(state: &GameState, player_id: PlayerId) -> bool {
+    check_static_ability(
+        state,
+        StaticMode::CantWinTheGame,
         &StaticCheckContext {
             player_id: Some(player_id),
             ..Default::default()

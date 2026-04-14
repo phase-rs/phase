@@ -795,6 +795,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
     for obj in state.objects.values_mut() {
         obj.cast_from_zone = None;
         obj.mana_spent_to_cast = false;
+        obj.colors_spent_to_cast = crate::types::mana::ColoredManaCount::default();
     }
 }
 
@@ -1479,21 +1480,22 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::SourceInZone { zone } => source_id
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| obj.zone == *zone),
-        // CR 702.104b: Tribute — the opponent didn't add counters.
-        TriggerCondition::TributeNotPaid => {
-            // TODO: Track tribute payment via replacement effect. Stub: always true
-            // (conservative — the trigger fires, but its effect may not apply correctly).
-            true
-        }
+        // CR 702.104b: Tribute — the opponent chosen for tribute declined to place the
+        // +1/+1 counters. Tribute is not yet implemented as an interactive ETB mechanic
+        // (no opponent-choice WaitingFor), so creatures with Tribute always enter without
+        // counters. That means tribute was never paid, so this condition is correctly
+        // `true` for every Tribute card in the engine's current state. Once the Tribute
+        // mechanic is wired (tracked separately), this will need to read actual choice state.
+        TriggerCondition::TributeNotPaid => true,
         // CR 207.2c: Addendum — cast during main phase.
         TriggerCondition::CastDuringMainPhase => {
             matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
         }
-        // CR 207.2c: Adamant — at least N mana of a specific color was spent.
-        TriggerCondition::ManaColorSpent { .. } => {
-            // TODO: Track mana color spending during casting. Stub: false.
-            false
-        }
+        // CR 207.2c: Adamant — at least N mana of a specific color was spent to cast.
+        // Reads the per-color tally recorded in casting::pay_mana_cost.
+        TriggerCondition::ManaColorSpent { color, minimum } => source_id
+            .and_then(|id| state.objects.get(&id))
+            .is_some_and(|obj| obj.colors_spent_to_cast.get(*color) >= *minimum),
         // CR 601.2h: "if no mana was spent to cast it/them" — check the entering object.
         TriggerCondition::ManaSpentCondition { text } => {
             let entering_id = trigger_event
@@ -3495,6 +3497,101 @@ pub mod tests {
         let mut events = Vec::new();
         crate::game::turns::start_next_turn(&mut state, &mut events);
         assert!(state.damage_dealt_this_turn.is_empty());
+    }
+
+    // === CR 207.2c: Adamant — ManaColorSpent intervening-if ===
+
+    fn setup_with_colored_cast(color: ManaColor, count: u32) -> (GameState, ObjectId) {
+        let mut state = setup();
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Adamant Source".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&src).unwrap();
+        obj.colors_spent_to_cast.add(color, count);
+        (state, src)
+    }
+
+    #[test]
+    fn test_adamant_true_when_enough_color_spent() {
+        let (state, src) = setup_with_colored_cast(ManaColor::Red, 3);
+        let cond = TriggerCondition::ManaColorSpent {
+            color: ManaColor::Red,
+            minimum: 3,
+        };
+        assert!(check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_adamant_false_when_not_enough() {
+        let (state, src) = setup_with_colored_cast(ManaColor::Red, 3);
+        let cond = TriggerCondition::ManaColorSpent {
+            color: ManaColor::Red,
+            minimum: 4,
+        };
+        assert!(!check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_adamant_false_when_wrong_color() {
+        let (state, src) = setup_with_colored_cast(ManaColor::Green, 3);
+        let cond = TriggerCondition::ManaColorSpent {
+            color: ManaColor::Red,
+            minimum: 3,
+        };
+        assert!(!check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_adamant_respects_minimum_one() {
+        // minimum: 1 with one red spent → true
+        let (state, src) = setup_with_colored_cast(ManaColor::Red, 1);
+        let cond = TriggerCondition::ManaColorSpent {
+            color: ManaColor::Red,
+            minimum: 1,
+        };
+        assert!(check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+
+        // minimum: 1 with zero red spent → false
+        let (state, src) = setup_with_colored_cast(ManaColor::Green, 5);
+        let cond = TriggerCondition::ManaColorSpent {
+            color: ManaColor::Red,
+            minimum: 1,
+        };
+        assert!(!check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
     }
 
     // === CR 603.10a: Leaves-the-battlefield trigger LKI tests ===

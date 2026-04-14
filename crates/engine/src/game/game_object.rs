@@ -12,7 +12,7 @@ use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{Keyword, KeywordKind};
-use crate::types::mana::{ManaColor, ManaCost};
+use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -267,6 +267,13 @@ pub struct GameObject {
     /// like "if no mana was spent to cast it" (e.g., Satoru, the Infiltrator).
     #[serde(default)]
     pub mana_spent_to_cast: bool,
+
+    /// CR 601.2h: Per-color breakdown of mana spent to cast this object.
+    /// Populated during casting finalization; consumed by trigger conditions
+    /// like Adamant (CR 207.2c). Cleared in lockstep with `mana_spent_to_cast`
+    /// (see `triggers::clear_transient_cast_state`).
+    #[serde(default, skip_serializing_if = "ColoredManaCount::is_empty")]
+    pub colors_spent_to_cast: ColoredManaCount,
 }
 
 impl GameObject {
@@ -417,6 +424,7 @@ impl GameObject {
             class_level: None,
             cast_from_zone: None,
             mana_spent_to_cast: false,
+            colors_spent_to_cast: ColoredManaCount::default(),
         }
     }
 
