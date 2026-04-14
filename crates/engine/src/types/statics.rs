@@ -9,9 +9,16 @@ use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost};
 use super::phase::Phase;
 
-/// CR 101.2: Who is prohibited from casting spells.
+/// CR 109.5 + CR 102.1: The "who" axis of a continuous prohibition static.
+///
+/// Shared across the prohibition family (casting, drawing, searching, activating).
+/// CR 109.5: The words "you" and "your" on an object refer to the object's controller.
+/// CR 102.1: "opponent" is defined relative to a given player's controller.
+/// Wire format (`Display` / `FromStr`) is preserved: `"opponents"`, `"all_players"`,
+/// `"controller"`, `"enchanted_creature_controller"` — do NOT change these strings,
+/// they are serialized into card-data JSON.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum CastingProhibitionScope {
+pub enum ProhibitionScope {
     /// "your opponents" — only the controller's opponents are prohibited.
     Opponents,
     /// "players" / "each player" — all players are prohibited.
@@ -23,31 +30,33 @@ pub enum CastingProhibitionScope {
     EnchantedCreatureController,
 }
 
-impl fmt::Display for CastingProhibitionScope {
+/// Legacy name retained as a type alias during the codebase-wide rename.
+/// Prefer `ProhibitionScope` in new code.
+pub type CastingProhibitionScope = ProhibitionScope;
+
+impl fmt::Display for ProhibitionScope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CastingProhibitionScope::Opponents => write!(f, "opponents"),
-            CastingProhibitionScope::AllPlayers => write!(f, "all_players"),
-            CastingProhibitionScope::Controller => write!(f, "controller"),
-            CastingProhibitionScope::EnchantedCreatureController => {
+            ProhibitionScope::Opponents => write!(f, "opponents"),
+            ProhibitionScope::AllPlayers => write!(f, "all_players"),
+            ProhibitionScope::Controller => write!(f, "controller"),
+            ProhibitionScope::EnchantedCreatureController => {
                 write!(f, "enchanted_creature_controller")
             }
         }
     }
 }
 
-impl FromStr for CastingProhibitionScope {
+impl FromStr for ProhibitionScope {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "opponents" => Ok(CastingProhibitionScope::Opponents),
-            "all_players" => Ok(CastingProhibitionScope::AllPlayers),
-            "controller" => Ok(CastingProhibitionScope::Controller),
-            "enchanted_creature_controller" => {
-                Ok(CastingProhibitionScope::EnchantedCreatureController)
-            }
-            other => Err(format!("unknown CastingProhibitionScope: {other}")),
+            "opponents" => Ok(ProhibitionScope::Opponents),
+            "all_players" => Ok(ProhibitionScope::AllPlayers),
+            "controller" => Ok(ProhibitionScope::Controller),
+            "enchanted_creature_controller" => Ok(ProhibitionScope::EnchantedCreatureController),
+            other => Err(format!("unknown ProhibitionScope: {other}")),
         }
     }
 }
@@ -88,6 +97,33 @@ impl FromStr for CastingProhibitionCondition {
     }
 }
 
+/// CR 603.2g + CR 603.6a + CR 700.4: A trigger event whose triggered-ability
+/// firing can be suppressed by a `StaticMode::SuppressTriggers` effect.
+///
+/// Distinct from `GameEvent` (the raw engine event) — this is the narrow set of
+/// events for which the MTG rules recognize "enters"/"dies" as a bound category.
+/// Other zone-change events (leaves-battlefield, exile, bounce) are not expressed
+/// here because no printed card prohibits those specifically in this shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SuppressedTriggerEvent {
+    /// CR 603.6a: Enters-the-battlefield triggered abilities.
+    /// Does NOT include CR 603.6d static "enters tapped" / "enters with counters"
+    /// / "as X enters" effects — those are static, not triggered.
+    EntersBattlefield,
+    /// CR 700.4: "Dies" means moving from the battlefield to the graveyard.
+    /// Narrower than "leaves the battlefield" — does not catch exile or bounce.
+    Dies,
+}
+
+impl fmt::Display for SuppressedTriggerEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SuppressedTriggerEvent::EntersBattlefield => write!(f, "EntersBattlefield"),
+            SuppressedTriggerEvent::Dies => write!(f, "Dies"),
+        }
+    }
+}
+
 /// CR 402.2: How a static ability modifies the maximum hand size.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HandSizeModification {
@@ -121,9 +157,40 @@ pub enum StaticMode {
     /// CR 101.2: Blanket casting prohibition — prevents the scoped player(s) from casting spells.
     /// E.g., Steel Golem: "You can't cast creature spells." (Controller scope + creature filter)
     CantBeCast {
-        who: CastingProhibitionScope,
+        who: ProhibitionScope,
     },
-    CantBeActivated,
+    /// CR 602.5: "A player can't begin to activate an ability that's prohibited from being activated."
+    /// CR 603.2a: Activation-prohibition effects do **not** affect triggered abilities —
+    /// use `SuppressTriggers` for the triggered-ability side of the prohibition family.
+    ///
+    /// `who` = activator-axis (which player is blocked from activating).
+    /// `source_filter` = which permanent's activated abilities are blocked.
+    ///
+    /// - Chalice of Life ("this permanent's activated abilities can't be activated"):
+    ///   `who = AllPlayers, source_filter = SelfRef`.
+    /// - Clarion Conqueror ("Activated abilities of artifacts, creatures, and planeswalkers
+    ///   your opponents control can't be activated"):
+    ///   `who = AllPlayers, source_filter = AnyOf(Artifact,Creature,Planeswalker) + ControllerRef::Opponent`.
+    /// - Karn, the Great Creator ("Activated abilities of artifacts your opponents control
+    ///   can't be activated"): `who = AllPlayers, source_filter = Artifact + ControllerRef::Opponent`.
+    ///
+    /// `who = AllPlayers` is correct on Clarion/Karn: CR 602.5 prohibitions block the
+    /// ability itself, not a specific activator. Opponent-ness rides on the filter's
+    /// `ControllerRef`, which survives control-swap effects like Act of Treason.
+    CantBeActivated {
+        who: ProhibitionScope,
+        source_filter: TargetFilter,
+    },
+    /// CR 701.23 + CR 609.3: "Spells and abilities <scope> can't cause their controller
+    /// to search their library." E.g., Ashiok, Dream Render's first static ability.
+    /// When a muzzled spell/ability would cause a search, the search is treated as
+    /// impossible and produces no-op behavior (CR 609.3).
+    ///
+    /// `cause` = which player's spells/abilities are muzzled (the *source* of the search,
+    /// not the searcher). For Ashiok: `cause = Opponents`.
+    CantSearchLibrary {
+        cause: ProhibitionScope,
+    },
     CastWithFlash,
     /// CR 702.51a: Grants a keyword to spells during casting.
     /// Generalized version of CastWithFlash — the `spell_filter` on the StaticDefinition
@@ -158,7 +225,7 @@ pub enum StaticMode {
     MustAttack,
     MustBlock,
     CantDraw {
-        who: CastingProhibitionScope,
+        who: ProhibitionScope,
     },
     Panharmonicon,
     IgnoreHexproof,
@@ -193,7 +260,7 @@ pub enum StaticMode {
     /// spells under specified conditions (turn/phase-scoped).
     /// E.g., "Your opponents can't cast spells during your turn."
     CantCastDuring {
-        who: CastingProhibitionScope,
+        who: ProhibitionScope,
         when: CastingProhibitionCondition,
     },
     /// CR 101.2 + CR 604.1: Per-turn casting limit — static ability generating a
@@ -201,7 +268,7 @@ pub enum StaticMode {
     /// E.g., Rule of Law: "Each player can't cast more than one spell each turn."
     /// E.g., Deafening Silence: "Each player can't cast more than one noncreature spell each turn."
     PerTurnCastLimit {
-        who: CastingProhibitionScope,
+        who: ProhibitionScope,
         max: u32,
         spell_filter: Option<TargetFilter>,
     },
@@ -209,8 +276,35 @@ pub enum StaticMode {
     /// E.g., Spirit of the Labyrinth: "Each player can't draw more than one card each turn."
     /// E.g., Narset, Parter of Veils: "Each opponent can't draw more than one card each turn."
     PerTurnDrawLimit {
-        who: CastingProhibitionScope,
+        who: ProhibitionScope,
         max: u32,
+    },
+    /// CR 603.2g: "An event that's prevented or replaced won't trigger anything."
+    /// Generalizes this rule into a typed prohibition: for a permanent matching
+    /// `source_filter`, declare that the listed trigger events (ETB / Dies) never
+    /// register, so no triggered ability fires in response to them.
+    ///
+    /// This is NOT a replacement effect (CR 614) — the event still happens, it simply
+    /// does not cause any triggered abilities. Replacement effects that key on the
+    /// same event (e.g., ETB tapped) are unaffected. Per CR 603.6d, static "enters with"
+    /// / "enters tapped" / "as X enters" effects are also unaffected — they are
+    /// static abilities, not triggered.
+    ///
+    /// `source_filter` matches the **subject of the trigger event** (the entering /
+    /// dying permanent) — NOT the trigger-source permanent. A creature entering
+    /// suppresses every ETB trigger caused by that entry, including observer triggers
+    /// on other permanents (e.g., Soul Warden's "whenever another creature enters").
+    /// Reading confirmed by official Torpor Orb rulings.
+    ///
+    /// - Torpor Orb: `source_filter = creatures, events = [EntersBattlefield]`.
+    /// - Hushbringer: `source_filter = creatures, events = [EntersBattlefield, Dies]`.
+    ///
+    /// `events` is a unique-invariant Vec treated as a set. Parser constructs in the
+    /// canonical order `[EntersBattlefield, Dies]`. Promote to a typed set newtype
+    /// only if the variant population grows beyond two.
+    SuppressTriggers {
+        source_filter: TargetFilter,
+        events: Vec<SuppressedTriggerEvent>,
     },
 
     // -- Tier 1: Keyword/evasion statics with dedicated handlers --
@@ -356,7 +450,10 @@ impl Hash for StaticMode {
             | StaticMode::PerTurnCastLimit { .. }
             | StaticMode::PerTurnDrawLimit { .. }
             | StaticMode::MaximumHandSize { .. }
-            | StaticMode::CastWithKeyword { .. } => {}
+            | StaticMode::CastWithKeyword { .. }
+            | StaticMode::CantBeActivated { .. }
+            | StaticMode::CantSearchLibrary { .. }
+            | StaticMode::SuppressTriggers { .. } => {}
             // All other variants are unit variants — discriminant suffices.
             _ => {}
         }
@@ -372,7 +469,12 @@ impl fmt::Display for StaticMode {
             StaticMode::CantAttackOrBlock => write!(f, "CantAttackOrBlock"),
             StaticMode::CantBeTargeted => write!(f, "CantBeTargeted"),
             StaticMode::CantBeCast { who } => write!(f, "CantBeCast({who})"),
-            StaticMode::CantBeActivated => write!(f, "CantBeActivated"),
+            StaticMode::CantBeActivated { who, .. } => write!(f, "CantBeActivated({who})"),
+            StaticMode::CantSearchLibrary { cause } => write!(f, "CantSearchLibrary({cause})"),
+            StaticMode::SuppressTriggers { events, .. } => {
+                let parts: Vec<String> = events.iter().map(|e| e.to_string()).collect();
+                write!(f, "SuppressTriggers({})", parts.join("+"))
+            }
             StaticMode::CastWithFlash => write!(f, "CastWithFlash"),
             StaticMode::CastWithKeyword { keyword } => {
                 write!(f, "CastWithKeyword({keyword:?})")
@@ -486,9 +588,16 @@ impl FromStr for StaticMode {
             "CantAttackOrBlock" => StaticMode::CantAttackOrBlock,
             "CantBeTargeted" => StaticMode::CantBeTargeted,
             "CantBeCast" => StaticMode::CantBeCast {
-                who: CastingProhibitionScope::Controller,
+                who: ProhibitionScope::Controller,
             },
-            "CantBeActivated" => StaticMode::CantBeActivated,
+            // CR 602.5: Legacy unit-string defaults to the self-reference case
+            // (Chalice-of-Life-class): `who = AllPlayers, source_filter = SelfRef`.
+            // This preserves backward compatibility for the Forge DB constructor and
+            // any card-data JSON that serialized the pre-widening form.
+            "CantBeActivated" => StaticMode::CantBeActivated {
+                who: ProhibitionScope::AllPlayers,
+                source_filter: TargetFilter::SelfRef,
+            },
             "CastWithFlash" => StaticMode::CastWithFlash,
             "ReduceCost" => StaticMode::ReduceCost {
                 amount: ManaCost::zero(),
@@ -591,7 +700,7 @@ impl FromStr for StaticMode {
                     .strip_prefix("CantDraw(")
                     .and_then(|s| s.strip_suffix(')'))
                 {
-                    if let Ok(who) = CastingProhibitionScope::from_str(inner) {
+                    if let Ok(who) = ProhibitionScope::from_str(inner) {
                         return Ok(StaticMode::CantDraw { who });
                     }
                     return Ok(StaticMode::Other(other.to_string()));
@@ -599,9 +708,35 @@ impl FromStr for StaticMode {
                     .strip_prefix("CantBeCast(")
                     .and_then(|s| s.strip_suffix(')'))
                 {
-                    if let Ok(who) = CastingProhibitionScope::from_str(inner) {
+                    if let Ok(who) = ProhibitionScope::from_str(inner) {
                         return Ok(StaticMode::CantBeCast { who });
                     }
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
+                    .strip_prefix("CantBeActivated(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    // CR 602.5: Round-trip of the parameterized form is diagnostic-only;
+                    // `source_filter` is data-carrying and defaults to `SelfRef`.
+                    if let Ok(who) = ProhibitionScope::from_str(inner) {
+                        return Ok(StaticMode::CantBeActivated {
+                            who,
+                            source_filter: TargetFilter::SelfRef,
+                        });
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
+                    .strip_prefix("CantSearchLibrary(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    // CR 701.23: Round-trip of the scope identifier.
+                    if let Ok(cause) = ProhibitionScope::from_str(inner) {
+                        return Ok(StaticMode::CantSearchLibrary { cause });
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if other.starts_with("SuppressTriggers(") {
+                    // CR 603.2g: Data-carrying — round-trip preserves discriminant only.
+                    // Callers that need the full filter/events read from the typed field.
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if let Some(inner) = other
                     .strip_prefix("CantCastDuring(")
@@ -609,7 +744,7 @@ impl FromStr for StaticMode {
                 {
                     if let Some((who_str, when_str)) = inner.split_once(',') {
                         if let (Ok(who), Ok(when)) = (
-                            CastingProhibitionScope::from_str(who_str),
+                            ProhibitionScope::from_str(who_str),
                             CastingProhibitionCondition::from_str(when_str),
                         ) {
                             return Ok(StaticMode::CantCastDuring { who, when });
@@ -621,10 +756,9 @@ impl FromStr for StaticMode {
                     .and_then(|s| s.strip_suffix(')'))
                 {
                     if let Some((who_str, max_str)) = inner.split_once(',') {
-                        if let (Ok(who), Ok(max)) = (
-                            CastingProhibitionScope::from_str(who_str),
-                            max_str.parse::<u32>(),
-                        ) {
+                        if let (Ok(who), Ok(max)) =
+                            (ProhibitionScope::from_str(who_str), max_str.parse::<u32>())
+                        {
                             return Ok(StaticMode::PerTurnCastLimit {
                                 who,
                                 max,
@@ -638,10 +772,9 @@ impl FromStr for StaticMode {
                     .and_then(|s| s.strip_suffix(')'))
                 {
                     if let Some((who_str, max_str)) = inner.split_once(',') {
-                        if let (Ok(who), Ok(max)) = (
-                            CastingProhibitionScope::from_str(who_str),
-                            max_str.parse::<u32>(),
-                        ) {
+                        if let (Ok(who), Ok(max)) =
+                            (ProhibitionScope::from_str(who_str), max_str.parse::<u32>())
+                        {
                             return Ok(StaticMode::PerTurnDrawLimit { who, max });
                         }
                     }
@@ -797,37 +930,37 @@ mod tests {
             },
             // Casting prohibitions
             StaticMode::CantBeCast {
-                who: CastingProhibitionScope::Controller,
+                who: ProhibitionScope::Controller,
             },
             StaticMode::CantBeCast {
-                who: CastingProhibitionScope::Opponents,
+                who: ProhibitionScope::Opponents,
             },
             StaticMode::CantCastDuring {
-                who: CastingProhibitionScope::Opponents,
+                who: ProhibitionScope::Opponents,
                 when: CastingProhibitionCondition::DuringYourTurn,
             },
             StaticMode::CantCastDuring {
-                who: CastingProhibitionScope::AllPlayers,
+                who: ProhibitionScope::AllPlayers,
                 when: CastingProhibitionCondition::DuringCombat,
             },
             StaticMode::CantCastDuring {
-                who: CastingProhibitionScope::Controller,
+                who: ProhibitionScope::Controller,
                 when: CastingProhibitionCondition::NotDuringYourTurn,
             },
             StaticMode::CantDraw {
-                who: CastingProhibitionScope::AllPlayers,
+                who: ProhibitionScope::AllPlayers,
             },
             StaticMode::CantDraw {
-                who: CastingProhibitionScope::Opponents,
+                who: ProhibitionScope::Opponents,
             },
             // Per-turn casting limits
             StaticMode::PerTurnCastLimit {
-                who: CastingProhibitionScope::AllPlayers,
+                who: ProhibitionScope::AllPlayers,
                 max: 1,
                 spell_filter: None,
             },
             StaticMode::PerTurnCastLimit {
-                who: CastingProhibitionScope::Controller,
+                who: ProhibitionScope::Controller,
                 max: 2,
                 spell_filter: None,
             },
@@ -853,6 +986,52 @@ mod tests {
         let json = serde_json::to_string(&modes).unwrap();
         let deserialized: Vec<StaticMode> = serde_json::from_str(&json).unwrap();
         assert_eq!(modes, deserialized);
+    }
+
+    #[test]
+    fn prohibition_family_display_includes_scope() {
+        // CR 602.5: CantBeActivated display carries the scope identifier.
+        let mode = StaticMode::CantBeActivated {
+            who: ProhibitionScope::AllPlayers,
+            source_filter: TargetFilter::SelfRef,
+        };
+        assert_eq!(mode.to_string(), "CantBeActivated(all_players)");
+
+        // CR 701.23: CantSearchLibrary display carries the cause scope.
+        let mode = StaticMode::CantSearchLibrary {
+            cause: ProhibitionScope::Opponents,
+        };
+        assert_eq!(mode.to_string(), "CantSearchLibrary(opponents)");
+
+        // CR 603.2g: SuppressTriggers display enumerates the event set.
+        let mode = StaticMode::SuppressTriggers {
+            source_filter: TargetFilter::SelfRef,
+            events: vec![SuppressedTriggerEvent::EntersBattlefield],
+        };
+        assert_eq!(mode.to_string(), "SuppressTriggers(EntersBattlefield)");
+
+        let mode = StaticMode::SuppressTriggers {
+            source_filter: TargetFilter::SelfRef,
+            events: vec![
+                SuppressedTriggerEvent::EntersBattlefield,
+                SuppressedTriggerEvent::Dies,
+            ],
+        };
+        assert_eq!(mode.to_string(), "SuppressTriggers(EntersBattlefield+Dies)");
+    }
+
+    #[test]
+    fn cant_be_activated_legacy_string_deserializes_to_self_ref() {
+        // CR 602.5: The legacy unit-string `"CantBeActivated"` (from pre-widening
+        // serialized data) must still parse, yielding the self-reference default.
+        let parsed = StaticMode::from_str("CantBeActivated").unwrap();
+        assert_eq!(
+            parsed,
+            StaticMode::CantBeActivated {
+                who: ProhibitionScope::AllPlayers,
+                source_filter: TargetFilter::SelfRef,
+            }
+        );
     }
 
     #[test]

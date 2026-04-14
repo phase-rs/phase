@@ -1,10 +1,45 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
+use crate::game::static_abilities::prohibition_scope_matches_player;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::statics::StaticMode;
+
+/// CR 701.23 + CR 609.3: Check if any active CantSearchLibrary static on the battlefield
+/// muzzles the source of this search. `ability.controller` is the player who controls
+/// the spell/ability that would cause the search (the "cause"). If muzzled, the search
+/// is treated as an impossible action and produces no game-state change (CR 609.3).
+///
+/// E.g., Ashiok, Dream Render: `"Spells and abilities your opponents control can't cause
+/// their controller to search their library."` — cause=Opponents means the Ashiok
+/// controller's opponents' spells/abilities are muzzled.
+///
+/// NOTE: Ashiok's Oracle is grammatically "cause **their controller** to search **their**
+/// library" — both pronouns bind to the cause's controller (i.e., self-search only).
+/// The current implementation muzzles ALL searches caused by an opponent regardless of
+/// the searching player, which is a minor over-block for the rare case of an opponent's
+/// effect searching a non-controller's library (e.g., Splinter targeting). Most printed
+/// search effects are self-searches where the distinction does not matter. Tightening
+/// this to require `searcher == cause_controller` is tracked as a follow-up refinement.
+fn is_search_muzzled(state: &GameState, cause_controller: crate::types::player::PlayerId) -> bool {
+    for &bf_id in &state.battlefield {
+        let Some(bf_obj) = state.objects.get(&bf_id) else {
+            continue;
+        };
+        for def in &bf_obj.static_definitions {
+            let StaticMode::CantSearchLibrary { ref cause } = def.mode else {
+                continue;
+            };
+            if prohibition_scope_matches_player(cause, cause_controller, bf_id, state) {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 /// CR 701.23a + CR 401.2: Search a library — look through it, find card(s) matching criteria, then shuffle.
 /// CR 401.2: Libraries are normally face-down; searching is an exception that lets a player look through cards.
@@ -13,6 +48,19 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 701.23 + CR 609.3: If a CantSearchLibrary static muzzles the cause of this
+    // search, the search does nothing. Per CR 609.3, an effect that attempts to do
+    // something impossible does only as much as possible — so we skip the search
+    // entirely, do NOT mark the turn-tracking flag, and emit only the resolution
+    // event so downstream bookkeeping sees a completed (no-op) effect.
+    if is_search_muzzled(state, ability.controller) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::SearchLibrary,
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
     // CR 107.3a + CR 601.2b: Resolve the count expression against the ability so
     // `Variable("X")` picks up the caster's announced X. Fixed counts are unaffected.
     let (filter, count, reveal, has_target_player) = match &ability.effect {
@@ -461,5 +509,129 @@ mod tests {
             }
             other => panic!("Expected SearchChoice, got {:?}", other),
         }
+    }
+
+    // === CR 701.23 + CR 609.3: CantSearchLibrary runtime enforcement tests ===
+
+    use crate::types::ability::StaticDefinition;
+    use crate::types::statics::{ProhibitionScope, StaticMode};
+
+    fn add_cant_search_library_permanent(
+        state: &mut GameState,
+        controller: PlayerId,
+        cause: ProhibitionScope,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(0xA51),
+            controller,
+            "Ashiok".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Planeswalker);
+        obj.entered_battlefield_turn = Some(0);
+        obj.static_definitions
+            .push(StaticDefinition::new(StaticMode::CantSearchLibrary {
+                cause,
+            }));
+        id
+    }
+
+    #[test]
+    fn ashiok_muzzles_opponent_caused_search() {
+        // CR 701.23 + CR 609.3: Ashiok on P0's battlefield (cause=Opponents). A P1
+        // spell/ability resolving into a search is muzzled: no library inspection,
+        // no turn-flag mutation, no SearchChoice state transition.
+        let mut state = GameState::new_two_player(42);
+        add_cant_search_library_permanent(&mut state, PlayerId(0), ProhibitionScope::Opponents);
+
+        // P1 library contains searchable creatures.
+        let _bear = add_library_creature(&mut state, 1, PlayerId(1), "Bear");
+        let _runeclaw = add_library_creature(&mut state, 2, PlayerId(1), "Runeclaw Bear");
+
+        // Ability controller = P1 (the opponent of Ashiok's controller).
+        let ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+            },
+            vec![],
+            ObjectId(9999),
+            PlayerId(1),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // CR 609.3: No progress. No PlayerPerformedAction::SearchedLibrary event,
+        // no turn-flag mutation, no SearchChoice waiting state.
+        assert!(
+            !events.iter().any(
+                |e| matches!(e, GameEvent::PlayerPerformedAction { action, .. }
+                    if matches!(action, PlayerActionKind::SearchedLibrary))
+            ),
+            "Muzzled search must NOT emit PlayerPerformedAction::SearchedLibrary"
+        );
+        assert!(
+            !state
+                .players_who_searched_library_this_turn
+                .contains(&PlayerId(1)),
+            "Muzzled search must NOT mark the turn-tracking flag"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::SearchChoice { .. }),
+            "Muzzled search must NOT transition to SearchChoice"
+        );
+        // EffectResolved is emitted so downstream bookkeeping sees a completed (no-op) effect.
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::SearchLibrary,
+                    ..
+                }
+            )),
+            "Muzzled search must emit a completed EffectResolved event (CR 609.3 no-op)"
+        );
+    }
+
+    #[test]
+    fn ashiok_permits_own_controller_search() {
+        // CR 701.23: Ashiok's static is `cause = Opponents`. Its own controller's
+        // searches are not muzzled.
+        let mut state = GameState::new_two_player(42);
+        add_cant_search_library_permanent(&mut state, PlayerId(0), ProhibitionScope::Opponents);
+
+        let _bear = add_library_creature(&mut state, 1, PlayerId(0), "Bear");
+
+        // Ability controller = P0 (Ashiok's own controller).
+        let ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+            },
+            vec![],
+            ObjectId(9998),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state
+                .players_who_searched_library_this_turn
+                .contains(&PlayerId(0)),
+            "Non-muzzled search must mark the turn-tracking flag"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::SearchChoice { .. }),
+            "Non-muzzled search must transition to SearchChoice"
+        );
     }
 }

@@ -33,7 +33,7 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::statics::{
-    CastingProhibitionCondition, CastingProhibitionScope, HandSizeModification, StaticMode,
+    CastingProhibitionCondition, ProhibitionScope, HandSizeModification, StaticMode,
 };
 use crate::types::zones::Zone;
 
@@ -809,12 +809,40 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         return Some(def);
     }
 
+    // --- "Activated abilities of <type-list> [your opponents control|you control] can't be activated" ---
+    // CR 602.5 + CR 603.2a: Global filter-scoped activation prohibition — Clarion Conqueror,
+    // Karn the Great Creator. Opponent-ness rides on the TargetFilter's `ControllerRef`,
+    // NOT on the activator scope (`who = AllPlayers`) — per CR 602.5, the prohibition is
+    // on the ability itself, not a specific activator.
+    if let Some(def) = parse_filter_scoped_cant_be_activated(&tp, &text) {
+        return Some(def);
+    }
+
+    // --- "Spells and abilities <scope> can't cause their controller to search their library" ---
+    // CR 701.23 + CR 609.3: Ashiok, Dream Render's first static. Subject-scoped
+    // prohibition where `cause` identifies whose spells/abilities are muzzled.
+    if let Some(def) = parse_cant_search_library(&tp, &text) {
+        return Some(def);
+    }
+
+    // --- "Creatures entering [the battlefield] [and dying] don't cause abilities to trigger" ---
+    // CR 603.2g + CR 603.6a + CR 700.4: Torpor Orb (ETB only), Hushbringer (ETB + Dies).
+    if let Some(def) = parse_suppress_triggers(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "its activated abilities can't be activated" / "activated abilities can't be activated" ---
-    // CR 602.5: Prevents activated abilities of the affected permanent from being activated.
+    // CR 602.5 + CR 603.2a: Prevents activated abilities of the affected permanent from
+    // being activated. The self-reference case: `who = AllPlayers, source_filter = SelfRef`.
+    // Global filter-scoped variants (Clarion/Karn) are handled by parse_filter_scoped_cant_be_activated
+    // which runs earlier via the "activated abilities of " prefix dispatch.
     if nom_primitives::scan_contains(tp.lower, "activated abilities can't be activated") {
-        let mut def = StaticDefinition::new(StaticMode::CantBeActivated)
-            .affected(TargetFilter::SelfRef)
-            .description(text.to_string());
+        let mut def = StaticDefinition::new(StaticMode::CantBeActivated {
+            who: ProhibitionScope::AllPlayers,
+            source_filter: TargetFilter::SelfRef,
+        })
+        .affected(TargetFilter::SelfRef)
+        .description(text.to_string());
         if let Some(condition) = parse_unless_static_condition(&tp) {
             def.condition = Some(condition);
         }
@@ -937,7 +965,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     {
         let who = strip_casting_prohibition_subject(tp.lower)
             .map(|(scope, _)| scope)
-            .unwrap_or(CastingProhibitionScope::Controller);
+            .unwrap_or(ProhibitionScope::Controller);
         return Some(
             StaticDefinition::new(StaticMode::CantCastDuring {
                 who,
@@ -962,7 +990,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     if nom_primitives::scan_contains(tp.lower, "can't cast spells during") {
         let who = strip_casting_prohibition_subject(tp.lower)
             .map(|(scope, _)| scope)
-            .unwrap_or(CastingProhibitionScope::AllPlayers);
+            .unwrap_or(ProhibitionScope::AllPlayers);
         let when = if nom_primitives::scan_contains(tp.lower, "during your turn") {
             CastingProhibitionCondition::DuringYourTurn
         } else if nom_primitives::scan_contains(tp.lower, "during combat") {
@@ -1298,9 +1326,14 @@ pub fn parse_static_line_multi(text: &str) -> Vec<StaticDefinition> {
                 .description(stripped.to_string()),
         );
         defs.push(
-            StaticDefinition::new(StaticMode::CantBeActivated)
-                .affected(TargetFilter::SelfRef)
-                .description(stripped.to_string()),
+            // CR 602.5 + CR 603.2a: Self-reference case — the affected permanent's
+            // own activated abilities can't be activated by anyone.
+            StaticDefinition::new(StaticMode::CantBeActivated {
+                who: ProhibitionScope::AllPlayers,
+                source_filter: TargetFilter::SelfRef,
+            })
+            .affected(TargetFilter::SelfRef)
+            .description(stripped.to_string()),
         );
         return defs;
     }
@@ -2976,25 +3009,180 @@ fn parse_cant_be_countered_subject(tp: &TextPair) -> TargetFilter {
     TargetFilter::SelfRef
 }
 
-/// Strip a subject prefix that maps to a `CastingProhibitionScope`.
+/// CR 602.5 + CR 603.2a: Parse global filter-scoped activation prohibitions.
+///
+/// Shape: `"Activated abilities of <type-list> [<controller suffix>] can't be activated."`
+///
+/// Delegates the type-list + controller-suffix parse to `parse_type_phrase` (which
+/// already handles `"your opponents control"`, `"you control"`, multi-type disjunctions,
+/// commas, and the final `"and"` Oxford conjunction). The scope on the activator axis
+/// is always `AllPlayers` — CR 602.5 prohibits the ability itself, not a specific
+/// player; opponent-ness rides on the filter's `ControllerRef`.
+///
+/// Returns `None` for the self-reference case ("its activated abilities can't be activated"
+/// / "activated abilities can't be activated" on creature text), which the self-ref
+/// branch below handles directly.
+fn parse_filter_scoped_cant_be_activated(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    // Require the "activated abilities of " prefix — distinguishes from the self-ref
+    // "its activated abilities can't be activated" / bare "activated abilities can't be
+    // activated" forms which are handled separately.
+    let rest_tp = nom_tag_tp(tp, "activated abilities of ")?;
+    // Require the predicate ending "... can't be activated[.]" at the tail.
+    let predicate_tp = rest_tp
+        .strip_suffix(" can't be activated.")
+        .or_else(|| rest_tp.strip_suffix(" can't be activated"))?;
+    // Extract the type-list + optional controller suffix via the shared helper.
+    // `parse_type_phrase` consumes the filter and returns the unconsumed tail —
+    // for this pattern the tail should be empty (the whole predicate IS the filter).
+    let (source_filter, tail) = parse_type_phrase(predicate_tp.original);
+    if !tail.trim().is_empty() {
+        return None;
+    }
+    // `parse_type_phrase` returns `SelfRef` for unparseable input — treat that as a
+    // parse failure and fall through to the self-ref branch in parse_static_line.
+    if matches!(source_filter, TargetFilter::SelfRef) {
+        return None;
+    }
+    Some(
+        StaticDefinition::new(StaticMode::CantBeActivated {
+            who: ProhibitionScope::AllPlayers,
+            source_filter,
+        })
+        .description(text.to_string()),
+    )
+}
+
+/// CR 701.23 + CR 609.3: Parse "Spells and abilities <scope> can't cause their
+/// controller to search their library" — Ashiok, Dream Render's first static.
+///
+/// The scope on the `cause` axis identifies whose spells/abilities are muzzled.
+/// For Ashiok the phrasing is "your opponents control" so `cause = Opponents`.
+fn parse_cant_search_library(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+    let rest_tp = nom_tag_tp(tp, "spells and abilities ")?;
+    // Strip the controller suffix — scope identifier rides on the possessive phrase.
+    let (cause, predicate) = strip_controller_possessive_scope(rest_tp.original)?;
+    // Verify the predicate continues with "can't cause their controller to search
+    // their library" — require the exact full phrase so we don't match unrelated
+    // "spells and abilities your opponents control can't ..." Oracle texts.
+    let predicate_lower = predicate.to_lowercase();
+    let trimmed_lower = predicate_lower.trim_end_matches('.').trim_end();
+    if trimmed_lower != "can't cause their controller to search their library" {
+        return None;
+    }
+    Some(
+        StaticDefinition::new(StaticMode::CantSearchLibrary { cause })
+            .description(text.to_string()),
+    )
+}
+
+/// CR 603.2g + CR 603.6a + CR 700.4: Parse Torpor Orb / Hushbringer-class
+/// "Creatures entering [the battlefield] [and dying] don't cause abilities to trigger."
+///
+/// The optional `and dying` clause toggles the `Dies` event in the event set.
+/// Parser constructs events in canonical order `[EntersBattlefield, Dies]`.
+fn parse_suppress_triggers(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+    use crate::types::statics::SuppressedTriggerEvent;
+
+    // Consume the type-list + optional controller suffix (e.g., "Creatures your
+    // opponents control"). `parse_type_phrase` returns the unconsumed tail.
+    let (source_filter, tail) = parse_type_phrase(tp.original);
+    // Require a meaningful type constraint — reject the `SelfRef` fallback that
+    // `parse_type_phrase` returns when it fails to identify any type.
+    if matches!(source_filter, TargetFilter::SelfRef) {
+        return None;
+    }
+    // Match the predicate: "entering [the battlefield] [and dying] don't cause
+    // abilities to trigger[.]"
+    let tail_trimmed = tail.trim_start();
+    let tail_lower = tail_trimmed.to_lowercase();
+    // Start with "entering"
+    let after_entering = nom_tag_lower(tail_trimmed, &tail_lower, "entering ")?;
+    let after_entering_lower = after_entering.to_lowercase();
+    // Optional "the battlefield " — accept both with and without (Oracle errata varies).
+    let after_tb = nom_tag_lower(after_entering, &after_entering_lower, "the battlefield ")
+        .unwrap_or(after_entering);
+    let after_tb_lower = after_tb.to_lowercase();
+    // Optional "[or|and] dying" clause (Hushbringer — the Oracle uses "or";
+    // accept "and" too for defensive parsing of close variants).
+    let (events, after_dying) = if let Some(rest) =
+        nom_tag_lower(after_tb, &after_tb_lower, "or dying ")
+            .or_else(|| nom_tag_lower(after_tb, &after_tb_lower, "and dying "))
+    {
+        (
+            vec![
+                SuppressedTriggerEvent::EntersBattlefield,
+                SuppressedTriggerEvent::Dies,
+            ],
+            rest,
+        )
+    } else {
+        (vec![SuppressedTriggerEvent::EntersBattlefield], after_tb)
+    };
+    let after_dying_lower = after_dying.to_lowercase();
+    let after_verb = nom_tag_lower(
+        after_dying,
+        &after_dying_lower,
+        "don't cause abilities to trigger",
+    )?;
+    // Allow only terminal punctuation (period or empty).
+    if !matches!(after_verb.trim(), "" | ".") {
+        return None;
+    }
+    Some(
+        StaticDefinition::new(StaticMode::SuppressTriggers {
+            source_filter,
+            events,
+        })
+        .description(text.to_string()),
+    )
+}
+
+/// CR 109.5 + CR 102.1: Strip a "<possessive> control" / "<possessive> controls" suffix
+/// from an Oracle noun phrase and return `(ProhibitionScope, remaining_predicate)`.
+///
+/// Used by Ashiok-class prohibitions where the scope rides on the controller suffix
+/// of a preceding noun phrase (e.g., "spells and abilities your opponents control ...").
+/// Distinct from `strip_casting_prohibition_subject` which consumes sentence-subject
+/// pronoun forms like "you" / "your opponents".
+fn strip_controller_possessive_scope(tp: &str) -> Option<(ProhibitionScope, &str)> {
+    let lower = tp.to_lowercase();
+    // Try "your opponents control " first (plural form — Ashiok).
+    if let Some(rest) = nom_tag_lower(tp, &lower, "your opponents control ") {
+        return Some((ProhibitionScope::Opponents, rest));
+    }
+    // "an opponent controls " (singular form).
+    if let Some(rest) = nom_tag_lower(tp, &lower, "an opponent controls ") {
+        return Some((ProhibitionScope::Opponents, rest));
+    }
+    // "you control " — Controller scope.
+    if let Some(rest) = nom_tag_lower(tp, &lower, "you control ") {
+        return Some((ProhibitionScope::Controller, rest));
+    }
+    None
+}
+
+/// Strip a subject prefix that maps to a `ProhibitionScope`.
 /// Returns `(scope, remaining_predicate)` or `None` if no known subject prefix matches.
 /// Shared by all casting prohibition parsers (CantCastDuring, PerTurnCastLimit, etc.).
-fn strip_casting_prohibition_subject(tp: &str) -> Option<(CastingProhibitionScope, &str)> {
+fn strip_casting_prohibition_subject(tp: &str) -> Option<(ProhibitionScope, &str)> {
     nom_tag_lower(tp, tp, "each opponent ")
         .or_else(|| nom_tag_lower(tp, tp, "your opponents "))
-        .map(|rest| (CastingProhibitionScope::Opponents, rest))
+        .map(|rest| (ProhibitionScope::Opponents, rest))
         .or_else(|| {
-            nom_tag_lower(tp, tp, "you ").map(|rest| (CastingProhibitionScope::Controller, rest))
+            nom_tag_lower(tp, tp, "you ").map(|rest| (ProhibitionScope::Controller, rest))
         })
         .or_else(|| {
             nom_tag_lower(tp, tp, "each player ")
                 .or_else(|| nom_tag_lower(tp, tp, "players "))
-                .map(|rest| (CastingProhibitionScope::AllPlayers, rest))
+                .map(|rest| (ProhibitionScope::AllPlayers, rest))
         })
         .or_else(|| {
             // CR 303.4e: "Enchanted player" — the player enchanted by an aura.
             nom_tag_lower(tp, tp, "enchanted player ")
-                .map(|rest| (CastingProhibitionScope::EnchantedCreatureController, rest))
+                .map(|rest| (ProhibitionScope::EnchantedCreatureController, rest))
         })
 }
 
@@ -3094,7 +3282,7 @@ fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<StaticDefinition>
     {
         return Some(
             StaticDefinition::new(StaticMode::CantBeCast {
-                who: CastingProhibitionScope::Opponents,
+                who: ProhibitionScope::Opponents,
             })
             .description(text.to_string()),
         );
@@ -3235,7 +3423,7 @@ fn parse_passive_cant_be_cast(tp: &str, text: &str) -> Option<StaticDefinition> 
         }
         return Some(
             StaticDefinition::new(StaticMode::CantBeCast {
-                who: CastingProhibitionScope::AllPlayers,
+                who: ProhibitionScope::AllPlayers,
             })
             .affected(TargetFilter::Typed(tf))
             .description(text.to_string()),
@@ -3256,7 +3444,7 @@ fn parse_passive_cant_be_cast(tp: &str, text: &str) -> Option<StaticDefinition> 
 
     Some(
         StaticDefinition::new(StaticMode::CantBeCast {
-            who: CastingProhibitionScope::AllPlayers,
+            who: ProhibitionScope::AllPlayers,
         })
         .affected(filter)
         .description(text.to_string()),
@@ -3354,7 +3542,7 @@ fn parse_enchanted_controller_cant_cast(tp: &str, text: &str) -> Option<StaticDe
     };
 
     let mut def = StaticDefinition::new(StaticMode::CantBeCast {
-        who: CastingProhibitionScope::EnchantedCreatureController,
+        who: ProhibitionScope::EnchantedCreatureController,
     })
     .description(text.to_string());
     if let Some(filter) = spell_filter {
@@ -3367,7 +3555,7 @@ fn parse_enchanted_controller_cant_cast(tp: &str, text: &str) -> Option<StaticDe
 /// after "spells with mana value ".
 fn parse_cant_cast_mana_value(
     rest: &str,
-    who: CastingProhibitionScope,
+    who: ProhibitionScope,
     text: &str,
 ) -> Option<StaticDefinition> {
     let (n, after_n) = parse_number(rest)?;
@@ -8071,7 +8259,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantCastDuring {
-                who: CastingProhibitionScope::Opponents,
+                who: ProhibitionScope::Opponents,
                 when: CastingProhibitionCondition::DuringYourTurn,
             }
         );
@@ -8084,7 +8272,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantCastDuring {
-                who: CastingProhibitionScope::AllPlayers,
+                who: ProhibitionScope::AllPlayers,
                 when: CastingProhibitionCondition::DuringCombat,
             }
         );
@@ -8101,7 +8289,7 @@ mod tests {
     #[test]
     fn static_cant_cast_during_serde_roundtrip() {
         let mode = StaticMode::CantCastDuring {
-            who: CastingProhibitionScope::Opponents,
+            who: ProhibitionScope::Opponents,
             when: CastingProhibitionCondition::DuringYourTurn,
         };
         let json = serde_json::to_string(&mode).unwrap();
@@ -8112,14 +8300,14 @@ mod tests {
     #[test]
     fn static_cant_cast_during_display_roundtrip() {
         let mode = StaticMode::CantCastDuring {
-            who: CastingProhibitionScope::Opponents,
+            who: ProhibitionScope::Opponents,
             when: CastingProhibitionCondition::DuringYourTurn,
         };
         let s = mode.to_string();
         assert_eq!(StaticMode::from_str(&s).unwrap(), mode);
 
         let mode2 = StaticMode::CantCastDuring {
-            who: CastingProhibitionScope::AllPlayers,
+            who: ProhibitionScope::AllPlayers,
             when: CastingProhibitionCondition::DuringCombat,
         };
         let s2 = mode2.to_string();
@@ -8136,7 +8324,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::PerTurnCastLimit {
-                who: CastingProhibitionScope::AllPlayers,
+                who: ProhibitionScope::AllPlayers,
                 max: 1,
                 spell_filter: None,
             }
@@ -8150,7 +8338,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::PerTurnCastLimit {
-                who: CastingProhibitionScope::Opponents,
+                who: ProhibitionScope::Opponents,
                 max: 1,
                 spell_filter: None,
             }
@@ -8163,7 +8351,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::PerTurnCastLimit {
-                who: CastingProhibitionScope::Controller,
+                who: ProhibitionScope::Controller,
                 max: 1,
                 spell_filter: None,
             }
@@ -8184,7 +8372,7 @@ mod tests {
         else {
             panic!("expected PerTurnCastLimit");
         };
-        assert_eq!(*who, CastingProhibitionScope::AllPlayers);
+        assert_eq!(*who, ProhibitionScope::AllPlayers);
         assert_eq!(*max, 1);
         // Filter should be Non(Creature)
         let Some(TargetFilter::Typed(tf)) = spell_filter else {
@@ -8203,7 +8391,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::PerTurnCastLimit {
-                who: CastingProhibitionScope::Controller,
+                who: ProhibitionScope::Controller,
                 max: 2,
                 spell_filter: None,
             }
@@ -8221,7 +8409,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::PerTurnCastLimit {
-                who: CastingProhibitionScope::Controller,
+                who: ProhibitionScope::Controller,
                 max: 2,
                 spell_filter: None,
             }
@@ -8235,7 +8423,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantCastDuring {
-                who: CastingProhibitionScope::Controller,
+                who: ProhibitionScope::Controller,
                 when: CastingProhibitionCondition::NotDuringYourTurn,
             }
         );
@@ -8763,7 +8951,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantBeCast {
-                who: CastingProhibitionScope::Controller,
+                who: ProhibitionScope::Controller,
             }
         );
     }
@@ -8775,7 +8963,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantBeCast {
-                who: CastingProhibitionScope::Controller,
+                who: ProhibitionScope::Controller,
             }
         );
     }
@@ -8787,7 +8975,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantBeCast {
-                who: CastingProhibitionScope::Controller,
+                who: ProhibitionScope::Controller,
             }
         );
     }
@@ -8811,7 +8999,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::PerTurnDrawLimit {
-                who: CastingProhibitionScope::AllPlayers,
+                who: ProhibitionScope::AllPlayers,
                 max: 1,
             }
         );
@@ -8825,7 +9013,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::PerTurnDrawLimit {
-                who: CastingProhibitionScope::Opponents,
+                who: ProhibitionScope::Opponents,
                 max: 1,
             }
         );
@@ -8837,7 +9025,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantDraw {
-                who: CastingProhibitionScope::AllPlayers,
+                who: ProhibitionScope::AllPlayers,
             }
         );
     }
@@ -8848,7 +9036,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantDraw {
-                who: CastingProhibitionScope::Controller,
+                who: ProhibitionScope::Controller,
             }
         );
     }
@@ -8859,7 +9047,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantDraw {
-                who: CastingProhibitionScope::Opponents,
+                who: ProhibitionScope::Opponents,
             }
         );
     }
@@ -8892,7 +9080,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantBeCast {
-                who: CastingProhibitionScope::AllPlayers,
+                who: ProhibitionScope::AllPlayers,
             }
         );
         match &def.affected {
@@ -8911,7 +9099,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantBeCast {
-                who: CastingProhibitionScope::Opponents,
+                who: ProhibitionScope::Opponents,
             }
         );
         match &def.affected {
@@ -8935,7 +9123,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantBeCast {
-                who: CastingProhibitionScope::Opponents,
+                who: ProhibitionScope::Opponents,
             }
         );
         assert_eq!(def.affected, Some(TargetFilter::HasChosenName));
@@ -8951,7 +9139,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantBeCast {
-                who: CastingProhibitionScope::Opponents,
+                who: ProhibitionScope::Opponents,
             }
         );
         assert_eq!(def.affected, Some(TargetFilter::HasChosenName));
@@ -8964,7 +9152,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantBeCast {
-                who: CastingProhibitionScope::AllPlayers,
+                who: ProhibitionScope::AllPlayers,
             }
         );
         match &def.affected {
@@ -8986,7 +9174,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantBeCast {
-                who: CastingProhibitionScope::EnchantedCreatureController,
+                who: ProhibitionScope::EnchantedCreatureController,
             }
         );
         match &def.affected {
@@ -9006,7 +9194,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantBeCast {
-                who: CastingProhibitionScope::Opponents,
+                who: ProhibitionScope::Opponents,
             }
         );
         match &def.affected {
@@ -9029,7 +9217,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantBeCast {
-                who: CastingProhibitionScope::Opponents,
+                who: ProhibitionScope::Opponents,
             }
         );
         match &def.affected {
@@ -9199,7 +9387,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantCastDuring {
-                who: CastingProhibitionScope::Opponents,
+                who: ProhibitionScope::Opponents,
                 when: CastingProhibitionCondition::DuringYourTurn,
             }
         );
@@ -9215,7 +9403,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantBeCast {
-                who: CastingProhibitionScope::Opponents,
+                who: ProhibitionScope::Opponents,
             }
         );
     }
@@ -9229,7 +9417,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantBeCast {
-                who: CastingProhibitionScope::AllPlayers,
+                who: ProhibitionScope::AllPlayers,
             }
         );
         match &def.affected {
@@ -9256,7 +9444,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::PerTurnCastLimit {
-                who: CastingProhibitionScope::EnchantedCreatureController,
+                who: ProhibitionScope::EnchantedCreatureController,
                 max: 1,
                 spell_filter: None,
             }
@@ -9273,7 +9461,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantCastDuring {
-                who: CastingProhibitionScope::AllPlayers,
+                who: ProhibitionScope::AllPlayers,
                 when: CastingProhibitionCondition::DuringCombat,
             }
         );
@@ -9294,7 +9482,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantBeCast {
-                who: CastingProhibitionScope::Opponents,
+                who: ProhibitionScope::Opponents,
             }
         );
     }
@@ -9307,7 +9495,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantBeCast {
-                who: CastingProhibitionScope::Opponents,
+                who: ProhibitionScope::Opponents,
             }
         );
     }
@@ -9320,7 +9508,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantBeCast {
-                who: CastingProhibitionScope::AllPlayers,
+                who: ProhibitionScope::AllPlayers,
             }
         );
     }
@@ -9335,7 +9523,7 @@ mod tests {
         assert_eq!(
             def.mode,
             StaticMode::CantBeCast {
-                who: CastingProhibitionScope::Opponents,
+                who: ProhibitionScope::Opponents,
             }
         );
     }
@@ -9797,5 +9985,209 @@ mod tests {
             def.affected.is_some(),
             "affected player-scope filter required"
         );
+    }
+
+    // --- CR 602.5 + CR 603.2a: Global filter-scoped CantBeActivated (Clarion/Karn class) ---
+
+    #[test]
+    fn cant_be_activated_self_ref_preserves_legacy_semantics() {
+        // CR 602.5: Self-reference form (Chalice-of-Life class) must emit the
+        // unit-default shape: `who = AllPlayers, source_filter = SelfRef`.
+        let def = parse_static_line("Its activated abilities can't be activated.").unwrap();
+        match def.mode {
+            StaticMode::CantBeActivated { who, source_filter } => {
+                assert_eq!(who, ProhibitionScope::AllPlayers);
+                assert_eq!(source_filter, TargetFilter::SelfRef);
+            }
+            other => panic!("expected CantBeActivated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cant_be_activated_clarion_multi_type_filter() {
+        // CR 602.5 + CR 603.2a: Clarion Conqueror — "Activated abilities of artifacts,
+        // creatures, and planeswalkers your opponents control can't be activated."
+        // The activator axis is AllPlayers; opponent-ness rides on the filter's
+        // `ControllerRef::Opponent`. `parse_type_phrase` emits an `Or`-disjunction of
+        // `Typed` filters when a comma-separated type list is present — each variant
+        // inherits the shared controller suffix via the post-process pass.
+        let def = parse_static_line(
+            "Activated abilities of artifacts, creatures, and planeswalkers your opponents control can't be activated.",
+        )
+        .expect("Clarion Conqueror Oracle text should parse");
+        match def.mode {
+            StaticMode::CantBeActivated {
+                who,
+                source_filter: TargetFilter::Or { filters },
+            } => {
+                assert_eq!(who, ProhibitionScope::AllPlayers);
+                assert_eq!(filters.len(), 3, "three type variants expected");
+                // Each disjunct should be a Typed filter with opponent controller and
+                // one of the three expected type filters.
+                let mut seen_types: Vec<TypeFilter> = Vec::new();
+                for f in &filters {
+                    match f {
+                        TargetFilter::Typed(tf) => {
+                            assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+                            assert_eq!(tf.type_filters.len(), 1);
+                            seen_types.push(tf.type_filters[0].clone());
+                        }
+                        other => panic!("expected Typed variant, got {other:?}"),
+                    }
+                }
+                assert!(seen_types.iter().any(|t| matches!(t, TypeFilter::Artifact)));
+                assert!(seen_types.iter().any(|t| matches!(t, TypeFilter::Creature)));
+                assert!(seen_types
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Planeswalker)));
+            }
+            other => panic!("expected CantBeActivated with Or-disjunction filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cant_be_activated_karn_single_type_filter() {
+        // CR 602.5 + CR 603.2a: Karn, the Great Creator — "Activated abilities of
+        // artifacts your opponents control can't be activated."
+        let def = parse_static_line(
+            "Activated abilities of artifacts your opponents control can't be activated.",
+        )
+        .expect("Karn Oracle text should parse");
+        match def.mode {
+            StaticMode::CantBeActivated {
+                who,
+                source_filter: TargetFilter::Typed(tf),
+            } => {
+                assert_eq!(who, ProhibitionScope::AllPlayers);
+                assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+                assert_eq!(tf.type_filters, vec![TypeFilter::Artifact]);
+            }
+            other => panic!("expected CantBeActivated, got {other:?}"),
+        }
+    }
+
+    // --- CR 701.23 + CR 609.3: CantSearchLibrary (Ashiok class) ---
+
+    #[test]
+    fn cant_search_library_ashiok() {
+        // CR 701.23 + CR 609.3: Ashiok, Dream Render — "Spells and abilities your
+        // opponents control can't cause their controller to search their library."
+        let def = parse_static_line(
+            "Spells and abilities your opponents control can't cause their controller to search their library.",
+        )
+        .expect("Ashiok Oracle text should parse");
+        assert_eq!(
+            def.mode,
+            StaticMode::CantSearchLibrary {
+                cause: ProhibitionScope::Opponents,
+            }
+        );
+    }
+
+    #[test]
+    fn cant_search_library_controller_variant() {
+        // Building-block coverage: `you control` should map to Controller scope.
+        let def = parse_static_line(
+            "Spells and abilities you control can't cause their controller to search their library.",
+        )
+        .expect("controller-scoped variant should parse");
+        assert_eq!(
+            def.mode,
+            StaticMode::CantSearchLibrary {
+                cause: ProhibitionScope::Controller,
+            }
+        );
+    }
+
+    // --- CR 603.2g + CR 603.6a + CR 700.4: SuppressTriggers (Torpor Orb / Hushbringer) ---
+
+    #[test]
+    fn suppress_triggers_torpor_orb_etb_only() {
+        use crate::types::statics::SuppressedTriggerEvent;
+
+        // CR 603.2g + CR 603.6a: Torpor Orb — "Creatures entering the battlefield
+        // don't cause abilities to trigger." Event set is [EntersBattlefield] only.
+        let def = parse_static_line(
+            "Creatures entering the battlefield don't cause abilities to trigger.",
+        )
+        .expect("Torpor Orb Oracle text should parse");
+        match def.mode {
+            StaticMode::SuppressTriggers {
+                source_filter: TargetFilter::Typed(tf),
+                events,
+            } => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                assert_eq!(events, vec![SuppressedTriggerEvent::EntersBattlefield]);
+            }
+            other => panic!("expected SuppressTriggers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suppress_triggers_torpor_orb_etb_without_the_battlefield() {
+        use crate::types::statics::SuppressedTriggerEvent;
+
+        // Errata variant: some printings drop "the battlefield" and just say
+        // "Creatures entering don't cause abilities to trigger." — same semantics.
+        let def = parse_static_line("Creatures entering don't cause abilities to trigger.")
+            .expect("Short-form Oracle should parse");
+        match def.mode {
+            StaticMode::SuppressTriggers { events, .. } => {
+                assert_eq!(events, vec![SuppressedTriggerEvent::EntersBattlefield]);
+            }
+            other => panic!("expected SuppressTriggers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suppress_triggers_hushbringer_accepts_and_dying_variant() {
+        use crate::types::statics::SuppressedTriggerEvent;
+
+        // CR 603.2g + CR 700.4: The "and dying" phrasing is also accepted for
+        // defensive parsing of errata/near-variants. Same event set as "or dying".
+        let def = parse_static_line(
+            "Creatures entering the battlefield and dying don't cause abilities to trigger.",
+        )
+        .expect("'and dying' variant should parse");
+        match def.mode {
+            StaticMode::SuppressTriggers { events, .. } => {
+                assert_eq!(
+                    events,
+                    vec![
+                        SuppressedTriggerEvent::EntersBattlefield,
+                        SuppressedTriggerEvent::Dies,
+                    ]
+                );
+            }
+            other => panic!("expected SuppressTriggers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suppress_triggers_hushbringer_etb_and_dies() {
+        use crate::types::statics::SuppressedTriggerEvent;
+
+        // CR 603.2g + CR 603.6a + CR 700.4: Hushbringer's actual MTGJSON Oracle
+        // text is "Creatures entering or dying don't cause abilities to trigger."
+        // Event set is [EntersBattlefield, Dies] in canonical order.
+        let def =
+            parse_static_line("Creatures entering or dying don't cause abilities to trigger.")
+                .expect("Hushbringer Oracle text should parse");
+        match def.mode {
+            StaticMode::SuppressTriggers {
+                source_filter: TargetFilter::Typed(tf),
+                events,
+            } => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                assert_eq!(
+                    events,
+                    vec![
+                        SuppressedTriggerEvent::EntersBattlefield,
+                        SuppressedTriggerEvent::Dies,
+                    ]
+                );
+            }
+            other => panic!("expected SuppressTriggers, got {other:?}"),
+        }
     }
 }

@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChosenAttribute, ControllerRef, Effect, ModalChoice,
-    PlayerFilter, ResolvedAbility, TargetFilter, TargetRef, TriggerCondition, TriggerDefinition,
-    TributeOutcome, TypeFilter, TypedFilter, UnlessCost,
+    PlayerFilter, ResolvedAbility, TargetFilter, TargetRef, TributeOutcome, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessCost,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -200,6 +200,72 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
     }
 }
 
+/// CR 603.2g + CR 603.6a + CR 700.4: Check whether an event's trigger-firing
+/// should be suppressed by any active `SuppressTriggers` static on the battlefield.
+///
+/// Only matches ZoneChanged events that correspond to ETB (to=Battlefield) or Dies
+/// (from=Battlefield, to=Graveyard). The suppression tests the event's *subject*
+/// (the entering/dying permanent) against the static's `source_filter`, matching
+/// official Torpor Orb rulings: a creature entering suppresses every ETB trigger
+/// in response — including observer triggers on other permanents.
+///
+/// CR 603.10a: Filter evaluation uses the event's `ZoneChangeRecord`
+/// (last-known-information snapshot) rather than live `state.objects` — for Dies
+/// events the subject has already left the battlefield and its live type data may
+/// no longer reflect the pre-change state.
+///
+/// Replacement effects (CR 614) are unaffected — they run in a different phase.
+/// Static "enters with" / "enters tapped" / "as X enters" effects (CR 603.6d) are
+/// also unaffected because they are static abilities, not triggered ones.
+fn event_is_suppressed_by_static_triggers(state: &GameState, event: &GameEvent) -> bool {
+    use crate::types::statics::SuppressedTriggerEvent;
+
+    // Classify the event: is it ETB, Dies, or neither?
+    let (record, triggered_event) = match event {
+        GameEvent::ZoneChanged {
+            record,
+            to: Zone::Battlefield,
+            ..
+        } => (record.as_ref(), SuppressedTriggerEvent::EntersBattlefield),
+        GameEvent::ZoneChanged {
+            record,
+            from: Zone::Battlefield,
+            to: Zone::Graveyard,
+            ..
+        } => (record.as_ref(), SuppressedTriggerEvent::Dies),
+        _ => return false,
+    };
+
+    for &bf_id in &state.battlefield {
+        let Some(bf_obj) = state.objects.get(&bf_id) else {
+            continue;
+        };
+        for def in &bf_obj.static_definitions {
+            let StaticMode::SuppressTriggers {
+                ref source_filter,
+                ref events,
+            } = def.mode
+            else {
+                continue;
+            };
+            if !events.contains(&triggered_event) {
+                continue;
+            }
+            // CR 603.10a: Zone-change last-known information — use the record snapshot.
+            let filter_ctx = super::filter::FilterContext::from_source(state, bf_id);
+            if super::filter::matches_target_filter_on_zone_change_record(
+                state,
+                record,
+                source_filter,
+                &filter_ctx,
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Process events and place triggered abilities on the stack in APNAP order.
 /// CR 603.3b: Process triggered abilities waiting to be put on the stack.
 pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
@@ -209,6 +275,17 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
     let mut batched_this_pass: HashSet<(ObjectId, usize)> = HashSet::new();
 
     for event in events {
+        // CR 603.2g + CR 603.6a + CR 700.4: If a SuppressTriggers static matches the
+        // subject of an ETB/Dies event, skip all trigger matching for that event —
+        // per CR 603.2g, an event that "won't trigger anything" because the static
+        // declares its trigger registration void. Torpor Orb stops every ETB trigger
+        // caused by a creature entering, including observer triggers like Soul Warden.
+        // CR 603.6d: Static "enters tapped"/"enters with counters"/"as X enters"
+        // effects are NOT triggered and are unaffected (they run as part of the ETB
+        // event itself, not through process_triggers).
+        if event_is_suppressed_by_static_triggers(state, event) {
+            continue;
+        }
         // Scan all permanents on the battlefield for matching triggers
         for obj_id in trigger_source_ids_for_zone(state, Zone::Battlefield) {
             let (
@@ -1485,7 +1562,7 @@ pub(crate) fn check_trigger_condition(
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| obj.zone == *zone),
         // CR 702.104b: True when the Tribute ETB replacement resolved without the
-        // chosen opponent placing the +1/+1 counters. Reads the creature's
+        // chosen opponent placing the +1/+1 counters. Read from the creature's
         // persisted `ChosenAttribute::TributeOutcome` — explicit `Declined` or no
         // outcome recorded (e.g., all opponents eliminated before the prompt) both
         // count as "tribute wasn't paid". An explicit `Paid` outcome suppresses the
@@ -3820,6 +3897,367 @@ pub mod tests {
         assert!(
             extract_target_filter_from_effect(&effect).is_some(),
             "ChangeZone from battlefield should still extract target for stack-time targeting"
+        );
+    }
+
+    // === CR 603.2g + CR 603.6a + CR 700.4: SuppressTriggers integration tests ===
+
+    use crate::types::ability::StaticDefinition;
+    use crate::types::statics::{StaticMode, SuppressedTriggerEvent};
+
+    /// Attach a `SuppressTriggers` static to a newly-created permanent in `state.battlefield`.
+    fn add_suppress_triggers_permanent(
+        state: &mut GameState,
+        controller: PlayerId,
+        source_filter: TargetFilter,
+        events: Vec<SuppressedTriggerEvent>,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(0xABCDE),
+            controller,
+            "Suppressor".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.entered_battlefield_turn = Some(0);
+        obj.static_definitions
+            .push(StaticDefinition::new(StaticMode::SuppressTriggers {
+                source_filter,
+                events,
+            }));
+        id
+    }
+
+    /// Attach an ETB-trigger creature to a newly-created permanent on the battlefield.
+    /// Trigger is a no-op Draw(1) keyed on "whenever any creature enters".
+    fn add_etb_observer(state: &mut GameState, controller: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(0xFADE),
+            controller,
+            "ETB Observer".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.entered_battlefield_turn = Some(0);
+        obj.trigger_definitions.push(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                ))
+                .destination(Zone::Battlefield),
+        );
+        id
+    }
+
+    #[test]
+    fn suppress_triggers_torpor_blocks_creature_etb_observer() {
+        // CR 603.2g + CR 603.6a: Torpor Orb-class static on battlefield suppresses
+        // an observer's ETB trigger when a CREATURE enters. Soul Warden reading.
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // Torpor Orb: source_filter = creatures, events = [EntersBattlefield]
+        add_suppress_triggers_permanent(
+            &mut state,
+            PlayerId(0),
+            TargetFilter::Typed(TypedFilter::creature()),
+            vec![SuppressedTriggerEvent::EntersBattlefield],
+        );
+        let _observer = add_etb_observer(&mut state, PlayerId(0));
+
+        // Simulate a creature entering the battlefield.
+        let events = vec![zone_changed_event(
+            ObjectId(0xBEEF),
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        )];
+
+        process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            0,
+            "Torpor Orb should suppress the observer's ETB trigger for a creature entering"
+        );
+    }
+
+    #[test]
+    fn suppress_triggers_torpor_permits_non_creature_etb() {
+        // CR 603.2g + CR 603.6a: Torpor Orb only filters on CREATURES. An artifact
+        // entering still fires ETB triggers normally — filter correctness test.
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        add_suppress_triggers_permanent(
+            &mut state,
+            PlayerId(0),
+            TargetFilter::Typed(TypedFilter::creature()),
+            vec![SuppressedTriggerEvent::EntersBattlefield],
+        );
+        let _observer = add_etb_observer(&mut state, PlayerId(0));
+
+        // Non-creature (artifact) enters.
+        let events = vec![zone_changed_event(
+            ObjectId(0xBEEF),
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Artifact],
+            Vec::new(),
+        )];
+
+        process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Torpor Orb must NOT suppress ETB triggers caused by a non-creature entering"
+        );
+    }
+
+    #[test]
+    fn suppress_triggers_torpor_permits_dies_event() {
+        // CR 700.4: Torpor Orb has `events = [EntersBattlefield]` only — death
+        // triggers must still fire. Event-set correctness test.
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // Torpor (ETB-only) on battlefield.
+        add_suppress_triggers_permanent(
+            &mut state,
+            PlayerId(0),
+            TargetFilter::Typed(TypedFilter::creature()),
+            vec![SuppressedTriggerEvent::EntersBattlefield],
+        );
+
+        // Create a creature with a "dies" trigger and place it on the battlefield,
+        // then simulate its death.
+        let dying = create_object(
+            &mut state,
+            CardId(0xD1E),
+            PlayerId(0),
+            "Dying Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&dying).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(0);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ))
+                    .origin(Zone::Battlefield)
+                    .destination(Zone::Graveyard),
+            );
+        }
+        // Move the object out of the battlefield to mirror a real death.
+        {
+            let obj = state.objects.get_mut(&dying).unwrap();
+            obj.zone = Zone::Graveyard;
+        }
+        state.battlefield.retain(|id| *id != dying);
+
+        let events = vec![zone_changed_event(
+            dying,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            vec![CoreType::Creature],
+            Vec::new(),
+        )];
+
+        process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Torpor Orb must NOT suppress dies triggers — only [EntersBattlefield] is in events"
+        );
+    }
+
+    #[test]
+    fn suppress_triggers_hushbringer_blocks_creature_dies() {
+        // CR 700.4 + CR 603.2g: Hushbringer-class (`events = [EntersBattlefield, Dies]`)
+        // suppresses death triggers on creatures. Event-set building-block test.
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        add_suppress_triggers_permanent(
+            &mut state,
+            PlayerId(0),
+            TargetFilter::Typed(TypedFilter::creature()),
+            vec![
+                SuppressedTriggerEvent::EntersBattlefield,
+                SuppressedTriggerEvent::Dies,
+            ],
+        );
+
+        let dying = create_object(
+            &mut state,
+            CardId(0xD1F),
+            PlayerId(0),
+            "Hushed Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&dying).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(0);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ))
+                    .origin(Zone::Battlefield)
+                    .destination(Zone::Graveyard),
+            );
+        }
+        {
+            let obj = state.objects.get_mut(&dying).unwrap();
+            obj.zone = Zone::Graveyard;
+        }
+        state.battlefield.retain(|id| *id != dying);
+
+        let events = vec![zone_changed_event(
+            dying,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            vec![CoreType::Creature],
+            Vec::new(),
+        )];
+
+        process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            0,
+            "Hushbringer-class SuppressTriggers(events=[ETB, Dies]) must suppress creature death triggers"
+        );
+    }
+
+    #[test]
+    fn suppress_triggers_hushbringer_permits_non_creature_dies() {
+        // CR 700.4: Hushbringer filters on creatures only — an artifact dying
+        // must still fire its triggers. Filter + event-set combination test.
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        add_suppress_triggers_permanent(
+            &mut state,
+            PlayerId(0),
+            TargetFilter::Typed(TypedFilter::creature()),
+            vec![
+                SuppressedTriggerEvent::EntersBattlefield,
+                SuppressedTriggerEvent::Dies,
+            ],
+        );
+
+        let dying_artifact = create_object(
+            &mut state,
+            CardId(0xD20),
+            PlayerId(0),
+            "Dying Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&dying_artifact).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.entered_battlefield_turn = Some(0);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ))
+                    .origin(Zone::Battlefield)
+                    .destination(Zone::Graveyard),
+            );
+        }
+        {
+            let obj = state.objects.get_mut(&dying_artifact).unwrap();
+            obj.zone = Zone::Graveyard;
+        }
+        state.battlefield.retain(|id| *id != dying_artifact);
+
+        let events = vec![zone_changed_event(
+            dying_artifact,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            vec![CoreType::Artifact],
+            Vec::new(),
+        )];
+
+        process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Hushbringer must NOT suppress triggers for non-creature deaths (filter is creature-only)"
+        );
+    }
+
+    #[test]
+    fn suppress_triggers_no_suppressor_means_trigger_fires() {
+        // Baseline: without any SuppressTriggers static, creature ETB fires normally.
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        let _observer = add_etb_observer(&mut state, PlayerId(0));
+
+        let events = vec![zone_changed_event(
+            ObjectId(0xBEEF),
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        )];
+
+        process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Baseline: observer ETB trigger must fire when no suppressor is active"
+        );
+    }
+
+    #[test]
+    fn suppress_triggers_ignores_non_zone_change_events() {
+        // CR 603.2g: SuppressTriggers keys on ETB / Dies zone-change events only.
+        // Other events (phase changes, spell casts) pass through untouched.
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        add_suppress_triggers_permanent(
+            &mut state,
+            PlayerId(0),
+            TargetFilter::Typed(TypedFilter::creature()),
+            vec![
+                SuppressedTriggerEvent::EntersBattlefield,
+                SuppressedTriggerEvent::Dies,
+            ],
+        );
+
+        // A non-zone-change event must not be suppressed.
+        let event = GameEvent::PhaseChanged { phase: Phase::Draw };
+        assert!(
+            !event_is_suppressed_by_static_triggers(&state, &event),
+            "PhaseChanged must not be suppressed by SuppressTriggers"
         );
     }
 }

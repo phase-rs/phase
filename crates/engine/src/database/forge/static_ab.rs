@@ -37,11 +37,15 @@ pub(crate) fn translate_static(
 
         // CR 101.2: Restriction on casting (Forge data defaults to Controller scope).
         "CantBeCast" => Ok(StaticDefinition::new(StaticMode::CantBeCast {
-            who: crate::types::statics::CastingProhibitionScope::Controller,
+            who: crate::types::statics::ProhibitionScope::Controller,
         })),
 
-        // Restriction on activation.
-        "CantBeActivated" => Ok(StaticDefinition::new(StaticMode::CantBeActivated)),
+        // CR 602.5: Restriction on activation. Forge's unit-string form maps to the
+        // Chalice-of-Life-class self-reference case: `who = AllPlayers, source_filter = SelfRef`.
+        "CantBeActivated" => Ok(StaticDefinition::new(StaticMode::CantBeActivated {
+            who: crate::types::statics::ProhibitionScope::AllPlayers,
+            source_filter: crate::types::ability::TargetFilter::SelfRef,
+        })),
 
         // Can't be targeted.
         "CantTarget" => Ok(StaticDefinition::new(StaticMode::CantBeTargeted)),

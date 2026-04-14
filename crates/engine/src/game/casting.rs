@@ -12,7 +12,7 @@ use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{ManaCost, ManaSpellGrant, SpellMeta};
 use crate::types::player::PlayerId;
-use crate::types::statics::{CastingProhibitionCondition, CastingProhibitionScope, StaticMode};
+use crate::types::statics::{CastingProhibitionCondition, ProhibitionScope, StaticMode};
 use crate::types::zones::Zone;
 
 use std::collections::HashSet;
@@ -2266,6 +2266,13 @@ pub fn can_activate_ability_now(
     if !obj.detained_by.is_empty() {
         return false;
     }
+    // CR 602.5 + CR 603.2a: Consult active CantBeActivated statics — a player can't
+    // begin to activate an ability that's prohibited from being activated. Note this
+    // only affects activated abilities (CR 603.2a: triggered abilities are unaffected
+    // and use SuppressTriggers instead).
+    if is_blocked_by_cant_be_activated(state, player, source_id) {
+        return false;
+    }
     if restrictions::check_activation_restrictions(
         state,
         player,
@@ -2354,6 +2361,14 @@ pub fn handle_activate_ability(
             "Object is not in the correct zone (expected {:?})",
             required_zone
         )));
+    }
+
+    // CR 602.5 + CR 603.2a: Reject activation if any CantBeActivated static prohibits
+    // the player from activating this permanent's activated abilities.
+    if is_blocked_by_cant_be_activated(state, player, source_id) {
+        return Err(EngineError::ActionNotAllowed(
+            "Activated abilities of this permanent can't be activated (CR 602.5)".to_string(),
+        ));
     }
 
     // CR 601.2f: Apply self-referential cost reduction before any cost payment.
@@ -2644,7 +2659,7 @@ fn apply_cost_reduction(
 /// CR 101.2: Check if a casting prohibition scope applies to the given caster.
 /// Shared by CantBeCast, CantCastDuring, and PerTurnCastLimit.
 fn casting_prohibition_scope_matches(
-    who: &CastingProhibitionScope,
+    who: &ProhibitionScope,
     caster: PlayerId,
     source_obj: &super::game_object::GameObject,
     state: &GameState,
@@ -2684,6 +2699,58 @@ fn is_blocked_from_casting_from_zone(
                 ) {
                     return true;
                 }
+            }
+        }
+    }
+    false
+}
+
+/// CR 602.5 + CR 603.2a: Check if any active CantBeActivated static on the battlefield
+/// prohibits the given player from activating the given permanent's activated abilities.
+/// Each matching static contributes both an activator-axis check (`who` vs caster) AND
+/// a permanent-axis check (`source_filter` vs the object whose ability is being activated).
+///
+/// Per CR 603.2a, this only affects ACTIVATED abilities; triggered abilities are suppressed
+/// via the separate `SuppressTriggers` variant.
+///
+/// - Chalice of Life (`who=AllPlayers, source_filter=SelfRef`): prohibits Chalice's own
+///   activations regardless of controller.
+/// - Clarion Conqueror (`who=AllPlayers, source_filter=Artifact/Creature/Planeswalker`):
+///   prohibits activation of any artifact/creature/planeswalker's activated abilities.
+/// - Karn, the Great Creator (`who=AllPlayers, source_filter=Artifact with ControllerRef::Opponent`):
+///   prohibits activation of opponent-controlled artifacts' activated abilities.
+fn is_blocked_by_cant_be_activated(
+    state: &GameState,
+    caster: PlayerId,
+    activating_source_id: ObjectId,
+) -> bool {
+    for &bf_id in &state.battlefield {
+        let Some(bf_obj) = state.objects.get(&bf_id) else {
+            continue;
+        };
+        for def in &bf_obj.static_definitions {
+            let StaticMode::CantBeActivated {
+                ref who,
+                ref source_filter,
+            } = def.mode
+            else {
+                continue;
+            };
+            // CR 109.5: The "who" axis — is the caster within the scope?
+            if !casting_prohibition_scope_matches(who, caster, bf_obj, state) {
+                continue;
+            }
+            // CR 602.5: The permanent-axis — does the object whose ability is being
+            // activated match the static's filter? `ControllerRef` is resolved against
+            // the static's source controller (`bf_id`), not the caster.
+            let filter_ctx = super::filter::FilterContext::from_source(state, bf_id);
+            if super::filter::matches_target_filter(
+                state,
+                activating_source_id,
+                source_filter,
+                &filter_ctx,
+            ) {
+                return true;
             }
         }
     }
@@ -2926,9 +2993,9 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::{
-        BasicLandType, ChosenAttribute, ChosenSubtypeKind, ContinuousModification, GameRestriction,
-        QuantityExpr, RestrictionExpiry, RestrictionPlayerScope, StaticDefinition, TypeFilter,
-        TypedFilter,
+        BasicLandType, ChosenAttribute, ChosenSubtypeKind, ContinuousModification, ControllerRef,
+        GameRestriction, QuantityExpr, RestrictionExpiry, RestrictionPlayerScope, StaticDefinition,
+        TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -4801,8 +4868,8 @@ mod tests {
     }
 
     // --- Aura casting tests ---
-
-    use crate::types::ability::{ControllerRef, TargetFilter};
+    // Note: `ControllerRef` + `TargetFilter` are already imported at the test module
+    // head (where the CantBeActivated tests need them). No local re-import required.
 
     /// Create an Aura enchantment in hand with Enchant creature keyword.
     fn create_aura_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
@@ -5888,12 +5955,12 @@ mod tests {
 
     // ---- CantCastDuring runtime enforcement tests ----
 
-    use crate::types::statics::{CastingProhibitionCondition, CastingProhibitionScope};
+    use crate::types::statics::{CastingProhibitionCondition, ProhibitionScope};
 
     fn add_cant_cast_during_permanent(
         state: &mut GameState,
         controller: PlayerId,
-        who: CastingProhibitionScope,
+        who: ProhibitionScope,
         when: CastingProhibitionCondition,
     ) -> ObjectId {
         let id = create_object(
@@ -5943,7 +6010,7 @@ mod tests {
         add_cant_cast_during_permanent(
             &mut state,
             PlayerId(0),
-            CastingProhibitionScope::Opponents,
+            ProhibitionScope::Opponents,
             CastingProhibitionCondition::DuringYourTurn,
         );
         // Active player is 0 (controller's turn) — opponent (Player 1) should be blocked
@@ -5956,7 +6023,7 @@ mod tests {
         add_cant_cast_during_permanent(
             &mut state,
             PlayerId(0),
-            CastingProhibitionScope::Opponents,
+            ProhibitionScope::Opponents,
             CastingProhibitionCondition::DuringYourTurn,
         );
         // Controller (Player 0) should NOT be blocked by their own "opponents can't cast"
@@ -5970,7 +6037,7 @@ mod tests {
         add_cant_cast_during_permanent(
             &mut state,
             PlayerId(0),
-            CastingProhibitionScope::AllPlayers,
+            ProhibitionScope::AllPlayers,
             CastingProhibitionCondition::DuringCombat,
         );
         // Both players should be blocked during combat
@@ -5985,7 +6052,7 @@ mod tests {
         add_cant_cast_during_permanent(
             &mut state,
             PlayerId(0),
-            CastingProhibitionScope::AllPlayers,
+            ProhibitionScope::AllPlayers,
             CastingProhibitionCondition::DuringCombat,
         );
         assert!(!is_blocked_by_cant_cast_during(&state, PlayerId(0)));
@@ -6005,7 +6072,7 @@ mod tests {
     fn add_per_turn_cast_limit_permanent(
         state: &mut GameState,
         controller: PlayerId,
-        who: CastingProhibitionScope,
+        who: ProhibitionScope,
         max: u32,
         spell_filter: Option<TargetFilter>,
     ) -> ObjectId {
@@ -6053,7 +6120,7 @@ mod tests {
         add_per_turn_cast_limit_permanent(
             &mut state,
             PlayerId(0),
-            CastingProhibitionScope::AllPlayers,
+            ProhibitionScope::AllPlayers,
             1,
             None,
         );
@@ -6078,7 +6145,7 @@ mod tests {
         add_per_turn_cast_limit_permanent(
             &mut state,
             PlayerId(0),
-            CastingProhibitionScope::Controller,
+            ProhibitionScope::Controller,
             1,
             None,
         );
@@ -6101,7 +6168,7 @@ mod tests {
         add_per_turn_cast_limit_permanent(
             &mut state,
             PlayerId(0),
-            CastingProhibitionScope::Opponents,
+            ProhibitionScope::Opponents,
             1,
             None,
         );
@@ -6125,7 +6192,7 @@ mod tests {
         add_per_turn_cast_limit_permanent(
             &mut state,
             PlayerId(0),
-            CastingProhibitionScope::AllPlayers,
+            ProhibitionScope::AllPlayers,
             1,
             Some(TargetFilter::Typed(TypedFilter {
                 type_filters: vec![TypeFilter::Non(Box::new(TypeFilter::Creature))],
@@ -6162,7 +6229,7 @@ mod tests {
         add_per_turn_cast_limit_permanent(
             &mut state,
             PlayerId(0),
-            CastingProhibitionScope::Controller,
+            ProhibitionScope::Controller,
             2,
             None,
         );
@@ -6189,7 +6256,7 @@ mod tests {
         let a_id = add_per_turn_cast_limit_permanent(
             &mut state,
             PlayerId(0),
-            CastingProhibitionScope::AllPlayers,
+            ProhibitionScope::AllPlayers,
             2,
             None,
         );
@@ -6197,7 +6264,7 @@ mod tests {
         let b_id = add_per_turn_cast_limit_permanent(
             &mut state,
             PlayerId(0),
-            CastingProhibitionScope::AllPlayers,
+            ProhibitionScope::AllPlayers,
             1,
             None,
         );
@@ -6229,7 +6296,7 @@ mod tests {
         add_cant_cast_during_permanent(
             &mut state,
             PlayerId(0),
-            CastingProhibitionScope::Controller,
+            ProhibitionScope::Controller,
             CastingProhibitionCondition::NotDuringYourTurn,
         );
         // Active player is 0 (controller's turn) — controller should NOT be blocked
@@ -7606,6 +7673,200 @@ mod tests {
         assert!(
             can_cast_object_now(&state, PlayerId(0), bolt),
             "Lightning Bolt should be castable with 2 Mountains (covers {{1}}{{R}} after Thalia tax)"
+        );
+    }
+
+    // === CR 602.5 + CR 603.2a: CantBeActivated runtime enforcement tests ===
+    //
+    // These exercise the building-block (`is_blocked_by_cant_be_activated` +
+    // `can_activate_ability_now`) directly rather than end-to-end game flow.
+
+    /// Attach a `CantBeActivated` static to a freshly-created permanent on the battlefield.
+    fn add_cant_be_activated_source(
+        state: &mut GameState,
+        controller: PlayerId,
+        who: ProhibitionScope,
+        source_filter: TargetFilter,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(0xCAC7),
+            controller,
+            "Activation Prohibitor".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.entered_battlefield_turn = Some(0);
+        obj.static_definitions
+            .push(StaticDefinition::new(StaticMode::CantBeActivated {
+                who,
+                source_filter,
+            }));
+        id
+    }
+
+    /// Attach an artifact creature with a Tap-only activated ability to the battlefield.
+    fn add_artifact_with_activated_ability(
+        state: &mut GameState,
+        controller: PlayerId,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(0xA8CF),
+            controller,
+            "Artifact Dude".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.entered_battlefield_turn = Some(0);
+        obj.abilities.push(
+            crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Activated,
+                crate::types::ability::Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+            )
+            .cost(crate::types::ability::AbilityCost::Tap),
+        );
+        id
+    }
+
+    #[test]
+    fn karn_blocks_opponent_artifact_activation() {
+        // CR 602.5: Karn the Great Creator — activated abilities of artifacts your
+        // opponents control can't be activated. `who = AllPlayers, source_filter =
+        // Artifact + ControllerRef::Opponent`.
+        let mut state = setup_game_at_main_phase();
+        // Karn on P0's battlefield.
+        add_cant_be_activated_source(
+            &mut state,
+            PlayerId(0),
+            ProhibitionScope::AllPlayers,
+            TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::Opponent),
+            ),
+        );
+        // Artifact under P1's control (P0's opponent from Karn's perspective).
+        let p1_artifact = add_artifact_with_activated_ability(&mut state, PlayerId(1));
+
+        assert!(
+            is_blocked_by_cant_be_activated(&state, PlayerId(1), p1_artifact),
+            "Karn must block P1 from activating their own artifact's ability"
+        );
+        assert!(
+            !can_activate_ability_now(&state, PlayerId(1), p1_artifact, 0),
+            "can_activate_ability_now must reject activation under Karn"
+        );
+    }
+
+    #[test]
+    fn karn_permits_own_artifact_activation() {
+        // CR 602.5: Karn's filter has `ControllerRef::Opponent` — an artifact under
+        // Karn's own controller is NOT blocked.
+        let mut state = setup_game_at_main_phase();
+        add_cant_be_activated_source(
+            &mut state,
+            PlayerId(0),
+            ProhibitionScope::AllPlayers,
+            TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::Opponent),
+            ),
+        );
+        // Artifact under P0's (Karn controller's) control.
+        let p0_artifact = add_artifact_with_activated_ability(&mut state, PlayerId(0));
+
+        assert!(
+            !is_blocked_by_cant_be_activated(&state, PlayerId(0), p0_artifact),
+            "Karn must NOT block its own controller's artifact activations"
+        );
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), p0_artifact, 0),
+            "can_activate_ability_now must accept activation for Karn's own artifacts"
+        );
+    }
+
+    #[test]
+    fn clarion_blocks_activation_of_multi_type_filter_set() {
+        // CR 602.5 + CR 603.2a: Clarion Conqueror — activated abilities of artifacts,
+        // creatures, and planeswalkers your opponents control can't be activated.
+        //
+        // Use the parser-emitted Or-disjunction form to exercise the real runtime path.
+        let mut state = setup_game_at_main_phase();
+        let clarion_static = parse_static_line(
+            "Activated abilities of artifacts, creatures, and planeswalkers your opponents control can't be activated.",
+        )
+        .expect("Clarion parses");
+        // Attach it to a permanent on P0's battlefield.
+        let prohibitor = create_object(
+            &mut state,
+            CardId(0xC1A0),
+            PlayerId(0),
+            "Clarion".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&prohibitor)
+            .unwrap()
+            .static_definitions
+            .push(clarion_static);
+
+        // Artifact-creature (matches Clarion's filter) under P1.
+        let p1_creature = add_artifact_with_activated_ability(&mut state, PlayerId(1));
+        assert!(
+            is_blocked_by_cant_be_activated(&state, PlayerId(1), p1_creature),
+            "Clarion must block an opponent's artifact/creature activation"
+        );
+    }
+
+    #[test]
+    fn cant_be_activated_selfref_blocks_only_this_permanent() {
+        // CR 602.5: Chalice-of-Life-class — `source_filter = SelfRef`. Only the
+        // source permanent's OWN activated abilities are blocked; other permanents
+        // are unaffected.
+        let mut state = setup_game_at_main_phase();
+        // Prohibitor whose self-ref filter blocks only itself.
+        let prohibitor = create_object(
+            &mut state,
+            CardId(0xCACA),
+            PlayerId(0),
+            "SelfRef Prohibitor".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&prohibitor).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.entered_battlefield_turn = Some(0);
+            obj.static_definitions
+                .push(StaticDefinition::new(StaticMode::CantBeActivated {
+                    who: ProhibitionScope::AllPlayers,
+                    source_filter: TargetFilter::SelfRef,
+                }));
+            obj.abilities.push(
+                crate::types::ability::AbilityDefinition::new(
+                    crate::types::ability::AbilityKind::Activated,
+                    crate::types::ability::Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                )
+                .cost(crate::types::ability::AbilityCost::Tap),
+            );
+        }
+
+        // The prohibitor's own abilities are blocked.
+        assert!(
+            is_blocked_by_cant_be_activated(&state, PlayerId(0), prohibitor),
+            "SelfRef must block the prohibitor's own activations"
+        );
+
+        // Another, unrelated artifact with activated ability is NOT blocked.
+        let other = add_artifact_with_activated_ability(&mut state, PlayerId(0));
+        assert!(
+            !is_blocked_by_cant_be_activated(&state, PlayerId(0), other),
+            "SelfRef must NOT block other permanents' activations"
         );
     }
 }

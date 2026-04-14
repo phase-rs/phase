@@ -313,7 +313,7 @@ pub(crate) fn static_mode_polarity(mode: &StaticMode) -> EffectPolarity {
         | StaticMode::MustAttack
         | StaticMode::MustBlock
         | StaticMode::CantGainLife
-        | StaticMode::CantBeActivated => EffectPolarity::Harmful,
+        | StaticMode::CantBeActivated { .. } => EffectPolarity::Harmful,
         // Beneficial: enhances the enchanted permanent
         StaticMode::CantBeBlocked
         | StaticMode::CantBeBlockedExceptBy { .. }

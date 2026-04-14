@@ -6,7 +6,7 @@ use crate::types::ability::{TargetFilter, TypedFilter};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::statics::{CastingProhibitionScope, StaticMode};
+use crate::types::statics::{ProhibitionScope, StaticMode};
 
 /// Handler function type for static ability modes.
 /// Receives the `StaticMode` variant the handler was registered under.
@@ -45,7 +45,22 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::CantBeTargeted, handle_rule_mod);
     // Note: CantBeCast is a data-carrying variant — runtime enforcement is in
     // casting.rs::is_blocked_by_cant_be_cast(). Coverage support is via is_data_carrying_static().
-    registry.insert(StaticMode::CantBeActivated, handle_rule_mod);
+    //
+    // CR 602.5 + CR 603.2a: CantBeActivated is a data-carrying variant (`who` + `source_filter`)
+    // — runtime enforcement is in casting.rs::is_blocked_by_cant_be_activated() via
+    // can_activate_ability_now(). Coverage support is via is_data_carrying_static().
+    // Per CR 603.2a, activation-prohibition effects do NOT affect triggered abilities —
+    // see SuppressTriggers for the triggered-ability side of the prohibition family.
+    //
+    // CR 701.23 + CR 609.3: CantSearchLibrary is a data-carrying variant — runtime
+    // enforcement is in effects/search_library.rs::resolve(). Coverage support is via
+    // is_data_carrying_static().
+    //
+    // CR 603.2g + CR 603.6a + CR 700.4: SuppressTriggers is a data-carrying variant —
+    // runtime enforcement is in triggers.rs via event_is_suppressed_by_static_triggers().
+    // Coverage support is via is_data_carrying_static(). Per CR 603.6d, static
+    // "enters tapped" / "enters with counters" / "as X enters" effects are NOT
+    // triggered and are unaffected by this variant.
     // CR 702.8a: CastWithFlash — card may be cast at instant speed.
     registry.insert(StaticMode::CastWithFlash, handle_rule_mod);
     // CR 601.2f: ReduceCost/RaiseCost are data-carrying variants — runtime checks are
@@ -201,7 +216,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
 }
 
 pub(crate) fn prohibition_scope_matches_player(
-    scope: &CastingProhibitionScope,
+    scope: &ProhibitionScope,
     player: PlayerId,
     source_id: ObjectId,
     state: &GameState,
@@ -210,12 +225,12 @@ pub(crate) fn prohibition_scope_matches_player(
         return false;
     };
     match scope {
-        CastingProhibitionScope::Opponents => player != source_obj.controller,
-        CastingProhibitionScope::AllPlayers => true,
-        CastingProhibitionScope::Controller => player == source_obj.controller,
+        ProhibitionScope::Opponents => player != source_obj.controller,
+        ProhibitionScope::AllPlayers => true,
+        ProhibitionScope::Controller => player == source_obj.controller,
         // CR 303.4e: "Enchanted player" / "enchanted creature's controller" style scopes
         // follow the currently attached object's controller.
-        CastingProhibitionScope::EnchantedCreatureController => source_obj
+        ProhibitionScope::EnchantedCreatureController => source_obj
             .attached_to
             .and_then(|target_id| state.objects.get(&target_id))
             .is_some_and(|enchanted| enchanted.controller == player),

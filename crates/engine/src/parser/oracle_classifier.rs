@@ -134,6 +134,14 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "can't draw cards",
     "can cast spells only during",
     "activated abilities can't be activated",
+    // CR 602.5 + CR 603.2a: Clarion/Karn-class global filter-scoped activation prohibition.
+    // The "of ..." infix between "abilities" and "can't be activated" blocks the contiguous
+    // scan above; recognize the dispatched prefix separately so parse_static_line is reached.
+    "activated abilities of ",
+    // CR 701.23 + CR 609.3: Ashiok-class search prohibition.
+    "can't cause their controller to search their library",
+    // CR 603.2g + CR 603.6a + CR 700.4: Torpor Orb / Hushbringer trigger suppression.
+    "don't cause abilities to trigger",
     "skip your ",
     "maximum hand size",
     "life total can't change",

@@ -160,7 +160,7 @@ mod tests {
     use crate::types::ability::{QuantityExpr, StaticDefinition};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use crate::types::statics::CastingProhibitionScope;
+    use crate::types::statics::ProhibitionScope;
 
     fn make_ability(num_cards: u32) -> ResolvedAbility {
         ResolvedAbility::new(
@@ -330,7 +330,7 @@ mod tests {
             .unwrap()
             .static_definitions
             .push(StaticDefinition::new(StaticMode::CantDraw {
-                who: CastingProhibitionScope::AllPlayers,
+                who: ProhibitionScope::AllPlayers,
             }));
 
         let mut events = Vec::new();
@@ -366,7 +366,7 @@ mod tests {
             .unwrap()
             .static_definitions
             .push(StaticDefinition::new(StaticMode::CantDraw {
-                who: CastingProhibitionScope::Opponents,
+                who: ProhibitionScope::Opponents,
             }));
 
         let mut events = Vec::new();
@@ -405,7 +405,7 @@ mod tests {
             .unwrap()
             .static_definitions
             .push(StaticDefinition::new(StaticMode::PerTurnDrawLimit {
-                who: CastingProhibitionScope::AllPlayers,
+                who: ProhibitionScope::AllPlayers,
                 max: 1,
             }));
 
@@ -446,7 +446,7 @@ mod tests {
             .unwrap()
             .static_definitions
             .push(StaticDefinition::new(StaticMode::PerTurnDrawLimit {
-                who: CastingProhibitionScope::Opponents,
+                who: ProhibitionScope::Opponents,
                 max: 1,
             }));
 

@@ -42,7 +42,7 @@ CastSpell action
    ├─ CantCastFrom statics (Grafdigger's Cage) — is_blocked_from_casting_from_zone()
    ├─ CantCastDuring statics (Teferi) — is_blocked_by_cant_cast_during()
    ├─ PerTurnCastLimit statics (Rule of Law) — is_blocked_by_per_turn_cast_limit()
-   │  └─ Uses CastingProhibitionScope (Controller/Opponents/AllPlayers) + optional spell_filter
+   │  └─ Uses ProhibitionScope (Controller/Opponents/AllPlayers) + optional spell_filter
    └─ Temporary zone restrictions — is_blocked_by_cast_only_from_zones()
   │
   ▼
