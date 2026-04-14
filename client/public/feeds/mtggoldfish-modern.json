@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-04-27T00:00:00Z",
+  "updated": "2026-04-28T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -585,6 +585,148 @@
       ]
     },
     {
+      "name": "Ruby Storm",
+      "author": "MTGGoldfish",
+      "colors": [
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Pyretic Ritual"
+        },
+        {
+          "count": 4,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Reckless Impulse"
+        },
+        {
+          "count": 4,
+          "name": "Wrenn's Resolve"
+        },
+        {
+          "count": 3,
+          "name": "Past in Flames"
+        },
+        {
+          "count": 1,
+          "name": "Elegant Parlor"
+        },
+        {
+          "count": 1,
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 4,
+          "name": "Desperate Ritual"
+        },
+        {
+          "count": 2,
+          "name": "Artist's Talent"
+        },
+        {
+          "count": 1,
+          "name": "Gemstone Caverns"
+        },
+        {
+          "count": 1,
+          "name": "Sunbaked Canyon"
+        },
+        {
+          "count": 2,
+          "name": "Valakut Awakening"
+        },
+        {
+          "count": 4,
+          "name": "Ruby Medallion"
+        },
+        {
+          "count": 2,
+          "name": "Wish"
+        },
+        {
+          "count": 4,
+          "name": "Ral, Monsoon Mage"
+        },
+        {
+          "count": 1,
+          "name": "Grapeshot"
+        },
+        {
+          "count": 1,
+          "name": "Thundering Falls"
+        },
+        {
+          "count": 4,
+          "name": "Scalding Tarn"
+        },
+        {
+          "count": 4,
+          "name": "Arid Mesa"
+        },
+        {
+          "count": 1,
+          "name": "Wooded Foothills"
+        },
+        {
+          "count": 4,
+          "name": "Glimpse the Impossible"
+        },
+        {
+          "count": 4,
+          "name": "Manamorphose"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 3,
+          "name": "Prismatic Ending"
+        },
+        {
+          "count": 3,
+          "name": "Orim's Chant"
+        },
+        {
+          "count": 1,
+          "name": "Past in Flames"
+        },
+        {
+          "count": 1,
+          "name": "Grapeshot"
+        },
+        {
+          "count": 1,
+          "name": "Empty the Warrens"
+        },
+        {
+          "count": 1,
+          "name": "Untimely Malfunction"
+        },
+        {
+          "count": 1,
+          "name": "Galvanic Relay"
+        },
+        {
+          "count": 2,
+          "name": "Brotherhood's End"
+        },
+        {
+          "count": 1,
+          "name": "Phlage, Titan of Fire's Fury"
+        },
+        {
+          "count": 1,
+          "name": "Wear // Tear"
+        }
+      ]
+    },
+    {
       "name": "Eldrazi Tron",
       "author": "MTGGoldfish",
       "colors": [
@@ -735,148 +877,6 @@
         {
           "count": 1,
           "name": "Walking Ballista"
-        }
-      ]
-    },
-    {
-      "name": "Ruby Storm",
-      "author": "MTGGoldfish",
-      "colors": [
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Pyretic Ritual"
-        },
-        {
-          "count": 4,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Reckless Impulse"
-        },
-        {
-          "count": 4,
-          "name": "Wrenn's Resolve"
-        },
-        {
-          "count": 3,
-          "name": "Past in Flames"
-        },
-        {
-          "count": 1,
-          "name": "Elegant Parlor"
-        },
-        {
-          "count": 1,
-          "name": "Sacred Foundry"
-        },
-        {
-          "count": 4,
-          "name": "Desperate Ritual"
-        },
-        {
-          "count": 2,
-          "name": "Artist's Talent"
-        },
-        {
-          "count": 1,
-          "name": "Gemstone Caverns"
-        },
-        {
-          "count": 1,
-          "name": "Sunbaked Canyon"
-        },
-        {
-          "count": 2,
-          "name": "Valakut Awakening"
-        },
-        {
-          "count": 4,
-          "name": "Ruby Medallion"
-        },
-        {
-          "count": 2,
-          "name": "Wish"
-        },
-        {
-          "count": 4,
-          "name": "Ral, Monsoon Mage"
-        },
-        {
-          "count": 1,
-          "name": "Grapeshot"
-        },
-        {
-          "count": 1,
-          "name": "Thundering Falls"
-        },
-        {
-          "count": 4,
-          "name": "Scalding Tarn"
-        },
-        {
-          "count": 4,
-          "name": "Arid Mesa"
-        },
-        {
-          "count": 1,
-          "name": "Wooded Foothills"
-        },
-        {
-          "count": 4,
-          "name": "Glimpse the Impossible"
-        },
-        {
-          "count": 4,
-          "name": "Manamorphose"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 3,
-          "name": "Prismatic Ending"
-        },
-        {
-          "count": 3,
-          "name": "Orim's Chant"
-        },
-        {
-          "count": 1,
-          "name": "Past in Flames"
-        },
-        {
-          "count": 1,
-          "name": "Grapeshot"
-        },
-        {
-          "count": 1,
-          "name": "Empty the Warrens"
-        },
-        {
-          "count": 1,
-          "name": "Untimely Malfunction"
-        },
-        {
-          "count": 1,
-          "name": "Galvanic Relay"
-        },
-        {
-          "count": 2,
-          "name": "Brotherhood's End"
-        },
-        {
-          "count": 1,
-          "name": "Phlage, Titan of Fire's Fury"
-        },
-        {
-          "count": 1,
-          "name": "Wear // Tear"
         }
       ]
     },

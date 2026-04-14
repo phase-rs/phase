@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-04-27T00:00:00Z",
+  "updated": "2026-04-28T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -674,23 +674,27 @@
       "name": "Niv to Light",
       "author": "MTGGoldfish",
       "colors": [
-        "U",
+        "B",
+        "R",
         "W",
         "G",
-        "B",
-        "R"
+        "U"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 1,
-          "name": "Watery Grave"
+          "count": 4,
+          "name": "North Wind Avatar"
         },
         {
-          "count": 1,
-          "name": "Temple Garden"
+          "count": 4,
+          "name": "Ancient Cornucopia"
+        },
+        {
+          "count": 2,
+          "name": "Hushwood Verge"
         },
         {
           "count": 4,
@@ -699,10 +703,6 @@
         {
           "count": 1,
           "name": "Swamp"
-        },
-        {
-          "count": 1,
-          "name": "Supreme Verdict"
         },
         {
           "count": 4,
@@ -718,27 +718,19 @@
         },
         {
           "count": 1,
+          "name": "Supreme Verdict"
+        },
+        {
+          "count": 1,
           "name": "Sunbillow Verge"
         },
         {
-          "count": 2,
-          "name": "Fable of the Mirror-Breaker"
+          "count": 1,
+          "name": "Floodfarm Verge"
         },
         {
           "count": 1,
-          "name": "Stomping Ground"
-        },
-        {
-          "count": 1,
-          "name": "Sacred Foundry"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 2,
-          "name": "Hushwood Verge"
+          "name": "Abrupt Decay"
         },
         {
           "count": 1,
@@ -746,7 +738,7 @@
         },
         {
           "count": 1,
-          "name": "Pest Control"
+          "name": "Sacred Foundry"
         },
         {
           "count": 2,
@@ -765,12 +757,28 @@
           "name": "Kolaghan's Command"
         },
         {
-          "count": 2,
-          "name": "Breeding Pool"
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 1,
+          "name": "Pest Control"
         },
         {
           "count": 1,
           "name": "Overgrown Tomb"
+        },
+        {
+          "count": 3,
+          "name": "Lightning Helix"
+        },
+        {
+          "count": 1,
+          "name": "Niv-Mizzet, Supreme"
+        },
+        {
+          "count": 2,
+          "name": "Omnath, Locus of Creation"
         },
         {
           "count": 1,
@@ -781,28 +789,8 @@
           "name": "Maelstrom Pulse"
         },
         {
-          "count": 2,
-          "name": "Niv-Mizzet Reborn"
-        },
-        {
-          "count": 1,
-          "name": "Niv-Mizzet, Supreme"
-        },
-        {
-          "count": 3,
-          "name": "Omnath, Locus of Creation"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
           "count": 1,
           "name": "Pillage the Bog"
-        },
-        {
-          "count": 1,
-          "name": "Forest"
         },
         {
           "count": 1,
@@ -810,11 +798,15 @@
         },
         {
           "count": 1,
-          "name": "Floodfarm Verge"
+          "name": "Island"
         },
         {
           "count": 1,
           "name": "Spara's Headquarters"
+        },
+        {
+          "count": 1,
+          "name": "Forest"
         },
         {
           "count": 4,
@@ -823,10 +815,6 @@
         {
           "count": 1,
           "name": "Elesh Norn, Mother of Machines"
-        },
-        {
-          "count": 3,
-          "name": "Ancient Cornucopia"
         },
         {
           "count": 1,
@@ -854,15 +842,11 @@
         },
         {
           "count": 1,
-          "name": "Wandering Mind"
-        },
-        {
-          "count": 1,
           "name": "Wastewood Verge"
         },
         {
           "count": 1,
-          "name": "Abrupt Decay"
+          "name": "Stomping Ground"
         },
         {
           "count": 2,
@@ -877,34 +861,42 @@
           "name": "Ziatora's Proving Ground"
         },
         {
-          "count": 3,
-          "name": "Lightning Helix"
-        },
-        {
           "count": 4,
           "name": "Leyline Binding"
+        },
+        {
+          "count": 1,
+          "name": "Temple Garden"
+        },
+        {
+          "count": 1,
+          "name": "Niv-Mizzet Reborn"
+        },
+        {
+          "count": 1,
+          "name": "Watery Grave"
+        },
+        {
+          "count": 2,
+          "name": "Breeding Pool"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Deafening Clarion"
-        },
-        {
-          "count": 2,
           "name": "Dovin's Veto"
         },
         {
           "count": 1,
-          "name": "Reckoner Bankbuster"
+          "name": "Culling Ritual"
         },
         {
-          "count": 3,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 3,
+          "count": 1,
           "name": "Rest in Peace"
+        },
+        {
+          "count": 1,
+          "name": "High Noon"
         },
         {
           "count": 1,
@@ -915,8 +907,36 @@
           "name": "Yorion, Sky Nomad"
         },
         {
-          "count": 3,
-          "name": "High Noon"
+          "count": 1,
+          "name": "Virulent Plague"
+        },
+        {
+          "count": 2,
+          "name": "Clarion Conqueror"
+        },
+        {
+          "count": 1,
+          "name": "Surrak Dragonclaw"
+        },
+        {
+          "count": 1,
+          "name": "Beza, the Bounding Spring"
+        },
+        {
+          "count": 1,
+          "name": "Damping Sphere"
+        },
+        {
+          "count": 1,
+          "name": "Sphinx's Revelation"
+        },
+        {
+          "count": 1,
+          "name": "Niv-Mizzet Reborn"
+        },
+        {
+          "count": 1,
+          "name": "Blood Baron of Vizkopa"
         }
       ]
     },
