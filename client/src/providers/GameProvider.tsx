@@ -136,6 +136,28 @@ const GameDispatchContext = createContext<(action: GameAction) => Promise<void>>
   },
 );
 
+// Deferred store reset: cleanup schedules the store clear on a macrotask so that
+// an immediate remount (StrictMode double-mount, or any dep-change re-run) can
+// cancel it before it fires. Without this, every cleanup briefly sets
+// gameState to null and GameBoard flashes "Waiting for game..." before the
+// next initGame/resumeGame repopulates the store.
+let pendingStoreReset: ReturnType<typeof setTimeout> | null = null;
+
+function cancelPendingStoreReset(): void {
+  if (pendingStoreReset !== null) {
+    clearTimeout(pendingStoreReset);
+    pendingStoreReset = null;
+  }
+}
+
+function scheduleStoreReset(reset: () => void): void {
+  cancelPendingStoreReset();
+  pendingStoreReset = setTimeout(() => {
+    pendingStoreReset = null;
+    reset();
+  }, 0);
+}
+
 export interface GameProviderProps {
   gameId: string;
   mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join";
@@ -189,6 +211,11 @@ export function GameProvider({
   onResumeResetRef.current = onResumeReset;
 
   useEffect(() => {
+    // A prior cleanup may have deferred a store reset. Cancel it — this mount
+    // is about to populate the store via initGame/resumeGame, and a fire from
+    // the previous cleanup would null out the state we just wrote.
+    cancelPendingStoreReset();
+
     const { initGame, resumeGame, reset, setGameMode } = useGameStore.getState();
     setGameMode(mode);
 
@@ -508,23 +535,28 @@ export function GameProvider({
         // to the same worker's FIFO message queue, so it executes before any
         // subsequent initializeGame call from the next game session.
         adapter.resetGameState();
-        useGameStore.setState({
-          gameId: null,
-          gameState: null,
-          events: [],
-          eventHistory: [],
-          logHistory: [],
-          nextLogSeq: 0,
-          adapter: null,
-          waitingFor: null,
-          legalActions: [],
-          autoPassRecommended: false,
-          spellCosts: {},
-          stateHistory: [],
-          turnCheckpoints: [],
+        // Defer the store clear so a StrictMode remount or dep-change re-run
+        // can cancel it before it fires. On real unmount (user navigates
+        // away), the timeout fires on the next macrotask and clears the store.
+        scheduleStoreReset(() => {
+          useGameStore.setState({
+            gameId: null,
+            gameState: null,
+            events: [],
+            eventHistory: [],
+            logHistory: [],
+            nextLogSeq: 0,
+            adapter: null,
+            waitingFor: null,
+            legalActions: [],
+            autoPassRecommended: false,
+            spellCosts: {},
+            stateHistory: [],
+            turnCheckpoints: [],
+          });
         });
       } else {
-        reset();
+        scheduleStoreReset(reset);
       }
     };
   }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer]);
