@@ -75,12 +75,10 @@ fn greasefang_mirror_terminates_within_bound() {
 
     let ai_players: HashSet<PlayerId> = [PlayerId(0), PlayerId(1)].into_iter().collect();
     let config = create_config_for_players(AiDifficulty::Easy, Platform::Native, 2);
-    let ai_configs: HashMap<PlayerId, _> = [
-        (PlayerId(0), config.clone()),
-        (PlayerId(1), config.clone()),
-    ]
-    .into_iter()
-    .collect();
+    let ai_configs: HashMap<PlayerId, _> =
+        [(PlayerId(0), config.clone()), (PlayerId(1), config.clone())]
+            .into_iter()
+            .collect();
 
     let mut total_actions: usize = 0;
     loop {
