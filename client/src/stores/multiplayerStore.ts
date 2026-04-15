@@ -237,18 +237,22 @@ interface MultiplayerActions {
 }
 
 /**
- * Checks whether a lobby entry's host is running a compatible build with the
- * given server snapshot. Used by the lobby list to disable incompatible rows.
- * A missing `hostBuildCommit` (restored session, legacy entry) is treated as
- * unknown-but-allowed, matching the server's behavior at the join gate.
+ * Checks whether a lobby entry's host is running a compatible build with
+ * the browsing client. Used by the lobby list to disable incompatible
+ * rows. A missing `hostBuildCommit` (restored session, legacy entry) is
+ * treated as unknown-but-allowed, matching the server's behavior at the
+ * join gate. We compare against this client's `__BUILD_HASH__` rather
+ * than the server's commit because in `LobbyOnly` mode the server is a
+ * P2P peer broker — its commit is independent of the host/guest engine
+ * build that actually has to agree at game time. In `Full` mode the
+ * protocol-version check in `isServerCompatible` covers the client-to-
+ * server direction, and host/guest still need matching engine builds.
  */
 export function isLobbyEntryCompatible(
   hostBuildCommit: string | undefined,
-  serverInfo: ServerInfo | null,
 ): boolean {
-  if (!serverInfo) return true;
   if (!hostBuildCommit) return true;
-  return hostBuildCommit === serverInfo.buildCommit;
+  return hostBuildCommit === __BUILD_HASH__;
 }
 
 /** True when the client's wire-protocol matches the server's. */

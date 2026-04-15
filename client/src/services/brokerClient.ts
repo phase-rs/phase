@@ -367,17 +367,23 @@ export function subscribeLobbyOver(
         onUpdate(current);
         break;
       }
-      case "LobbyGameAdded": {
-        const data = msg.data as { game: LobbyGame };
-        current = [...current, data.game];
-        onUpdate(current);
-        break;
-      }
+      // Added and Updated are both handled as an upsert keyed by
+      // `game_code`. Applying a delta twice must equal applying it once
+      // (idempotence), otherwise any overlap between the initial
+      // `LobbyUpdate` snapshot and a subsequent delta — or a reconnect
+      // replay — duplicates rows in the UI. Treating Update as an
+      // insert-if-missing also guards against missed Adds on a dropped
+      // frame; the server is authoritative either way.
+      case "LobbyGameAdded":
       case "LobbyGameUpdated": {
         const data = msg.data as { game: LobbyGame };
-        current = current.map((g) =>
-          g.game_code === data.game.game_code ? data.game : g,
+        const idx = current.findIndex(
+          (g) => g.game_code === data.game.game_code,
         );
+        current =
+          idx >= 0
+            ? current.map((g, i) => (i === idx ? data.game : g))
+            : [...current, data.game];
         onUpdate(current);
         break;
       }

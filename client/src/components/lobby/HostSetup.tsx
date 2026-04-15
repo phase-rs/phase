@@ -89,10 +89,14 @@ export function HostSetup({
   // Mirror the in-flight format to the store on every change so sibling
   // views (the deck picker shown when the user clicks "Change Deck" out
   // of this form) can filter by the format the user is actively
-  // configuring — not just the one they submitted last time.
+  // configuring — not just the one they submitted last time. Mirror the
+  // format-level invariants only; `max_players` is the format's ceiling
+  // here (not the user's chosen count), so overwriting it with the local
+  // `playerCount` would collapse the picker on re-entry. The submission
+  // payload injects `playerCount` via `finalConfig` below.
   useEffect(() => {
-    setFormatConfig({ ...formatConfig, max_players: playerCount });
-  }, [formatConfig, playerCount, setFormatConfig]);
+    setFormatConfig(formatConfig);
+  }, [formatConfig, setFormatConfig]);
 
   const isP2P = connectionMode === "p2p";
   const maxPlayers = isP2P
@@ -140,9 +144,23 @@ export function HostSetup({
   };
 
   const handleHost = () => {
+    // `finalConfig` is the submission payload — `max_players` here is the
+    // user's chosen count, not the format ceiling. Do NOT mirror this
+    // into the store: the store tracks the format's invariants (so the
+    // deck picker can filter), and overwriting `max_players` there would
+    // collapse the picker on re-entry. The live mirror effect above
+    // keeps the store in sync with the format itself.
     const finalConfig = { ...formatConfig, max_players: playerCount };
-    setFormatConfig(finalConfig);
     const trimmedRoomName = roomName.trim();
+    // Default to the placeholder value when the field is blank so the
+    // lobby title matches what the user was shown. Falls back to null
+    // (server uses host name) only if the user has no display name set.
+    const resolvedRoomName =
+      trimmedRoomName.length > 0
+        ? trimmedRoomName
+        : displayName
+          ? `${displayName}'s table`
+          : null;
     onHost({
       displayName,
       public: isPublic,
@@ -151,7 +169,7 @@ export function HostSetup({
       formatConfig: finalConfig,
       matchType: playerCount === 2 ? matchType : "Bo1",
       aiSeats,
-      roomName: trimmedRoomName.length > 0 ? trimmedRoomName : null,
+      roomName: resolvedRoomName,
     });
   };
 
@@ -201,7 +219,8 @@ export function HostSetup({
             className="w-full rounded-[16px] bg-black/18 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none ring-1 ring-white/10 focus:ring-white/20"
           />
           <p className="mt-1 text-[11px] text-slate-500">
-            Shown to players browsing the lobby. Leave blank to use your name.
+            Shown to players browsing the lobby.
+            {displayName ? ` Defaults to "${displayName}'s table".` : ""}
           </p>
         </div>
 

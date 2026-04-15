@@ -57,7 +57,6 @@ export function LobbyView({
   const isServer = connectionMode !== "p2p";
   const isP2P = connectionMode === "p2p";
   const serverAddress = useMultiplayerStore((s) => s.serverAddress);
-  const serverInfo = useMultiplayerStore((s) => s.serverInfo);
   const [games, setGames] = useState<LobbyGame[]>([]);
   const gamesRef = useRef<LobbyGame[]>([]);
   const [playerCount, setPlayerCount] = useState(0);
@@ -314,7 +313,7 @@ export function LobbyView({
                   key={game.game_code}
                   game={game}
                   onJoin={handleJoinFromList}
-                  compatible={isLobbyEntryCompatible(game.host_build_commit, serverInfo)}
+                  compatible={isLobbyEntryCompatible(game.host_build_commit)}
                 />
               ))}
             </div>

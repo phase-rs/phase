@@ -325,7 +325,15 @@ export function GameProvider({
               signal.throwIfAborted();
             }
 
-            onP2PEventRef.current?.({ type: "roomCreated", roomCode: host.roomCode });
+            // The code displayed to the host must match what a guest
+            // would use to join. When broker-registered, the lobby (and
+            // `resolveGuest`) advertise the server-assigned `gameCode`;
+            // the peer `roomCode` is an internal dialing detail. Without
+            // broker the peer code IS the join code.
+            onP2PEventRef.current?.({
+              type: "roomCreated",
+              roomCode: serverGameCode ?? host.roomCode,
+            });
             onP2PEventRef.current?.({ type: "waitingForGuest" });
 
             // The adapter owns the host Peer reference and subscribes to

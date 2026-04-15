@@ -225,6 +225,74 @@ export function MultiplayerPage() {
     return { main_deck: mainDeck, sideboard };
   }, []);
 
+  const resolveGuestFromStore = useMultiplayerStore((s) => s.resolveGuest);
+
+  /**
+   * Guest-path P2P resolve loop. Tries `resolveGuest` over the shared
+   * subscription socket, prompts for a password on `password_required`
+   * and retries on the same socket, surfaces explicit UI for
+   * `build_mismatch` / `connection_lost` / etc., and navigates on
+   * success. No `throw`-based control flow: failures come back as a
+   * discriminated `ResolveResult`.
+   *
+   * Declared above `executeAction` so the deck-select → re-dispatch
+   * path can route LobbyOnly joins through the broker too. `setJoinErrorDialog`
+   * is referenced as an identifier (stable across renders via React).
+   */
+  const joinP2PRoom = useCallback(
+    async (code: string, initialPassword?: string) => {
+      let password = initialPassword;
+      while (true) {
+        const result = await resolveGuestFromStore(code, password);
+        if (result.ok) {
+          const gameId = crypto.randomUUID();
+          useGameStore.setState({ gameId });
+          // GameProvider's p2p-join path calls `joinRoom(code)`, which
+          // re-prepends the `phase-` PeerJS prefix. The broker returns
+          // the *full* peer id (e.g. "phase-3FAHP"), so strip the prefix
+          // to pass the bare room code — otherwise `joinRoom` would dial
+          // `phase-phase-3FAHP` and fail with "peer not found".
+          const hostPeerId = result.peerInfo.host_peer_id;
+          const roomCode = hostPeerId.startsWith("phase-")
+            ? hostPeerId.slice("phase-".length)
+            : hostPeerId;
+          navigate(`/game/${gameId}?mode=p2p-join&code=${roomCode}`);
+          return;
+        }
+        if (result.reason === "password_required") {
+          const entered = window.prompt("This room requires a password:");
+          if (!entered) return;
+          password = entered;
+          continue;
+        }
+        if (result.reason === "build_mismatch") {
+          setJoinErrorDialog({
+            title: "Client out of date",
+            message: result.message,
+            primaryAction: {
+              label: "Refresh",
+              onClick: () => window.location.reload(),
+            },
+          });
+          return;
+        }
+        if (
+          result.reason === "not_found" ||
+          result.reason === "room_full"
+        ) {
+          setJoinErrorDialog({
+            title: "Can't join this room",
+            message: result.message,
+          });
+          return;
+        }
+        showToast(result.message);
+        return;
+      }
+    },
+    [navigate, resolveGuestFromStore, showToast],
+  );
+
   // Execute a pending action (host or join) with the currently active deck.
   //
   // Before routing, we validate the active deck against the chosen format
@@ -285,23 +353,25 @@ export function MultiplayerPage() {
           return false;
         }
 
-        if (action.connectionMode === "p2p") {
-          // Reachability check for the `LobbyOnly` host flow. We lean on
-          // the store's long-lived subscription socket (opened when the
-          // user entered this page) rather than paying a fresh broker
-          // handshake: `ensureSubscriptionSocket` is idempotent and
-          // returns `null` when the server is unreachable, which is
-          // exactly the signal the `BrokerOfflinePrompt` needs. This
-          // also populates `serverInfo` on the store so the mode check
-          // below has authoritative data even on a fresh page load.
-          const store = useMultiplayerStore.getState();
-          const socket = await store.ensureSubscriptionSocket();
-          const mode = socket?.serverInfo.mode ?? store.serverInfo?.mode;
-          if (mode === "LobbyOnly") {
-            if (!socket) {
-              setBrokerOfflinePrompt({ action });
-              return false;
-            }
+        // Reachability + mode check for the hosting flow. We lean on the
+        // store's long-lived subscription socket (opened when the user
+        // entered this page) rather than paying a fresh broker handshake:
+        // `ensureSubscriptionSocket` is idempotent and returns `null` when
+        // the server is unreachable, which is exactly the signal the
+        // `BrokerOfflinePrompt` needs. This also populates `serverInfo` on
+        // the store so the mode check has authoritative data even on a
+        // fresh page load. A `LobbyOnly` server doesn't run games — it
+        // only brokers P2P peer IDs — so a user who clicked "Host Game"
+        // (server mode) against such a server is implicitly asking for a
+        // broker-advertised P2P game.
+        const store = useMultiplayerStore.getState();
+        const socket = await store.ensureSubscriptionSocket();
+        const mode = socket?.serverInfo.mode ?? store.serverInfo?.mode;
+
+        if (action.connectionMode === "p2p" || mode === "LobbyOnly") {
+          if (mode === "LobbyOnly" && !socket) {
+            setBrokerOfflinePrompt({ action });
+            return false;
           }
           navigateToP2PHost(action, /* useBroker */ mode === "LobbyOnly");
         } else {
@@ -313,6 +383,16 @@ export function MultiplayerPage() {
       } else {
         // Join flow
         const { code, password } = action;
+
+        // On a `LobbyOnly` server every join is P2P — the code typed or
+        // clicked resolves through the broker to the host's PeerJS peer
+        // id. Direct-dial is correct only for `Full` servers with pure
+        // PeerJS rooms.
+        const serverMode = useMultiplayerStore.getState().serverInfo?.mode;
+        if (serverMode === "LobbyOnly") {
+          void joinP2PRoom(code, password);
+          return true;
+        }
 
         const p2pCode = parseRoomCode(code);
         if (p2pCode && code.trim().length === 5) {
@@ -335,7 +415,7 @@ export function MultiplayerPage() {
 
       return true;
     },
-    [expandDeck, startHosting, navigate, navigateToP2PHost, showToast],
+    [expandDeck, startHosting, navigate, navigateToP2PHost, showToast, joinP2PRoom],
   );
 
   // Host setup complete → execute immediately if deck exists, otherwise prompt
@@ -352,71 +432,6 @@ export function MultiplayerPage() {
     [connectionMode, activeDeckName, executeAction],
   );
 
-  const resolveGuest = useMultiplayerStore((s) => s.resolveGuest);
-
-  /**
-   * Guest-path P2P resolve loop. Tries `resolveGuest` over the shared
-   * subscription socket, prompts for a password on `password_required`
-   * and retries on the same socket, surfaces explicit UI for
-   * `build_mismatch` / `connection_lost` / etc., and navigates on
-   * success. No `throw`-based control flow: failures come back as a
-   * discriminated `ResolveResult`.
-   */
-  const joinP2PRoom = useCallback(
-    async (code: string, initialPassword?: string) => {
-      let password = initialPassword;
-      while (true) {
-        const result = await resolveGuest(code, password);
-        if (result.ok) {
-          const gameId = crypto.randomUUID();
-          useGameStore.setState({ gameId });
-          navigate(
-            `/game/${gameId}?mode=p2p-join&code=${result.peerInfo.host_peer_id}`,
-          );
-          return;
-        }
-        if (result.reason === "password_required") {
-          const entered = window.prompt("This room requires a password:");
-          if (!entered) return;
-          password = entered;
-          continue;
-        }
-        // `build_mismatch` is recoverable with a page refresh — surface
-        // it via the modal with an explicit "Refresh" button so the user
-        // isn't left wondering how to resolve it. Other fatal reasons
-        // (`not_found`, `room_full`) go through the same modal without
-        // a primary action — they're terminal and the dismiss button
-        // returns the user to the lobby.
-        if (result.reason === "build_mismatch") {
-          setJoinErrorDialog({
-            title: "Client out of date",
-            message: result.message,
-            primaryAction: {
-              label: "Refresh",
-              onClick: () => window.location.reload(),
-            },
-          });
-          return;
-        }
-        if (
-          result.reason === "not_found" ||
-          result.reason === "room_full"
-        ) {
-          setJoinErrorDialog({
-            title: "Can't join this room",
-            message: result.message,
-          });
-          return;
-        }
-        // Transient failures (`connection_lost`, `error`) — a toast is
-        // enough because the user can simply try again.
-        showToast(result.message);
-        return;
-      }
-    },
-    [navigate, resolveGuest, showToast],
-  );
-
   // Join from lobby → execute immediately if deck exists, otherwise prompt
   const handleJoinGame = useCallback(
     (
@@ -427,8 +442,12 @@ export function MultiplayerPage() {
     ) => {
       // Explicit `=== true` so legacy lobby rows (older server builds
       // without `is_p2p`) fall through to the server-run flow rather
-      // than being treated as P2P.
-      if (context?.is_p2p === true) {
+      // than being treated as P2P. On a `LobbyOnly` server the broker
+      // is the only translator from the displayed game code to the
+      // host's PeerJS peer ID, so every join — typed code or lobby
+      // click — must go through `joinP2PRoom` regardless of `context`.
+      const serverMode = useMultiplayerStore.getState().serverInfo?.mode;
+      if (context?.is_p2p === true || serverMode === "LobbyOnly") {
         void joinP2PRoom(code, password);
         return;
       }
