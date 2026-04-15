@@ -12,7 +12,9 @@ use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{ManaCost, ManaSpellGrant, SpellMeta};
 use crate::types::player::PlayerId;
-use crate::types::statics::{CastingProhibitionCondition, ProhibitionScope, StaticMode};
+use crate::types::statics::{
+    ActivationExemption, CastingProhibitionCondition, ProhibitionScope, StaticMode,
+};
 use crate::types::zones::Zone;
 
 use std::collections::HashSet;
@@ -2370,7 +2372,9 @@ pub fn can_activate_ability_now(
     // begin to activate an ability that's prohibited from being activated. Note this
     // only affects activated abilities (CR 603.2a: triggered abilities are unaffected
     // and use SuppressTriggers instead).
-    if is_blocked_by_cant_be_activated(state, player, source_id) {
+    // CR 605.1a: The ability definition is passed through so the prohibition can apply
+    // its mana-ability exemption (Pithing Needle class) via the single classifier authority.
+    if is_blocked_by_cant_be_activated(state, player, source_id, &ability_def) {
         return false;
     }
     if restrictions::check_activation_restrictions(
@@ -2465,7 +2469,9 @@ pub fn handle_activate_ability(
 
     // CR 602.5 + CR 603.2a: Reject activation if any CantBeActivated static prohibits
     // the player from activating this permanent's activated abilities.
-    if is_blocked_by_cant_be_activated(state, player, source_id) {
+    // CR 605.1a: The exemption gate (Pithing Needle's "unless they're mana abilities")
+    // is applied inside `is_blocked_by_cant_be_activated` via `mana_abilities::is_mana_ability`.
+    if is_blocked_by_cant_be_activated(state, player, source_id, &ability_def) {
         return Err(EngineError::ActionNotAllowed(
             "Activated abilities of this permanent can't be activated (CR 602.5)".to_string(),
         ));
@@ -2813,16 +2819,23 @@ fn is_blocked_from_casting_from_zone(
 /// Per CR 603.2a, this only affects ACTIVATED abilities; triggered abilities are suppressed
 /// via the separate `SuppressTriggers` variant.
 ///
+/// CR 605.1a: When the static carries `exemption: ManaAbilities` (Pithing Needle class),
+/// abilities classified as mana abilities by the single authority
+/// `mana_abilities::is_mana_ability` bypass the prohibition.
+///
 /// - Chalice of Life (`who=AllPlayers, source_filter=SelfRef`): prohibits Chalice's own
 ///   activations regardless of controller.
 /// - Clarion Conqueror (`who=AllPlayers, source_filter=Artifact/Creature/Planeswalker`):
 ///   prohibits activation of any artifact/creature/planeswalker's activated abilities.
 /// - Karn, the Great Creator (`who=AllPlayers, source_filter=Artifact with ControllerRef::Opponent`):
 ///   prohibits activation of opponent-controlled artifacts' activated abilities.
+/// - Pithing Needle (`source_filter=HasChosenName, exemption=ManaAbilities`): prohibits
+///   activation of named-card sources except their mana abilities.
 fn is_blocked_by_cant_be_activated(
     state: &GameState,
     caster: PlayerId,
     activating_source_id: ObjectId,
+    activating_ability: &AbilityDefinition,
 ) -> bool {
     for &bf_id in &state.battlefield {
         let Some(bf_obj) = state.objects.get(&bf_id) else {
@@ -2832,6 +2845,7 @@ fn is_blocked_by_cant_be_activated(
             let StaticMode::CantBeActivated {
                 ref who,
                 ref source_filter,
+                ref exemption,
             } = def.mode
             else {
                 continue;
@@ -2844,13 +2858,23 @@ fn is_blocked_by_cant_be_activated(
             // activated match the static's filter? `ControllerRef` is resolved against
             // the static's source controller (`bf_id`), not the caster.
             let filter_ctx = super::filter::FilterContext::from_source(state, bf_id);
-            if super::filter::matches_target_filter(
+            if !super::filter::matches_target_filter(
                 state,
                 activating_source_id,
                 source_filter,
                 &filter_ctx,
             ) {
-                return true;
+                continue;
+            }
+            // CR 605.1a: Apply the exemption gate. Routes through the single
+            // `mana_abilities::is_mana_ability` classifier — no duplicated logic.
+            match exemption {
+                ActivationExemption::None => return true,
+                ActivationExemption::ManaAbilities => {
+                    if !super::mana_abilities::is_mana_ability(activating_ability) {
+                        return true;
+                    }
+                }
             }
         }
     }
@@ -7855,6 +7879,9 @@ mod tests {
             .push(StaticDefinition::new(StaticMode::CantBeActivated {
                 who,
                 source_filter,
+                // CR 605.1a: Existing test helpers cover the Karn/Clarion family which
+                // has no exemption suffix.
+                exemption: ActivationExemption::None,
             }));
         id
     }
@@ -7904,9 +7931,10 @@ mod tests {
         );
         // Artifact under P1's control (P0's opponent from Karn's perspective).
         let p1_artifact = add_artifact_with_activated_ability(&mut state, PlayerId(1));
+        let p1_ability = state.objects[&p1_artifact].abilities[0].clone();
 
         assert!(
-            is_blocked_by_cant_be_activated(&state, PlayerId(1), p1_artifact),
+            is_blocked_by_cant_be_activated(&state, PlayerId(1), p1_artifact, &p1_ability),
             "Karn must block P1 from activating their own artifact's ability"
         );
         assert!(
@@ -7930,9 +7958,10 @@ mod tests {
         );
         // Artifact under P0's (Karn controller's) control.
         let p0_artifact = add_artifact_with_activated_ability(&mut state, PlayerId(0));
+        let p0_ability = state.objects[&p0_artifact].abilities[0].clone();
 
         assert!(
-            !is_blocked_by_cant_be_activated(&state, PlayerId(0), p0_artifact),
+            !is_blocked_by_cant_be_activated(&state, PlayerId(0), p0_artifact, &p0_ability),
             "Karn must NOT block its own controller's artifact activations"
         );
         assert!(
@@ -7969,8 +7998,9 @@ mod tests {
 
         // Artifact-creature (matches Clarion's filter) under P1.
         let p1_creature = add_artifact_with_activated_ability(&mut state, PlayerId(1));
+        let p1_ability = state.objects[&p1_creature].abilities[0].clone();
         assert!(
-            is_blocked_by_cant_be_activated(&state, PlayerId(1), p1_creature),
+            is_blocked_by_cant_be_activated(&state, PlayerId(1), p1_creature, &p1_ability),
             "Clarion must block an opponent's artifact/creature activation"
         );
     }
@@ -7997,6 +8027,7 @@ mod tests {
                 .push(StaticDefinition::new(StaticMode::CantBeActivated {
                     who: ProhibitionScope::AllPlayers,
                     source_filter: TargetFilter::SelfRef,
+                    exemption: ActivationExemption::None,
                 }));
             obj.abilities.push(
                 crate::types::ability::AbilityDefinition::new(
@@ -8009,17 +8040,144 @@ mod tests {
             );
         }
 
+        let prohibitor_ability = state.objects[&prohibitor].abilities[0].clone();
         // The prohibitor's own abilities are blocked.
         assert!(
-            is_blocked_by_cant_be_activated(&state, PlayerId(0), prohibitor),
+            is_blocked_by_cant_be_activated(&state, PlayerId(0), prohibitor, &prohibitor_ability),
             "SelfRef must block the prohibitor's own activations"
         );
 
         // Another, unrelated artifact with activated ability is NOT blocked.
         let other = add_artifact_with_activated_ability(&mut state, PlayerId(0));
+        let other_ability = state.objects[&other].abilities[0].clone();
         assert!(
-            !is_blocked_by_cant_be_activated(&state, PlayerId(0), other),
+            !is_blocked_by_cant_be_activated(&state, PlayerId(0), other, &other_ability),
             "SelfRef must NOT block other permanents' activations"
+        );
+    }
+
+    // === CR 605.1a: Pithing Needle mana-ability exemption gate ===
+
+    /// Build a Llanowar-Elves-style mana ability: `{T}: Add {G}` (no targets, produces mana).
+    fn make_tap_for_green_mana_ability() -> AbilityDefinition {
+        use crate::types::ability::{AbilityKind, Effect, ManaProduction};
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![crate::types::mana::ManaColor::Green],
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            },
+        )
+        .cost(crate::types::ability::AbilityCost::Tap)
+    }
+
+    #[test]
+    fn is_mana_ability_classifier_authoritative() {
+        // CR 605.1a: A {T}: Add {G} ability classifies as a mana ability;
+        // a tap+sacrifice activated ability with a player target (Mindslaver-shape)
+        // does NOT classify as a mana ability.
+        let mana_ab = make_tap_for_green_mana_ability();
+        assert!(
+            super::super::mana_abilities::is_mana_ability(&mana_ab),
+            "CR 605.1a: {{T}}: Add {{G}} must classify as a mana ability"
+        );
+
+        // Mindslaver-shape: ControlNextTurn does not produce mana.
+        let mindslaver_ab = AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Activated,
+            crate::types::ability::Effect::ControlNextTurn {
+                target: TargetFilter::Player,
+                grant_extra_turn_after: false,
+            },
+        )
+        .cost(crate::types::ability::AbilityCost::Tap);
+        assert!(
+            !super::super::mana_abilities::is_mana_ability(&mindslaver_ab),
+            "CR 605.1a: ControlNextTurn does not produce mana — must NOT classify as a mana ability"
+        );
+    }
+
+    #[test]
+    fn pithing_needle_blocks_named_non_mana_ability_but_not_mana_ability() {
+        // CR 605.1a + CR 602.5: Pithing Needle naming "Llanowar Elves" must
+        // - NOT block Llanowar Elves's mana ability ({T}: Add {G}).
+        // - Block any non-mana activated ability of a source named "Llanowar Elves".
+        use crate::types::ability::ChosenAttribute;
+        let mut state = setup_game_at_main_phase();
+
+        // Pithing Needle on P0 with chosen name "Llanowar Elves" and the
+        // CantBeActivated(HasChosenName, ManaAbilities) static.
+        let needle = create_object(
+            &mut state,
+            CardId(0x9EED1E),
+            PlayerId(0),
+            "Pithing Needle".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&needle).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.entered_battlefield_turn = Some(0);
+            obj.chosen_attributes
+                .push(ChosenAttribute::CardName("Llanowar Elves".to_string()));
+            obj.static_definitions
+                .push(StaticDefinition::new(StaticMode::CantBeActivated {
+                    who: ProhibitionScope::AllPlayers,
+                    source_filter: TargetFilter::HasChosenName,
+                    exemption: ActivationExemption::ManaAbilities,
+                }));
+        }
+
+        // Llanowar Elves on P1 with two abilities: [0] mana ({T}: Add {G})
+        // and [1] a non-mana Draw ability (synthetic — exercises the gate).
+        let elves = create_object(
+            &mut state,
+            CardId(0xE17E5),
+            PlayerId(1),
+            "Llanowar Elves".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&elves).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(0);
+            obj.abilities.push(make_tap_for_green_mana_ability());
+            obj.abilities.push(
+                AbilityDefinition::new(
+                    crate::types::ability::AbilityKind::Activated,
+                    crate::types::ability::Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                )
+                .cost(crate::types::ability::AbilityCost::Tap),
+            );
+        }
+
+        let mana_ability = state.objects[&elves].abilities[0].clone();
+        let non_mana_ability = state.objects[&elves].abilities[1].clone();
+
+        // CR 605.1a: The mana ability is exempt from Pithing Needle's prohibition.
+        assert!(
+            !is_blocked_by_cant_be_activated(&state, PlayerId(1), elves, &mana_ability),
+            "Pithing Needle must NOT block Llanowar Elves's mana ability (CR 605.1a exemption)"
+        );
+
+        // CR 602.5: The non-mana ability of the named source is blocked.
+        assert!(
+            is_blocked_by_cant_be_activated(&state, PlayerId(1), elves, &non_mana_ability),
+            "Pithing Needle must block non-mana activated abilities of named sources"
+        );
+
+        // An unrelated permanent (different name) is not blocked even on a non-mana ability.
+        let other = add_artifact_with_activated_ability(&mut state, PlayerId(1));
+        let other_ability = state.objects[&other].abilities[0].clone();
+        assert!(
+            !is_blocked_by_cant_be_activated(&state, PlayerId(1), other, &other_ability),
+            "Pithing Needle must NOT block sources whose name doesn't match the chosen name"
         );
     }
 

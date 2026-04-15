@@ -145,6 +145,36 @@ impl fmt::Display for HandSizeModification {
     }
 }
 
+/// CR 605.1a: Exemption applied to a `CantBeActivated` prohibition.
+///
+/// Encodes the "unless they're mana abilities" suffix that appears on
+/// activation prohibitions like Pithing Needle. Modeled as a typed enum
+/// (not a bool) so the design space is self-documenting and extensible if
+/// a future card introduces a new exemption kind — do not add variants
+/// until a real card needs them.
+///
+/// CR 605.1a: A mana ability is an activated ability that has no target, could
+/// add mana to a player's mana pool when it resolves, and is not a loyalty
+/// ability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ActivationExemption {
+    /// No exemption — every matching activated ability is prohibited.
+    #[default]
+    None,
+    /// "unless they're mana abilities" — activations classified as mana abilities
+    /// (CR 605.1a) bypass the prohibition.
+    ManaAbilities,
+}
+
+impl fmt::Display for ActivationExemption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ActivationExemption::None => write!(f, "none"),
+            ActivationExemption::ManaAbilities => write!(f, "mana"),
+        }
+    }
+}
+
 /// All static ability modes from Forge's static ability registry.
 /// Matched case-sensitively against Forge mode strings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,9 +207,16 @@ pub enum StaticMode {
     /// `who = AllPlayers` is correct on Clarion/Karn: CR 602.5 prohibitions block the
     /// ability itself, not a specific activator. Opponent-ness rides on the filter's
     /// `ControllerRef`, which survives control-swap effects like Act of Treason.
+    ///
+    /// `exemption` carries the optional "unless they're mana abilities" clause
+    /// (CR 605.1a). Pithing Needle emits `ActivationExemption::ManaAbilities`;
+    /// Phyrexian Revoker, Sorcerous Spyglass, and the standard Chalice/Karn
+    /// family use `ActivationExemption::None`.
     CantBeActivated {
         who: ProhibitionScope,
         source_filter: TargetFilter,
+        #[serde(default)]
+        exemption: ActivationExemption,
     },
     /// CR 701.23 + CR 609.3: "Spells and abilities <scope> can't cause their controller
     /// to search their library." E.g., Ashiok, Dream Render's first static ability.
@@ -597,6 +634,9 @@ impl FromStr for StaticMode {
             "CantBeActivated" => StaticMode::CantBeActivated {
                 who: ProhibitionScope::AllPlayers,
                 source_filter: TargetFilter::SelfRef,
+                // CR 605.1a: Default to no exemption — legacy serialized form predates
+                // the mana-ability exemption field.
+                exemption: ActivationExemption::None,
             },
             "CastWithFlash" => StaticMode::CastWithFlash,
             "ReduceCost" => StaticMode::ReduceCost {
@@ -722,6 +762,9 @@ impl FromStr for StaticMode {
                         return Ok(StaticMode::CantBeActivated {
                             who,
                             source_filter: TargetFilter::SelfRef,
+                            // CR 605.1a: Display round-trip is diagnostic-only; the
+                            // exemption field is data-carrying and defaults to `None`.
+                            exemption: ActivationExemption::None,
                         });
                     }
                     return Ok(StaticMode::Other(other.to_string()));
@@ -994,6 +1037,7 @@ mod tests {
         let mode = StaticMode::CantBeActivated {
             who: ProhibitionScope::AllPlayers,
             source_filter: TargetFilter::SelfRef,
+            exemption: ActivationExemption::None,
         };
         assert_eq!(mode.to_string(), "CantBeActivated(all_players)");
 
@@ -1030,6 +1074,7 @@ mod tests {
             StaticMode::CantBeActivated {
                 who: ProhibitionScope::AllPlayers,
                 source_filter: TargetFilter::SelfRef,
+                exemption: ActivationExemption::None,
             }
         );
     }

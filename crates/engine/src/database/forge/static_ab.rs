@@ -45,6 +45,9 @@ pub(crate) fn translate_static(
         "CantBeActivated" => Ok(StaticDefinition::new(StaticMode::CantBeActivated {
             who: crate::types::statics::ProhibitionScope::AllPlayers,
             source_filter: crate::types::ability::TargetFilter::SelfRef,
+            // CR 605.1a: Legacy Forge mode strings predate the exemption suffix —
+            // default to no exemption.
+            exemption: crate::types::statics::ActivationExemption::None,
         })),
 
         // Can't be targeted.

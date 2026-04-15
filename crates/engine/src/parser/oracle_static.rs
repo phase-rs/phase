@@ -34,7 +34,8 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::statics::{
-    CastingProhibitionCondition, HandSizeModification, ProhibitionScope, StaticMode,
+    ActivationExemption, CastingProhibitionCondition, HandSizeModification, ProhibitionScope,
+    StaticMode,
 };
 use crate::types::zones::Zone;
 
@@ -859,6 +860,8 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         let mut def = StaticDefinition::new(StaticMode::CantBeActivated {
             who: ProhibitionScope::AllPlayers,
             source_filter: TargetFilter::SelfRef,
+            // CR 605.1a: Self-ref form has no "unless they're..." suffix.
+            exemption: ActivationExemption::None,
         })
         .affected(TargetFilter::SelfRef)
         .description(text.to_string());
@@ -1371,6 +1374,8 @@ pub fn parse_static_line_multi(text: &str) -> Vec<StaticDefinition> {
             StaticDefinition::new(StaticMode::CantBeActivated {
                 who: ProhibitionScope::AllPlayers,
                 source_filter: TargetFilter::SelfRef,
+                // CR 605.1a: Self-ref form has no "unless they're..." suffix.
+                exemption: ActivationExemption::None,
             })
             .affected(TargetFilter::SelfRef)
             .description(stripped.to_string()),
@@ -3284,15 +3289,40 @@ fn parse_cant_be_countered_subject(tp: &TextPair) -> TargetFilter {
     TargetFilter::SelfRef
 }
 
+/// CR 605.1a: Parse the optional "unless they're mana abilities" suffix that
+/// follows a `CantBeActivated` predicate. Returns `ActivationExemption::None`
+/// (and the unconsumed input) when no suffix is present.
+///
+/// Composed from nom `tag()`/`alt()`/`value()`/`preceded`/`opt` so additional
+/// exemption kinds can be added as one combinator branch when a real card needs
+/// them — do not add variants speculatively.
+fn parse_activation_exemption_suffix(input: &str) -> OracleResult<'_, ActivationExemption> {
+    let mut parser = opt(preceded(
+        tag(" unless they're "),
+        value(ActivationExemption::ManaAbilities, tag("mana abilities")),
+    ));
+    let (rest, exemption) = parser.parse(input)?;
+    Ok((rest, exemption.unwrap_or_default()))
+}
+
 /// CR 602.5 + CR 603.2a: Parse global filter-scoped activation prohibitions.
 ///
-/// Shape: `"Activated abilities of <type-list> [<controller suffix>] can't be activated."`
+/// Shape: `"Activated abilities of <source-filter> can't be activated[ unless they're <kind> abilities]."`
 ///
-/// Delegates the type-list + controller-suffix parse to `parse_type_phrase` (which
-/// already handles `"your opponents control"`, `"you control"`, multi-type disjunctions,
-/// commas, and the final `"and"` Oxford conjunction). The scope on the activator axis
-/// is always `AllPlayers` — CR 602.5 prohibits the ability itself, not a specific
-/// player; opponent-ness rides on the filter's `ControllerRef`.
+/// Source filter dispatch:
+/// - `"sources with the chosen name"` → `TargetFilter::HasChosenName` (Pithing Needle,
+///   Phyrexian Revoker, Sorcerous Spyglass — the chosen-name name-picker class).
+/// - Otherwise delegates to `parse_type_phrase` for type-list + controller-suffix
+///   forms (Karn, Clarion Conqueror).
+///
+/// The scope on the activator axis is always `AllPlayers` — CR 602.5 prohibits the
+/// ability itself, not a specific player; opponent-ness rides on the filter's
+/// `ControllerRef`.
+///
+/// CR 605.1a: The optional "unless they're mana abilities" suffix produces
+/// `ActivationExemption::ManaAbilities`; runtime enforcement (CR 605.1a definition
+/// of mana abilities) lives in `casting.rs::is_blocked_by_cant_be_activated` via
+/// `mana_abilities::is_mana_ability` — the single classifier authority.
 ///
 /// Returns `None` for the self-reference case ("its activated abilities can't be activated"
 /// / "activated abilities can't be activated" on creature text), which the self-ref
@@ -3305,6 +3335,39 @@ fn parse_filter_scoped_cant_be_activated(
     // "its activated abilities can't be activated" / bare "activated abilities can't be
     // activated" forms which are handled separately.
     let rest_tp = nom_tag_tp(tp, "activated abilities of ")?;
+
+    // CR 605.1a: Pithing Needle / Phyrexian Revoker / Sorcerous Spyglass class —
+    // "sources with the chosen name". Composed nom dispatch: `tag` matches the
+    // chosen-name source phrase, then `tag` consumes the predicate, then the
+    // exemption combinator handles the optional suffix.
+    if let Ok((after_source, source_filter)) = (value(
+        TargetFilter::HasChosenName,
+        tag::<_, _, nom_language::error::VerboseError<&str>>("sources with the chosen name"),
+    ))
+    .parse(rest_tp.lower)
+    {
+        if let Ok((after_predicate, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>(" can't be activated")
+                .parse(after_source)
+        {
+            // Optional "unless they're..." suffix, then the trailing period (or end-of-input).
+            if let Ok((tail, exemption)) = parse_activation_exemption_suffix(after_predicate) {
+                let trimmed_tail = tail.trim_end_matches('.').trim();
+                if trimmed_tail.is_empty() {
+                    return Some(
+                        StaticDefinition::new(StaticMode::CantBeActivated {
+                            who: ProhibitionScope::AllPlayers,
+                            source_filter,
+                            exemption,
+                        })
+                        .description(text.to_string()),
+                    );
+                }
+            }
+        }
+    }
+
+    // Otherwise fall back to the type-list + controller-suffix form (Karn, Clarion).
     // Require the predicate ending "... can't be activated[.]" at the tail.
     let predicate_tp = rest_tp
         .strip_suffix(" can't be activated.")
@@ -3325,6 +3388,8 @@ fn parse_filter_scoped_cant_be_activated(
         StaticDefinition::new(StaticMode::CantBeActivated {
             who: ProhibitionScope::AllPlayers,
             source_filter,
+            // CR 605.1a: Karn/Clarion class — no "unless they're..." suffix.
+            exemption: ActivationExemption::None,
         })
         .description(text.to_string()),
     )
@@ -10317,9 +10382,15 @@ mod tests {
         // unit-default shape: `who = AllPlayers, source_filter = SelfRef`.
         let def = parse_static_line("Its activated abilities can't be activated.").unwrap();
         match def.mode {
-            StaticMode::CantBeActivated { who, source_filter } => {
+            StaticMode::CantBeActivated {
+                who,
+                source_filter,
+                exemption,
+            } => {
                 assert_eq!(who, ProhibitionScope::AllPlayers);
                 assert_eq!(source_filter, TargetFilter::SelfRef);
+                // CR 605.1a: Self-ref form has no exemption suffix.
+                assert_eq!(exemption, ActivationExemption::None);
             }
             other => panic!("expected CantBeActivated, got {other:?}"),
         }
@@ -10341,8 +10412,10 @@ mod tests {
             StaticMode::CantBeActivated {
                 who,
                 source_filter: TargetFilter::Or { filters },
+                exemption,
             } => {
                 assert_eq!(who, ProhibitionScope::AllPlayers);
+                assert_eq!(exemption, ActivationExemption::None);
                 assert_eq!(filters.len(), 3, "three type variants expected");
                 // Each disjunct should be a Typed filter with opponent controller and
                 // one of the three expected type filters.
@@ -10379,10 +10452,83 @@ mod tests {
             StaticMode::CantBeActivated {
                 who,
                 source_filter: TargetFilter::Typed(tf),
+                exemption,
             } => {
                 assert_eq!(who, ProhibitionScope::AllPlayers);
+                assert_eq!(exemption, ActivationExemption::None);
                 assert_eq!(tf.controller, Some(ControllerRef::Opponent));
                 assert_eq!(tf.type_filters, vec![TypeFilter::Artifact]);
+            }
+            other => panic!("expected CantBeActivated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cant_be_activated_pithing_needle_chosen_name_with_mana_exemption() {
+        // CR 605.1a + CR 602.5 + CR 603.2a: Pithing Needle —
+        // "Activated abilities of sources with the chosen name can't be activated
+        // unless they're mana abilities."
+        // Source filter binds to `HasChosenName`; exemption captures the mana-ability suffix.
+        let def = parse_static_line(
+            "Activated abilities of sources with the chosen name can't be activated unless they're mana abilities.",
+        )
+        .expect("Pithing Needle Oracle text should parse");
+        match def.mode {
+            StaticMode::CantBeActivated {
+                who,
+                source_filter,
+                exemption,
+            } => {
+                assert_eq!(who, ProhibitionScope::AllPlayers);
+                assert_eq!(source_filter, TargetFilter::HasChosenName);
+                assert_eq!(exemption, ActivationExemption::ManaAbilities);
+            }
+            other => panic!("expected CantBeActivated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cant_be_activated_phyrexian_revoker_chosen_name_no_exemption_suffix() {
+        // CR 602.5 + CR 603.2a: Phyrexian Revoker — MTGJSON Oracle text omits the
+        // "unless they're mana abilities" suffix on this card. Same source filter
+        // shape as Pithing Needle, but `ActivationExemption::None`. The parser must
+        // produce the same `HasChosenName` AST shape regardless of exemption suffix —
+        // demonstrating the optional suffix combinator works in both branches.
+        let def = parse_static_line(
+            "Activated abilities of sources with the chosen name can't be activated.",
+        )
+        .expect("Phyrexian Revoker Oracle text should parse");
+        match def.mode {
+            StaticMode::CantBeActivated {
+                who,
+                source_filter,
+                exemption,
+            } => {
+                assert_eq!(who, ProhibitionScope::AllPlayers);
+                assert_eq!(source_filter, TargetFilter::HasChosenName);
+                assert_eq!(exemption, ActivationExemption::None);
+            }
+            other => panic!("expected CantBeActivated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cant_be_activated_sorcerous_spyglass_chosen_name_with_mana_exemption() {
+        // CR 605.1a + CR 602.5: Sorcerous Spyglass — identical static on an artifact
+        // that reveals an opponent's hand on ETB. Exercises composability: the static
+        // parses identically regardless of the surrounding ETB shape.
+        let def = parse_static_line(
+            "Activated abilities of sources with the chosen name can't be activated unless they're mana abilities.",
+        )
+        .expect("Sorcerous Spyglass Oracle text should parse");
+        match def.mode {
+            StaticMode::CantBeActivated {
+                source_filter,
+                exemption,
+                ..
+            } => {
+                assert_eq!(source_filter, TargetFilter::HasChosenName);
+                assert_eq!(exemption, ActivationExemption::ManaAbilities);
             }
             other => panic!("expected CantBeActivated, got {other:?}"),
         }
