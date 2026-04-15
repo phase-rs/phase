@@ -152,6 +152,9 @@ pub fn source_matches_protection_target(
         ProtectionTarget::ChosenColor => protected
             .chosen_color()
             .is_some_and(|color| source.color.contains(&color)),
+        // CR 702.16j: "Protection from everything" — protection from each object
+        // regardless of the source's characteristic values.
+        ProtectionTarget::Everything => true,
     }
 }
 

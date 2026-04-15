@@ -444,6 +444,13 @@ pub fn validate_blockers(
                         }
                     }
                 }
+                // CR 702.16j: Protection from everything — blocked by no creature.
+                Keyword::Protection(ProtectionTarget::Everything) => {
+                    return Err(format!(
+                        "{:?} cannot block {:?} (protection from everything)",
+                        blocker_id, attacker_id
+                    ));
+                }
                 _ => {}
             }
         }
@@ -1365,6 +1372,10 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
                         return false;
                     }
                 }
+            }
+            // CR 702.16j: Protection from everything — blocked by no creature.
+            Keyword::Protection(ProtectionTarget::Everything) => {
+                return false;
             }
             _ => {}
         }

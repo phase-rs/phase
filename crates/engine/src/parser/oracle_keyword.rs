@@ -1003,14 +1003,15 @@ mod tests {
     fn expand_protection_from_everything_no_split() {
         use crate::types::keywords::ProtectionTarget;
 
-        // "protection from everything" — no " and from " present, no expansion
+        // CR 702.16j: "protection from everything" → typed `Everything` variant
+        // (no " and from " present, no expansion).
         let keywords =
             extract_keyword_line("protection from everything", &["protection".to_string()])
                 .unwrap();
         assert_eq!(keywords.len(), 1);
         assert_eq!(
             keywords[0],
-            Keyword::Protection(ProtectionTarget::CardType("everything".to_string()))
+            Keyword::Protection(ProtectionTarget::Everything)
         );
     }
 

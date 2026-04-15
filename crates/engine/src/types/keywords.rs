@@ -244,6 +244,10 @@ pub enum ProtectionTarget {
     /// CR 702.16: Protection from the chosen color — resolved at runtime from the
     /// source permanent's `chosen_attributes`.
     ChosenColor,
+    /// CR 702.16j: "Protection from everything" — protection from each object
+    /// regardless of that object's characteristic values. Matches every source
+    /// in `source_matches_protection_target`.
+    Everything,
 }
 
 /// CR 702.21a: Ward cost — what the targeting player must pay.
@@ -1204,6 +1208,8 @@ fn parse_hexproof_filter(s: &str) -> HexproofFilter {
 }
 
 fn parse_protection_target(s: &str) -> ProtectionTarget {
+    // Lookup table on an atomic quality string (not Oracle-text dispatch) — the
+    // caller has already isolated the quality token from "protection from X".
     let lower = s.to_ascii_lowercase();
     match lower.as_str() {
         "white" => ProtectionTarget::Color(ManaColor::White),
@@ -1214,6 +1220,8 @@ fn parse_protection_target(s: &str) -> ProtectionTarget {
         "multicolored" => ProtectionTarget::Multicolored,
         // CR 702.16: "the chosen color" resolves at runtime from chosen_attributes
         "the chosen color" | "chosen color" => ProtectionTarget::ChosenColor,
+        // CR 702.16j: "protection from everything" — typed variant, not stringly-typed
+        "everything" => ProtectionTarget::Everything,
         _ if lower.starts_with("from ") => ProtectionTarget::Quality(s.to_string()),
         _ => ProtectionTarget::CardType(s.to_string()),
     }
@@ -1664,6 +1672,11 @@ mod tests {
         assert_eq!(
             Keyword::from_str("Protection:from everything").unwrap(),
             Keyword::Protection(ProtectionTarget::Quality("from everything".to_string()))
+        );
+        // CR 702.16j: atomic "everything" quality → typed Everything variant
+        assert_eq!(
+            Keyword::from_str("Protection:everything").unwrap(),
+            Keyword::Protection(ProtectionTarget::Everything)
         );
         assert_eq!(
             Keyword::from_str("Protection:Artifacts").unwrap(),
