@@ -7378,6 +7378,54 @@ mod tests {
         assert_eq!(state.stack.len(), 1);
     }
 
+    /// CR 702.34a + CR 119.8: Flashback with a non-mana PayLife cost is not
+    /// castable when the caster has CantLoseLife — the cost "can't be paid"
+    /// per CR 119.8, so `can_cast_object_now` must reject it and the spell
+    /// must not appear in the castable-objects list.
+    #[test]
+    fn non_mana_flashback_filtered_under_cant_lose_life() {
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup_game_at_main_phase();
+        let obj_id = add_flashback_instant_to_graveyard(
+            &mut state,
+            PlayerId(0),
+            ManaCost::NoCost,
+            ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Green],
+            },
+        );
+        // Replace the flashback mana cost with a pay-life cost directly on the card.
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.base_keywords.clear();
+        obj.keywords.clear();
+        obj.base_keywords
+            .push(Keyword::Flashback(FlashbackCost::NonMana(
+                AbilityCost::PayLife { amount: 2 },
+            )));
+        obj.keywords = obj.base_keywords.clone();
+
+        // Install CantLoseLife on PlayerId(0).
+        let lock_id = create_object(
+            &mut state,
+            CardId(0x5117),
+            PlayerId(0),
+            "Life Lock".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&lock_id).unwrap().static_definitions.push(
+            StaticDefinition::new(StaticMode::CantLoseLife).affected(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            )),
+        );
+
+        assert!(
+            !can_cast_object_now(&state, PlayerId(0), obj_id),
+            "Flashback with PayLife cost must be unreachable under CantLoseLife"
+        );
+    }
+
     #[test]
     fn self_graveyard_static_flashback_grant_is_castable() {
         let mut state = setup_game_at_main_phase();
@@ -7922,6 +7970,90 @@ mod tests {
         assert!(
             !is_blocked_by_cant_be_activated(&state, PlayerId(0), other),
             "SelfRef must NOT block other permanents' activations"
+        );
+    }
+
+    // === CR 119.8: pay-life cost under CantLoseLife ===
+
+    /// Add a permanent granting `CantLoseLife` to its controller.
+    fn add_cant_lose_life_permanent(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        use crate::types::statics::StaticMode;
+        let id = create_object(
+            state,
+            CardId(0x5117),
+            owner,
+            "Life Lock".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().static_definitions.push(
+            StaticDefinition::new(StaticMode::CantLoseLife).affected(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            )),
+        );
+        id
+    }
+
+    /// Attach a Greed-style activated ability ({1}{B}, Pay 2 life: Draw a card) to
+    /// a freshly-created permanent on the battlefield controlled by `controller`.
+    fn add_pay_life_activated_ability(state: &mut GameState, controller: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(0x6DEE),
+            controller,
+            "Greed-like".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.entered_battlefield_turn = Some(0);
+        obj.abilities.push(
+            crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Activated,
+                crate::types::ability::Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+            )
+            .cost(AbilityCost::PayLife { amount: 2 }),
+        );
+        id
+    }
+
+    /// CR 119.8: A Greed-style activated ability with `Pay 2 life` cost is filtered
+    /// from legal actions when the activating player has CantLoseLife.
+    #[test]
+    fn pay_life_activated_ability_filtered_under_cant_lose_life() {
+        let mut state = setup_game_at_main_phase();
+        add_cant_lose_life_permanent(&mut state, PlayerId(0));
+        let greed = add_pay_life_activated_ability(&mut state, PlayerId(0));
+
+        assert!(
+            !can_activate_ability_now(&state, PlayerId(0), greed, 0),
+            "can_activate_ability_now must reject PayLife activation under CantLoseLife"
+        );
+    }
+
+    /// CR 119.8: Same ability is legal when the controller does NOT have the lock.
+    #[test]
+    fn pay_life_activated_ability_legal_without_lock() {
+        let mut state = setup_game_at_main_phase();
+        let greed = add_pay_life_activated_ability(&mut state, PlayerId(0));
+
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), greed, 0),
+            "can_activate_ability_now must accept PayLife activation without a lock"
+        );
+    }
+
+    /// CR 118.3: With `life < amount`, can_activate_ability_now must reject.
+    #[test]
+    fn pay_life_activated_ability_filtered_when_insufficient_life() {
+        let mut state = setup_game_at_main_phase();
+        state.players[0].life = 1;
+        let greed = add_pay_life_activated_ability(&mut state, PlayerId(0));
+
+        assert!(
+            !can_activate_ability_now(&state, PlayerId(0), greed, 0),
+            "can_activate_ability_now must reject PayLife activation with insufficient life"
         );
     }
 }

@@ -218,4 +218,47 @@ mod tests {
         assert!(state.cost_payment_failed_flag);
         assert_eq!(state.players[0].energy, 1); // No change
     }
+
+    /// CR 119.8: An `Effect::PayCost { Life }` under CantLoseLife is unpayable —
+    /// `cost_payment_failed_flag` is set and life total does not change.
+    #[test]
+    fn life_payment_blocked_by_cant_lose_life() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{
+            ControllerRef, StaticDefinition, TargetFilter, TypedFilter,
+        };
+        use crate::types::identifiers::CardId;
+        use crate::types::statics::StaticMode;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Life Lock".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().static_definitions.push(
+            StaticDefinition::new(StaticMode::CantLoseLife).affected(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            )),
+        );
+
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::Life { amount: 3 },
+        });
+        let mut events = Vec::new();
+        let result = resolve(&mut state, &ability, &mut events);
+
+        assert!(result.is_ok());
+        assert!(state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].life, 20, "life total must not change");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LifeChanged { .. })),
+            "no LifeChanged event should be emitted"
+        );
+    }
 }
