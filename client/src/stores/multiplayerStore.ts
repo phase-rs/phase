@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import type { FormatConfig, GameFormat, MatchType, PlayerId } from "../adapter/types";
+import { PROTOCOL_VERSION, type ServerInfo } from "../adapter/ws-adapter";
 import {
   clearWsSession,
   loadWsSession,
@@ -21,6 +22,26 @@ let gameStartedFired = false;
 let hostReconnectAttempt = 0;
 let hostReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 const HOST_MAX_RECONNECT_ATTEMPTS = 3;
+
+/**
+ * The first frame the hosting WS would have sent (CreateGameWithSettings or
+ * Reconnect) is deferred until the server's ServerHello is received, so a
+ * version-mismatched connection never registers a lobby or claims a session.
+ */
+let hostHandshakeContinuation: (() => void) | null = null;
+
+function sendClientHello(ws: WebSocket): void {
+  ws.send(
+    JSON.stringify({
+      type: "ClientHello",
+      data: {
+        client_version: __APP_VERSION__,
+        build_commit: __BUILD_HASH__,
+        protocol_version: PROTOCOL_VERSION,
+      },
+    }),
+  );
+}
 
 export interface AiSeatConfig {
   seatIndex: number;
@@ -42,6 +63,9 @@ export interface HostingSettings {
   formatConfig: FormatConfig;
   matchType: MatchType;
   aiSeats: AiSeatConfig[];
+  /** Optional per-match label shown in the lobby, distinct from `displayName`
+   * (the player's global identity). `null` means "use the player's name". */
+  roomName: string | null;
 }
 
 export interface PlayerSlot {
@@ -53,6 +77,38 @@ export interface PlayerSlot {
   deckName: string | null;
 }
 
+/** Single toast entry keyed by caller.
+ *
+ * `expiresAt` is always set (absolute wall-clock ms) — both plain and
+ * countdown toasts auto-dismiss by comparing `expiresAt <= Date.now()`,
+ * which is immune to Map-mutation re-renders that would otherwise reset a
+ * relative `setTimeout`. Plain toasts use a fixed 5s window; countdown
+ * toasts use `countdownSeconds` from the caller.
+ *
+ * `showCountdown` controls the "Ns to forfeit" suffix in the UI, keeping
+ * the visual treatment (amber banner at top vs. red at bottom) orthogonal
+ * to the dismissal mechanism.
+ */
+export interface Toast {
+  message: string;
+  expiresAt: number;
+  showCountdown: boolean;
+}
+
+/** Default auto-dismiss window for plain toasts. */
+const PLAIN_TOAST_DURATION_MS = 5000;
+
+/** Stable key for opponent-disconnect toasts so multiple concurrent
+ * disconnects in a 3+ player game stack instead of stomping each other. */
+export function playerToastKey(playerId: number): string {
+  return `player:${playerId}`;
+}
+
+/** Default slot for toasts that don't care about coexisting with others
+ * (generic errors, own-reconnect banners). Matches the pre-map single-slot
+ * behavior: repeated generic toasts replace each other. */
+const GENERIC_TOAST_KEY = "generic";
+
 interface MultiplayerState {
   playerId: string;
   displayName: string;
@@ -60,7 +116,9 @@ interface MultiplayerState {
   connectionStatus: ConnectionStatus;
   activePlayerId: PlayerId | null;
   opponentDisplayName: string | null;
-  toastMessage: string | null;
+  /** Keyed toast stack. Iteration order = insertion order (Map guarantee),
+   * so the UI renders them top-down in the order they were raised. */
+  toasts: Map<string, Toast>;
   formatConfig: FormatConfig | null;
   playerSlots: PlayerSlot[];
   spectators: string[];
@@ -75,6 +133,10 @@ interface MultiplayerState {
   hostIsPublic: boolean;
   hostingStatus: HostingStatus;
   pendingGameRoute: string | null;
+  // Server identity from the most recent ServerHello (ephemeral — not persisted).
+  // null before the first hello; updated when the hosting WS or the game WS
+  // completes its handshake.
+  serverInfo: ServerInfo | null;
 }
 
 interface MultiplayerActions {
@@ -83,8 +145,25 @@ interface MultiplayerActions {
   setConnectionStatus: (status: ConnectionStatus) => void;
   setActivePlayerId: (id: PlayerId | null) => void;
   setOpponentDisplayName: (name: string | null) => void;
-  showToast: (message: string) => void;
-  clearToast: () => void;
+  /**
+   * Show a transient toast. When `opts.countdownSeconds` is provided, the
+   * toast renders a live countdown and persists until it reaches zero or
+   * is explicitly cleared; otherwise it auto-dismisses after 5 seconds.
+   * `opts.key` lets concurrent toasts coexist (e.g. `playerToastKey(pid)`);
+   * omitted keys all share the "generic" slot (old behavior).
+   */
+  showToast: (
+    message: string,
+    opts?: { countdownSeconds?: number; key?: string },
+  ) => void;
+  /** Clear one toast. No key → clear the generic slot only. */
+  clearToast: (key?: string) => void;
+  /** Clear only player-disconnect toasts (`player:*` keys). Leaves generic
+   * toasts like connection errors intact. Use on `gameResumed`. */
+  clearPlayerToasts: () => void;
+  /** Clear every toast. Rarely needed — prefer `clearPlayerToasts()` or
+   * keyed `clearToast()`. Retained for full-reset paths. */
+  clearAllToasts: () => void;
   setFormatConfig: (config: FormatConfig | null) => void;
   setPlayerSlots: (slots: PlayerSlot[]) => void;
   toggleReady: (playerId: string) => void;
@@ -98,6 +177,28 @@ interface MultiplayerActions {
   startHosting: (settings: HostingSettings, deck: HostingDeck) => void;
   cancelHosting: () => void;
   clearPendingGameRoute: () => void;
+  setServerInfo: (info: ServerInfo | null) => void;
+}
+
+/**
+ * Checks whether a lobby entry's host is running a compatible build with the
+ * given server snapshot. Used by the lobby list to disable incompatible rows.
+ * A missing `hostBuildCommit` (restored session, legacy entry) is treated as
+ * unknown-but-allowed, matching the server's behavior at the join gate.
+ */
+export function isLobbyEntryCompatible(
+  hostBuildCommit: string | undefined,
+  serverInfo: ServerInfo | null,
+): boolean {
+  if (!serverInfo) return true;
+  if (!hostBuildCommit) return true;
+  return hostBuildCommit === serverInfo.buildCommit;
+}
+
+/** True when the client's wire-protocol matches the server's. */
+export function isServerCompatible(info: ServerInfo | null): boolean {
+  if (!info) return false;
+  return info.protocolVersion === PROTOCOL_VERSION;
 }
 
 export const FORMAT_DEFAULTS: Record<GameFormat, FormatConfig> = {
@@ -220,7 +321,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       connectionStatus: "disconnected",
       activePlayerId: null,
       opponentDisplayName: null,
-      toastMessage: null,
+      toasts: new Map(),
       formatConfig: null,
       playerSlots: [],
       spectators: [],
@@ -232,14 +333,52 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       hostIsPublic: false,
       hostingStatus: "idle" as HostingStatus,
       pendingGameRoute: null,
+      serverInfo: null,
 
+      setServerInfo: (info) => set({ serverInfo: info }),
       setDisplayName: (name) => set({ displayName: name }),
       setServerAddress: (address) => set({ serverAddress: address }),
       setConnectionStatus: (status) => set({ connectionStatus: status }),
       setActivePlayerId: (id) => set({ activePlayerId: id }),
       setOpponentDisplayName: (name) => set({ opponentDisplayName: name }),
-      showToast: (message) => set({ toastMessage: message }),
-      clearToast: () => set({ toastMessage: null }),
+      showToast: (message, opts) =>
+        set((state) => {
+          const key = opts?.key ?? GENERIC_TOAST_KEY;
+          const isCountdown = opts?.countdownSeconds != null;
+          const expiresAt = isCountdown
+            ? Date.now() + opts!.countdownSeconds! * 1000
+            : Date.now() + PLAIN_TOAST_DURATION_MS;
+          const next = new Map(state.toasts);
+          next.set(key, { message, expiresAt, showCountdown: isCountdown });
+          return { toasts: next };
+        }),
+      clearToast: (key) =>
+        set((state) => {
+          const k = key ?? GENERIC_TOAST_KEY;
+          if (!state.toasts.has(k)) return {};
+          const next = new Map(state.toasts);
+          next.delete(k);
+          return { toasts: next };
+        }),
+      /** Clear every player-disconnect toast. Used on `gameResumed`, which is
+       * a server-wide resume — any per-player countdown is moot, but generic
+       * toasts (errors, connection warnings) should survive. */
+      clearPlayerToasts: () =>
+        set((state) => {
+          let changed = false;
+          const next = new Map(state.toasts);
+          for (const key of state.toasts.keys()) {
+            if (key.startsWith("player:")) {
+              next.delete(key);
+              changed = true;
+            }
+          }
+          return changed ? { toasts: next } : {};
+        }),
+      clearAllToasts: () =>
+        set((state) =>
+          state.toasts.size === 0 ? {} : { toasts: new Map() },
+        ),
       setFormatConfig: (config) => set({ formatConfig: config }),
       setPlayerSlots: (slots) => set({ playerSlots: slots }),
       toggleReady: (playerId) =>
@@ -288,7 +427,33 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
 
         // Shared message handler for both initial and reconnect WebSockets
         const handleHostMessage = (ws: WebSocket, msg: { type: string; data?: unknown }) => {
-          if (msg.type === "GameCreated") {
+          if (msg.type === "ServerHello") {
+            const data = msg.data as {
+              server_version: string;
+              build_commit: string;
+              protocol_version: number;
+              mode: "Full" | "LobbyOnly";
+            };
+            const info: ServerInfo = {
+              version: data.server_version,
+              buildCommit: data.build_commit,
+              protocolVersion: data.protocol_version,
+              mode: data.mode,
+            };
+            set({ serverInfo: info });
+            if (info.protocolVersion !== PROTOCOL_VERSION) {
+              hostHandshakeContinuation = null;
+              ws.close();
+              get().showToast(
+                `Server protocol version ${info.protocolVersion} does not match client ${PROTOCOL_VERSION}. Please refresh.`,
+              );
+              get().cancelHosting();
+              return;
+            }
+            const cont = hostHandshakeContinuation;
+            hostHandshakeContinuation = null;
+            cont?.();
+          } else if (msg.type === "GameCreated") {
             const data = msg.data as { game_code: string; player_token: string };
             saveWsSession({
               gameCode: data.game_code,
@@ -319,7 +484,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           } else if (msg.type === "Error") {
             const data = msg.data as { message: string };
             console.error("Host error:", data.message);
-            set({ toastMessage: data.message || "Failed to create game." });
+            get().showToast(data.message || "Failed to create game.");
             get().cancelHosting();
           }
         };
@@ -336,8 +501,8 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               hostIsPublic: false,
               hostingStatus: "idle",
               playerSlots: [],
-              toastMessage: "Connection to server lost.",
             });
+            get().showToast("Connection to server lost.");
             return;
           }
 
@@ -354,23 +519,26 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
                 hostIsPublic: false,
                 hostingStatus: "idle",
                 playerSlots: [],
-                toastMessage: "Invalid server address. Update it in Settings.",
               });
+              get().showToast("Invalid server address. Update it in Settings.");
               return;
             }
             const rws = new WebSocket(get().serverAddress);
             hostWs = rws;
 
             rws.onopen = () => {
-              rws.send(
-                JSON.stringify({
-                  type: "Reconnect",
-                  data: {
-                    game_code: session.gameCode,
-                    player_token: session.playerToken,
-                  },
-                }),
-              );
+              hostHandshakeContinuation = () => {
+                rws.send(
+                  JSON.stringify({
+                    type: "Reconnect",
+                    data: {
+                      game_code: session.gameCode,
+                      player_token: session.playerToken,
+                    },
+                  }),
+                );
+              };
+              sendClientHello(rws);
             };
 
             rws.onmessage = (event) => {
@@ -404,30 +572,34 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             hostIsPublic: false,
             hostingStatus: "idle",
             playerSlots: [],
-            toastMessage: "Invalid server address. Update it in Settings.",
           });
+          get().showToast("Invalid server address. Update it in Settings.");
           return;
         }
         const ws = new WebSocket(get().serverAddress);
         hostWs = ws;
 
         ws.onopen = () => {
-          ws.send(
-            JSON.stringify({
-              type: "CreateGameWithSettings",
-              data: {
-                deck: { main_deck: deck.main_deck, sideboard: deck.sideboard, commander: deck.commander ?? [] },
-                display_name: settings.displayName,
-                public: settings.public,
-                password: settings.password || null,
-                timer_seconds: settings.timerSeconds,
-                player_count: settings.formatConfig.max_players,
-                match_config: { match_type: settings.matchType },
-                format_config: settings.formatConfig,
-                ai_seats: settings.aiSeats,
-              },
-            }),
-          );
+          hostHandshakeContinuation = () => {
+            ws.send(
+              JSON.stringify({
+                type: "CreateGameWithSettings",
+                data: {
+                  deck: { main_deck: deck.main_deck, sideboard: deck.sideboard, commander: deck.commander ?? [] },
+                  display_name: settings.displayName,
+                  public: settings.public,
+                  password: settings.password || null,
+                  timer_seconds: settings.timerSeconds,
+                  player_count: settings.formatConfig.max_players,
+                  match_config: { match_type: settings.matchType },
+                  format_config: settings.formatConfig,
+                  ai_seats: settings.aiSeats,
+                  room_name: settings.roomName,
+                },
+              }),
+            );
+          };
+          sendClientHello(ws);
         };
 
         ws.onmessage = (event) => {
@@ -464,6 +636,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         }
         gameStartedFired = false;
         hostReconnectAttempt = 0;
+        hostHandshakeContinuation = null;
         clearWsSession();
         set({
           hostGameCode: null,

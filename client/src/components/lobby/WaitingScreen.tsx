@@ -1,4 +1,5 @@
 import { motion } from "framer-motion";
+import { useState } from "react";
 
 import type { PlayerSlot } from "../../stores/multiplayerStore";
 import { MenuPanel } from "../menu/MenuShell";
@@ -34,6 +35,18 @@ export function WaitingScreen({
   onSendChat,
   chatMessages,
 }: WaitingScreenProps) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(gameCode);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard API unavailable (insecure context or old browser) — silent no-op.
+    }
+  };
+
   // Use ReadyRoom when player slots are available (multiplayer with ready-up)
   if (playerSlots && currentPlayerId && onToggleReady && onStartGame && onSendChat) {
     return (
@@ -65,8 +78,20 @@ export function WaitingScreen({
           <p className="mb-2 text-xs font-medium uppercase tracking-wider text-gray-400">
             Game Code
           </p>
-          <p className="font-mono text-4xl font-bold tracking-widest text-emerald-400">
+          <button
+            type="button"
+            onClick={handleCopyCode}
+            className="rounded font-mono text-4xl font-bold tracking-widest text-emerald-400 transition hover:text-emerald-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b1020]"
+            title="Click to copy"
+          >
             {gameCode}
+          </button>
+          <p className="mt-1.5 min-h-[1rem] text-xs">
+            {copied ? (
+              <span className="font-medium text-emerald-300">Copied!</span>
+            ) : (
+              <span className="text-gray-500">Click to copy</span>
+            )}
           </p>
         </div>
 

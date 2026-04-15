@@ -22,8 +22,10 @@ use engine::game::{validate_deck_for_format, DeckCompatibilityRequest};
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use http::HeaderValue;
-use server_core::lobby::LobbyManager;
-use server_core::protocol::{ClientMessage, ServerMessage};
+use server_core::lobby::{LobbyManager, RegisterGameRequest};
+use server_core::protocol::{
+    build_commit, ClientMessage, ServerMessage, ServerMode, PROTOCOL_VERSION,
+};
 use server_core::resolve_deck;
 use server_core::session::SessionManager;
 use tokio::sync::{mpsc, Mutex};
@@ -110,6 +112,91 @@ struct SocketIdentity {
     lobby_subscribed: bool,
     /// Span for field inheritance — all events within this connection inherit game + player fields.
     session_span: Option<tracing::Span>,
+    /// Set after a successful `ClientHello`. Until this is `Some`, only
+    /// `ClientMessage::ClientHello` is accepted. Carries the client's build
+    /// identity so downstream handlers (`CreateGameWithSettings`,
+    /// `JoinGameWithPassword`) can stamp / compare against host builds.
+    client_hello: Option<ClientHelloInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClientHelloInfo {
+    client_version: String,
+    build_commit: String,
+}
+
+/// Outcome of evaluating the handshake gate against an incoming message.
+/// Extracted into a pure function so the gate's invariants can be unit-tested
+/// without spinning up a real WebSocket.
+#[derive(Debug, PartialEq, Eq)]
+enum HelloGateOutcome {
+    /// First ClientHello on this socket, compatible protocol — store the info
+    /// and continue the message loop (no further processing for this frame).
+    Accept(ClientHelloInfo),
+    /// ClientHello arrived but declares an incompatible protocol version.
+    /// Send Error with this (client, server) pair and drop the frame.
+    RejectProtocol { client: u32, server: u32 },
+    /// A non-hello frame arrived before the handshake completed. Send Error
+    /// ("ClientHello required before any other message") and drop.
+    RejectHandshakeRequired,
+    /// Handshake already completed and another ClientHello arrived. Ignore
+    /// silently — this is a harmless misbehavior, not an error.
+    IgnoreRedundantHello,
+    /// Handshake already completed and a regular frame arrived — let the
+    /// downstream match in `handle_client_message` handle it.
+    PassThrough,
+}
+
+fn classify_hello_gate(
+    hello_received: bool,
+    msg: &ClientMessage,
+    server_protocol: u32,
+) -> HelloGateOutcome {
+    match (hello_received, msg) {
+        (
+            false,
+            ClientMessage::ClientHello {
+                client_version,
+                build_commit,
+                protocol_version,
+            },
+        ) => {
+            if *protocol_version != server_protocol {
+                HelloGateOutcome::RejectProtocol {
+                    client: *protocol_version,
+                    server: server_protocol,
+                }
+            } else {
+                HelloGateOutcome::Accept(ClientHelloInfo {
+                    client_version: client_version.clone(),
+                    build_commit: build_commit.clone(),
+                })
+            }
+        }
+        (false, _) => HelloGateOutcome::RejectHandshakeRequired,
+        (true, ClientMessage::ClientHello { .. }) => HelloGateOutcome::IgnoreRedundantHello,
+        (true, _) => HelloGateOutcome::PassThrough,
+    }
+}
+
+/// Outcome of the build-commit check on `JoinGameWithPassword`. The host's
+/// and guest's commits must either both be populated and equal, or at least
+/// one must be empty (restored session, legacy client) for the join to proceed.
+#[derive(Debug, PartialEq, Eq)]
+enum BuildCommitCheck {
+    Allow,
+    Reject { host: String, guest: String },
+}
+
+fn check_build_commit(host_commit: &str, guest_commit: &str) -> BuildCommitCheck {
+    if !guest_commit.is_empty() && !host_commit.is_empty() && host_commit != guest_commit {
+        BuildCommitCheck::Reject {
+            host: host_commit.to_owned(),
+            guest: guest_commit.to_owned(),
+        }
+    } else {
+        BuildCommitCheck::Allow
+    }
 }
 
 impl SocketIdentity {
@@ -185,15 +272,20 @@ async fn main() {
                                 }
                             }
 
-                            // Restore lobby entry if game hasn't started
+                            // Restore lobby entry if game hasn't started.
+                            // Persisted sessions pre-date version metadata;
+                            // restored lobbies appear without a version badge.
                             if let Some(meta) = lobby_meta {
                                 if !is_started {
                                     lob.register_game(
                                         game_code,
-                                        meta.host_name,
-                                        meta.public,
-                                        meta.password,
-                                        meta.timer_seconds,
+                                        RegisterGameRequest {
+                                            host_name: meta.host_name,
+                                            public: meta.public,
+                                            password: meta.password,
+                                            timer_seconds: meta.timer_seconds,
+                                            ..Default::default()
+                                        },
                                     );
                                 }
                             }
@@ -436,8 +528,26 @@ async fn handle_socket(
         player_token: None,
         lobby_subscribed: false,
         session_span: None,
+        client_hello: None,
     };
     let mut rate_limiter = RateLimiter::new();
+
+    // Greet the client with our version identity. The client uses this to
+    // decide whether to proceed (protocol-version mismatch ⇒ it gives up
+    // before sending any game-affecting frame).
+    let hello = ServerMessage::ServerHello {
+        server_version: env!("CARGO_PKG_VERSION").to_string(),
+        build_commit: build_commit().to_string(),
+        protocol_version: PROTOCOL_VERSION,
+        mode: ServerMode::Full,
+    };
+    if let Ok(json) = serde_json::to_string(&hello) {
+        if socket.send(Message::text(json)).await.is_err() {
+            let count = player_count.fetch_sub(1, Ordering::Relaxed) - 1;
+            broadcast_player_count(&lobby_subscribers, count).await;
+            return;
+        }
+    }
 
     loop {
         tokio::select! {
@@ -621,7 +731,62 @@ async fn handle_client_message(
     tx: &mpsc::UnboundedSender<ServerMessage>,
     identity: &mut SocketIdentity,
 ) {
+    // Handshake gate: ClientHello must be the first message. See
+    // `classify_hello_gate` for the full truth table.
+    match classify_hello_gate(
+        identity.client_hello.is_some(),
+        &client_msg,
+        PROTOCOL_VERSION,
+    ) {
+        HelloGateOutcome::Accept(info) => {
+            info!(
+                version = %info.client_version,
+                commit = %info.build_commit,
+                "ClientHello accepted"
+            );
+            identity.client_hello = Some(info);
+            return;
+        }
+        HelloGateOutcome::RejectProtocol { client, server } => {
+            warn!(
+                client_protocol = client,
+                server_protocol = server,
+                "protocol version mismatch at ClientHello"
+            );
+            let msg = ServerMessage::Error {
+                message: format!(
+                    "Protocol version mismatch (client={client} server={server}). Please update."
+                ),
+            };
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = socket.send(Message::text(json)).await;
+            }
+            return;
+        }
+        HelloGateOutcome::RejectHandshakeRequired => {
+            warn!("client sent non-hello message before ClientHello");
+            let msg = ServerMessage::Error {
+                message: "ClientHello required before any other message".to_string(),
+            };
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = socket.send(Message::text(json)).await;
+            }
+            return;
+        }
+        HelloGateOutcome::IgnoreRedundantHello => {
+            debug!("ignoring redundant ClientHello");
+            return;
+        }
+        HelloGateOutcome::PassThrough => {
+            // Fall through to the regular dispatch below.
+        }
+    }
+
     match client_msg {
+        ClientMessage::ClientHello { .. } => {
+            // Unreachable: IgnoreRedundantHello above handled this case.
+            debug!("unreachable ClientHello arm");
+        }
         ClientMessage::CreateGame { deck } => {
             info!(deck_size = deck.main_deck.len(), "CreateGame");
             {
@@ -1200,6 +1365,7 @@ async fn handle_client_message(
             match_config,
             ai_seats,
             format_config,
+            room_name,
         } => {
             info!(
                 display_name = %display_name,
@@ -1392,6 +1558,9 @@ async fn handle_client_message(
                 // --- Standard multiplayer path ---
                 let mut mgr = state.lock().await;
                 let pc = requested_player_count.clamp(2, 6);
+                // Capture the format before `format_config` is consumed so we
+                // can stamp it on the lobby entry below.
+                let format_for_lobby = format_config.as_ref().map(|fc| fc.format);
                 let (game_code, player_token) = mgr.create_game_n_players(
                     resolved,
                     display_name.clone(),
@@ -1411,12 +1580,49 @@ async fn handle_client_message(
                     .insert(PlayerId(0), tx.clone());
 
                 let mut lob = lobby.lock().await;
+                // Pull the client's advertised build identity from the
+                // stored ClientHello. `client_hello` is guaranteed Some here
+                // because the handshake gate at the top of this function
+                // rejects any non-hello frame when it's None.
+                let (host_version, host_build_commit) = identity
+                    .client_hello
+                    .as_ref()
+                    .map(|h| (h.client_version.clone(), h.build_commit.clone()))
+                    .unwrap_or_default();
                 lob.register_game(
                     &game_code,
-                    display_name.clone(),
-                    public,
-                    password.clone(),
-                    timer_seconds,
+                    RegisterGameRequest {
+                        host_name: display_name.clone(),
+                        public,
+                        password: password.clone(),
+                        timer_seconds,
+                        host_version,
+                        host_build_commit,
+                        // Initial count reflects the host plus any AI seats
+                        // configured at creation time; further updates flow
+                        // through `set_current_players` as guests join.
+                        current_players: mgr
+                            .sessions
+                            .get(&game_code)
+                            .map(|s| s.current_player_count())
+                            .unwrap_or(1),
+                        // Use the clamped `pc` (not the raw request) so the
+                        // lobby listing's max_players matches the session's
+                        // actual capacity. A hostile client sending
+                        // `player_count: 100` would otherwise advertise
+                        // "1/100 players" while the game ran with 6.
+                        max_players: pc as u32,
+                        format: format_for_lobby,
+                        // Trim then drop empty strings so the client can't
+                        // smuggle a blank room_name that would render as an
+                        // empty row title. `None` is the "use host name"
+                        // fallback both here and in the client.
+                        room_name: room_name
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string),
+                    },
                 );
 
                 // Store lobby metadata on the session and persist to SQLite
@@ -1466,6 +1672,32 @@ async fn handle_client_message(
             info!(game = %game_code, joiner = %display_name, "JoinGameWithPassword");
             {
                 let lob = lobby.lock().await;
+
+                // Build-commit gate: see `check_build_commit` for the
+                // policy. If both host and guest publish commits and they
+                // differ, the guest is running a different engine than the
+                // host and joining would diverge GameState on resolution.
+                let guest_commit = identity
+                    .client_hello
+                    .as_ref()
+                    .map(|h| h.build_commit.as_str())
+                    .unwrap_or("");
+                let host_commit = lob.host_build_commit(&game_code).unwrap_or("");
+                if let BuildCommitCheck::Reject { host, guest } =
+                    check_build_commit(host_commit, guest_commit)
+                {
+                    warn!(game = %game_code, %host, %guest, "build mismatch — refusing join");
+                    let msg = ServerMessage::Error {
+                        message: format!(
+                            "Build mismatch: host is on {host}, you are on {guest}. Refresh to update."
+                        ),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+
                 match lob.verify_password(&game_code, password.as_deref()) {
                     Ok(()) => {}
                     Err(e) if e == "password_required" => {
@@ -1518,6 +1750,7 @@ async fn handle_client_message(
                     // Build slot info before releasing session borrow
                     let slot_info = session.player_slot_info();
                     let is_full = session.is_full();
+                    let current_count = session.current_player_count();
 
                     let mut conns = connections.lock().await;
                     conns
@@ -1530,6 +1763,28 @@ async fn handle_client_message(
                     if let Some(players) = conns.get(&game_code) {
                         for sender in players.values() {
                             let _ = sender.send(slots_msg.clone());
+                        }
+                    }
+
+                    // Keep the public lobby listing's `current_players` in sync
+                    // for games that are still waiting. When the game becomes
+                    // full the `if is_full` branch below unregisters it from
+                    // the lobby entirely, so no update is needed there.
+                    if !is_full {
+                        let updated = {
+                            let mut lob = lobby.lock().await;
+                            lob.set_current_players(&game_code, current_count);
+                            // Private games aren't listed in the public lobby,
+                            // so `public_game` returns None and no update is
+                            // broadcast — which is the correct behavior.
+                            lob.public_game(&game_code)
+                        };
+                        if let Some(game) = updated {
+                            broadcast_to_lobby_subscribers(
+                                lobby_subscribers,
+                                ServerMessage::LobbyGameUpdated { game },
+                            )
+                            .await;
                         }
                     }
 
@@ -1747,5 +2002,156 @@ async fn handle_client_message(
                 let _ = socket.send(Message::text(json)).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod handshake_tests {
+    use super::*;
+    use engine::types::actions::GameAction;
+    use server_core::protocol::DeckData;
+
+    fn empty_deck() -> DeckData {
+        DeckData {
+            main_deck: vec!["Forest".into()],
+            sideboard: vec![],
+            commander: vec![],
+        }
+    }
+
+    #[test]
+    fn accepts_matching_client_hello() {
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::ClientHello {
+                client_version: "0.1.11".into(),
+                build_commit: "abc1234".into(),
+                protocol_version: PROTOCOL_VERSION,
+            },
+            PROTOCOL_VERSION,
+        );
+        assert_eq!(
+            outcome,
+            HelloGateOutcome::Accept(ClientHelloInfo {
+                client_version: "0.1.11".into(),
+                build_commit: "abc1234".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_client_hello_with_zero_protocol_version() {
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::ClientHello {
+                client_version: "0.1.11".into(),
+                build_commit: "abc1234".into(),
+                protocol_version: 0,
+            },
+            PROTOCOL_VERSION,
+        );
+        assert_eq!(
+            outcome,
+            HelloGateOutcome::RejectProtocol {
+                client: 0,
+                server: PROTOCOL_VERSION,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_client_hello_with_future_protocol_version() {
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::ClientHello {
+                client_version: "0.2.0".into(),
+                build_commit: "def5678".into(),
+                protocol_version: PROTOCOL_VERSION + 1,
+            },
+            PROTOCOL_VERSION,
+        );
+        assert!(matches!(outcome, HelloGateOutcome::RejectProtocol { .. }));
+    }
+
+    #[test]
+    fn rejects_non_hello_frame_before_handshake() {
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::Action {
+                action: GameAction::PassPriority,
+            },
+            PROTOCOL_VERSION,
+        );
+        assert_eq!(outcome, HelloGateOutcome::RejectHandshakeRequired);
+
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::CreateGame { deck: empty_deck() },
+            PROTOCOL_VERSION,
+        );
+        assert_eq!(outcome, HelloGateOutcome::RejectHandshakeRequired);
+
+        let outcome = classify_hello_gate(false, &ClientMessage::SubscribeLobby, PROTOCOL_VERSION);
+        assert_eq!(outcome, HelloGateOutcome::RejectHandshakeRequired);
+
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::Ping { timestamp: 1 },
+            PROTOCOL_VERSION,
+        );
+        assert_eq!(outcome, HelloGateOutcome::RejectHandshakeRequired);
+    }
+
+    #[test]
+    fn ignores_redundant_hello_after_accept() {
+        let outcome = classify_hello_gate(
+            true,
+            &ClientMessage::ClientHello {
+                client_version: "0.1.11".into(),
+                build_commit: "abc1234".into(),
+                protocol_version: PROTOCOL_VERSION,
+            },
+            PROTOCOL_VERSION,
+        );
+        assert_eq!(outcome, HelloGateOutcome::IgnoreRedundantHello);
+    }
+
+    #[test]
+    fn passes_through_regular_frames_after_handshake() {
+        let outcome = classify_hello_gate(
+            true,
+            &ClientMessage::Action {
+                action: GameAction::PassPriority,
+            },
+            PROTOCOL_VERSION,
+        );
+        assert_eq!(outcome, HelloGateOutcome::PassThrough);
+    }
+
+    #[test]
+    fn build_commit_allows_matching() {
+        assert_eq!(
+            check_build_commit("abc1234", "abc1234"),
+            BuildCommitCheck::Allow
+        );
+    }
+
+    #[test]
+    fn build_commit_allows_when_either_side_is_empty() {
+        // Restored sessions / legacy clients are treated as unknown.
+        assert_eq!(check_build_commit("", "abc1234"), BuildCommitCheck::Allow);
+        assert_eq!(check_build_commit("abc1234", ""), BuildCommitCheck::Allow);
+        assert_eq!(check_build_commit("", ""), BuildCommitCheck::Allow);
+    }
+
+    #[test]
+    fn build_commit_rejects_when_both_populated_and_different() {
+        assert_eq!(
+            check_build_commit("abc1234", "def5678"),
+            BuildCommitCheck::Reject {
+                host: "abc1234".into(),
+                guest: "def5678".into(),
+            }
+        );
     }
 }

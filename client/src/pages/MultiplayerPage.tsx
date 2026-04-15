@@ -5,7 +5,10 @@ import type { GameFormat } from "../adapter/types";
 import { useAudioContext } from "../audio/useAudioContext";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { HostSetup } from "../components/lobby/HostSetup";
+import type { LobbyGame } from "../components/lobby/GameListItem";
 import { LobbyView } from "../components/lobby/LobbyView";
+import { PlayerIdentityBanner } from "../components/lobby/PlayerIdentityBanner";
+import { ServerOfflinePrompt } from "../components/lobby/ServerOfflinePrompt";
 import { WaitingScreen } from "../components/lobby/WaitingScreen";
 import { ConnectionToast } from "../components/multiplayer/ConnectionToast";
 import { MenuParticles } from "../components/menu/MenuParticles";
@@ -23,7 +26,19 @@ type MultiplayerView = "lobby" | "host-setup" | "deck-select" | "waiting";
 
 type PendingAction =
   | { type: "host"; settings: HostSettings; connectionMode: ConnectionMode }
-  | { type: "join"; code: string; password?: string; format?: GameFormat };
+  | {
+      type: "join";
+      code: string;
+      password?: string;
+      format?: GameFormat;
+      /**
+       * Full lobby row, populated when the join originated from a lobby list
+       * click (not from a typed code). Lets the deck-select view render
+       * "Joining Alice's Commander game — 2/4" so the user doesn't lose the
+       * thread between clicking a game and picking a deck.
+       */
+      context?: LobbyGame;
+    };
 
 export function MultiplayerPage() {
   useAudioContext("lobby");
@@ -45,6 +60,13 @@ export function MultiplayerPage() {
   const [connectionMode, setConnectionMode] = useState<ConnectionMode>("server");
   const [showSettings, setShowSettings] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+  // Shown when `LobbyView` detects the server is unreachable. The user picks
+  // between staying in server mode (LobbyView remounts via `lobbyRetryKey` and
+  // retries) or flipping to P2P for direct-code play. Tracked on this page,
+  // not in the store, because it's scoped to the Multiplayer flow.
+  const [serverOfflinePrompt, setServerOfflinePrompt] = useState(false);
+  const [lobbyRetryKey, setLobbyRetryKey] = useState(0);
+  const serverAddress = useMultiplayerStore((s) => s.serverAddress);
 
   useEffect(() => {
     setActiveDeckName(localStorage.getItem(ACTIVE_DECK_KEY));
@@ -103,9 +125,18 @@ export function MultiplayerPage() {
         if (action.connectionMode === "p2p") {
           const gameId = crypto.randomUUID();
           useGameStore.setState({ gameId });
-          navigate(
-            `/game/${gameId}?mode=p2p-host&match=${action.settings.matchType.toLowerCase()}`,
-          );
+          // Thread format + seat count into the URL — `GamePage` rehydrates
+          // them into `formatConfig` / `playerCount` which flow to
+          // `P2PHostAdapter`. Without these params, P2P host silently
+          // defaults to 2-player Standard regardless of what the user
+          // selected in HostSetup.
+          const params = new URLSearchParams({
+            mode: "p2p-host",
+            match: action.settings.matchType.toLowerCase(),
+            format: action.settings.formatConfig.format,
+            players: String(action.settings.formatConfig.max_players),
+          });
+          navigate(`/game/${gameId}?${params.toString()}`);
         } else {
           startHosting(action.settings, deck);
           // Navigate to main menu — the HostingBanner takes over as the
@@ -164,8 +195,19 @@ export function MultiplayerPage() {
 
   // Join from lobby → execute immediately if deck exists, otherwise prompt
   const handleJoinGame = useCallback(
-    (code: string, password?: string, format?: GameFormat) => {
-      const action: PendingAction = { type: "join", code, password, format };
+    (
+      code: string,
+      password?: string,
+      format?: GameFormat,
+      context?: LobbyGame,
+    ) => {
+      const action: PendingAction = {
+        type: "join",
+        code,
+        password,
+        format,
+        context,
+      };
       if (activeDeckName) {
         executeAction(action);
       } else {
@@ -236,6 +278,12 @@ export function MultiplayerPage() {
 
       <MenuShell eyebrow="Multiplayer" title={title} description={description} layout="stacked">
         <div className="flex w-full flex-col items-center">
+        {/* Player identity — always available on lobby/host-setup so users
+            can edit their name without hunting in Preferences. Sits above
+            the deck banner so the two "about you" rows (name + deck) stack
+            as a unit. */}
+        {(view === "lobby" || view === "host-setup") && <PlayerIdentityBanner />}
+
         {/* Active deck indicator — shown on lobby/host-setup when a deck is selected */}
         {(view === "lobby" || view === "host-setup") && activeDeckName && (
           <div className="mx-auto mb-4 flex w-full max-w-xl items-center justify-between gap-3 rounded-[16px] border border-white/8 bg-black/16 px-4 py-2.5">
@@ -274,11 +322,19 @@ export function MultiplayerPage() {
 
         {view === "lobby" && (
           <LobbyView
+            key={lobbyRetryKey}
             onHostGame={() => { setConnectionMode("server"); setView("host-setup"); }}
             onHostP2P={() => { setConnectionMode("p2p"); setView("host-setup"); }}
             onJoinGame={handleJoinGame}
             connectionMode={connectionMode}
-            onServerOffline={() => setConnectionMode("p2p")}
+            onServerOffline={() => {
+              // Only prompt when we're actually trying to use the server; if
+              // the user already flipped to P2P the "unreachable" state is
+              // expected and not worth interrupting.
+              if (connectionMode === "server") {
+                setServerOfflinePrompt(true);
+              }
+            }}
           />
         )}
 
@@ -291,14 +347,39 @@ export function MultiplayerPage() {
         )}
 
         {view === "deck-select" && (
-          <MyDecks
-            mode="select"
-            selectedFormat={selectedFormat}
-            onSelectDeck={handleSelectDeck}
-            activeDeckName={activeDeckName}
-            onConfirmSelection={handleDeckConfirm}
-            confirmLabel={pendingAction?.type === "host" ? "Host Game" : "Join Game"}
-          />
+          <>
+            {pendingAction?.type === "join" && pendingAction.context && (
+              <div className="mx-auto mb-4 w-full max-w-xl rounded-[16px] border border-cyan-400/20 bg-cyan-500/[0.07] px-4 py-2.5">
+                <div className="text-[0.6rem] uppercase tracking-[0.22em] text-cyan-300/70">
+                  Joining
+                </div>
+                <div className="mt-1 text-sm text-cyan-100">
+                  <span className="font-medium">
+                    {pendingAction.context.host_name || "Anonymous"}
+                  </span>
+                  {pendingAction.context.format && (
+                    <span className="text-cyan-200/70">
+                      {" "}· {pendingAction.context.format}
+                    </span>
+                  )}
+                  {pendingAction.context.max_players != null && (
+                    <span className="text-cyan-200/70">
+                      {" "}· {pendingAction.context.current_players ?? 1}/
+                      {pendingAction.context.max_players}
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+            <MyDecks
+              mode="select"
+              selectedFormat={selectedFormat}
+              onSelectDeck={handleSelectDeck}
+              activeDeckName={activeDeckName}
+              onConfirmSelection={handleDeckConfirm}
+              confirmLabel={pendingAction?.type === "host" ? "Host Game" : "Join Game"}
+            />
+          </>
         )}
 
         {view === "waiting" && hostGameCode && (
@@ -314,6 +395,22 @@ export function MultiplayerPage() {
         </div>
       </MenuShell>
       <ConnectionToast />
+      {serverOfflinePrompt && view === "lobby" && (
+        <ServerOfflinePrompt
+          serverAddress={serverAddress}
+          onUseDirect={() => {
+            setConnectionMode("p2p");
+            setServerOfflinePrompt(false);
+          }}
+          onKeepWaiting={() => {
+            setServerOfflinePrompt(false);
+            // Force LobbyView to unmount + remount with a fresh WebSocket
+            // connection attempt. All local state in LobbyView resets, which
+            // is intentional — we want a clean retry.
+            setLobbyRetryKey((k) => k + 1);
+          }}
+        />
+      )}
     </div>
   );
 }

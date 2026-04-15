@@ -8,11 +8,30 @@ interface LobbyGame {
   format?: GameFormat;
   current_players?: number;
   max_players?: number;
+  /** Display-only version string (e.g. "0.1.11"). */
+  host_version?: string;
+  /**
+   * Git short-hash of the host's build. Used as a hard compatibility gate:
+   * when the lobby list renders, rows whose commit doesn't match the
+   * client's own build are disabled because the host and guest would run
+   * diverged engine rules otherwise.
+   */
+  host_build_commit?: string;
+  /** Optional host-provided label for this room, distinct from their player
+   * name. When present, the lobby row shows it as the primary title with
+   * the host's player name as secondary metadata. */
+  room_name?: string | null;
 }
 
 interface GameListItemProps {
   game: LobbyGame;
   onJoin: (code: string, format?: GameFormat) => void;
+  /**
+   * When false, the row is visible but disabled with a tooltip explaining
+   * the mismatch. Computed by the parent from the server's `build_commit`
+   * vs the client's `__BUILD_HASH__`.
+   */
+  compatible?: boolean;
 }
 
 const FORMAT_BADGE_CLASSES: Record<GameFormat, string> = {
@@ -49,27 +68,65 @@ function formatWaitTime(createdAt: number): string {
   return `${hours}h ago`;
 }
 
-export function GameListItem({ game, onJoin }: GameListItemProps) {
+export function GameListItem({ game, onJoin, compatible = true }: GameListItemProps) {
   const format = game.format ?? "Standard";
   const badgeClass = FORMAT_BADGE_CLASSES[format];
   const formatLabel = FORMAT_LABELS[format];
 
+  // A game is "full" when every configured seat is occupied (humans + AI).
+  // The server unregisters full games on the last join, so in the happy path
+  // browsers rarely see this state — but race conditions between a join and
+  // the `LobbyGameRemoved` broadcast can briefly expose it, and a disabled
+  // row is a clearer UX than a row that errors on click.
+  const isFull =
+    game.max_players != null &&
+    game.current_players != null &&
+    game.current_players >= game.max_players;
+  const disabled = !compatible || isFull;
+
+  const disabledTitle = !compatible
+    ? `Host is on ${game.host_version || "?"} (${game.host_build_commit || "?"}) — your build is different. Refresh to update.`
+    : isFull
+      ? "This game is full."
+      : undefined;
+
   return (
     <button
-      onClick={() => onJoin(game.game_code, game.format)}
-      className="flex w-full items-center gap-3 rounded-[18px] border border-white/10 bg-black/18 px-4 py-3 text-left transition-colors hover:border-white/18 hover:bg-white/6"
+      onClick={() => !disabled && onJoin(game.game_code, game.format)}
+      disabled={disabled}
+      title={disabledTitle}
+      className={
+        "flex w-full items-center gap-3 rounded-[18px] border px-4 py-3 text-left transition-colors " +
+        (disabled
+          ? "cursor-not-allowed border-white/5 bg-black/10 opacity-60"
+          : "border-white/10 bg-black/18 hover:border-white/18 hover:bg-white/6")
+      }
     >
       {/* Format badge */}
       <span className={`flex-shrink-0 rounded px-1.5 py-0.5 text-xs font-semibold ${badgeClass}`}>
         {formatLabel}
       </span>
 
-      {/* Host name and metadata */}
+      {/* Room title and metadata. When the host set an explicit room name
+          we show it as the primary title and demote the host's player name
+          to the secondary line; otherwise fall back to showing the player
+          name as the title (the pre-room_name behavior). */}
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-medium text-gray-200">
-          {game.host_name || "Anonymous"}
+          {game.room_name || game.host_name || "Anonymous"}
         </p>
-        <p className="text-xs text-gray-500">{formatWaitTime(game.created_at)}</p>
+        <p className="text-xs text-gray-500">
+          {game.room_name && game.host_name && (
+            <span className="mr-2 text-gray-400">by {game.host_name}</span>
+          )}
+          {formatWaitTime(game.created_at)}
+          {game.host_version && (
+            <span className="ml-2 font-mono text-[10px] text-gray-600">
+              v{game.host_version}
+              {game.host_build_commit ? `·${game.host_build_commit}` : ""}
+            </span>
+          )}
+        </p>
       </div>
 
       {/* Player count */}

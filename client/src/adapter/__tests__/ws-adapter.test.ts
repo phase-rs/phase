@@ -170,6 +170,24 @@ describe("WebSocketAdapter", () => {
         const reconnectWs = (reconnectingAdapter as unknown as { ws: MockWebSocket }).ws;
         reconnectWs.onopen?.();
 
+        // After the version handshake was added, the first frame on open
+        // is always ClientHello; the Reconnect frame is deferred until the
+        // server's ServerHello arrives.
+        expect(reconnectWs.send).toHaveBeenNthCalledWith(
+          1,
+          expect.stringContaining('"type":"ClientHello"'),
+        );
+        reconnectWs.onmessage?.({
+          data: JSON.stringify({
+            type: "ServerHello",
+            data: {
+              server_version: "0.0.0-test",
+              build_commit: "testhash",
+              protocol_version: 1,
+              mode: "Full",
+            },
+          }),
+        });
         expect(reconnectWs.send).toHaveBeenCalledWith(
           JSON.stringify({
             type: "Reconnect",

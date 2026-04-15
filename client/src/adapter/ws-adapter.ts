@@ -20,8 +20,24 @@ export interface DeckData {
   commander?: string[];
 }
 
+/**
+ * Wire-protocol version the client speaks. Must match `PROTOCOL_VERSION` in
+ * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
+ * adds, removes, renames, or changes the type of a protocol variant field.
+ */
+export const PROTOCOL_VERSION = 1;
+
+/** Identity advertised by the server in its `ServerHello`. */
+export interface ServerInfo {
+  version: string;
+  buildCommit: string;
+  protocolVersion: number;
+  mode: "Full" | "LobbyOnly";
+}
+
 /** Events emitted by the WebSocketAdapter for UI state updates. */
 export type WsAdapterEvent =
+  | { type: "serverHello"; info: ServerInfo; compatible: boolean }
   | { type: "playerIdentity"; playerId: PlayerId; opponentName: string | null }
   | { type: "actionPendingChanged"; pending: boolean }
   | { type: "latencyChanged"; latencyMs: number | null }
@@ -71,6 +87,19 @@ export class WebSocketAdapter implements EngineAdapter {
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
   private gameEnded = false;
+  /**
+   * Populated once the server's `ServerHello` arrives. `null` between the
+   * WebSocket opening and the hello being delivered. Consumers see it via
+   * the `serverHello` event, or through `getServerInfo()`.
+   */
+  private _serverInfo: ServerInfo | null = null;
+  /**
+   * Work deferred until a compatible `ServerHello` is received — typically
+   * the create-game, join-game, or reconnect frame. Both `initialize()`
+   * and `tryReconnect()` populate this so their setup frame never goes out
+   * before the handshake completes.
+   */
+  private pendingHelloContinuation: (() => void) | null = null;
 
   constructor(
     private readonly serverUrl: string,
@@ -129,22 +158,25 @@ export class WebSocketAdapter implements EngineAdapter {
 
       this.ws.onopen = () => {
         this.startPing();
-        if (this.mode === "host") {
-          this.send({
-            type: "CreateGame",
-            data: { deck: this.deckData },
-          });
-        } else {
-          this.send({
-            type: "JoinGameWithPassword",
-            data: {
-              game_code: this.joinGameCode!,
-              deck: this.deckData,
-              display_name: this.displayName,
-              password: this.joinPassword ?? null,
-            },
-          });
-        }
+        this.pendingHelloContinuation = () => {
+          if (this.mode === "host") {
+            this.send({
+              type: "CreateGame",
+              data: { deck: this.deckData },
+            });
+          } else {
+            this.send({
+              type: "JoinGameWithPassword",
+              data: {
+                game_code: this.joinGameCode!,
+                deck: this.deckData,
+                display_name: this.displayName,
+                password: this.joinPassword ?? null,
+              },
+            });
+          }
+        };
+        this.sendClientHello();
       };
 
       this.ws.onmessage = (event) => {
@@ -270,6 +302,8 @@ export class WebSocketAdapter implements EngineAdapter {
     this.pendingReject = null;
     this.initResolve = null;
     this.initReject = null;
+    this.pendingHelloContinuation = null;
+    this._serverInfo = null;
     this.emit({ type: "actionPendingChanged", pending: false });
     this.emit({ type: "latencyChanged", latencyMs: null });
     if (this.gameEnded) {
@@ -291,13 +325,16 @@ export class WebSocketAdapter implements EngineAdapter {
     this.ws = new WebSocket(this.serverUrl);
     this.ws.onopen = () => {
       this.startPing();
-      this.send({
-        type: "Reconnect",
-        data: {
-          game_code: session.gameCode,
-          player_token: session.playerToken,
-        },
-      });
+      this.pendingHelloContinuation = () => {
+        this.send({
+          type: "Reconnect",
+          data: {
+            game_code: session.gameCode,
+            player_token: session.playerToken,
+          },
+        });
+      };
+      this.sendClientHello();
     };
     this.ws.onmessage = (event) => {
       const msg = JSON.parse(event.data as string) as { type: string; data?: unknown };
@@ -356,8 +393,71 @@ export class WebSocketAdapter implements EngineAdapter {
     this.ws?.send(JSON.stringify(msg));
   }
 
+  private sendClientHello(): void {
+    this.send({
+      type: "ClientHello",
+      data: {
+        client_version: __APP_VERSION__,
+        build_commit: __BUILD_HASH__,
+        protocol_version: PROTOCOL_VERSION,
+      },
+    });
+  }
+
+  /** Snapshot of the server's advertised identity, or null before ServerHello. */
+  getServerInfo(): ServerInfo | null {
+    return this._serverInfo;
+  }
+
   private handleMessage(msg: { type: string; data?: unknown }): void {
     switch (msg.type) {
+      case "ServerHello": {
+        // Servers send ServerHello exactly once per connection. A duplicate
+        // frame means either a misbehaving server or a test harness; either
+        // way, re-running the continuation would send the setup frame twice.
+        if (this._serverInfo) {
+          return;
+        }
+        const data = msg.data as {
+          server_version: string;
+          build_commit: string;
+          protocol_version: number;
+          mode: "Full" | "LobbyOnly";
+        };
+        const info: ServerInfo = {
+          version: data.server_version,
+          buildCommit: data.build_commit,
+          protocolVersion: data.protocol_version,
+          mode: data.mode,
+        };
+        this._serverInfo = info;
+        const compatible = info.protocolVersion === PROTOCOL_VERSION;
+        this.emit({ type: "serverHello", info, compatible });
+
+        if (!compatible) {
+          // Give up before running the deferred setup frame — a mismatched
+          // protocol will just produce a rejected frame on the other side.
+          this.pendingHelloContinuation = null;
+          const err = new AdapterError(
+            "WS_ERROR",
+            `Server protocol version ${info.protocolVersion} does not match client ${PROTOCOL_VERSION}. Please refresh.`,
+            false,
+          );
+          if (this.initReject) {
+            this.initReject(err);
+            this.initResolve = null;
+            this.initReject = null;
+          }
+          this.ws?.close();
+          return;
+        }
+
+        const cont = this.pendingHelloContinuation;
+        this.pendingHelloContinuation = null;
+        cont?.();
+        break;
+      }
+
       case "GameCreated": {
         const data = msg.data as { game_code: string; player_token: string };
         this._gameCode = data.game_code;

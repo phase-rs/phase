@@ -87,6 +87,18 @@ impl GameSession {
             .all(|(i, t)| !t.is_empty() || self.ai_seats.contains(&PlayerId(i as u8)))
     }
 
+    /// Count of occupied seats — humans who have joined plus configured AI
+    /// seats. Matches `is_full()` semantics: a full game has
+    /// `current_player_count() == player_count`. Published on the public
+    /// `LobbyGame` entry so browsers can see how close a game is to starting.
+    pub fn current_player_count(&self) -> u32 {
+        (0..self.player_count as usize)
+            .filter(|i| {
+                !self.player_tokens[*i].is_empty() || self.ai_seats.contains(&PlayerId(*i as u8))
+            })
+            .count() as u32
+    }
+
     /// Build slot info for all seats in this game session.
     pub fn player_slot_info(&self) -> Vec<PlayerSlotInfo> {
         (0..self.player_count as usize)

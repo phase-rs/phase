@@ -1,17 +1,30 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { GameFormat } from "../../adapter/types";
+import { PROTOCOL_VERSION, type ServerInfo } from "../../adapter/ws-adapter";
 import { isValidWebSocketUrl, parseJoinCode } from "../../services/serverDetection";
-import { useMultiplayerStore } from "../../stores/multiplayerStore";
+import { isLobbyEntryCompatible, useMultiplayerStore } from "../../stores/multiplayerStore";
 import { MenuPanel } from "../menu/MenuShell";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { GameListItem } from "./GameListItem";
 import type { LobbyGame } from "./GameListItem";
+import { ServerPicker } from "./ServerPicker";
 
 interface LobbyViewProps {
   onHostGame: () => void;
   onHostP2P: () => void;
-  onJoinGame: (code: string, password?: string, format?: GameFormat) => void;
+  /**
+   * Called when the user elects to join a game. `context` is the full
+   * `LobbyGame` row when the join originates from the lobby list, so
+   * downstream views (e.g. the deck picker) can render "Joining Alice's
+   * Commander game — 2/4". It is absent for typed-code joins.
+   */
+  onJoinGame: (
+    code: string,
+    password?: string,
+    format?: GameFormat,
+    context?: LobbyGame,
+  ) => void;
   connectionMode?: "server" | "p2p";
   onServerOffline?: () => void;
 }
@@ -38,13 +51,21 @@ export function LobbyView({
   const isServer = connectionMode !== "p2p";
   const isP2P = connectionMode === "p2p";
   const serverAddress = useMultiplayerStore((s) => s.serverAddress);
+  const serverInfo = useMultiplayerStore((s) => s.serverInfo);
   const [games, setGames] = useState<LobbyGame[]>([]);
   const gamesRef = useRef<LobbyGame[]>([]);
   const [playerCount, setPlayerCount] = useState(0);
   const [joinCode, setJoinCode] = useState("");
-  const [passwordModal, setPasswordModal] = useState<{ gameCode: string; format?: GameFormat } | null>(null);
+  const [passwordModal, setPasswordModal] = useState<{
+    gameCode: string;
+    format?: GameFormat;
+    /** Full lobby row when click came from the list — propagates into
+     * the join handler as deck-picker context. */
+    context?: LobbyGame;
+  } | null>(null);
   const [passwordInput, setPasswordInput] = useState("");
   const [formatFilter, setFormatFilter] = useState<GameFormat | null>(null);
+  const [serverPickerOpen, setServerPickerOpen] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -72,14 +93,47 @@ export function LobbyView({
     wsRef.current = ws;
 
     ws.onopen = () => {
+      // SubscribeLobby is deferred until ServerHello arrives — the server
+      // rejects every non-hello frame before the handshake completes.
       connected = true;
-      ws.send(JSON.stringify({ type: "SubscribeLobby" }));
+      ws.send(
+        JSON.stringify({
+          type: "ClientHello",
+          data: {
+            client_version: __APP_VERSION__,
+            build_commit: __BUILD_HASH__,
+            protocol_version: PROTOCOL_VERSION,
+          },
+        }),
+      );
     };
 
     ws.onmessage = (event) => {
       const msg = JSON.parse(event.data as string) as { type: string; data?: unknown };
 
       switch (msg.type) {
+        case "ServerHello": {
+          const data = msg.data as {
+            server_version: string;
+            build_commit: string;
+            protocol_version: number;
+            mode: "Full" | "LobbyOnly";
+          };
+          const info: ServerInfo = {
+            version: data.server_version,
+            buildCommit: data.build_commit,
+            protocolVersion: data.protocol_version,
+            mode: data.mode,
+          };
+          useMultiplayerStore.getState().setServerInfo(info);
+          if (info.protocolVersion !== PROTOCOL_VERSION) {
+            notifyServerOffline();
+            ws.close();
+            break;
+          }
+          ws.send(JSON.stringify({ type: "SubscribeLobby" }));
+          break;
+        }
         case "LobbyUpdate": {
           const data = msg.data as { games: LobbyGame[] };
           gamesRef.current = data.games;
@@ -90,6 +144,24 @@ export function LobbyView({
           const data = msg.data as { game: LobbyGame };
           setGames((prev) => {
             const next = [...prev, data.game];
+            gamesRef.current = next;
+            return next;
+          });
+          break;
+        }
+        case "LobbyGameUpdated": {
+          // Replace an existing entry in-place so `current_players` ticks up
+          // live as guests join. If the game_code isn't in the current list
+          // we silently ignore — either the client hasn't received its
+          // initial `LobbyUpdate` snapshot yet (any in-flight update will
+          // be superseded by the snapshot), or the game was removed and
+          // this update raced in-flight; appending would resurrect it.
+          // `LobbyGameAdded` is the only path that introduces new rows.
+          const data = msg.data as { game: LobbyGame };
+          setGames((prev) => {
+            const idx = prev.findIndex((g) => g.game_code === data.game.game_code);
+            if (idx < 0) return prev;
+            const next = prev.map((g, i) => (i === idx ? data.game : g));
             gamesRef.current = next;
             return next;
           });
@@ -139,7 +211,17 @@ export function LobbyView({
 
   const handleJoinFromList = useCallback(
     (code: string, format?: GameFormat) => {
-      onJoinGame(code, undefined, format);
+      const game = gamesRef.current.find((g) => g.game_code === code);
+      // Proactive password prompt: if the lobby row advertises a password,
+      // open the modal before any server round-trip. The reactive
+      // `PasswordRequired` handler above remains as a fallback for stale
+      // rows (server says yes when the client thought no).
+      if (game?.has_password) {
+        setPasswordModal({ gameCode: code, format, context: game });
+        setPasswordInput("");
+        return;
+      }
+      onJoinGame(code, undefined, format, game);
     },
     [onJoinGame],
   );
@@ -159,7 +241,12 @@ export function LobbyView({
   const handlePasswordSubmit = useCallback((e: React.FormEvent) => {
     e.preventDefault();
     if (passwordModal && passwordInput) {
-      onJoinGame(passwordModal.gameCode, passwordInput, passwordModal.format);
+      onJoinGame(
+        passwordModal.gameCode,
+        passwordInput,
+        passwordModal.format,
+        passwordModal.context,
+      );
       setPasswordModal(null);
       setPasswordInput("");
     }
@@ -175,11 +262,23 @@ export function LobbyView({
         <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
           {isP2P ? "Direct Connection" : "Online Lobby"}
         </div>
-        {isServer && playerCount > 0 && (
-          <span className="rounded-full bg-emerald-500/20 px-2.5 py-0.5 text-xs font-medium text-emerald-300">
-            {playerCount} online
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {isServer && (
+            <button
+              type="button"
+              onClick={() => setServerPickerOpen(true)}
+              title={serverAddress}
+              className="rounded-full border border-white/10 bg-black/18 px-2.5 py-0.5 font-mono text-[10px] text-slate-300 transition-colors hover:border-white/18 hover:bg-white/6"
+            >
+              {serverAddress.replace(/^wss?:\/\//, "").split("/")[0]}
+            </button>
+          )}
+          {isServer && playerCount > 0 && (
+            <span className="rounded-full bg-emerald-500/20 px-2.5 py-0.5 text-xs font-medium text-emerald-300">
+              {playerCount} online
+            </span>
+          )}
+        </div>
       </div>
 
       {isServer && (
@@ -204,10 +303,30 @@ export function LobbyView({
         <div className="w-full space-y-3">
           <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Open Tables</div>
           {filteredGames.length === 0 ? (
-            <div className="rounded-[18px] border border-dashed border-white/10 py-8 text-center">
-              <p className="text-sm text-gray-500">
-                No games available. Host one or join by code!
+            <div className="flex flex-col items-center gap-3 rounded-[18px] border border-dashed border-white/10 px-4 py-6 text-center">
+              <p className="text-sm text-gray-400">
+                {formatFilter
+                  ? `No ${formatFilter} games right now.`
+                  : "No open games right now."}
               </p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={onHostGame}
+                  className={menuButtonClass({ tone: "emerald", size: "sm" })}
+                >
+                  Host a game
+                </button>
+                {formatFilter && (
+                  <button
+                    type="button"
+                    onClick={() => setFormatFilter(null)}
+                    className={menuButtonClass({ tone: "neutral", size: "sm" })}
+                  >
+                    Show all formats
+                  </button>
+                )}
+              </div>
             </div>
           ) : (
             <div className="flex max-h-64 flex-col gap-2 overflow-y-auto">
@@ -216,6 +335,7 @@ export function LobbyView({
                   key={game.game_code}
                   game={game}
                   onJoin={handleJoinFromList}
+                  compatible={isLobbyEntryCompatible(game.host_build_commit, serverInfo)}
                 />
               ))}
             </div>
@@ -281,6 +401,15 @@ export function LobbyView({
           </button>
         )}
       </div>
+
+      {serverPickerOpen && (
+        <ServerPicker
+          onClose={() => setServerPickerOpen(false)}
+          onApply={(url) => {
+            useMultiplayerStore.getState().setServerAddress(url);
+          }}
+        />
+      )}
 
       {/* Password modal */}
       {passwordModal && (

@@ -69,6 +69,7 @@ import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
 import {
   FORMAT_DEFAULTS,
+  playerToastKey,
   useMultiplayerStore,
 } from "../stores/multiplayerStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
@@ -121,7 +122,6 @@ export function GamePage() {
   const [hostGameCode, setHostGameCode] = useState<string | null>(null);
   const [waitingForOpponent, setWaitingForOpponent] = useState(false);
   const [opponentDisconnected, setOpponentDisconnected] = useState(false);
-  const [disconnectGrace, setDisconnectGrace] = useState(0);
   const [reconnectState, setReconnectState] = useState<
     | { status: "idle" }
     | { status: "reconnecting"; attempt: number; maxAttempts: number }
@@ -154,23 +154,27 @@ export function GamePage() {
       case "waitingForOpponent":
         setWaitingForOpponent(true);
         break;
-      case "opponentDisconnected":
+      case "opponentDisconnected": {
         setOpponentDisconnected(true);
-        setDisconnectGrace(event.graceSeconds);
         // 2-player: mark the single opponent as disconnected
-        {
-          const myId = useMultiplayerStore.getState().activePlayerId ?? 0;
-          useMultiplayerStore.getState().setPlayerDisconnected(myId === 0 ? 1 : 0);
-        }
+        const myId = useMultiplayerStore.getState().activePlayerId ?? 0;
+        const oppId = myId === 0 ? 1 : 0;
+        useMultiplayerStore.getState().setPlayerDisconnected(oppId);
+        useMultiplayerStore.getState().showToast("Opponent disconnected", {
+          countdownSeconds: event.graceSeconds,
+          key: playerToastKey(oppId),
+        });
         break;
-      case "opponentReconnected":
+      }
+      case "opponentReconnected": {
         setOpponentDisconnected(false);
         // 2-player: clear disconnected status
-        {
-          const myId = useMultiplayerStore.getState().activePlayerId ?? 0;
-          useMultiplayerStore.getState().setPlayerReconnected(myId === 0 ? 1 : 0);
-        }
+        const myId = useMultiplayerStore.getState().activePlayerId ?? 0;
+        const oppId = myId === 0 ? 1 : 0;
+        useMultiplayerStore.getState().setPlayerReconnected(oppId);
+        useMultiplayerStore.getState().clearToast(playerToastKey(oppId));
         break;
+      }
       case "reconnecting":
         setReconnectState({
           status: "reconnecting",
@@ -225,23 +229,38 @@ export function GamePage() {
       case "playerDisconnected":
         // Multiplayer (3+ players): a specific player disconnected
         setOpponentDisconnected(true);
-        setDisconnectGrace(event.graceSeconds);
         useMultiplayerStore.getState().setPlayerDisconnected(event.playerId);
+        useMultiplayerStore.getState().showToast(
+          `Player ${event.playerId + 1} disconnected`,
+          {
+            countdownSeconds: event.graceSeconds,
+            key: playerToastKey(event.playerId),
+          },
+        );
         break;
       case "playerReconnected":
         useMultiplayerStore.getState().setPlayerReconnected(event.playerId);
-        // Clear overlay only if no players remain disconnected
+        useMultiplayerStore.getState().clearToast(playerToastKey(event.playerId));
         if (useMultiplayerStore.getState().disconnectedPlayers.size === 0) {
           setOpponentDisconnected(false);
         }
         break;
       case "gamePaused":
         setOpponentDisconnected(true);
-        setDisconnectGrace(event.timeoutSeconds);
         useMultiplayerStore.getState().setPlayerDisconnected(event.disconnectedPlayer);
+        useMultiplayerStore.getState().showToast(
+          `Game paused — Player ${event.disconnectedPlayer + 1} disconnected`,
+          {
+            countdownSeconds: event.timeoutSeconds,
+            key: playerToastKey(event.disconnectedPlayer),
+          },
+        );
         break;
       case "gameResumed":
         setOpponentDisconnected(false);
+        // Clear per-player disconnect toasts only. Generic toasts (errors,
+        // connection warnings) are independent of the pause/resume cycle.
+        useMultiplayerStore.getState().clearPlayerToasts();
         break;
       case "playerEliminated":
         // Store-level side effects (isSpectator, toast) already handled in ws-adapter
@@ -362,7 +381,6 @@ export function GamePage() {
         hostGameCode={hostGameCode}
         waitingForOpponent={waitingForOpponent}
         opponentDisconnected={opponentDisconnected}
-        disconnectGrace={disconnectGrace}
         reconnectState={reconnectState}
         showCardDataMissing={showCardDataMissing}
         onDismissCardDataMissing={() => setShowCardDataMissing(false)}
@@ -390,7 +408,6 @@ interface GamePageContentProps {
   hostGameCode: string | null;
   waitingForOpponent: boolean;
   opponentDisconnected: boolean;
-  disconnectGrace: number;
   reconnectState:
     | { status: "idle" }
     | { status: "reconnecting"; attempt: number; maxAttempts: number }
@@ -419,7 +436,6 @@ function GamePageContent({
   hostGameCode,
   waitingForOpponent,
   opponentDisconnected,
-  disconnectGrace,
   reconnectState,
   showCardDataMissing,
   onDismissCardDataMissing,
@@ -856,12 +872,11 @@ function GamePageContent({
       )}
 
       {/*
-        Opponent disconnected overlays.
-
-        Server (WS) disconnects still use the static yellow overlay since
-        server mode doesn't yet emit `opponentDisconnectedWithChoice`. P2P
-        disconnects use the new `DisconnectChoiceDialog` (host) and
-        `PausedBanner` (everyone) — see plan §6 + adapter §4.
+        Opponent-disconnected overlay for server (WS) games. The live
+        "N seconds to forfeit" countdown lives on `ConnectionToast`, keyed
+        by player — this modal just communicates the blocking/paused state
+        of the game screen. P2P games use `DisconnectChoiceDialog` +
+        `PausedBanner` instead (see adapter §4).
       */}
       {opponentDisconnected && !pauseReason && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -872,9 +887,6 @@ function GamePageContent({
             </h2>
             <p className="text-sm text-gray-300">
               Waiting for opponent to reconnect...
-            </p>
-            <p className="mt-2 text-xs text-gray-500">
-              Game will forfeit in {disconnectGrace}s
             </p>
           </div>
         </div>

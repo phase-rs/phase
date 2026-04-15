@@ -35,6 +35,8 @@ export default defineConfig({
   plugins: [wasmStubPlugin()],
   define: {
     __SCRYFALL_DATA_URL__: JSON.stringify("/scryfall-data.json"),
+    __APP_VERSION__: JSON.stringify("0.0.0-test"),
+    __BUILD_HASH__: JSON.stringify("testhash"),
   },
   test: {
     environment: "happy-dom",

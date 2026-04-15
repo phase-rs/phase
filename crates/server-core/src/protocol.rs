@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::format::FormatConfig;
+use engine::types::format::{FormatConfig, GameFormat};
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::log::GameLogEntry;
@@ -11,6 +11,37 @@ use engine::types::match_config::MatchConfig;
 use engine::types::player::PlayerId;
 use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
+
+/// Wire-protocol version. Bump when any `ClientMessage` or `ServerMessage`
+/// variant is added, removed, renamed, or has a field type changed. Adding a
+/// new optional field with `#[serde(default)]` does not require a bump.
+///
+/// Note: renaming or removing a variant silently fails at JSON parse time
+/// (clients see "Invalid message: unknown variant") rather than at the
+/// handshake. When making such changes, plan a deprecation window where
+/// both the old and new variants coexist, then bump and remove the old.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Git short-hash of the build. Emitted by `build.rs`; falls back to `"dev"`
+/// when git isn't available (containers, source tarballs).
+pub fn build_commit() -> &'static str {
+    env!("PHASE_BUILD_COMMIT")
+}
+
+/// Advertised role of the server. `Full` runs game sessions end-to-end;
+/// `LobbyOnly` acts as a matchmaking broker for P2P connections and rejects
+/// game-state messages.
+///
+/// Note: `LobbyOnly` is intentionally unused in PR 1 — the server always
+/// sends `ServerMode::Full` today. The variant ships now so the client can
+/// already pattern-match on it; the actual lobby-only dispatch logic lands
+/// in PR 2 (see `.planning/…/lobby-only-server-plan` and the plan file at
+/// `/Users/matt/.claude/plans/cached-puzzling-alpaca.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServerMode {
+    Full,
+    LobbyOnly,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeckData {
@@ -36,6 +67,33 @@ pub struct LobbyGame {
     pub host_name: String,
     pub created_at: u64,
     pub has_password: bool,
+    /// Display string (e.g. `"0.1.11"`). Human-readable; not a compatibility gate.
+    #[serde(default)]
+    pub host_version: String,
+    /// Git short-hash of the host's build. The compatibility gate — clients on
+    /// a different commit cannot join because GameState / rules may have diverged.
+    #[serde(default)]
+    pub host_build_commit: String,
+    /// Number of seats currently occupied (host + joined guests, including AI
+    /// if present). Updated as players join/leave.
+    #[serde(default)]
+    pub current_players: u32,
+    /// Configured seat count for this game. For 1v1 formats this is 2; for
+    /// Commander it ranges 2–4.
+    #[serde(default)]
+    pub max_players: u32,
+    /// Game format (Standard, Commander, etc.) — lets lobby UIs filter or
+    /// badge the row. Optional because older persisted entries predate the
+    /// field.
+    #[serde(default)]
+    pub format: Option<GameFormat>,
+    /// Optional per-match label distinct from the host's player name. When
+    /// set, lobby UIs render this as the row's primary title ("Friday Night
+    /// Commander") and the host's name as secondary metadata. `None` means
+    /// "use the host's name as the room label" — the behavior before this
+    /// field existed, preserved for backward compatibility.
+    #[serde(default)]
+    pub room_name: Option<String>,
 }
 
 /// Info about a single player slot in a waiting room, sent to all connected players.
@@ -53,6 +111,14 @@ pub struct PlayerSlotInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ClientMessage {
+    /// First frame the client must send after receiving `ServerHello`. Carries
+    /// the client's version identity so the server can enforce compatibility
+    /// before accepting any game-affecting message.
+    ClientHello {
+        client_version: String,
+        build_commit: String,
+        protocol_version: u32,
+    },
     CreateGame {
         deck: DeckData,
     },
@@ -83,6 +149,10 @@ pub enum ClientMessage {
         ai_seats: Vec<AiSeatRequest>,
         #[serde(default)]
         format_config: Option<FormatConfig>,
+        /// Optional distinct label for this room, separate from the host's
+        /// player name. Routed into `LobbyGame.room_name`.
+        #[serde(default)]
+        room_name: Option<String>,
     },
     JoinGameWithPassword {
         game_code: String,
@@ -109,6 +179,16 @@ fn default_player_count() -> u8 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ServerMessage {
+    /// Sent unprompted immediately on WebSocket accept. The client compares
+    /// `protocol_version` against its own and refuses to proceed on mismatch.
+    /// `build_commit` is the git short-hash of the server binary; it is used
+    /// by the lobby to gate joins when host and guest are on different builds.
+    ServerHello {
+        server_version: String,
+        build_commit: String,
+        protocol_version: u32,
+        mode: ServerMode,
+    },
     GameCreated {
         game_code: String,
         player_token: String,
@@ -167,6 +247,12 @@ pub enum ServerMessage {
         games: Vec<LobbyGame>,
     },
     LobbyGameAdded {
+        game: LobbyGame,
+    },
+    /// Broadcast when an existing lobby entry's mutable state changes
+    /// (e.g. `current_players` ticks up as a guest joins). Lets clients
+    /// refresh a single row without a full `LobbyUpdate` resync.
+    LobbyGameUpdated {
         game: LobbyGame,
     },
     LobbyGameRemoved {
@@ -336,6 +422,7 @@ mod tests {
             match_config: MatchConfig::default(),
             ai_seats: vec![],
             format_config: None,
+            room_name: Some("Friday Night Commander".to_string()),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -347,6 +434,7 @@ mod tests {
                 timer_seconds,
                 player_count,
                 match_config,
+                room_name,
                 ..
             } => {
                 assert_eq!(display_name, "Alice");
@@ -355,6 +443,7 @@ mod tests {
                 assert_eq!(timer_seconds, Some(60));
                 assert_eq!(player_count, 4);
                 assert_eq!(match_config, MatchConfig::default());
+                assert_eq!(room_name, Some("Friday Night Commander".to_string()));
             }
             _ => panic!("wrong variant"),
         }
@@ -502,6 +591,12 @@ mod tests {
                 host_name: "Alice".to_string(),
                 created_at: 1700000000,
                 has_password: false,
+                host_version: "0.1.11".to_string(),
+                host_build_commit: "abc1234".to_string(),
+                current_players: 1,
+                max_players: 2,
+                format: None,
+                room_name: None,
             }],
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -525,6 +620,12 @@ mod tests {
                 host_name: "Bob".to_string(),
                 created_at: 1700000000,
                 has_password: true,
+                host_version: "0.1.11".to_string(),
+                host_build_commit: "abc1234".to_string(),
+                current_players: 1,
+                max_players: 2,
+                format: None,
+                room_name: None,
             },
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -533,6 +634,36 @@ mod tests {
             ServerMessage::LobbyGameAdded { game } => {
                 assert_eq!(game.game_code, "XYZ789");
                 assert!(game.has_password);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_message_lobby_game_updated_roundtrips() {
+        let msg = ServerMessage::LobbyGameUpdated {
+            game: LobbyGame {
+                game_code: "ABC123".to_string(),
+                host_name: "Alice".to_string(),
+                created_at: 1700000000,
+                has_password: false,
+                host_version: "0.1.11".to_string(),
+                host_build_commit: "abc1234".to_string(),
+                current_players: 2,
+                max_players: 4,
+                format: Some(GameFormat::Commander),
+                room_name: Some("Board-wipe special".to_string()),
+            },
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::LobbyGameUpdated { game } => {
+                assert_eq!(game.game_code, "ABC123");
+                assert_eq!(game.current_players, 2);
+                assert_eq!(game.max_players, 4);
+                assert_eq!(game.format, Some(GameFormat::Commander));
+                assert_eq!(game.room_name, Some("Board-wipe special".to_string()));
             }
             _ => panic!("wrong variant"),
         }
@@ -678,6 +809,7 @@ mod tests {
                 deck_name: None,
             }],
             format_config: None,
+            room_name: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -737,6 +869,103 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn client_hello_roundtrips() {
+        let msg = ClientMessage::ClientHello {
+            client_version: "0.1.11".to_string(),
+            build_commit: "abc1234".to_string(),
+            protocol_version: PROTOCOL_VERSION,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::ClientHello {
+                client_version,
+                build_commit,
+                protocol_version,
+            } => {
+                assert_eq!(client_version, "0.1.11");
+                assert_eq!(build_commit, "abc1234");
+                assert_eq!(protocol_version, PROTOCOL_VERSION);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_hello_roundtrips() {
+        let msg = ServerMessage::ServerHello {
+            server_version: "0.1.11".to_string(),
+            build_commit: "abc1234".to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            mode: ServerMode::LobbyOnly,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::ServerHello {
+                server_version,
+                build_commit,
+                protocol_version,
+                mode,
+            } => {
+                assert_eq!(server_version, "0.1.11");
+                assert_eq!(build_commit, "abc1234");
+                assert_eq!(protocol_version, PROTOCOL_VERSION);
+                assert_eq!(mode, ServerMode::LobbyOnly);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn lobby_game_with_full_metadata_roundtrips() {
+        let game = LobbyGame {
+            game_code: "ABC123".to_string(),
+            host_name: "Alice".to_string(),
+            created_at: 1700000000,
+            has_password: false,
+            host_version: "0.2.0".to_string(),
+            host_build_commit: "def5678".to_string(),
+            current_players: 2,
+            max_players: 4,
+            format: Some(GameFormat::Commander),
+            room_name: Some("Spellslingers".to_string()),
+        };
+        let json = serde_json::to_string(&game).unwrap();
+        let parsed: LobbyGame = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.host_version, "0.2.0");
+        assert_eq!(parsed.host_build_commit, "def5678");
+        assert_eq!(parsed.current_players, 2);
+        assert_eq!(parsed.max_players, 4);
+        assert_eq!(parsed.format, Some(GameFormat::Commander));
+        assert_eq!(parsed.room_name, Some("Spellslingers".to_string()));
+    }
+
+    #[test]
+    fn lobby_game_without_optional_metadata_deserializes_with_defaults() {
+        // Older clients / persisted entries may lack the new fields.
+        let json = r#"{
+            "game_code": "OLD123",
+            "host_name": "Legacy",
+            "created_at": 1700000000,
+            "has_password": false
+        }"#;
+        let parsed: LobbyGame = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.host_version, "");
+        assert_eq!(parsed.host_build_commit, "");
+        assert_eq!(parsed.current_players, 0);
+        assert_eq!(parsed.max_players, 0);
+        assert_eq!(parsed.format, None);
+        assert_eq!(parsed.room_name, None);
+    }
+
+    #[test]
+    fn build_commit_is_nonempty() {
+        // Whether in git or not, build.rs always emits something.
+        assert!(!build_commit().is_empty());
     }
 
     #[test]
