@@ -32,7 +32,7 @@ echo "Configured /home/deploy/.ssh/"
 
 # Grant deploy user scoped passwordless sudo for phase-server management
 cat > /etc/sudoers.d/phase-deploy << 'SUDOERS'
-deploy ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop phase-server, /usr/bin/systemctl start phase-server, /usr/bin/systemctl is-active phase-server, /usr/bin/cp, /usr/bin/chmod, /usr/bin/chown
+deploy ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop phase-server, /usr/bin/systemctl start phase-server, /usr/bin/systemctl is-active phase-server, /usr/bin/systemctl daemon-reload, /usr/bin/cp, /usr/bin/chmod, /usr/bin/chown
 SUDOERS
 chmod 440 /etc/sudoers.d/phase-deploy
 echo "Configured passwordless sudo for deploy user"

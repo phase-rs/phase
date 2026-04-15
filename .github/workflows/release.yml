@@ -353,6 +353,8 @@ jobs:
     timeout-minutes: 5
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download server artifact
         uses: actions/download-artifact@v4
         with:
@@ -376,17 +378,19 @@ jobs:
           SSH="ssh -p 29292 -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST_BEEBS }}"
           SCP="scp -P 29292 -i ~/.ssh/deploy_key"
 
-          # Upload binary and card data
-          $SCP staging/phase-server staging/data/card-data.json ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST_BEEBS }}:/tmp/
+          # Upload binary, card data, and service file (service file ensures --lobby-only flag is applied)
+          $SCP staging/phase-server staging/data/card-data.json deploy/phase-server.service ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST_BEEBS }}:/tmp/
 
           # Stop, install, start
           $SSH "sudo systemctl stop phase-server || true \
             && sudo cp /tmp/phase-server /opt/phase-server/phase-server \
             && sudo chmod +x /opt/phase-server/phase-server \
             && sudo cp /tmp/card-data.json /opt/phase-server/data/card-data.json \
+            && sudo cp /tmp/phase-server.service /etc/systemd/system/phase-server.service \
+            && sudo systemctl daemon-reload \
             && sudo chown -R phase:phase /opt/phase-server \
             && sudo systemctl start phase-server \
-            && rm -f /tmp/phase-server /tmp/card-data.json"
+            && rm -f /tmp/phase-server /tmp/card-data.json /tmp/phase-server.service"
 
           echo "Deployed phase-server ${GITHUB_REF#refs/tags/} to beebs"
 

@@ -20,6 +20,8 @@ ssh "${HOST}" "\
   && sudo cp /tmp/phase-server /opt/phase-server/phase-server \
   && sudo chmod +x /opt/phase-server/phase-server \
   && sudo cp /tmp/card-data.json /opt/phase-server/data/card-data.json \
+  && sudo cp /tmp/phase-server.service /etc/systemd/system/phase-server.service \
+  && sudo systemctl daemon-reload \
   && sudo chown -R phase:phase /opt/phase-server \
   && sudo systemctl start phase-server \
   && rm -f /tmp/phase-server /tmp/card-data.json /tmp/phase-server.service \
