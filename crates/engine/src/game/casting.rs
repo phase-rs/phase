@@ -1822,16 +1822,14 @@ pub fn can_cast_object_now(state: &GameState, player: PlayerId, object_id: Objec
     // For Optional additional costs this is a false-negative in the locked case
     // only if the optional cost is the ONLY affordability gate, which is never
     // the case; the mana cost already has to be payable on its own.
-    if let Some(additional) = state
+    if let Some(AdditionalCost::Required(cost)) = state
         .objects
         .get(&prepared.object_id)
         .and_then(|o| o.additional_cost.as_ref())
     {
-        if let AdditionalCost::Required(cost) = additional {
-            if let Some(amount) = find_pay_life_cost(cost) {
-                if !super::life_costs::can_pay_life_cost(state, player, amount) {
-                    return false;
-                }
+        if let Some(amount) = find_pay_life_cost(cost) {
+            if !super::life_costs::can_pay_life_cost(state, player, amount) {
+                return false;
             }
         }
     }
