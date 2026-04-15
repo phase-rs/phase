@@ -39,7 +39,7 @@ type EngineRequest =
       playerCount?: number;
       firstPlayer?: number;
     }
-  | { type: "submitAction"; id: number; action: GameAction }
+  | { type: "submitAction"; id: number; actor: number; action: GameAction }
   | { type: "getState"; id: number }
   | { type: "getFilteredState"; id: number; viewerId: number }
   | { type: "getLegalActions"; id: number }
@@ -158,7 +158,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "submitAction": {
-        const actionResult = submit_action(msg.action);
+        const actionResult = submit_action(msg.actor, msg.action);
         if (typeof actionResult === "string") {
           error(msg.id, actionResult);
           break;

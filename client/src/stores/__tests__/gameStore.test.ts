@@ -95,7 +95,7 @@ describe("gameStore", () => {
     const store = useGameStore.getState();
     expect(store.gameState).toEqual(state2);
     expect(store.events).toEqual(events);
-    expect(adapter.submitAction).toHaveBeenCalledWith({ type: "PassPriority" });
+    expect(adapter.submitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 0);
   });
 
   it("dispatch pushes to stateHistory for undoable actions", async () => {

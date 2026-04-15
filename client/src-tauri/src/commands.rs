@@ -43,12 +43,22 @@ pub fn initialize_game(
 #[tauri::command]
 pub fn submit_action(
     state: tauri::State<AppState>,
+    actor: u8,
     action: GameAction,
 ) -> Result<ActionResult, String> {
+    // `actor` is the local player's PlayerId as tracked by the frontend
+    // adapter. In desktop/Tauri mode there is a single local human so the
+    // trust boundary is trivial, but we still pass it through so the
+    // engine's guard enforces identity the same way every transport does.
     let mut guard = state.game.lock().map_err(|e| e.to_string())?;
     let game = guard.as_mut().ok_or("Game not initialized")?;
 
-    apply(game, action).map_err(|e| e.to_string())
+    apply(
+        game,
+        engine::types::player::PlayerId(actor),
+        action,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

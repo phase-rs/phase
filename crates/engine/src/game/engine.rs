@@ -54,12 +54,32 @@ pub enum EngineError {
     ActionNotAllowed(String),
 }
 
-pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, EngineError> {
+/// Public engine entrypoint. Every caller must supply the `actor` — the
+/// `PlayerId` whose authenticated identity is making this action. The engine
+/// rejects any action whose `actor` does not match `authorized_submitter(state)`
+/// (with a narrow Concede exception — see `check_actor_authorization`).
+///
+/// # Safety contract (non-negotiable)
+///
+/// `actor` must come from a **trusted transport boundary**, never from
+/// client-supplied payload data. Adapters that forward actions from a remote
+/// peer (WebSocket server, P2P host) must tag the action with the PlayerId
+/// associated with the *connection*, not a value copied out of the wire frame.
+/// Otherwise a malicious peer can trivially spoof another player's identity.
+///
+/// Engine-internal simulation (AI search, legal-action probing) may use
+/// [`apply_as_current`] which derives `actor` from the game state itself.
+pub fn apply(
+    state: &mut GameState,
+    actor: PlayerId,
+    action: GameAction,
+) -> Result<ActionResult, EngineError> {
     // Clear transient inter-effect state at the start of each player action.
     // last_effect_count is set by interactive handlers (e.g., DiscardChoice) and
     // consumed by sub_ability continuations via EventContextAmount fallback.
     state.last_effect_count = None;
     state.exiled_from_hand_this_resolution = 0;
+    check_actor_authorization(state, actor, &action)?;
     let mut result = apply_action(state, action)?;
     bump_state_revision(state);
     mark_public_state_all_dirty(state);
@@ -68,6 +88,54 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
     finalize_public_state(state);
     result.log_entries = super::log::resolve_log_entries(&result.events, state);
     Ok(result)
+}
+
+/// Engine-level authorization guard. Any action other than `Concede` must come
+/// from the `authorized_submitter` for the current `WaitingFor` (which already
+/// accounts for turn-decision-controller effects like Mindslaver). `Concede`
+/// self-authenticates via its own `player_id` field — but we still require it
+/// to match `actor` so a player cannot concede someone else on their behalf.
+fn check_actor_authorization(
+    state: &GameState,
+    actor: PlayerId,
+    action: &GameAction,
+) -> Result<(), EngineError> {
+    if let GameAction::Concede { player_id } = action {
+        // CR 104.3a: A player may concede at any time — but only themselves.
+        if *player_id != actor {
+            return Err(EngineError::WrongPlayer);
+        }
+        return Ok(());
+    }
+    if let Some(expected) = turn_control::authorized_submitter(state) {
+        if expected != actor {
+            return Err(EngineError::WrongPlayer);
+        }
+    }
+    Ok(())
+}
+
+/// Engine-internal convenience: apply `action` as the player the engine is
+/// currently waiting on. Intended for simulation (AI search, legal-action
+/// probing) and tests — *not* for transport adapters, which must pass a
+/// transport-authenticated `actor` to [`apply`] directly.
+///
+/// For [`GameAction::Concede`] the concede payload's `player_id` is used as
+/// the actor, so tests can concede any player without first maneuvering the
+/// `WaitingFor` state onto that player.
+pub fn apply_as_current(
+    state: &mut GameState,
+    action: GameAction,
+) -> Result<ActionResult, EngineError> {
+    let actor = match &action {
+        GameAction::Concede { player_id } => *player_id,
+        _ => turn_control::authorized_submitter(state).ok_or_else(|| {
+            EngineError::InvalidAction(
+                "apply_as_current: no authorized submitter (game over?)".to_string(),
+            )
+        })?,
+    };
+    apply(state, actor, action)
 }
 
 pub(super) fn resume_pending_continuation_if_priority(
@@ -2624,7 +2692,7 @@ mod tests {
     fn apply_pass_priority_alternates_players() {
         let mut state = setup_game_at_main_phase();
 
-        let result = apply(&mut state, GameAction::PassPriority).unwrap();
+        let result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
         assert!(matches!(
             result.waiting_for,
@@ -2650,7 +2718,7 @@ mod tests {
         // for player 1. The issue is if player 0 somehow acts.
         // In practice, the action doesn't carry a player ID -- the engine
         // uses priority_player. So this is a protocol-level concern.
-        let result = apply(&mut state, GameAction::PassPriority);
+        let result = apply_as_current(&mut state, GameAction::PassPriority);
         assert!(result.is_ok());
     }
 
@@ -2674,7 +2742,7 @@ mod tests {
         // CR 104.3a + CR 800.4a: 3-player game, P1 concedes — P1 leaves, game continues.
         let mut state = setup_three_player_at_main_phase();
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::Concede {
                 player_id: PlayerId(1),
@@ -2702,7 +2770,7 @@ mod tests {
         // P0 holds priority.
         assert_eq!(state.priority_player, PlayerId(0));
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::Concede {
                 player_id: PlayerId(1),
@@ -2730,7 +2798,7 @@ mod tests {
             valid_attack_targets: vec![],
         };
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::Concede {
                 player_id: PlayerId(1),
@@ -2761,7 +2829,7 @@ mod tests {
         // P0 holds priority; P1 concedes — P0 keeps priority.
         assert_eq!(state.priority_player, PlayerId(0));
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::Concede {
                 player_id: PlayerId(1),
@@ -2783,7 +2851,7 @@ mod tests {
         // CR 104.2a: In a 2-player game, when one player concedes, the other wins.
         let mut state = setup_game_at_main_phase();
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::Concede {
                 player_id: PlayerId(0),
@@ -2805,7 +2873,7 @@ mod tests {
         // CR 800.4a: In a 3-player game, when one concedes, the remaining two continue.
         let mut state = setup_three_player_at_main_phase();
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::Concede {
                 player_id: PlayerId(2),
@@ -2838,7 +2906,7 @@ mod tests {
             .core_types
             .push(CoreType::Land);
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::PlayLand {
                 object_id: obj_id,
@@ -2878,7 +2946,7 @@ mod tests {
             Zone::Hand,
         );
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::PlayLand {
                 object_id: obj_id,
@@ -2902,7 +2970,7 @@ mod tests {
             Zone::Hand,
         );
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::PlayLand {
                 object_id: obj_id,
@@ -2917,7 +2985,7 @@ mod tests {
     fn apply_play_land_rejects_card_not_in_hand() {
         let mut state = setup_game_at_main_phase();
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::PlayLand {
                 object_id: ObjectId(0),
@@ -2963,7 +3031,7 @@ mod tests {
                 ),
             );
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::PlayLand {
                 object_id: land_id,
@@ -3067,7 +3135,7 @@ mod tests {
         assert_eq!(state.turn_number, 1);
 
         // Pass priority from player 0 (pre-combat main)
-        let result = apply(&mut state, GameAction::PassPriority).unwrap();
+        let result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         assert!(matches!(
             result.waiting_for,
             WaitingFor::Priority {
@@ -3076,19 +3144,19 @@ mod tests {
         ));
 
         // Pass priority from player 1 (both passed, stack empty -> advance)
-        let _result = apply(&mut state, GameAction::PassPriority).unwrap();
+        let _result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         // Should skip combat phases and land at PostCombatMain
         assert_eq!(state.phase, Phase::PostCombatMain);
 
         // Pass through post-combat main
-        let _result = apply(&mut state, GameAction::PassPriority).unwrap();
-        let _result = apply(&mut state, GameAction::PassPriority).unwrap();
+        let _result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        let _result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         // Should advance to End step
         assert_eq!(state.phase, Phase::End);
 
         // Pass through end step
-        let _result = apply(&mut state, GameAction::PassPriority).unwrap();
-        let _result = apply(&mut state, GameAction::PassPriority).unwrap();
+        let _result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        let _result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         // Should advance through cleanup to next turn, then auto-advance to PreCombatMain
         assert_eq!(state.phase, Phase::PreCombatMain);
         assert_eq!(state.turn_number, 2);
@@ -3117,7 +3185,7 @@ mod tests {
             .push(CoreType::Land);
 
         // Play the land
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::PlayLand {
                 object_id: land_id,
@@ -3245,6 +3313,59 @@ mod tests {
         assert_eq!(err.to_string(), "Invalid action: test");
     }
 
+    /// Regression: the engine must reject any non-Concede action whose
+    /// `actor` does not match `authorized_submitter(state)`. Before the
+    /// engine-level guard existed, `apply()` silently used `waiting_for`'s
+    /// player as the actor — meaning the human could click targets during
+    /// an AI's `TargetSelection` and the engine would accept them *as the
+    /// AI*. The guard below is the single place that closes that loophole
+    /// for every transport (WASM, WebSocket, P2P).
+    #[test]
+    fn apply_rejects_action_from_wrong_actor() {
+        let mut state = setup_game_at_main_phase();
+        // `setup_game_at_main_phase` leaves P0 with priority.
+        assert_eq!(
+            turn_control::authorized_submitter(&state),
+            Some(PlayerId(0)),
+            "precondition: P0 should have priority"
+        );
+
+        // P1 submitting an action meant for P0 must be rejected.
+        let result = apply(&mut state, PlayerId(1), GameAction::PassPriority);
+        assert!(
+            matches!(result, Err(EngineError::WrongPlayer)),
+            "expected WrongPlayer, got {result:?}"
+        );
+
+        // P0 submitting the same action must succeed.
+        let result = apply(&mut state, PlayerId(0), GameAction::PassPriority);
+        assert!(result.is_ok(), "P0 pass should succeed: {result:?}");
+    }
+
+    /// Regression: Concede self-authenticates via its own `player_id`, but
+    /// `actor` must still match that `player_id` so one player cannot
+    /// concede another. CR 104.3a: *a player* may concede at any time.
+    #[test]
+    fn apply_rejects_spoofed_concede() {
+        let mut state = setup_game_at_main_phase();
+        // P0 trying to concede P1 → rejected.
+        let spoofed = GameAction::Concede {
+            player_id: PlayerId(1),
+        };
+        let result = apply(&mut state, PlayerId(0), spoofed);
+        assert!(
+            matches!(result, Err(EngineError::WrongPlayer)),
+            "expected WrongPlayer, got {result:?}"
+        );
+
+        // P1 conceding themselves → accepted even though P0 has priority.
+        let self_concede = GameAction::Concede {
+            player_id: PlayerId(1),
+        };
+        let result = apply(&mut state, PlayerId(1), self_concede);
+        assert!(result.is_ok(), "self-concede should succeed: {result:?}");
+    }
+
     #[test]
     fn tap_land_for_mana_produces_correct_color() {
         let mut state = setup_game_at_main_phase();
@@ -3263,7 +3384,7 @@ mod tests {
             obj.entered_battlefield_turn = Some(1);
         }
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::TapLandForMana { object_id: land_id },
         )
@@ -3302,7 +3423,7 @@ mod tests {
             obj.tapped = true;
         }
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::TapLandForMana { object_id: land_id },
         );
@@ -3358,7 +3479,7 @@ mod tests {
             );
         }
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::TapLandForMana { object_id: dual_id },
         );
@@ -3417,7 +3538,7 @@ mod tests {
         }
 
         // Activate Blue (ability_index 0)
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::ActivateAbility {
                 source_id: dual_id,
@@ -3481,7 +3602,7 @@ mod tests {
         }
 
         // Tap for Black via ActivateAbility
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::ActivateAbility {
                 source_id: dual_id,
@@ -3498,7 +3619,7 @@ mod tests {
         );
 
         // Undo via UntapLandForMana
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::UntapLandForMana { object_id: dual_id },
         )
@@ -3593,7 +3714,7 @@ mod tests {
         }
 
         // Activate the Forest's {T}: Add {G} via the full apply() pipeline.
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::ActivateAbility {
                 source_id: forest,
@@ -3671,7 +3792,8 @@ mod tests {
         assert_eq!(state.players[1].hand.len(), 7);
 
         // Player 0 keeps
-        let result = apply(&mut state, GameAction::MulliganDecision { keep: true }).unwrap();
+        let result =
+            apply_as_current(&mut state, GameAction::MulliganDecision { keep: true }).unwrap();
         assert!(matches!(
             result.waiting_for,
             WaitingFor::MulliganDecision {
@@ -3681,7 +3803,8 @@ mod tests {
         ));
 
         // Player 1 keeps -> game starts, auto-advances to PreCombatMain
-        let result = apply(&mut state, GameAction::MulliganDecision { keep: true }).unwrap();
+        let result =
+            apply_as_current(&mut state, GameAction::MulliganDecision { keep: true }).unwrap();
         assert!(matches!(
             result.waiting_for,
             WaitingFor::Priority {
@@ -3693,7 +3816,7 @@ mod tests {
         // Play a land from hand
         let land_obj_id = state.players[0].hand[0];
         let land_card_id = state.objects[&land_obj_id].card_id;
-        let _result = apply(
+        let _result = apply_as_current(
             &mut state,
             GameAction::PlayLand {
                 object_id: land_obj_id,
@@ -3718,7 +3841,7 @@ mod tests {
             .unwrap();
 
         // Tap land for mana
-        let _result = apply(
+        let _result = apply_as_current(
             &mut state,
             GameAction::TapLandForMana {
                 object_id: land_on_bf,
@@ -3734,19 +3857,19 @@ mod tests {
 
         // Pass priority through the rest of the turn
         // PreCombatMain: P0 passes
-        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         // PreCombatMain: P1 passes -> advances to PostCombatMain
-        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         assert_eq!(state.phase, Phase::PostCombatMain);
 
         // PostCombatMain: both pass -> End
-        apply(&mut state, GameAction::PassPriority).unwrap();
-        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         assert_eq!(state.phase, Phase::End);
 
         // End: both pass -> Cleanup -> next turn
-        apply(&mut state, GameAction::PassPriority).unwrap();
-        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         assert_eq!(state.phase, Phase::PreCombatMain);
         assert_eq!(state.turn_number, 2);
         assert_eq!(state.active_player, PlayerId(1));
@@ -3793,7 +3916,7 @@ mod tests {
             });
         }
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: obj_id,
@@ -3865,7 +3988,7 @@ mod tests {
         }
 
         // Cast the spell
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: obj_id,
@@ -3879,8 +4002,8 @@ mod tests {
         let hand_before = state.players[0].hand.len();
 
         // Both pass -> resolve
-        apply(&mut state, GameAction::PassPriority).unwrap();
-        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
         // Stack should be empty
         assert!(state.stack.is_empty());
@@ -3944,7 +4067,7 @@ mod tests {
         });
 
         // Cast bolt — multiple valid targets (creature + 2 players) requires selection
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: bolt_id,
@@ -3959,7 +4082,7 @@ mod tests {
         ));
 
         // Select the creature as target
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::SelectTargets {
                 targets: vec![TargetRef::Object(creature_id)],
@@ -3973,8 +4096,8 @@ mod tests {
         zones::move_to_zone(&mut state, creature_id, Zone::Graveyard, &mut events);
 
         // Both pass -> resolve -- should fizzle
-        apply(&mut state, GameAction::PassPriority).unwrap();
-        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
         // Stack should be empty, bolt should be in graveyard (fizzled)
         assert!(state.stack.is_empty());
@@ -4042,7 +4165,7 @@ mod tests {
         add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
 
         // Cast Lightning Bolt — multiple valid targets (creature + 2 players) requires selection
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: bolt_id,
@@ -4057,7 +4180,7 @@ mod tests {
         ));
 
         // Select the creature as target
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::SelectTargets {
                 targets: vec![TargetRef::Object(creature_id)],
@@ -4069,8 +4192,8 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.total(), 0);
 
         // Both pass -> resolve
-        apply(&mut state, GameAction::PassPriority).unwrap();
-        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
         // Creature should have 3 damage, which equals toughness -> SBA destroys it
         assert!(state.stack.is_empty());
@@ -4106,7 +4229,7 @@ mod tests {
 
         // Two players as targets, need manual selection
         // Use Player filter -> 2 targets -> need SelectTargets
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: bolt_id,
@@ -4123,7 +4246,7 @@ mod tests {
         ));
 
         // Select player 1 as target
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::SelectTargets {
                 targets: vec![TargetRef::Player(PlayerId(1))],
@@ -4134,8 +4257,8 @@ mod tests {
         assert_eq!(state.stack.len(), 1);
 
         // Both pass -> resolve
-        apply(&mut state, GameAction::PassPriority).unwrap();
-        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
         assert!(state.stack.is_empty());
         assert_eq!(state.players[1].life, 17);
@@ -4167,7 +4290,7 @@ mod tests {
         add_mana(&mut state, PlayerId(0), ManaType::Green, 2);
 
         // Cast the creature
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: creature_id,
@@ -4180,7 +4303,7 @@ mod tests {
 
         // P1 gets priority, has Counterspell
         // Pass priority from P0 to P1
-        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         // Now P1 has priority
         assert_eq!(state.priority_player, PlayerId(1));
 
@@ -4211,7 +4334,7 @@ mod tests {
         add_mana(&mut state, PlayerId(1), ManaType::Blue, 2);
 
         // Cast Counterspell — targets a spell on the stack
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: counter_id,
@@ -4222,7 +4345,7 @@ mod tests {
         .unwrap();
         // Handle target selection if needed (single spell auto-targets, but be robust).
         let result = if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {
-            apply(
+            apply_as_current(
                 &mut state,
                 GameAction::SelectTargets {
                     targets: vec![TargetRef::Object(creature_id)],
@@ -4236,8 +4359,8 @@ mod tests {
         assert_eq!(state.stack.len(), 2); // creature + counterspell
 
         // Both pass -> Counterspell resolves first (LIFO)
-        apply(&mut state, GameAction::PassPriority).unwrap();
-        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
         // Counterspell resolved, creature spell should be countered (in graveyard)
         // Counterspell should also be in graveyard
@@ -4297,7 +4420,7 @@ mod tests {
         add_mana(&mut state, PlayerId(0), ManaType::Green, 1);
 
         // Cast Giant Growth (auto-targets single own creature)
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: growth_id,
@@ -4309,8 +4432,8 @@ mod tests {
         assert_eq!(state.stack.len(), 1);
 
         // Both pass -> resolve
-        apply(&mut state, GameAction::PassPriority).unwrap();
-        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
         assert!(state.stack.is_empty());
         assert_eq!(state.objects[&creature_id].power, Some(5));
@@ -4358,7 +4481,7 @@ mod tests {
         add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
 
         // Cast bolt — multiple valid targets (creature + 2 players) requires selection
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: bolt_id,
@@ -4373,7 +4496,7 @@ mod tests {
         ));
 
         // Select the creature as target
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::SelectTargets {
                 targets: vec![TargetRef::Object(creature_id)],
@@ -4386,8 +4509,8 @@ mod tests {
         zones::move_to_zone(&mut state, creature_id, Zone::Graveyard, &mut events);
 
         // Both pass -> fizzle
-        apply(&mut state, GameAction::PassPriority).unwrap();
-        let result = apply(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        let result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
         assert!(state.stack.is_empty());
         assert!(state.players[0].graveyard.contains(&bolt_id));
@@ -4430,7 +4553,7 @@ mod tests {
             );
         }
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::ActivateAbility {
                 source_id: obj_id,
@@ -4522,7 +4645,7 @@ mod tests {
             );
         }
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::ActivateAbility {
                 source_id: obj_id,
@@ -4611,7 +4734,7 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::ActivateAbility {
                 source_id: drum,
@@ -4631,7 +4754,7 @@ mod tests {
         assert!(!state.objects.get(&drum).unwrap().tapped);
         assert!(!state.objects.get(&creature).unwrap().tapped);
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::SelectCards {
                 cards: vec![creature],
@@ -4707,7 +4830,7 @@ mod tests {
             let creature_a = create_creature_on_bf(&mut state, PlayerId(0), "Bear A");
             let creature_b = create_creature_on_bf(&mut state, PlayerId(0), "Bear B");
 
-            let result = apply(
+            let result = apply_as_current(
                 &mut state,
                 GameAction::Equip {
                     equipment_id,
@@ -4739,7 +4862,7 @@ mod tests {
             let _creature_b = create_creature_on_bf(&mut state, PlayerId(0), "Bear B");
 
             // Activate equip
-            let result = apply(
+            let result = apply_as_current(
                 &mut state,
                 GameAction::Equip {
                     equipment_id,
@@ -4750,7 +4873,7 @@ mod tests {
             assert!(matches!(result.waiting_for, WaitingFor::EquipTarget { .. }));
 
             // Select target
-            let result = apply(
+            let result = apply_as_current(
                 &mut state,
                 GameAction::Equip {
                     equipment_id,
@@ -4780,7 +4903,7 @@ mod tests {
             let creature_b = create_creature_on_bf(&mut state, PlayerId(0), "Bear B");
 
             // First equip to creature A
-            apply(
+            apply_as_current(
                 &mut state,
                 GameAction::Equip {
                     equipment_id,
@@ -4788,7 +4911,7 @@ mod tests {
                 },
             )
             .unwrap();
-            apply(
+            apply_as_current(
                 &mut state,
                 GameAction::Equip {
                     equipment_id,
@@ -4802,7 +4925,7 @@ mod tests {
             );
 
             // Re-equip to creature B
-            apply(
+            apply_as_current(
                 &mut state,
                 GameAction::Equip {
                     equipment_id,
@@ -4810,7 +4933,7 @@ mod tests {
                 },
             )
             .unwrap();
-            apply(
+            apply_as_current(
                 &mut state,
                 GameAction::Equip {
                     equipment_id,
@@ -4845,7 +4968,7 @@ mod tests {
 
             // Try during combat phase - should fail
             state.phase = Phase::DeclareAttackers;
-            let result = apply(
+            let result = apply_as_current(
                 &mut state,
                 GameAction::Equip {
                     equipment_id,
@@ -4867,7 +4990,7 @@ mod tests {
                     actual_mana_spent: 0,
                 },
             });
-            let result = apply(
+            let result = apply_as_current(
                 &mut state,
                 GameAction::Equip {
                     equipment_id,
@@ -4879,7 +5002,7 @@ mod tests {
             // Try when not active player - should fail
             state.stack.clear();
             state.active_player = PlayerId(1);
-            let result = apply(
+            let result = apply_as_current(
                 &mut state,
                 GameAction::Equip {
                     equipment_id,
@@ -4895,7 +5018,7 @@ mod tests {
             let equipment_id = create_equipment(&mut state, PlayerId(0));
             let creature = create_creature_on_bf(&mut state, PlayerId(0), "Bear");
 
-            let result = apply(
+            let result = apply_as_current(
                 &mut state,
                 GameAction::Equip {
                     equipment_id,
@@ -4939,7 +5062,7 @@ mod tests {
                 .description("Selesnya Guildgate enters the battlefield tapped.".to_string()),
         );
 
-        let _result = apply(
+        let _result = apply_as_current(
             &mut state,
             GameAction::PlayLand {
                 object_id: obj_id,
@@ -4977,7 +5100,7 @@ mod tests {
         let mut state = setup_game_at_main_phase();
         let land_id = create_forest(&mut state, PlayerId(0));
 
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::TapLandForMana { object_id: land_id },
         )
@@ -4992,7 +5115,7 @@ mod tests {
         let mut state = setup_game_at_main_phase();
         let land_id = create_forest(&mut state, PlayerId(0));
 
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::TapLandForMana { object_id: land_id },
         )
@@ -5005,7 +5128,7 @@ mod tests {
             1
         );
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::UntapLandForMana { object_id: land_id },
         )
@@ -5036,8 +5159,8 @@ mod tests {
         let land1 = create_forest(&mut state, PlayerId(0));
         let land2 = create_forest(&mut state, PlayerId(0));
 
-        apply(&mut state, GameAction::TapLandForMana { object_id: land1 }).unwrap();
-        apply(&mut state, GameAction::TapLandForMana { object_id: land2 }).unwrap();
+        apply_as_current(&mut state, GameAction::TapLandForMana { object_id: land1 }).unwrap();
+        apply_as_current(&mut state, GameAction::TapLandForMana { object_id: land2 }).unwrap();
         assert_eq!(
             state.players[0]
                 .mana_pool
@@ -5045,7 +5168,7 @@ mod tests {
             2
         );
 
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::UntapLandForMana { object_id: land1 },
         )
@@ -5071,7 +5194,7 @@ mod tests {
         let mut state = setup_game_at_main_phase();
         let land_id = create_forest(&mut state, PlayerId(0));
 
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::TapLandForMana { object_id: land_id },
         )
@@ -5080,7 +5203,7 @@ mod tests {
         state.players[0].mana_pool.spend(ManaType::Green);
         assert_eq!(state.players[0].mana_pool.total(), 0);
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::UntapLandForMana { object_id: land_id },
         );
@@ -5092,14 +5215,14 @@ mod tests {
         let mut state = setup_game_at_main_phase();
         let land_id = create_forest(&mut state, PlayerId(0));
 
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::TapLandForMana { object_id: land_id },
         )
         .unwrap();
         assert!(!state.lands_tapped_for_mana.is_empty());
 
-        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         assert!(!state.lands_tapped_for_mana.contains_key(&PlayerId(0)));
     }
 
@@ -5108,7 +5231,7 @@ mod tests {
         let mut state = setup_game_at_main_phase();
         let tapped_land = create_forest(&mut state, PlayerId(0));
 
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::TapLandForMana {
                 object_id: tapped_land,
@@ -5130,7 +5253,7 @@ mod tests {
             obj.card_types.subtypes.push("Mountain".to_string());
         }
 
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::PlayLand {
                 object_id: hand_land,
@@ -5146,7 +5269,7 @@ mod tests {
         let mut state = setup_game_at_main_phase();
         let land_id = create_forest(&mut state, PlayerId(0));
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::UntapLandForMana { object_id: land_id },
         );
@@ -5195,7 +5318,7 @@ mod tests {
         // Create a forest on the battlefield to tap during ManaPayment
         let land_id = create_forest(&mut state, PlayerId(0));
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: spell_id,
@@ -5211,7 +5334,7 @@ mod tests {
         }) = &result
         {
             // Tap the land during ManaPayment
-            apply(
+            apply_as_current(
                 &mut state,
                 GameAction::TapLandForMana { object_id: land_id },
             )
@@ -5219,7 +5342,7 @@ mod tests {
             assert!(state.lands_tapped_for_mana[&PlayerId(0)].contains(&land_id));
 
             // Untap it — should return ManaPayment, not Priority
-            let untap_result = apply(
+            let untap_result = apply_as_current(
                 &mut state,
                 GameAction::UntapLandForMana { object_id: land_id },
             )
@@ -5241,7 +5364,7 @@ mod tests {
         let land_id = create_forest(&mut state, PlayerId(0));
 
         // Tap the land
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::TapLandForMana { object_id: land_id },
         )
@@ -5297,7 +5420,7 @@ mod tests {
         let action = GameAction::LearnDecision {
             choice: crate::types::actions::LearnOption::Rummage { card_id: hand_card },
         };
-        let result = apply(&mut state, action).unwrap();
+        let result = apply_as_current(&mut state, action).unwrap();
 
         // The discarded card should be in graveyard
         assert!(state.players[0].graveyard.contains(&hand_card));
@@ -5339,7 +5462,7 @@ mod tests {
         let action = GameAction::LearnDecision {
             choice: crate::types::actions::LearnOption::Skip,
         };
-        let result = apply(&mut state, action).unwrap();
+        let result = apply_as_current(&mut state, action).unwrap();
 
         // Hand should still have the original card
         assert_eq!(state.players[0].hand.len(), 1);
@@ -5411,7 +5534,7 @@ mod tests {
         let action = GameAction::LearnDecision {
             choice: crate::types::actions::LearnOption::Rummage { card_id: hand_card },
         };
-        let result = apply(&mut state, action).unwrap();
+        let result = apply_as_current(&mut state, action).unwrap();
 
         // Normal rummage completed
         assert_eq!(state.players[0].hand.len(), 1);
@@ -5554,7 +5677,7 @@ mod trigger_target_tests {
         };
 
         // Player selects target1
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::SelectTargets {
                 targets: vec![TargetRef::Object(target1)],
@@ -5633,7 +5756,7 @@ mod trigger_target_tests {
         };
 
         // Try to select an illegal target
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::SelectTargets {
                 targets: vec![TargetRef::Object(illegal_target)],
@@ -5713,7 +5836,7 @@ mod trigger_target_tests {
             unavailable_modes: vec![],
         };
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::SelectModes {
                 indices: vec![0, 0],
@@ -5823,7 +5946,8 @@ mod trigger_target_tests {
             unavailable_modes: vec![],
         };
 
-        let result = apply(&mut state, GameAction::SelectModes { indices: vec![0] }).unwrap();
+        let result =
+            apply_as_current(&mut state, GameAction::SelectModes { indices: vec![0] }).unwrap();
 
         assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
         assert!(state.pending_trigger.is_none());
@@ -5907,7 +6031,7 @@ mod trigger_target_tests {
             description: None,
         };
 
-        let invalid = apply(
+        let invalid = apply_as_current(
             &mut state,
             GameAction::SelectTargets {
                 targets: vec![
@@ -5918,7 +6042,7 @@ mod trigger_target_tests {
         );
         assert!(invalid.is_err(), "same player should be rejected");
 
-        let valid = apply(
+        let valid = apply_as_current(
             &mut state,
             GameAction::SelectTargets {
                 targets: vec![
@@ -6012,7 +6136,7 @@ mod trigger_target_tests {
             description: None,
         };
 
-        let intermediate = apply(
+        let intermediate = apply_as_current(
             &mut state,
             GameAction::ChooseTarget {
                 target: Some(TargetRef::Player(PlayerId(0))),
@@ -6031,7 +6155,7 @@ mod trigger_target_tests {
             other => panic!("expected trigger target selection, got {other:?}"),
         }
 
-        let completed = apply(
+        let completed = apply_as_current(
             &mut state,
             GameAction::ChooseTarget {
                 target: Some(TargetRef::Player(PlayerId(1))),
@@ -6117,7 +6241,7 @@ mod trigger_target_tests {
             unavailable_modes: vec![],
         };
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::SelectModes {
                 indices: vec![0, 0],
@@ -6573,7 +6697,7 @@ mod phase_trigger_regression_tests {
         // Pass priority twice (P0 passes, then P1 passes) with empty stack.
         // This advances from PreCombatMain → BeginCombat → no triggers, no
         // attackers → skip to PostCombatMain.
-        let result1 = apply(&mut state, GameAction::PassPriority).unwrap();
+        let result1 = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         assert!(matches!(
             result1.waiting_for,
             WaitingFor::Priority {
@@ -6581,7 +6705,7 @@ mod phase_trigger_regression_tests {
             }
         ));
 
-        let result2 = apply(&mut state, GameAction::PassPriority).unwrap();
+        let result2 = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
         // We should now be at PostCombatMain with empty stack.
         assert_eq!(state.phase, Phase::PostCombatMain);
@@ -6686,14 +6810,14 @@ mod phase_trigger_regression_tests {
         }
 
         // Pass priority from PreCombatMain
-        let result1 = apply(&mut state, GameAction::PassPriority).unwrap();
+        let result1 = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         assert!(matches!(
             result1.waiting_for,
             WaitingFor::Priority {
                 player: PlayerId(1)
             }
         ));
-        let _result2 = apply(&mut state, GameAction::PassPriority).unwrap();
+        let _result2 = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
         // Should be at BeginCombat with trigger on stack
         assert_eq!(state.phase, Phase::BeginCombat);
@@ -6743,14 +6867,14 @@ mod phase_trigger_regression_tests {
         }
 
         // Pass priority twice to advance from PreCombatMain
-        let result1 = apply(&mut state, GameAction::PassPriority).unwrap();
+        let result1 = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         assert!(matches!(
             result1.waiting_for,
             WaitingFor::Priority {
                 player: PlayerId(1)
             }
         ));
-        let _result2 = apply(&mut state, GameAction::PassPriority).unwrap();
+        let _result2 = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
         // Should be at BeginCombat with trigger on stack and combat state set
         assert_eq!(state.phase, Phase::BeginCombat);
@@ -6888,7 +7012,7 @@ mod phase_trigger_regression_tests {
             .core_types
             .push(CoreType::Instant);
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: searing_spear,
@@ -6912,7 +7036,7 @@ mod phase_trigger_regression_tests {
         ));
         assert_eq!(state.priority_player, PlayerId(0));
 
-        let pass_result = apply(&mut state, GameAction::PassPriority).unwrap();
+        let pass_result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         assert!(matches!(
             pass_result.waiting_for,
             WaitingFor::Priority {
@@ -7002,7 +7126,7 @@ mod phase_trigger_regression_tests {
             valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
         };
 
-        let declare_result = apply(
+        let declare_result = apply_as_current(
             &mut state,
             GameAction::DeclareAttackers {
                 attacks: vec![(ajani, AttackTarget::Player(PlayerId(1)))],
@@ -7023,8 +7147,8 @@ mod phase_trigger_regression_tests {
         );
         assert_eq!(state.phase, Phase::DeclareAttackers);
 
-        apply(&mut state, GameAction::PassPriority).unwrap();
-        let linden_resolve = apply(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        let linden_resolve = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
         assert!(matches!(
             linden_resolve.waiting_for,
@@ -7041,8 +7165,8 @@ mod phase_trigger_regression_tests {
         assert_eq!(state.objects[&ajani].power, Some(2));
         assert_eq!(state.objects[&ajani].toughness, Some(2));
 
-        apply(&mut state, GameAction::PassPriority).unwrap();
-        let pridemate_resolve = apply(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        let pridemate_resolve = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
         assert!(matches!(
             pridemate_resolve.waiting_for,
@@ -7054,8 +7178,8 @@ mod phase_trigger_regression_tests {
         assert_eq!(state.objects[&ajani].power, Some(3));
         assert_eq!(state.objects[&ajani].toughness, Some(3));
 
-        apply(&mut state, GameAction::PassPriority).unwrap();
-        let combat_result = apply(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        let combat_result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
         assert!(matches!(
             combat_result.waiting_for,
@@ -7175,7 +7299,7 @@ mod phase_trigger_regression_tests {
             valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
         };
 
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::DeclareAttackers {
                 attacks: vec![(bat, AttackTarget::Player(PlayerId(1)))],
@@ -7185,11 +7309,11 @@ mod phase_trigger_regression_tests {
 
         // Skip to combat damage: P0 pass, P1 pass (declare blockers — no blockers),
         // P0 pass, P1 pass (combat damage resolves).
-        apply(&mut state, GameAction::PassPriority).unwrap();
-        apply(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         // Now at declare blockers — P1 declares no blockers
         if matches!(state.waiting_for, WaitingFor::DeclareBlockers { .. }) {
-            apply(
+            apply_as_current(
                 &mut state,
                 GameAction::DeclareBlockers {
                     assignments: vec![],
@@ -7202,7 +7326,7 @@ mod phase_trigger_regression_tests {
             && !matches!(state.waiting_for, WaitingFor::GameOver { .. })
         {
             if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                apply(&mut state, GameAction::PassPriority).unwrap();
+                apply_as_current(&mut state, GameAction::PassPriority).unwrap();
             } else {
                 break;
             }
@@ -7243,7 +7367,7 @@ mod phase_trigger_regression_tests {
         };
 
         // Valid card name succeeds
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::ChooseOption {
                 choice: "Lightning Bolt".to_string(),
@@ -7260,7 +7384,7 @@ mod phase_trigger_regression_tests {
         };
 
         // Invalid card name fails
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::ChooseOption {
                 choice: "Not A Real Card".to_string(),
@@ -7280,7 +7404,7 @@ mod phase_trigger_regression_tests {
             source_id: None,
         };
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::ChooseOption {
                 choice: "lightning bolt".to_string(),
@@ -7328,7 +7452,7 @@ mod phase_trigger_regression_tests {
             description: None,
         };
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::DecideOptionalEffect { accept: true },
         )
@@ -7374,7 +7498,7 @@ mod phase_trigger_regression_tests {
             description: None,
         };
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::DecideOptionalEffect { accept: true },
         )
@@ -7419,7 +7543,8 @@ mod phase_trigger_regression_tests {
             effect_description: None,
         };
 
-        let result = apply(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
+        let result =
+            apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
 
         assert!(matches!(
             result.waiting_for,
@@ -7500,7 +7625,7 @@ mod phase_trigger_regression_tests {
             pending_ability: Box::new(pending_ability),
         };
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::SelectCards {
                 cards: vec![target_id],
@@ -7557,7 +7682,7 @@ mod phase_trigger_regression_tests {
             )),
         ));
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::SelectCards {
                 cards: vec![obj_id],
@@ -7641,7 +7766,8 @@ mod phase_trigger_regression_tests {
             }
         ));
 
-        let result = apply(&mut state, GameAction::SelectCards { cards: vec![p1_a] }).unwrap();
+        let result =
+            apply_as_current(&mut state, GameAction::SelectCards { cards: vec![p1_a] }).unwrap();
 
         assert!(matches!(
             result.waiting_for,
@@ -7725,7 +7851,7 @@ mod phase_trigger_regression_tests {
             source_id: Some(obj_id),
         };
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::ChooseOption {
                 choice: "Red".to_string(),
@@ -7806,7 +7932,7 @@ mod phase_trigger_regression_tests {
         };
 
         // Player chooses to copy Grizzly Bears
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(target_id)),
@@ -7859,7 +7985,7 @@ mod phase_trigger_regression_tests {
         };
 
         // Try to choose invalid target
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(invalid_id)),
@@ -8002,7 +8128,7 @@ mod phase_trigger_regression_tests {
             max_mana_value: None,
         };
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(elesh)),
@@ -8056,7 +8182,7 @@ mod phase_trigger_regression_tests {
             if matches!(state.waiting_for, WaitingFor::Priority { .. }) && state.stack.is_empty() {
                 break;
             }
-            if apply(&mut state, GameAction::PassPriority).is_err() {
+            if apply_as_current(&mut state, GameAction::PassPriority).is_err() {
                 break;
             }
         }
@@ -8180,7 +8306,7 @@ mod phase_trigger_regression_tests {
         // if we only asserted on end-state.
         let mut all_events: Vec<GameEvent> = Vec::new();
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(source_card)),
@@ -8202,7 +8328,7 @@ mod phase_trigger_regression_tests {
                 drained = true;
                 break;
             }
-            match apply(&mut state, GameAction::PassPriority) {
+            match apply_as_current(&mut state, GameAction::PassPriority) {
                 Ok(r) => all_events.extend(r.events),
                 Err(_) => {
                     drained = true;
@@ -8338,7 +8464,7 @@ mod crew_tests {
     fn test_crew_activation_enters_crew_vehicle_state() {
         let (mut state, vehicle_id, creature_a, creature_b) = setup_crew_scenario();
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CrewVehicle {
                 vehicle_id,
@@ -8369,7 +8495,7 @@ mod crew_tests {
         let (mut state, vehicle_id, creature_a, _creature_b) = setup_crew_scenario();
 
         // Activate crew
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::CrewVehicle {
                 vehicle_id,
@@ -8379,7 +8505,7 @@ mod crew_tests {
         .unwrap();
 
         // Resolve with creature_a (power 3 >= crew 3)
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CrewVehicle {
                 vehicle_id,
@@ -8421,7 +8547,7 @@ mod crew_tests {
         state.objects.get_mut(&creature_a).unwrap().base_power = Some(2);
 
         // Activate crew
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::CrewVehicle {
                 vehicle_id,
@@ -8431,7 +8557,7 @@ mod crew_tests {
         .unwrap();
 
         // Resolve with both creatures (2 + 2 = 4 >= 3)
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CrewVehicle {
                 vehicle_id,
@@ -8450,7 +8576,7 @@ mod crew_tests {
         let (mut state, vehicle_id, _creature_a, creature_b) = setup_crew_scenario();
 
         // Activate crew
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::CrewVehicle {
                 vehicle_id,
@@ -8460,7 +8586,7 @@ mod crew_tests {
         .unwrap();
 
         // creature_b has power 2, threshold is 3
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CrewVehicle {
                 vehicle_id,
@@ -8479,7 +8605,7 @@ mod crew_tests {
         state.phase = Phase::BeginCombat;
 
         // Activation should succeed during combat
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CrewVehicle {
                 vehicle_id,
@@ -8491,7 +8617,7 @@ mod crew_tests {
         assert!(matches!(result.waiting_for, WaitingFor::CrewVehicle { .. }));
 
         // Resolution should also succeed
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CrewVehicle {
                 vehicle_id,
@@ -8524,7 +8650,7 @@ mod crew_tests {
             obj.keywords.push(crate::types::keywords::Keyword::Crew(1));
         }
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CrewVehicle {
                 vehicle_id: artifact_id,
@@ -8548,7 +8674,7 @@ mod crew_tests {
             .core_types
             .push(CoreType::Creature);
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CrewVehicle {
                 vehicle_id,
@@ -8673,7 +8799,7 @@ mod mdfc_land_tests {
             make_land_type(),
         );
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::PlayLand {
                 object_id: obj_id,
@@ -8708,7 +8834,7 @@ mod mdfc_land_tests {
         );
 
         // Trigger ModalFaceChoice
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::PlayLand {
                 object_id: obj_id,
@@ -8722,7 +8848,8 @@ mod mdfc_land_tests {
         ));
 
         // Choose back face
-        let result = apply(&mut state, GameAction::ChooseModalFace { back_face: true }).unwrap();
+        let result =
+            apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: true }).unwrap();
 
         // Should return to priority (not another ModalFaceChoice)
         assert!(
@@ -8753,7 +8880,7 @@ mod mdfc_land_tests {
             make_land_type(),
         );
 
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::PlayLand {
                 object_id: obj_id,
@@ -8762,7 +8889,8 @@ mod mdfc_land_tests {
         )
         .unwrap();
 
-        let result = apply(&mut state, GameAction::ChooseModalFace { back_face: false }).unwrap();
+        let result =
+            apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: false }).unwrap();
 
         assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
         let obj = state.objects.get(&obj_id).unwrap();
@@ -8782,7 +8910,7 @@ mod mdfc_land_tests {
             make_land_type(),
         );
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::PlayLand {
                 object_id: obj_id,
@@ -8823,7 +8951,7 @@ mod mdfc_land_tests {
             }
         }
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::PlayLand {
                 object_id: obj_id,
@@ -8861,7 +8989,7 @@ mod mdfc_land_tests {
             Some(LayoutKind::Transform), // Transform, not Modal
         ));
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::PlayLand {
                 object_id: obj_id,
@@ -8891,7 +9019,7 @@ mod mdfc_land_tests {
         );
 
         // Trigger ModalFaceChoice via PlayLand
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::PlayLand {
                 object_id: obj_id,

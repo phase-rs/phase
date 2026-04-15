@@ -72,7 +72,9 @@ describe("useGameDispatch", () => {
       await promise;
     });
 
-    expect(mockAdapter.submitAction).toHaveBeenCalledWith(action);
+    // `dispatchAction` defaults actor to `getPlayerId()` (= 0 in local/AI
+    // mode) — authenticated identity is required by the engine guard.
+    expect(mockAdapter.submitAction).toHaveBeenCalledWith(action, 0);
   });
 
   it("defers state update until after animation duration", async () => {

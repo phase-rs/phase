@@ -825,7 +825,14 @@ export interface EngineAdapter {
     matchConfig?: MatchConfig,
     firstPlayer?: number,
   ): Promise<SubmitResult> | SubmitResult;
-  submitAction(action: GameAction): Promise<SubmitResult>;
+  /**
+   * Submit a game action on behalf of `actor`. The engine enforces that
+   * `actor === authorized_submitter(state)` (with the `Concede` exception),
+   * so a mismatched actor is rejected by the engine. Callers must pass the
+   * locally-authenticated PlayerId — never a value copied out of the
+   * action payload or the UI state.
+   */
+  submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
   getState(): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
   getAiAction(difficulty: string, playerId?: number): Promise<GameAction | null> | GameAction | null;

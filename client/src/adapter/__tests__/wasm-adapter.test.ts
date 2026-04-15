@@ -69,11 +69,11 @@ describe("WasmAdapter", () => {
   describe("submitAction", () => {
     it("throws AdapterError with NOT_INITIALIZED if not initialized", async () => {
       await expect(
-        adapter.submitAction({ type: "PassPriority" }),
+        adapter.submitAction({ type: "PassPriority" }, 0),
       ).rejects.toThrow(AdapterError);
 
       try {
-        await adapter.submitAction({ type: "PassPriority" });
+        await adapter.submitAction({ type: "PassPriority" }, 0);
       } catch (error) {
         expect(error).toBeInstanceOf(AdapterError);
         const adapterError = error as AdapterError;
@@ -84,10 +84,11 @@ describe("WasmAdapter", () => {
 
     it("delegates to worker client", async () => {
       await adapter.initialize();
-      await adapter.submitAction({ type: "PassPriority" });
-      expect(mockWorkerClient.submitAction).toHaveBeenCalledWith({
-        type: "PassPriority",
-      });
+      await adapter.submitAction({ type: "PassPriority" }, 0);
+      expect(mockWorkerClient.submitAction).toHaveBeenCalledWith(
+        0,
+        { type: "PassPriority" },
+      );
     });
   });
 

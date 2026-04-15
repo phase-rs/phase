@@ -13,6 +13,7 @@ import type {
   WaitingFor,
 } from "../adapter/types";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
+import { getPlayerId } from "../hooks/usePlayerId";
 import { loadCheckpoints, saveGame } from "../services/gamePersistence";
 
 /** Map a LegalActionsResult to the store fields it owns — single source of truth. */
@@ -176,7 +177,10 @@ export const useGameStore = create<GameStore>()(
       const shouldSaveHistory =
         UNDOABLE_ACTIONS.has(action.type) && !isMultiplayerMode(gameMode);
 
-      const result = await adapter.submitAction(action);
+      // `getPlayerId()` returns the local human's authenticated seat ID.
+      // The engine rejects the action if this doesn't match the authorized
+      // submitter — never trust the UI to route actions to the right seat.
+      const result = await adapter.submitAction(action, getPlayerId());
       const newState = await adapter.getState();
       const legalResult = await adapter.getLegalActions();
 

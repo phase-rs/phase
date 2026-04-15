@@ -44,6 +44,7 @@ export let currentSnapshot = useAnimationStore.getState().captureSnapshot();
 interface PendingLocalAction {
   kind: "local";
   action: GameAction;
+  actor: number;
   resolve: () => void;
   reject: (err: unknown) => void;
 }
@@ -65,7 +66,7 @@ let isAnimating = false;
 /** Unified queue for local actions and remote state updates. */
 const pendingQueue: PendingWork[] = [];
 
-async function processAction(action: GameAction): Promise<void> {
+async function processAction(action: GameAction, actor: number): Promise<void> {
   const { adapter, gameState } = useGameStore.getState();
   if (!adapter || !gameState) {
     debugLog("processAction called with no adapter or gameState");
@@ -83,8 +84,13 @@ async function processAction(action: GameAction): Promise<void> {
   const shouldSaveHistory =
     UNDOABLE_ACTIONS.has(action.type) && !isMultiplayerMode(gameMode);
 
-  // 3. Call WASM — get events without updating state yet
-  const result = await adapter.submitAction(action);
+  // 3. Call WASM — get events without updating state yet.
+  // `actor` is the authenticated seat ID of whoever initiated this dispatch
+  // (local human from `getPlayerId()`, or an AI seat from `aiController`).
+  // The engine's guard rejects any action whose actor doesn't match the
+  // authorized submitter — so passing the local human's ID during the AI's
+  // turn correctly fails instead of silently applying as the AI.
+  const result = await adapter.submitAction(action, actor);
   const events: GameEvent[] = result.events;
 
   // 3b. Fetch new state eagerly and persist before animations so a mid-animation
@@ -193,7 +199,7 @@ async function processQueue(): Promise<void> {
     const next = pendingQueue.shift()!;
     try {
       if (next.kind === "local") {
-        await processAction(next.action);
+        await processAction(next.action, next.actor);
       } else {
         await processRemoteUpdateInner(next.state, next.events, next.legalResult);
       }
@@ -218,17 +224,30 @@ async function processQueue(): Promise<void> {
  * 6. Update game state in gameStore
  * 7. Release mutex, process next queued action
  */
-export async function dispatchAction(action: GameAction): Promise<void> {
+/**
+ * Dispatch `action` on behalf of `actor`. `actor` defaults to the local
+ * human's seat (`getPlayerId()`); the AI controller overrides it with the
+ * AI seat's PlayerId so the engine accepts the action as coming from that
+ * seat instead of the human.
+ *
+ * The engine itself enforces `actor === authorized_submitter(state)`, so a
+ * misrouted action fails cleanly rather than silently applying as the
+ * wrong player.
+ */
+export async function dispatchAction(
+  action: GameAction,
+  actor: number = getPlayerId(),
+): Promise<void> {
   if (isAnimating) {
     debugLog(`dispatch queued (mutex held): ${action.type}, queue=${pendingQueue.length}`, "warn");
     return new Promise<void>((resolve, reject) => {
-      pendingQueue.push({ kind: "local", action, resolve, reject });
+      pendingQueue.push({ kind: "local", action, actor, resolve, reject });
     });
   }
 
   isAnimating = true;
   try {
-    await processAction(action);
+    await processAction(action, actor);
   } catch (e) {
     debugLog(`dispatch error for ${action.type}: ${e instanceof Error ? e.message : String(e)}`);
     throw e;

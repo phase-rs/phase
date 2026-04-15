@@ -307,8 +307,18 @@ pub fn initialize_game(
 /// applying the action as another player.
 #[wasm_bindgen]
 pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
-    let action: GameAction =
-        serde_wasm_bindgen::from_value(action).expect("Failed to deserialize GameAction");
+    // Deserialize outside `with_state_mut` and use a recoverable error, not
+    // `.expect()`. In WASM, panics do not unwind — a panic *inside*
+    // `with_state_mut` would leave `GAME_STATE` taken-but-not-returned,
+    // permanently bricking the game with "Game not initialized" for every
+    // subsequent call. Callers passing malformed `action` (including stale JS
+    // bindings post-signature-change) now get a clean error instead.
+    let action: GameAction = match serde_wasm_bindgen::from_value(action) {
+        Ok(a) => a,
+        Err(e) => {
+            return JsValue::from_str(&format!("Engine error: failed to deserialize action: {e}"));
+        }
+    };
     let actor = PlayerId(actor);
 
     match with_state_mut(|state| match apply(state, actor, action) {

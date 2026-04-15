@@ -338,7 +338,11 @@ export class P2PHostAdapter implements EngineAdapter {
     return result;
   }
 
-  async submitAction(action: GameAction): Promise<SubmitResult> {
+  async submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult> {
+    // Host's own UI submissions: `actor` is the host's local PlayerId (the
+    // caller — gameStore — derived it from `getPlayerId()`). The host is
+    // the trust boundary for its own actions; the engine's guard still
+    // verifies the actor against `authorized_submitter(state)`.
     if (this.gameRunState !== "running") {
       throw new AdapterError(
         "P2P_PAUSED",
@@ -346,7 +350,7 @@ export class P2PHostAdapter implements EngineAdapter {
         true,
       );
     }
-    const result = await this.wasm.submitAction(action);
+    const result = await this.wasm.submitAction(action, actor);
     await this.broadcastStateUpdate(result.events);
     return result;
   }
@@ -453,7 +457,13 @@ export class P2PHostAdapter implements EngineAdapter {
           return;
         }
         try {
-          const result = await this.wasm.submitAction(msg.action);
+          // CRITICAL: pass `pid` (the session-bound PlayerId), NEVER
+          // `msg.senderPlayerId`. The envelope check above already guarantees
+          // they match, but if we ever regressed that check we must still
+          // tag with the authenticated session identity — the wire payload
+          // is untrusted. This is the defense-in-depth that makes the engine
+          // guard meaningful for P2P.
+          const result = await this.wasm.submitAction(msg.action, pid);
           await this.broadcastStateUpdate(result.events);
           // Emit local stateChanged so host UI updates for opponent actions.
           const state = await this.wasm.getState();
@@ -653,7 +663,10 @@ export class P2PHostAdapter implements EngineAdapter {
         type: "Concede",
         data: { player_id: pid },
       } as unknown as GameAction;
-      const result = await this.wasm.submitAction(concedeAction);
+      // Concede's engine guard requires `actor === player_id`. `pid` is both
+      // the seat being conceded and the authenticated identity we're acting
+      // on behalf of (e.g. grace-expiry or kick).
+      const result = await this.wasm.submitAction(concedeAction, pid);
       await this.broadcastStateUpdate(result.events);
       const state = await this.wasm.getState();
       const legalResult = await this.wasm.getLegalActions();
@@ -855,7 +868,14 @@ export class P2PGuestAdapter implements EngineAdapter {
     return this.gameSetupPromise;
   }
 
-  async submitAction(action: GameAction): Promise<SubmitResult> {
+  async submitAction(action: GameAction, _actor: PlayerId): Promise<SubmitResult> {
+    // `_actor` is unused: the host re-tags the incoming action with the
+    // PlayerId bound to this WebRTC session at join time. `senderPlayerId`
+    // on the wire is kept for the host's envelope-level sanity check
+    // (rejects early with a clear diagnostic) but is NEVER used by the host
+    // as the engine `actor`. If this client were malicious and claimed
+    // another identity, the host would detect the mismatch and drop the
+    // action before touching the engine.
     if (!this.session) {
       throw new AdapterError(
         "P2P_ERROR",

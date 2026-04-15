@@ -73,8 +73,8 @@ pub use deck_validation::{
     DeckCompatibilityRequest, DeckCompatibilityResult, DeckCoverage, UnsupportedCard,
 };
 pub use engine::{
-    apply, new_game, start_game, start_game_skip_mulligan, start_game_with_starting_player,
-    EngineError,
+    apply, apply_as_current, new_game, start_game, start_game_skip_mulligan,
+    start_game_with_starting_player, EngineError,
 };
 pub use game_object::{BackFaceData, GameObject, PhaseOutCause, PhaseStatus};
 pub use keywords::parse_keywords;

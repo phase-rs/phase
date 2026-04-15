@@ -5,6 +5,7 @@ import type {
   GameState,
   LegalActionsResult,
   MatchConfig,
+  PlayerId,
   SubmitResult,
 } from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
@@ -46,10 +47,10 @@ export class TauriAdapter implements EngineAdapter {
     return { events: ar.events ?? [], log_entries: ar.log_entries ?? [] };
   }
 
-  async submitAction(action: GameAction): Promise<SubmitResult> {
+  async submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult> {
     this.assertInitialized();
     try {
-      const result = await this.invoke!("submit_action", { action });
+      const result = await this.invoke!("submit_action", { actor, action });
       const ar = result as ActionResult;
       return { events: ar.events ?? [], log_entries: ar.log_entries ?? [] };
     } catch (error) {

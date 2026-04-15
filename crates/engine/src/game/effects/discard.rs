@@ -713,7 +713,7 @@ mod tests {
 
     #[test]
     fn up_to_discard_allows_zero_selection() {
-        use crate::game::engine::apply;
+        use crate::game::engine::apply_as_current;
         use crate::types::actions::GameAction;
         use crate::types::game_state::WaitingFor;
 
@@ -740,7 +740,7 @@ mod tests {
         };
 
         // Select zero cards — should succeed with up_to=true
-        let result = apply(&mut state, GameAction::SelectCards { cards: vec![] });
+        let result = apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] });
         assert!(
             result.is_ok(),
             "Zero selection should succeed for up_to discard"

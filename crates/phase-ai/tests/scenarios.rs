@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
-use engine::game::engine::apply;
+use engine::game::engine::apply_as_current;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef};
 use engine::types::game_state::{
@@ -187,7 +187,7 @@ fn scenario_priority_choice_remains_reducer_legal() {
         .expect("AI should choose a legal priority action");
 
     let mut sim = runner.state().clone();
-    apply(&mut sim, action).expect("AI-selected action should remain reducer-legal");
+    apply_as_current(&mut sim, action).expect("AI-selected action should remain reducer-legal");
 }
 
 #[test]

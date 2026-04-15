@@ -159,9 +159,9 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         // Submit selection via engine
-        use crate::game::engine::apply;
+        use crate::game::engine::apply_as_current;
         use crate::types::actions::GameAction;
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::SelectCards {
                 cards: vec![selected],
@@ -243,9 +243,9 @@ mod tests {
         assert!(state.pending_continuation.is_some());
 
         // Submit selection
-        use crate::game::engine::apply;
+        use crate::game::engine::apply_as_current;
         use crate::types::actions::GameAction;
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::SelectCards {
                 cards: vec![selected],

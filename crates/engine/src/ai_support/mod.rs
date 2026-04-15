@@ -4,7 +4,7 @@ mod copy;
 
 use std::collections::{HashMap, HashSet};
 
-use crate::game::engine::apply;
+use crate::game::engine::apply_as_current;
 use crate::game::mana_abilities;
 use crate::game::mana_sources;
 use crate::types::ability::AbilityKind;
@@ -29,7 +29,7 @@ pub fn validated_candidate_actions(state: &GameState) -> Vec<CandidateAction> {
         .filter(|candidate| !cheap_reject_candidate(state, &candidate.action))
         .filter(|candidate| {
             let mut sim = state.clone();
-            apply(&mut sim, candidate.action.clone()).is_ok()
+            apply_as_current(&mut sim, candidate.action.clone()).is_ok()
         })
         .collect()
 }

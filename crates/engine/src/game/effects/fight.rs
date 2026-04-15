@@ -429,7 +429,7 @@ mod tests {
     /// AND the second direction (wolf → bear, via pending_continuation) must land.
     #[test]
     fn fight_replacement_accepted_delivers_both_directions() {
-        use crate::game::engine::apply;
+        use crate::game::engine::apply_as_current;
         use crate::game::game_object::GameObject;
         use crate::types::ability::{ReplacementDefinition, ReplacementMode};
         use crate::types::actions::GameAction;
@@ -479,7 +479,7 @@ mod tests {
         };
 
         // Accept the replacement for bear → wolf (first direction).
-        let result = apply(&mut state, GameAction::ChooseReplacement { index: 0 })
+        let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
             .expect("accept replacement");
         let mut all_events = result.events;
 
@@ -492,7 +492,7 @@ mod tests {
         // The continuation (wolf → bear) also triggers the Optional Shield replacement.
         // Accept it so the second direction lands.
         if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
-            let result = apply(&mut state, GameAction::ChooseReplacement { index: 0 })
+            let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
                 .expect("accept second-direction replacement");
             all_events.extend(result.events);
         }

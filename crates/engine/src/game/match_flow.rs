@@ -262,7 +262,7 @@ pub fn handle_choose_play_draw(
 mod tests {
     use super::*;
     use crate::game::deck_loading::PlayerDeckPayload;
-    use crate::game::engine::{apply, start_game};
+    use crate::game::engine::{apply_as_current, start_game};
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
     use crate::types::card_type::{CardType, CoreType};
@@ -462,7 +462,7 @@ mod tests {
             score: state.match_score,
         };
 
-        let submit_p0 = apply(
+        let submit_p0 = apply_as_current(
             &mut state,
             GameAction::SubmitSideboard {
                 main: vec![DeckCardCount {
@@ -484,7 +484,7 @@ mod tests {
             }
         ));
 
-        let submit_p1 = apply(
+        let submit_p1 = apply_as_current(
             &mut state,
             GameAction::SubmitSideboard {
                 main: vec![DeckCardCount {
@@ -506,7 +506,8 @@ mod tests {
             }
         ));
 
-        let choose = apply(&mut state, GameAction::ChoosePlayDraw { play_first: true }).unwrap();
+        let choose =
+            apply_as_current(&mut state, GameAction::ChoosePlayDraw { play_first: true }).unwrap();
 
         assert_eq!(state.match_phase, MatchPhase::InGame);
         assert_eq!(state.match_score.p0_wins, 1);

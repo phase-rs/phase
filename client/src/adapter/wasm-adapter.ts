@@ -5,6 +5,7 @@ import type {
   GameState,
   LegalActionsResult,
   MatchConfig,
+  PlayerId,
   SubmitResult,
 } from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
@@ -87,12 +88,12 @@ export class WasmAdapter implements EngineAdapter {
     }
   }
 
-  async submitAction(action: GameAction): Promise<SubmitResult> {
+  async submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult> {
     this.assertInitialized();
     if (this.engine) {
-      return this.engine.submitAction(action);
+      return this.engine.submitAction(actor, action);
     }
-    return this.fallback!.submitAction(action);
+    return this.fallback!.submitAction(action, actor);
   }
 
   async getState(): Promise<GameState> {
@@ -314,7 +315,7 @@ export class WasmAdapter implements EngineAdapter {
 
 interface MainThreadFallback {
   ensureCardDatabase(): Promise<number>;
-  submitAction(action: GameAction): Promise<SubmitResult>;
+  submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
   getState(): Promise<GameState>;
   getFilteredState(viewerId: number): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
@@ -351,9 +352,9 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
   return {
     ensureCardDatabase: () => cardData.ensureCardDatabase(),
 
-    submitAction: (action: GameAction) =>
+    submitAction: (action: GameAction, actor: PlayerId) =>
       enqueue(() => {
-        const r = wasm.submit_action(action);
+        const r = wasm.submit_action(actor, action);
         if (typeof r === "string") throw new Error(r);
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
       }),

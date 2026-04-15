@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use engine::ai_support::{
     build_decision_context, AiDecisionContext, CandidateAction, TacticalClass,
 };
-use engine::game::engine::apply;
+use engine::game::engine::apply_as_current;
 use engine::game::players;
 use engine::types::game_state::{DayNight, GameState, WaitingFor};
 use engine::types::player::PlayerId;
@@ -304,7 +304,7 @@ impl<'a> PlannerServices<'a> {
                 }
                 _ => {
                     let mut sim = state.clone();
-                    apply(&mut sim, candidate.action.clone()).is_ok()
+                    apply_as_current(&mut sim, candidate.action.clone()).is_ok()
                 }
             })
             .collect()
@@ -439,7 +439,9 @@ impl<'a> PlannerServices<'a> {
                 .iter()
                 .all(|c| matches!(c.action, engine::types::actions::GameAction::PassPriority));
             if all_pass {
-                if apply(&mut sim, engine::types::actions::GameAction::PassPriority).is_err() {
+                if apply_as_current(&mut sim, engine::types::actions::GameAction::PassPriority)
+                    .is_err()
+                {
                     break;
                 }
                 continue;
@@ -447,7 +449,7 @@ impl<'a> PlannerServices<'a> {
 
             // Case 2: Only one legal action — apply it (forced move)
             if ctx.candidates.len() == 1 {
-                if apply(&mut sim, ctx.candidates[0].action.clone()).is_err() {
+                if apply_as_current(&mut sim, ctx.candidates[0].action.clone()).is_err() {
                     break;
                 }
                 continue;
@@ -460,7 +462,7 @@ impl<'a> PlannerServices<'a> {
             if let Some(action) =
                 crate::search::deterministic_choice(&sim, acting_player, self.config, &actions)
             {
-                if apply(&mut sim, action).is_err() {
+                if apply_as_current(&mut sim, action).is_err() {
                     break;
                 }
                 continue;
@@ -779,7 +781,7 @@ where
 
 pub fn apply_candidate(state: &GameState, candidate: &CandidateAction) -> Option<GameState> {
     let mut sim = state.clone();
-    apply(&mut sim, candidate.action.clone()).ok()?;
+    apply_as_current(&mut sim, candidate.action.clone()).ok()?;
     Some(sim)
 }
 

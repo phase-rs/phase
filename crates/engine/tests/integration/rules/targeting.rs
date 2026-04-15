@@ -139,7 +139,7 @@ fn no_legal_targets_prevents_casting() {
     }
 
     // Try to cast with no creatures on the battlefield
-    let result = engine::game::apply(
+    let result = engine::game::apply_as_current(
         &mut state,
         GameAction::CastSpell {
             object_id: obj_id,

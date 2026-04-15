@@ -212,7 +212,7 @@ fn assert_assign_combat_damage_actions_respect_budget(state: &GameState) {
 fn assert_all_legal_actions_apply(state: &GameState) {
     for action in legal_actions(state) {
         let mut sim = state.clone();
-        apply(&mut sim, action.clone()).unwrap_or_else(|err| {
+        apply_as_current(&mut sim, action.clone()).unwrap_or_else(|err| {
             panic!(
                 "legal action {} should remain reducer-legal: {err}",
                 action.variant_name()
@@ -233,7 +233,8 @@ fn exercise_state(mut state: GameState, picks: &[u8], max_steps: usize) {
         }
 
         let choice = picks[step % picks.len()] as usize % actions.len();
-        apply(&mut state, actions[choice].clone()).expect("chosen legal action should apply");
+        apply_as_current(&mut state, actions[choice].clone())
+            .expect("chosen legal action should apply");
     }
 
     assert_zone_consistency(&state);
@@ -270,6 +271,6 @@ fn generated_priority_actions_remain_reducer_legal_in_default_opening_state() {
     let state = GameState::new_two_player(42);
     assert!(legal_actions(&state).iter().all(|action| {
         let mut sim = state.clone();
-        apply(&mut sim, action.clone()).is_ok()
+        apply_as_current(&mut sim, action.clone()).is_ok()
     }));
 }

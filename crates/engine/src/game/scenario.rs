@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::database::synthesis::synthesize_all;
-use crate::game::engine::{apply, EngineError};
+use crate::game::engine::{apply_as_current, EngineError};
 use crate::game::game_object::GameObject;
 use crate::game::printed_cards::apply_card_face_to_object;
 use crate::game::zones::create_object;
@@ -873,7 +873,7 @@ pub struct GameRunner {
 impl GameRunner {
     /// Execute a single action. Returns the `ActionResult` from the engine.
     pub fn act(&mut self, action: GameAction) -> Result<ActionResult, EngineError> {
-        apply(&mut self.state, action)
+        apply_as_current(&mut self.state, action)
     }
 
     /// Get a reference to the current game state.
@@ -895,7 +895,7 @@ impl GameRunner {
             if matches!(self.state.waiting_for, WaitingFor::Priority { .. }) {
                 break;
             }
-            if apply(&mut self.state, GameAction::PassPriority).is_err() {
+            if apply_as_current(&mut self.state, GameAction::PassPriority).is_err() {
                 break;
             }
         }
@@ -904,8 +904,8 @@ impl GameRunner {
     /// Pass priority for both players (P0 then P1, or whichever order is appropriate).
     pub fn pass_both_players(&mut self) {
         // Pass twice -- once for each player
-        let _ = apply(&mut self.state, GameAction::PassPriority);
-        let _ = apply(&mut self.state, GameAction::PassPriority);
+        let _ = apply_as_current(&mut self.state, GameAction::PassPriority);
+        let _ = apply_as_current(&mut self.state, GameAction::PassPriority);
     }
 
     /// Pass priority until the top of the stack resolves.
@@ -916,7 +916,7 @@ impl GameRunner {
             if self.state.stack.len() < initial_stack_len {
                 break;
             }
-            if apply(&mut self.state, GameAction::PassPriority).is_err() {
+            if apply_as_current(&mut self.state, GameAction::PassPriority).is_err() {
                 break;
             }
         }
@@ -928,7 +928,7 @@ impl GameRunner {
             if self.state.stack.is_empty() {
                 break;
             }
-            if apply(&mut self.state, GameAction::PassPriority).is_err() {
+            if apply_as_current(&mut self.state, GameAction::PassPriority).is_err() {
                 break;
             }
         }
@@ -949,7 +949,7 @@ impl GameRunner {
                         "no legal target available for required slot".to_string(),
                     ));
                 }
-                apply(&mut self.state, GameAction::ChooseTarget { target })
+                apply_as_current(&mut self.state, GameAction::ChooseTarget { target })
             }
             WaitingFor::TriggerTargetSelection {
                 target_slots,
@@ -963,7 +963,7 @@ impl GameRunner {
                         "no legal target available for required trigger slot".to_string(),
                     ));
                 }
-                apply(&mut self.state, GameAction::ChooseTarget { target })
+                apply_as_current(&mut self.state, GameAction::ChooseTarget { target })
             }
             _ => Err(EngineError::InvalidAction(
                 "choose_first_legal_target requires a targeting waiting state".to_string(),
@@ -1103,7 +1103,7 @@ impl GameRunner {
     pub fn run(&mut self, actions: Vec<GameAction>) -> ScenarioResult {
         let mut all_events = Vec::new();
         for action in actions {
-            match apply(&mut self.state, action) {
+            match apply_as_current(&mut self.state, action) {
                 Ok(result) => {
                     all_events.extend(result.events);
                 }

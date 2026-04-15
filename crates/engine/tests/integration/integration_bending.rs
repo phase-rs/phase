@@ -232,7 +232,7 @@ fn test_waterbending_zone_check() {
         convoke_mode: Some(ConvokeMode::Waterbend),
     };
 
-    let result = engine::game::engine::apply(
+    let result = engine::game::engine::apply_as_current(
         &mut state,
         GameAction::TapForConvoke {
             object_id: creature_id,
@@ -850,7 +850,7 @@ fn test_elemental_bend_all_four_types_tracked() {
 /// must complete and the game must return to a valid Priority state.
 #[test]
 fn test_search_changezone_shuffle_continuation_completes() {
-    use engine::game::engine::apply;
+    use engine::game::engine::apply_as_current;
     use engine::game::stack;
     use engine::types::card_type::Supertype;
 
@@ -991,9 +991,9 @@ fn test_search_changezone_shuffle_continuation_completes() {
     assert_eq!(state.stack.len(), 1, "trigger should be on the stack");
 
     // Both players pass priority → resolve_top fires
-    let _r1 = apply(&mut state, GameAction::PassPriority).expect("P0 pass");
+    let _r1 = apply_as_current(&mut state, GameAction::PassPriority).expect("P0 pass");
     // P0 passed, now P1 passes
-    let _r2 = apply(&mut state, GameAction::PassPriority).expect("P1 pass");
+    let _r2 = apply_as_current(&mut state, GameAction::PassPriority).expect("P1 pass");
 
     // After both pass, the trigger resolves: SearchLibrary sets SearchChoice
     assert!(
@@ -1008,7 +1008,8 @@ fn test_search_changezone_shuffle_continuation_completes() {
 
     // Select the Forest from the search
     let chosen = vec![lib_land_id];
-    apply(&mut state, GameAction::SelectCards { cards: chosen }).expect("select card from search");
+    apply_as_current(&mut state, GameAction::SelectCards { cards: chosen })
+        .expect("select card from search");
 
     // The continuation (ChangeZone + Shuffle) should have completed.
     // The game should be in a valid Priority state (possibly with triggers on stack).
@@ -1056,7 +1057,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
 /// fires from the searched land entering and appears stuck on the stack.
 #[test]
 fn test_earthbender_ascension_etb_completes_with_landfall() {
-    use engine::game::engine::apply;
+    use engine::game::engine::apply_as_current;
     use engine::game::stack;
     use engine::types::card_type::Supertype;
     use engine::types::triggers::TriggerMode;
@@ -1344,8 +1345,8 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
     stack::push_to_stack(&mut state, entry, &mut vec![]);
 
     // Both players pass → ETB trigger resolves
-    apply(&mut state, GameAction::PassPriority).expect("P0 pass");
-    apply(&mut state, GameAction::PassPriority).expect("P1 pass");
+    apply_as_current(&mut state, GameAction::PassPriority).expect("P0 pass");
+    apply_as_current(&mut state, GameAction::PassPriority).expect("P1 pass");
 
     // Should now be in SearchChoice
     assert!(
@@ -1359,7 +1360,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
     );
 
     // Select the Forest from search
-    let select_result = apply(
+    let select_result = apply_as_current(
         &mut state,
         GameAction::SelectCards {
             cards: vec![lib_land_id],
@@ -1401,14 +1402,14 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
     {
         match &state.waiting_for {
             WaitingFor::Priority { .. } => {
-                apply(&mut state, GameAction::PassPriority).unwrap_or_else(|e| {
+                apply_as_current(&mut state, GameAction::PassPriority).unwrap_or_else(|e| {
                     panic!("Pass priority failed at iteration {}: {:?}", safety, e)
                 });
             }
             WaitingFor::TriggerTargetSelection { target_slots, .. } => {
                 // Select the first legal target for the P1P1 counter effect
                 let target = target_slots[0].legal_targets[0].clone();
-                apply(
+                apply_as_current(
                     &mut state,
                     GameAction::SelectTargets {
                         targets: vec![target],
@@ -1438,7 +1439,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
 /// return to normal priority with an empty stack.
 #[test]
 fn test_earthbender_landfall_trigger_resolves_without_hang() {
-    use engine::game::engine::apply;
+    use engine::game::engine::apply_as_current;
     use engine::types::ability::{AbilityCondition, AbilityKind, Comparator, QuantityRef};
     use engine::types::triggers::TriggerMode;
     use engine::types::TriggerDefinition;
@@ -1542,7 +1543,7 @@ fn test_earthbender_landfall_trigger_resolves_without_hang() {
 
     // Step 1: Play the land
     let card_id = state.objects.get(&land_id).unwrap().card_id;
-    let result = apply(
+    let result = apply_as_current(
         &mut state,
         GameAction::PlayLand {
             object_id: land_id,
@@ -1578,9 +1579,10 @@ fn test_earthbender_landfall_trigger_resolves_without_hang() {
                     player.0,
                     state.stack.len()
                 );
-                let r = apply(&mut state, GameAction::PassPriority).unwrap_or_else(|e| {
-                    panic!("PassPriority failed at iteration {}: {:?}", safety, e)
-                });
+                let r =
+                    apply_as_current(&mut state, GameAction::PassPriority).unwrap_or_else(|e| {
+                        panic!("PassPriority failed at iteration {}: {:?}", safety, e)
+                    });
                 for ev in &r.events {
                     eprintln!("    event: {:?}", ev);
                 }
@@ -1645,7 +1647,7 @@ fn test_earthbender_landfall_trigger_resolves_without_hang() {
 /// on the stack.
 #[test]
 fn test_ai_passes_priority_on_earthbender_landfall() {
-    use engine::game::engine::apply;
+    use engine::game::engine::apply_as_current;
     use engine::types::ability::{AbilityCondition, AbilityKind, Comparator, QuantityRef};
     use engine::types::triggers::TriggerMode;
     use engine::types::TriggerDefinition;
@@ -1745,7 +1747,7 @@ fn test_ai_passes_priority_on_earthbender_landfall() {
 
     // Play the land → Landfall trigger fires
     let card_id = state.objects.get(&land_id).unwrap().card_id;
-    apply(
+    apply_as_current(
         &mut state,
         GameAction::PlayLand {
             object_id: land_id,
@@ -1765,7 +1767,7 @@ fn test_ai_passes_priority_on_earthbender_landfall() {
     );
 
     // Simulate human passing priority
-    apply(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     assert!(
         matches!(state.waiting_for, WaitingFor::Priority { player } if player == PlayerId(1)),
         "AI should have priority after human passes, got {:?}",
@@ -1785,7 +1787,7 @@ fn test_ai_passes_priority_on_earthbender_landfall() {
     );
 
     // AI passes priority
-    let result = apply(&mut state, GameAction::PassPriority);
+    let result = apply_as_current(&mut state, GameAction::PassPriority);
     assert!(
         result.is_ok(),
         "AI's chosen action should be valid: {:?}",

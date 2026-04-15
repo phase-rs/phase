@@ -63,7 +63,10 @@ pub fn run_ai_actions(
             }
         };
 
-        match apply(state, action.clone()) {
+        // `actor` is the AI's authenticated PlayerId — we selected the action
+        // for this seat and the engine's guard will reject if turn-decision
+        // control has shifted in the meantime.
+        match apply(state, actor, action.clone()) {
             Ok(result) => {
                 results.push(AiActionResult {
                     action,

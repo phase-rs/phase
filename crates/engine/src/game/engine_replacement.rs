@@ -566,7 +566,7 @@ fn resolved_ability_from_definition(
 mod tests {
     use super::super::game_object::GameObject;
     use super::*;
-    use crate::game::engine::apply;
+    use crate::game::engine::apply_as_current;
     use crate::game::replacement::{self as replacement_mod, ReplacementResult};
     use crate::game::zones::create_object;
     use crate::types::ability::{ReplacementDefinition, ReplacementMode};
@@ -639,7 +639,7 @@ mod tests {
         state.priority_player = player;
 
         // Accept the replacement — counters must land on the target.
-        apply(&mut state, GameAction::ChooseReplacement { index: 0 }).expect("accept");
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).expect("accept");
 
         let counters_on_target = *state.objects[&target]
             .counters
@@ -672,7 +672,7 @@ mod tests {
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
         state.priority_player = player;
 
-        apply(&mut state, GameAction::ChooseReplacement { index: 0 }).expect("accept");
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).expect("accept");
 
         assert!(
             state.objects[&target].tapped,
@@ -779,7 +779,7 @@ mod tests {
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
         state.priority_player = player;
 
-        apply(&mut state, GameAction::ChooseReplacement { index: 0 }).expect("accept");
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).expect("accept");
 
         // Victim left the battlefield.
         assert!(
@@ -939,7 +939,7 @@ mod tests {
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
         state.priority_player = player;
 
-        apply(&mut state, GameAction::ChooseReplacement { index: 0 }).expect("accept");
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).expect("accept");
 
         // Exactly one new battlefield object was created.
         let new_ids: Vec<_> = state

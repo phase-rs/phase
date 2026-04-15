@@ -118,8 +118,8 @@ export class EngineWorkerClient {
     });
   }
 
-  async submitAction(action: GameAction): Promise<SubmitResult> {
-    return this.request<SubmitResult>({ type: "submitAction", action });
+  async submitAction(actor: number, action: GameAction): Promise<SubmitResult> {
+    return this.request<SubmitResult>({ type: "submitAction", actor, action });
   }
 
   async getState(): Promise<GameState> {

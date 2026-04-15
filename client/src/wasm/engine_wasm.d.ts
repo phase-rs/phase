@@ -142,9 +142,18 @@ export function select_action_from_scores(scores_json: string, difficulty: strin
 export function set_multiplayer_mode(enabled: boolean): void;
 
 /**
- * Submit a game action and return the ActionResult (events + waiting_for).
+ * Submit a game action on behalf of `actor` and return the ActionResult
+ * (events + waiting_for).
+ *
+ * **Security contract:** `actor` must be the transport-authenticated
+ * `PlayerId` of the caller — either the local human's seat (in local/AI
+ * games) or the connection-authenticated seat (in P2P/WebSocket games).
+ * It must *never* come from UI or wire payload data. The engine rejects any
+ * action whose `actor` does not match `authorized_submitter(state)`, so
+ * passing a spoofed value here will fail cleanly rather than silently
+ * applying the action as another player.
  */
-export function submit_action(action: any): any;
+export function submit_action(actor: number, action: any): any;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
@@ -164,7 +173,7 @@ export interface InitOutput {
     readonly restore_game_state: (a: number, b: number) => [number, number];
     readonly select_action_from_scores: (a: number, b: number, c: number, d: number, e: bigint) => [number, number, number];
     readonly set_multiplayer_mode: (a: number) => void;
-    readonly submit_action: (a: any) => any;
+    readonly submit_action: (a: number, b: any) => any;
     readonly get_game_state: () => any;
     readonly get_legal_actions_js: () => any;
     readonly init_panic_hook: () => void;

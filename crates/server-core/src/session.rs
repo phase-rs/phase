@@ -548,9 +548,13 @@ impl SessionManager {
         // Set player names for log resolution
         session.state.log_player_names = session.display_names.clone();
 
-        // Apply action
+        // Apply action. `player` is the PlayerId authenticated from the
+        // WebSocket session (resolved from the join token) — never from the
+        // action payload. The engine's guard in `apply` enforces
+        // `player == authorized_submitter(state)`, so a spoofed action at the
+        // wire is rejected inside the engine as well as here.
         let action_type = action.variant_name();
-        let result = apply(&mut session.state, action).map_err(|e| {
+        let result = apply(&mut session.state, player, action).map_err(|e| {
             warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
             format!("Engine error: {}", e)
         })?;

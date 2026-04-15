@@ -81,7 +81,10 @@ export function createAIController(config: AIControllerConfig): AIController {
       // Guard against re-entry: set pending so subscription callbacks during
       // the fallback dispatch don't trigger another fallback cascade.
       pending = true;
-      dispatchAction(fallback)
+      // Dispatch the fallback as the AI seat that's being unstuck — NEVER
+      // as the local human. The engine guard would reject a human-seat actor
+      // while the WaitingFor belongs to the AI.
+      dispatchAction(fallback, waitingFor.data.player)
         .then(() => {
           consecutiveFailures = 0;
         })
@@ -141,7 +144,10 @@ export function createAIController(config: AIControllerConfig): AIController {
           failed = true;
           return;
         }
-        await dispatchAction(action);
+        // Pass `playerId` (the AI seat we're driving) as actor. The engine
+        // guard in `apply` verifies actor matches the authorized submitter;
+        // dispatching as the human here would be rejected.
+        await dispatchAction(action, playerId);
         // Successful dispatch — reset failure counter
         consecutiveFailures = 0;
       } catch (e) {

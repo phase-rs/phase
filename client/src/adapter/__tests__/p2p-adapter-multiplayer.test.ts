@@ -258,7 +258,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     await adapter.initializeGame();
     mockGetFilteredState.mockClear();
 
-    await adapter.submitAction({ type: "PassPriority" });
+    await adapter.submitAction({ type: "PassPriority" }, 0);
 
     // One filtered-state lookup per connected guest (host doesn't need one
     // for itself — local state is authoritative).
@@ -302,6 +302,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         type: "Concede",
         data: { player_id: 1 },
       }),
+      1,
     );
   });
 
@@ -376,6 +377,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         type: "Concede",
         data: { player_id: 1 },
       }),
+      1,
     );
 
     // Attempt reconnect with the kicked token → reconnect_rejected.
@@ -501,7 +503,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
 
     g1.simulateClose();
     // Now in paused-disconnect.
-    await expect(adapter.submitAction({ type: "PassPriority" })).rejects.toThrow(
+    await expect(adapter.submitAction({ type: "PassPriority" }, 0)).rejects.toThrow(
       /paused-disconnect/,
     );
   });

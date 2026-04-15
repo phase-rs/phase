@@ -224,7 +224,12 @@ export class WebSocketAdapter implements EngineAdapter {
     });
   }
 
-  async submitAction(action: GameAction): Promise<SubmitResult> {
+  async submitAction(action: GameAction, _actor: PlayerId): Promise<SubmitResult> {
+    // `_actor` is the local player's PlayerId. The WebSocket wire format
+    // intentionally omits it — the server derives the authoritative actor
+    // from the join-token-authenticated session, never from the payload.
+    // A client-supplied actor here would provide zero additional safety and
+    // only creates a spoofing surface if it were ever put on the wire.
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
     }

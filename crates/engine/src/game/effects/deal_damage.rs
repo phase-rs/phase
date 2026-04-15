@@ -1717,7 +1717,7 @@ mod tests {
     /// same way they do on the non-pause tail.
     #[test]
     fn damage_all_replacement_accepted_emits_parent_effect_resolved() {
-        use crate::game::engine::apply;
+        use crate::game::engine::apply_as_current;
         use crate::types::actions::GameAction;
 
         let mut state = GameState::new_two_player(1);
@@ -1791,7 +1791,7 @@ mod tests {
         ));
 
         // Accept the replacement — the drain resolves the chain and emits DamageAll.
-        let result = apply(&mut state, GameAction::ChooseReplacement { index: 0 })
+        let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
             .expect("accept DamageAll replacement");
         let damage_all_events = result
             .events
@@ -1821,7 +1821,7 @@ mod tests {
     /// re-emit `EffectKind::DamageEachPlayer` after the drain.
     #[test]
     fn damage_each_player_replacement_accepted_emits_parent_effect_resolved() {
-        use crate::game::engine::apply;
+        use crate::game::engine::apply_as_current;
         use crate::types::ability::PlayerFilter;
         use crate::types::actions::GameAction;
 
@@ -1867,7 +1867,7 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
 
-        let result = apply(&mut state, GameAction::ChooseReplacement { index: 0 })
+        let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
             .expect("accept DamageEachPlayer replacement");
         let each_player_events = result
             .events

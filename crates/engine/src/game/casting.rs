@@ -3391,7 +3391,7 @@ mod tests {
     /// payment proceeds against the now-definite total.
     #[test]
     fn x_cost_spell_prompts_for_x_then_pays_concretized_cost() {
-        use super::super::engine::apply;
+        use super::super::engine::apply_as_current;
         use crate::types::ability::QuantityRef;
 
         let mut state = setup_game_at_main_phase();
@@ -3428,7 +3428,7 @@ mod tests {
         add_mana(&mut state, PlayerId(0), ManaType::Green, 5);
 
         // Cast — expect ChooseXValue (not ManaPayment).
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: obj_id,
@@ -3458,7 +3458,7 @@ mod tests {
         // hybrid/Phyrexian shards and convoke is inactive, `enter_payment_step`
         // classifies payment as Unambiguous and auto-finalizes — the spell goes
         // straight to the stack without a `ManaPayment` round trip.
-        let result = apply(&mut state, GameAction::ChooseX { value: 3 }).unwrap();
+        let result = apply_as_current(&mut state, GameAction::ChooseX { value: 3 }).unwrap();
         assert!(
             !matches!(result.waiting_for, WaitingFor::ManaPayment { .. }),
             "auto-pay should skip ManaPayment for unambiguous concretized costs"
@@ -3485,7 +3485,7 @@ mod tests {
             if state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                 break;
             }
-            let _ = apply(&mut state, GameAction::PassPriority).unwrap();
+            let _ = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         }
         let hand_after = state.players[0].hand.len();
         assert_eq!(
@@ -3497,7 +3497,7 @@ mod tests {
     /// CR 601.2f: Player can cancel a cast before committing to an X value.
     #[test]
     fn x_cost_cancellation_returns_to_priority() {
-        use super::super::engine::apply;
+        use super::super::engine::apply_as_current;
         use crate::types::ability::QuantityRef;
 
         let mut state = setup_game_at_main_phase();
@@ -3528,7 +3528,7 @@ mod tests {
         }
         add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: obj_id,
@@ -3542,7 +3542,7 @@ mod tests {
             WaitingFor::ChooseXValue { .. }
         ));
 
-        let result = apply(&mut state, GameAction::CancelCast).unwrap();
+        let result = apply_as_current(&mut state, GameAction::CancelCast).unwrap();
         assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
         assert!(state.pending_cast.is_none());
         assert!(!state.players[0].hand.is_empty(), "spell returned to hand");
@@ -3553,7 +3553,7 @@ mod tests {
     /// (not the deprecated last_named_choice fallback).
     #[test]
     fn x_cost_deal_x_damage_lands_for_chosen_x() {
-        use super::super::engine::apply;
+        use super::super::engine::apply_as_current;
         use crate::types::ability::{QuantityRef, TargetFilter};
 
         let mut state = setup_game_at_main_phase();
@@ -3602,7 +3602,7 @@ mod tests {
         }
         add_mana(&mut state, PlayerId(0), ManaType::Red, 5);
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: obj_id,
@@ -3617,7 +3617,7 @@ mod tests {
         ));
 
         // Select the creature as target — flow then advances to ChooseXValue.
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::SelectTargets {
                 targets: vec![crate::types::ability::TargetRef::Object(creature)],
@@ -3630,14 +3630,14 @@ mod tests {
         };
         assert_eq!(max, 4, "pool=5 minus fixed R=1 should bound X at 4");
 
-        apply(&mut state, GameAction::ChooseX { value: 4 }).unwrap();
+        apply_as_current(&mut state, GameAction::ChooseX { value: 4 }).unwrap();
 
         // Drive priority passes until the stack resolves.
         for _ in 0..5 {
             if state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                 break;
             }
-            let _ = apply(&mut state, GameAction::PassPriority).unwrap();
+            let _ = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         }
 
         // X=4 damage applied to a 5-toughness creature — marked damage or destroyed.
@@ -3659,7 +3659,7 @@ mod tests {
     /// or cancel (CR 601.2f).
     #[test]
     fn x_cost_pass_priority_rejected_during_choose_x() {
-        use super::super::engine::apply;
+        use super::super::engine::apply_as_current;
         use crate::types::ability::QuantityRef;
 
         let mut state = setup_game_at_main_phase();
@@ -3690,7 +3690,7 @@ mod tests {
         }
         add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
 
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: obj_id,
@@ -3701,7 +3701,7 @@ mod tests {
         .unwrap();
         assert!(matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }));
 
-        let result = apply(&mut state, GameAction::PassPriority);
+        let result = apply_as_current(&mut state, GameAction::PassPriority);
         assert!(
             result.is_err(),
             "PassPriority must be rejected during ChooseXValue"
@@ -3743,7 +3743,7 @@ mod tests {
         }
         add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
 
-        super::super::engine::apply(
+        super::super::engine::apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: obj_id,
@@ -3835,7 +3835,7 @@ mod tests {
     /// ManaPayment completes — not during the announce-X phase.
     #[test]
     fn x_cost_activated_composite_tap_prompts_for_x_and_taps_on_resolution() {
-        use super::super::engine::apply;
+        use super::super::engine::apply_as_current;
         use crate::types::ability::{AbilityCost, QuantityRef};
 
         let mut state = setup_game_at_main_phase();
@@ -3876,7 +3876,7 @@ mod tests {
         add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
 
         // Activate — expect ChooseXValue, source not yet tapped.
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::ActivateAbility {
                 source_id: source,
@@ -3904,7 +3904,7 @@ mod tests {
         // `enter_payment_step` auto-finalizes: mana pays, the deferred Tap
         // activation cost fires, and the ability lands on the stack — all within
         // the single `ChooseX` action, no intermediate `ManaPayment` round trip.
-        apply(&mut state, GameAction::ChooseX { value: 1 }).unwrap();
+        apply_as_current(&mut state, GameAction::ChooseX { value: 1 }).unwrap();
         assert!(
             !matches!(state.waiting_for, WaitingFor::ManaPayment { .. }),
             "auto-pay should skip ManaPayment when the concretized cost is unambiguous"
@@ -3971,7 +3971,7 @@ mod tests {
         add_mana(&mut state, PlayerId(0), ManaType::Green, 1);
         add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
 
-        super::super::engine::apply(
+        super::super::engine::apply_as_current(
             &mut state,
             GameAction::ActivateAbility {
                 source_id: source,
@@ -4009,7 +4009,7 @@ mod tests {
     /// a {X}{2}{G} spell raises the affordable X by 1.
     #[test]
     fn x_cost_accounts_for_pending_cost_reduction_in_max() {
-        use super::super::engine::apply;
+        use super::super::engine::apply_as_current;
         use crate::types::ability::QuantityRef;
         use crate::types::game_state::PendingSpellCostReduction;
 
@@ -4050,7 +4050,7 @@ mod tests {
                 spell_filter: None,
             });
 
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: obj_id,
@@ -4073,7 +4073,7 @@ mod tests {
     /// must divide remaining capacity by the X-count.
     #[test]
     fn x_cost_double_x_max_divides_by_count() {
-        use super::super::engine::apply;
+        use super::super::engine::apply_as_current;
         use crate::types::ability::QuantityRef;
 
         let mut state = setup_game_at_main_phase();
@@ -4104,7 +4104,7 @@ mod tests {
         }
         add_mana(&mut state, PlayerId(0), ManaType::Colorless, 7);
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: obj_id,
@@ -4124,7 +4124,7 @@ mod tests {
     /// Invalid X values (exceeding max) must be rejected.
     #[test]
     fn x_cost_rejects_value_above_max() {
-        use super::super::engine::apply;
+        use super::super::engine::apply_as_current;
         use crate::types::ability::QuantityRef;
 
         let mut state = setup_game_at_main_phase();
@@ -4155,7 +4155,7 @@ mod tests {
         }
         add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
 
-        apply(
+        apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: obj_id,
@@ -4166,7 +4166,7 @@ mod tests {
         .unwrap();
 
         // Pool of 2, no free producers → max X = 2. Requesting 5 must fail.
-        let result = apply(&mut state, GameAction::ChooseX { value: 5 });
+        let result = apply_as_current(&mut state, GameAction::ChooseX { value: 5 });
         assert!(result.is_err(), "ChooseX above max should error");
         // State remains in ChooseXValue.
         assert!(matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }));
@@ -4800,7 +4800,7 @@ mod tests {
 
     #[test]
     fn cancel_cast_during_target_selection_returns_to_priority() {
-        use crate::game::engine::apply;
+        use crate::game::engine::apply_as_current;
         use crate::types::actions::GameAction;
 
         let mut state = setup_game_at_main_phase();
@@ -4826,7 +4826,7 @@ mod tests {
         }
 
         // Cast the spell -> should enter TargetSelection
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: obj_id,
@@ -4850,7 +4850,7 @@ mod tests {
         // CR 601.2i: Cancel -> the placeholder stack entry is popped and the
         // card remains in hand (no zone revert needed because no zone change
         // has been committed yet).
-        let result = apply(&mut state, GameAction::CancelCast).unwrap();
+        let result = apply_as_current(&mut state, GameAction::CancelCast).unwrap();
         assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
         assert!(state.stack.is_empty());
         assert!(!state.players[0].hand.is_empty());
@@ -4862,7 +4862,7 @@ mod tests {
     /// exercises the stack-at-announcement invariant during TargetSelection.
     #[test]
     fn spell_is_on_stack_during_target_selection() {
-        use crate::game::engine::apply;
+        use crate::game::engine::apply_as_current;
         use crate::types::actions::GameAction;
 
         let mut state = setup_game_at_main_phase();
@@ -4887,7 +4887,7 @@ mod tests {
                 .push(CoreType::Creature);
         }
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: obj_id,
@@ -4929,7 +4929,7 @@ mod tests {
     /// the PendingCast on outer `GameState::pending_cast`.
     #[test]
     fn cancel_cast_from_mana_payment_pops_stack_entry() {
-        use crate::game::engine::apply;
+        use crate::game::engine::apply_as_current;
         use crate::types::actions::GameAction;
 
         let mut state = setup_game_at_main_phase();
@@ -4974,7 +4974,7 @@ mod tests {
         }
         add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
 
-        let result = apply(
+        let result = apply_as_current(
             &mut state,
             GameAction::CastSpell {
                 object_id: obj_id,
@@ -4987,7 +4987,7 @@ mod tests {
         assert_eq!(state.stack.len(), 1);
         assert!(state.pending_cast.is_some());
 
-        let result = apply(&mut state, GameAction::CancelCast).unwrap();
+        let result = apply_as_current(&mut state, GameAction::CancelCast).unwrap();
         assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
         assert!(state.stack.is_empty());
         assert!(state.pending_cast.is_none());
@@ -8551,7 +8551,7 @@ mod tests {
     /// to `Priority`; life is unchanged if `PayMana` was chosen.
     #[test]
     fn phyrexian_engine_round_trip_dispatcher() {
-        use crate::game::engine::apply;
+        use crate::game::engine::apply_as_current;
         use crate::types::game_state::{ShardChoice, ShardOptions};
 
         let mut state = setup_game_at_main_phase();
@@ -8569,7 +8569,7 @@ mod tests {
             card_id: CardId(0x9117),
             targets: Vec::new(),
         };
-        let result = apply(&mut state, cast).expect("announce cast");
+        let result = apply_as_current(&mut state, cast).expect("announce cast");
         match &result.waiting_for {
             crate::types::game_state::WaitingFor::PhyrexianPayment { shards, .. } => {
                 assert_eq!(shards.len(), 1);
@@ -8582,7 +8582,7 @@ mod tests {
         let submit = GameAction::SubmitPhyrexianChoices {
             choices: vec![ShardChoice::PayMana],
         };
-        let result = apply(&mut state, submit).expect("submit choices");
+        let result = apply_as_current(&mut state, submit).expect("submit choices");
         assert_eq!(
             state.players[0].life, life_before,
             "PayMana keeps life unchanged"
@@ -8597,7 +8597,7 @@ mod tests {
     /// CR 107.4f + CR 601.2f + CR 118.3: Engine round-trip — submitting PayLife deducts 2 life.
     #[test]
     fn phyrexian_engine_round_trip_pay_life() {
-        use crate::game::engine::apply;
+        use crate::game::engine::apply_as_current;
         use crate::types::game_state::ShardChoice;
 
         let mut state = setup_game_at_main_phase();
@@ -8615,11 +8615,11 @@ mod tests {
             card_id: CardId(0x9117),
             targets: Vec::new(),
         };
-        let _ = apply(&mut state, cast).expect("announce cast");
+        let _ = apply_as_current(&mut state, cast).expect("announce cast");
         let submit = GameAction::SubmitPhyrexianChoices {
             choices: vec![ShardChoice::PayLife],
         };
-        let _ = apply(&mut state, submit).expect("submit choices");
+        let _ = apply_as_current(&mut state, submit).expect("submit choices");
         assert_eq!(
             state.players[0].life,
             life_before - 2,
@@ -8631,7 +8631,7 @@ mod tests {
     /// choices.
     #[test]
     fn phyrexian_engine_rejects_mismatched_choice_count() {
-        use crate::game::engine::apply;
+        use crate::game::engine::apply_as_current;
         use crate::types::game_state::ShardChoice;
 
         let mut state = setup_game_at_main_phase();
@@ -8648,11 +8648,11 @@ mod tests {
             card_id: CardId(0x9117),
             targets: Vec::new(),
         };
-        let _ = apply(&mut state, cast).expect("announce cast");
+        let _ = apply_as_current(&mut state, cast).expect("announce cast");
         let submit = GameAction::SubmitPhyrexianChoices {
             choices: vec![ShardChoice::PayMana, ShardChoice::PayLife], // length 2 vs 1 shard
         };
-        let result = apply(&mut state, submit);
+        let result = apply_as_current(&mut state, submit);
         assert!(result.is_err(), "mismatched choice count must error");
     }
 
