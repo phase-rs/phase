@@ -10630,6 +10630,97 @@ mod tests {
         }
     }
 
+    /// End-to-end parser integration test for Teferi's Protection.
+    ///
+    /// CR 119.7 + CR 119.8 + CR 702.16 + CR 702.26: The full Oracle text
+    /// exercises the compound chain parser (shared leading "Until your next
+    /// turn" duration), the life-lock clause (added in this batch), the
+    /// protection-granting clause, and the PhaseOut clause. All three must
+    /// chain correctly under the outer `UntilYourNextTurn` duration.
+    #[test]
+    fn parse_teferis_protection_end_to_end() {
+        let result = crate::parser::parse_oracle_text(
+            "Until your next turn, your life total can't change and you gain protection from everything. All permanents you control phase out.\nExile Teferi's Protection.",
+            "Teferi's Protection",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+
+        assert!(
+            result.abilities.len() >= 2,
+            "expected at least the chained spell ability and an exile ability, got {}: {:?}",
+            result.abilities.len(),
+            result
+                .abilities
+                .iter()
+                .map(|a| format!("{:?}", a.effect))
+                .collect::<Vec<_>>()
+        );
+
+        // First ability: the chained compound under UntilYourNextTurn.
+        let first = &result.abilities[0];
+        assert_eq!(first.duration, Some(Duration::UntilYourNextTurn));
+
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*first.effect
+        else {
+            panic!(
+                "expected first ability effect to be GenericEffect(life-lock), got {:?}",
+                first.effect
+            );
+        };
+        let modes: Vec<_> = static_abilities.iter().map(|s| s.mode.clone()).collect();
+        assert!(
+            modes.contains(&StaticMode::CantGainLife),
+            "first clause missing CantGainLife: {modes:?}"
+        );
+        assert!(
+            modes.contains(&StaticMode::CantLoseLife),
+            "first clause missing CantLoseLife: {modes:?}"
+        );
+
+        // Second clause: protection grant via sub_ability.
+        let second = first
+            .sub_ability
+            .as_ref()
+            .expect("life-lock clause should chain to protection clause via sub_ability");
+        let Effect::GenericEffect {
+            static_abilities: protection_statics,
+            ..
+        } = &*second.effect
+        else {
+            panic!(
+                "expected protection clause to be GenericEffect, got {:?}",
+                second.effect
+            );
+        };
+        assert!(
+            protection_statics
+                .iter()
+                .any(|s| s.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddKeyword {
+                        keyword: crate::types::keywords::Keyword::Protection(_)
+                    }
+                ))),
+            "expected protection-from-everything keyword in {:?}",
+            protection_statics
+        );
+
+        // Third clause: phase out all permanents you control.
+        let third = second
+            .sub_ability
+            .as_ref()
+            .expect("protection clause should chain to phase-out clause");
+        assert!(
+            matches!(*third.effect, Effect::PhaseOut { .. }),
+            "expected PhaseOut clause, got {:?}",
+            third.effect
+        );
+    }
+
     #[test]
     fn effect_doesnt_untap_restriction() {
         // CR 302.6: "That land doesn't untap during its controller's next untap step"
