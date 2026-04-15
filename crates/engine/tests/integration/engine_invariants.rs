@@ -1,6 +1,6 @@
 use assert_matches::assert_matches;
 use engine::ai_support::legal_actions;
-use engine::game::apply;
+use engine::game::apply_as_current;
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
