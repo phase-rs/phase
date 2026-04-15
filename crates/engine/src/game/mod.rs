@@ -30,6 +30,7 @@ pub mod game_object;
 pub mod gap_analysis;
 pub mod keywords;
 pub mod layers;
+pub mod life_costs;
 pub mod log;
 pub mod mana_abilities;
 pub mod mana_payment;
