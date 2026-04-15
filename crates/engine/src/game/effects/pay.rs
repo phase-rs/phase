@@ -1,4 +1,5 @@
 use crate::game::casting;
+use crate::game::life_costs::{pay_life_as_cost, PayLifeCostResult};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::speed::{effective_speed, set_speed};
 use crate::types::ability::{Effect, PaymentCost};
@@ -38,29 +39,15 @@ pub fn resolve(
             let _ = casting::pay_unless_cost(state, ability.controller, mana_cost, events);
         }
         PaymentCost::Life { amount } => {
-            // CR 118.2 + CR 118.3: Pay life directly — not "lose life".
-            // Replacement effects that apply to life loss do NOT apply.
-            // A player can pay life only if their life >= amount.
-            let can_pay = state
-                .players
-                .iter()
-                .find(|p| p.id == ability.controller)
-                .is_some_and(|p| p.life >= *amount as i32);
-
-            if can_pay {
-                if let Some(p) = state
-                    .players
-                    .iter_mut()
-                    .find(|p| p.id == ability.controller)
-                {
-                    p.life -= *amount as i32;
-                    events.push(GameEvent::LifeChanged {
-                        player_id: ability.controller,
-                        amount: -(*amount as i32),
-                    });
+            // CR 118.3b + CR 119.4 + CR 119.8: Paying life as an effect-embedded
+            // cost routes through the single-authority helper. Per CR 119.4 this
+            // IS a life-loss event, so the replacement pipeline fires and a
+            // CantLoseLife lock blocks the payment (cost unpayable).
+            match pay_life_as_cost(state, ability.controller, *amount, events) {
+                PayLifeCostResult::Paid { .. } => {}
+                PayLifeCostResult::InsufficientLife | PayLifeCostResult::LockedCantLoseLife => {
+                    state.cost_payment_failed_flag = true;
                 }
-            } else {
-                state.cost_payment_failed_flag = true;
             }
         }
         PaymentCost::Speed { amount } => {

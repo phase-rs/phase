@@ -24,6 +24,7 @@ use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
     build_target_slots, flatten_targets_in_chain,
 };
+use super::life_costs::{pay_life_as_cost, PayLifeCostResult};
 
 /// Handle the player's decision on an additional cost (kicker, blight, "or pay").
 ///
@@ -683,13 +684,33 @@ pub(crate) fn handle_defiler_payment(
     let mut cost = pending.cost.clone();
 
     if pay {
-        // Pay life
-        let player_state = &mut state.players[player.0 as usize];
-        player_state.life -= life_cost as i32;
-        events.push(GameEvent::LifeChanged {
-            player_id: player,
-            amount: -(life_cost as i32),
-        });
+        // CR 118.3b + CR 119.4 + CR 119.8: Defiler's optional life payment is a
+        // cost — route through the single-authority helper so the replacement
+        // pipeline and CantLoseLife lock are honored. If the cost can't be paid
+        // (insufficient life or locked), fall through to casting without the
+        // reduction — the Defiler prompt must not half-apply.
+        let payment = pay_life_as_cost(state, player, life_cost, events);
+        let reduction_applied = payment.is_paid();
+        match payment {
+            PayLifeCostResult::Paid { .. } => {}
+            PayLifeCostResult::InsufficientLife | PayLifeCostResult::LockedCantLoseLife => {
+                // Proceed with the original cost; no reduction.
+            }
+        }
+        if !reduction_applied {
+            return pay_and_push(
+                state,
+                player,
+                pending.object_id,
+                pending.card_id,
+                pending.ability,
+                &cost,
+                pending.casting_variant,
+                pending.distribute,
+                pending.origin_zone,
+                events,
+            );
+        }
 
         // Reduce mana cost — remove matching colored shards from the spell cost
         if let (
@@ -745,13 +766,16 @@ fn pay_additional_cost(
 ) -> Result<WaitingFor, EngineError> {
     match cost {
         AbilityCost::PayLife { amount } => {
-            // CR 118.3: A player can pay life as a cost only if their life >= amount.
-            let player_state = &mut state.players[player.0 as usize];
-            player_state.life -= amount as i32;
-            events.push(GameEvent::LifeChanged {
-                player_id: player,
-                amount: -(amount as i32),
-            });
+            // CR 118.3 + CR 119.4 + CR 119.8: Pay life as an additional cost via
+            // the single-authority helper. Unpayable = spell cannot be cast.
+            match pay_life_as_cost(state, player, amount, events) {
+                PayLifeCostResult::Paid { .. } => {}
+                PayLifeCostResult::InsufficientLife | PayLifeCostResult::LockedCantLoseLife => {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot pay life cost".to_string(),
+                    ));
+                }
+            }
         }
         AbilityCost::Blight { count } => {
             // Place blight counters on caster's lands

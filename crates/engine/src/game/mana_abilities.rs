@@ -9,6 +9,7 @@ use crate::types::zones::Zone;
 use super::effects::mana::resolve_mana_types;
 use super::engine::EngineError;
 use super::filter::{matches_target_filter, FilterContext};
+use super::life_costs::{self, PayLifeCostResult};
 use super::mana_payment;
 use super::mana_sources;
 use super::sacrifice;
@@ -347,20 +348,17 @@ fn pay_life_cost(
     amount: u32,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
-    // CR 118.3 + CR 118.3b: A player can pay life as a cost only if they have enough life,
-    // and paying life subtracts that amount from their life total immediately.
-    let player_state = &mut state.players[player.0 as usize];
-    if player_state.life < amount as i32 {
-        return Err(EngineError::ActionNotAllowed(
-            "Not enough life to pay mana ability cost".to_string(),
-        ));
+    // CR 118.3 + CR 119.4 + CR 119.8: Delegate to the single-authority helper
+    // so mana-ability life costs honor the replacement pipeline and the
+    // CantLoseLife lock identically to every other pay-life path.
+    match life_costs::pay_life_as_cost(state, player, amount, events) {
+        PayLifeCostResult::Paid { .. } => Ok(()),
+        PayLifeCostResult::InsufficientLife | PayLifeCostResult::LockedCantLoseLife => {
+            Err(EngineError::ActionNotAllowed(
+                "Cannot pay life cost for mana ability".to_string(),
+            ))
+        }
     }
-    player_state.life -= amount as i32;
-    events.push(GameEvent::LifeChanged {
-        player_id: player,
-        amount: -(amount as i32),
-    });
-    Ok(())
 }
 
 /// Tap a permanent as part of paying a mana ability cost.

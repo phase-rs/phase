@@ -7,6 +7,7 @@ use crate::types::zones::Zone;
 
 use super::casting;
 use super::effects;
+use super::life_costs::{pay_life_as_cost, PayLifeCostResult};
 use super::engine::{
     handle_tap_land_for_mana, handle_untap_land_for_mana, resume_pending_continuation_if_priority,
     EngineError,
@@ -217,13 +218,18 @@ pub(super) fn handle_unless_payment(
                 unreachable!("DynamicGeneric should be resolved before payment");
             }
             UnlessCost::PayLife { amount } => {
-                if let Some(player_state) = state.players.iter_mut().find(|p| p.id == player) {
-                    player_state.life -= amount;
+                // CR 118.12 + CR 118.3 + CR 119.4 + CR 119.8: Unless-pay life
+                // routes through the single-authority helper. An unpayable cost
+                // (insufficient life, or CantLoseLife lock) causes the "unless"
+                // branch to fall through to the effect still happening.
+                let life_amount = u32::try_from(amount.max(0)).unwrap_or(0);
+                match pay_life_as_cost(state, player, life_amount, events) {
+                    PayLifeCostResult::Paid { .. } => {}
+                    PayLifeCostResult::InsufficientLife
+                    | PayLifeCostResult::LockedCantLoseLife => {
+                        payment_failed = true;
+                    }
                 }
-                events.push(GameEvent::LifeChanged {
-                    player_id: player,
-                    amount: -amount,
-                });
             }
             UnlessCost::DiscardCard => {
                 let hand_cards: Vec<ObjectId> = state
