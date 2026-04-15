@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-04-28T00:00:00Z",
+  "updated": "2026-04-29T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -1204,17 +1204,17 @@
       "author": "MTGGoldfish",
       "colors": [
         "W",
+        "G",
         "R",
-        "U",
         "B",
-        "G"
+        "U"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 1,
+          "count": 2,
           "name": "Arena of Glory"
         },
         {
@@ -1226,12 +1226,12 @@
           "name": "Consign to Memory"
         },
         {
-          "count": 1,
+          "count": 4,
           "name": "Doorkeeper Thrull"
         },
         {
-          "count": 4,
-          "name": "Phlage, Titan of Fire's Fury"
+          "count": 1,
+          "name": "Temple Garden"
         },
         {
           "count": 1,
@@ -1258,8 +1258,8 @@
           "name": "Lightning Bolt"
         },
         {
-          "count": 2,
-          "name": "Steam Vents"
+          "count": 4,
+          "name": "Phlage, Titan of Fire's Fury"
         },
         {
           "count": 1,
@@ -1274,7 +1274,7 @@
           "name": "Scion of Draco"
         },
         {
-          "count": 3,
+          "count": 2,
           "name": "Stubborn Denial"
         },
         {
@@ -1282,8 +1282,8 @@
           "name": "Teferi, Time Raveler"
         },
         {
-          "count": 1,
-          "name": "Temple Garden"
+          "count": 4,
+          "name": "Flooded Strand"
         },
         {
           "count": 4,
@@ -1294,26 +1294,22 @@
           "name": "Thundering Falls"
         },
         {
-          "count": 1,
-          "name": "Arena of Glory"
-        },
-        {
           "count": 4,
           "name": "Wooded Foothills"
         },
         {
-          "count": 3,
-          "name": "Doorkeeper Thrull"
+          "count": 2,
+          "name": "Steam Vents"
         },
         {
-          "count": 4,
-          "name": "Flooded Strand"
+          "count": 1,
+          "name": "Winternight Stories"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
-          "name": "Ashiok, Dream Render"
+          "count": 1,
+          "name": "Stubborn Denial"
         },
         {
           "count": 2,
@@ -1321,27 +1317,31 @@
         },
         {
           "count": 1,
-          "name": "Damping Sphere"
+          "name": "Nihil Spellbomb"
         },
         {
           "count": 3,
           "name": "Mystical Dispute"
         },
         {
+          "count": 2,
+          "name": "Obsidian Charmaw"
+        },
+        {
+          "count": 1,
+          "name": "Wear // Tear"
+        },
+        {
+          "count": 3,
+          "name": "Wrath of the Skies"
+        },
+        {
           "count": 1,
           "name": "Path to Exile"
         },
         {
-          "count": 2,
-          "name": "Rough // Tumble"
-        },
-        {
-          "count": 2,
-          "name": "Wear // Tear"
-        },
-        {
-          "count": 2,
-          "name": "Wrath of the Skies"
+          "count": 1,
+          "name": "Ashiok, Dream Render"
         }
       ]
     },
