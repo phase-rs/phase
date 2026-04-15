@@ -270,6 +270,7 @@ function CardPreviewInner({
           backFaceHint={backFaceName != null && !showOtherFace
             ? `Hold Ctrl for ${isTransformed ? "front" : "back"} face`
             : null}
+          altHint={frontParseDetails || engineFrontFace ? "Alt: parsed abilities" : null}
         />
       )}
     </div>
@@ -315,6 +316,7 @@ function MobilePreviewOverlay({
             isLoading={isLoading}
             src={src}
             backFaceHint={null}
+            altHint={null}
             mobileMode
           />
         </div>
@@ -370,6 +372,7 @@ function CardImagePreview({
   isLoading,
   src,
   backFaceHint,
+  altHint,
   mobileMode,
 }: {
   cardName: string;
@@ -379,6 +382,7 @@ function CardImagePreview({
   isLoading: boolean;
   src: string | null;
   backFaceHint: string | null;
+  altHint: string | null;
   mobileMode?: boolean;
 }) {
   const sizeClass = mobileMode
@@ -421,6 +425,9 @@ function CardImagePreview({
       {showInfoPanel && obj && <CardInfoPanel obj={obj} />}
       {backFaceHint && (
         <div className="bg-gray-900/80 text-center py-1 text-[10px] text-gray-400">{backFaceHint}</div>
+      )}
+      {altHint && (
+        <div className="bg-gray-900/80 text-center py-1 text-[10px] text-gray-400">{altHint}</div>
       )}
     </div>
   );

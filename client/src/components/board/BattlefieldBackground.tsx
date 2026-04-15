@@ -1,4 +1,4 @@
-import { useMemo, useRef } from "react";
+import { type CSSProperties, useMemo, useRef } from "react";
 
 import type { ManaColor } from "../../adapter/types.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
@@ -81,15 +81,17 @@ export function BattlefieldBackground() {
 
   const bg = resolveBackground(boardBackground, customBackgroundUrl, deckColor, lockedRef);
 
-  if (!bg) return null;
-
-  const style =
-    bg.kind === "image"
-      ? { backgroundImage: cssUrl(bg.src) }
-      : { backgroundColor: bg.css };
+  // Always render the layer so right-click remains available even when no visible
+  // background is configured (the "Change background" menu is most useful then).
+  const style: CSSProperties =
+    bg == null
+      ? {}
+      : bg.kind === "image"
+        ? { backgroundImage: cssUrl(bg.src) }
+        : { backgroundColor: bg.css };
 
   const className =
-    bg.kind === "image"
+    bg?.kind === "image"
       ? "pointer-events-none fixed inset-0 bg-cover bg-center"
       : "pointer-events-none fixed inset-0";
 

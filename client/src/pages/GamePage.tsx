@@ -15,6 +15,7 @@ import { useAudioContext } from "../audio/useAudioContext.ts";
 import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
 import { TurnBanner } from "../components/animation/TurnBanner.tsx";
 import { BattlefieldBackground } from "../components/board/BattlefieldBackground.tsx";
+import { BoardContextMenu } from "../components/board/BoardContextMenu.tsx";
 import { AttackTargetLines } from "../components/board/AttackTargetLines.tsx";
 import { BlockAssignmentLines } from "../components/board/BlockAssignmentLines.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
@@ -49,7 +50,11 @@ import { ZoneIndicator } from "../components/zone/ZoneIndicator.tsx";
 import { CompanionZone } from "../components/zone/CompanionZone.tsx";
 import { ZoneHand } from "../components/hand/ZoneHand.tsx";
 import { ZoneViewer } from "../components/zone/ZoneViewer.tsx";
-import { PreferencesModal } from "../components/settings/PreferencesModal.tsx";
+import {
+  PreferencesModal,
+  type SettingsHighlight,
+  type SettingsTabId,
+} from "../components/settings/PreferencesModal.tsx";
 import { DebugPanel } from "../components/chrome/DebugPanel.tsx";
 import { GameMenu } from "../components/chrome/GameMenu.tsx";
 import { ConcedeDialog } from "../components/multiplayer/ConcedeDialog.tsx";
@@ -472,7 +477,10 @@ function GamePageContent({
     zone: "graveyard" | "exile";
     playerId: number;
   } | null>(null);
-  const [showPreferences, setShowPreferences] = useState(false);
+  const [preferencesOpen, setPreferencesOpen] = useState<
+    null | { tab?: SettingsTabId; highlight?: SettingsHighlight }
+  >(null);
+  const [boardContextMenu, setBoardContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   const playerId = usePlayerId();
   const perspectivePlayerId = usePerspectivePlayerId();
@@ -670,7 +678,20 @@ function GamePageContent({
       ref={containerRef}
       className={`game-no-select relative h-[100dvh] w-full overflow-hidden bg-gray-950${showDebugBounds ? " debug-bounds" : ""}`}
       style={gamePageStyle}
-      onContextMenu={(e) => e.preventDefault()}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        const target = e.target as HTMLElement | null;
+        // Cards, buttons, HUD, and the menu itself "own" their right-clicks.
+        // Anything else is considered the board background.
+        if (
+          target?.closest(
+            "button, a, input, select, textarea, [role='menuitem'], [role='menu'], [data-card-hover], [data-card-preview], [data-context-menu-ignore]",
+          )
+        ) {
+          return;
+        }
+        setBoardContextMenu({ x: e.clientX, y: e.clientY });
+      }}
     >
       <BattlefieldBackground />
       <StackDisplay />
@@ -814,11 +835,10 @@ function GamePageContent({
       >
         <CombatPhaseIndicator />
         <FullControlToggle />
-        <div className="flex items-center gap-1.5">
-          <ActionButton />
-          <GameLogPanel />
-        </div>
+        <ActionButton />
       </div>
+
+      <GameLogPanel />
 
       {/* Game menu — top-left hamburger */}
       <GameMenu
@@ -827,7 +847,7 @@ function GamePageContent({
         isOnlineMode={isOnlineMode}
         showAiHand={showAiHand}
         onToggleAiHand={() => setShowAiHand((v) => !v)}
-        onSettingsClick={() => setShowPreferences(true)}
+        onSettingsClick={() => setPreferencesOpen({})}
         onConcede={onShowConcedeDialog}
       />
 
@@ -835,7 +855,7 @@ function GamePageContent({
       {isOnlineMode && (
         <ConnectionToast
           onRetry={() => window.location.reload()}
-          onSettings={() => setShowPreferences(true)}
+          onSettings={() => setPreferencesOpen({})}
         />
       )}
 
@@ -963,8 +983,25 @@ function GamePageContent({
         />
       )}
 
-      {showPreferences && (
-        <PreferencesModal onClose={() => setShowPreferences(false)} />
+      {preferencesOpen && (
+        <PreferencesModal
+          onClose={() => setPreferencesOpen(null)}
+          initialTab={preferencesOpen.tab}
+          highlight={preferencesOpen.highlight}
+        />
+      )}
+
+      {boardContextMenu && (
+        <BoardContextMenu
+          x={boardContextMenu.x}
+          y={boardContextMenu.y}
+          onClose={() => setBoardContextMenu(null)}
+          onChangeBackground={() =>
+            setPreferencesOpen({ tab: "gameplay", highlight: "board-background" })
+          }
+          onToggleGameLog={() => useUiStore.getState().toggleLogPanel()}
+          onToggleDebugLog={() => useUiStore.getState().toggleDebugPanel()}
+        />
       )}
 
       {/* Animation overlay (above board, below modals) */}

@@ -34,6 +34,7 @@ interface UiStoreState {
   focusedOpponent: number | null;
   pendingAbilityChoice: { objectId: ObjectId; actions: GameAction[] } | null;
   debugPanelOpen: boolean;
+  logPanelOpen: boolean;
 }
 
 interface UiStoreActions {
@@ -59,6 +60,8 @@ interface UiStoreActions {
   setFocusedOpponent: (id: number | null) => void;
   setPendingAbilityChoice: (choice: { objectId: ObjectId; actions: GameAction[] } | null) => void;
   toggleDebugPanel: () => void;
+  setLogPanelOpen: (open: boolean) => void;
+  toggleLogPanel: () => void;
 }
 
 export type UiStore = UiStoreState & UiStoreActions;
@@ -83,6 +86,7 @@ export const useUiStore = create<UiStore>()((set) => ({
   focusedOpponent: null,
   pendingAbilityChoice: null,
   debugPanelOpen: false,
+  logPanelOpen: false,
 
   selectObject: (id) => set({ selectedObjectId: id }),
   hoverObject: (id) => set({ hoveredObjectId: id }),
@@ -178,4 +182,6 @@ export const useUiStore = create<UiStore>()((set) => ({
   setFocusedOpponent: (id) => set({ focusedOpponent: id }),
   setPendingAbilityChoice: (choice) => set({ pendingAbilityChoice: choice }),
   toggleDebugPanel: () => set((state) => ({ debugPanelOpen: !state.debugPanelOpen })),
+  setLogPanelOpen: (open) => set({ logPanelOpen: open }),
+  toggleLogPanel: () => set((state) => ({ logPanelOpen: !state.logPanelOpen })),
 }));

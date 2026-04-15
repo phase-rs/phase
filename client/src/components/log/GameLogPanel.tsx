@@ -4,6 +4,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import type { GameLogEntry } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
+import { useUiStore } from "../../stores/uiStore.ts";
 import { filterLogByVerbosity } from "../../viewmodel/logFormatting.ts";
 import type { LogVerbosity } from "../../viewmodel/logFormatting.ts";
 import { LogEntry } from "./LogEntry.tsx";
@@ -16,13 +17,22 @@ const LOG_PANEL_WIDTH_PX = 320;
 export function GameLogPanel() {
   const logHistory = useGameStore((s) => s.logHistory ?? EMPTY_LOG);
   const logDefaultState = usePreferencesStore((s) => s.logDefaultState);
+  const isOpen = useUiStore((s) => s.logPanelOpen);
+  const setLogPanelOpen = useUiStore((s) => s.setLogPanelOpen);
 
-  const [isOpen, setIsOpen] = useState(logDefaultState === "open");
   const [verbosity, setVerbosity] = useState<LogVerbosity>("compact");
   const scrollRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
   const filteredEntries = filterLogByVerbosity(logHistory, verbosity);
+
+  // One-time seed of the open state from user preference
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (seededRef.current) return;
+    seededRef.current = true;
+    if (logDefaultState === "open") setLogPanelOpen(true);
+  }, [logDefaultState, setLogPanelOpen]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -35,10 +45,10 @@ export function GameLogPanel() {
   const handleOutsideClick = useCallback(
     (e: MouseEvent) => {
       if (isOpen && panelRef.current && !panelRef.current.contains(e.target as Node)) {
-        setIsOpen(false);
+        setLogPanelOpen(false);
       }
     },
-    [isOpen],
+    [isOpen, setLogPanelOpen],
   );
 
   useEffect(() => {
@@ -56,24 +66,7 @@ export function GameLogPanel() {
 
   return (
     <>
-      {/* Toggle button when closed */}
-      {!isOpen && (
-        <button
-          onClick={() => setIsOpen(true)}
-          className="self-end rounded-lg bg-gray-800/90 p-1.5 text-gray-400 shadow-lg ring-1 ring-gray-700 transition-colors hover:bg-gray-700 hover:text-gray-200"
-          aria-label="Open game log"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5">
-            <path
-              fillRule="evenodd"
-              d="M4.5 2A1.5 1.5 0 0 0 3 3.5v13A1.5 1.5 0 0 0 4.5 18h11a1.5 1.5 0 0 0 1.5-1.5V7.621a1.5 1.5 0 0 0-.44-1.06l-4.12-4.122A1.5 1.5 0 0 0 11.378 2H4.5Zm2.25 8.5a.75.75 0 0 0 0 1.5h6.5a.75.75 0 0 0 0-1.5h-6.5Zm0 3a.75.75 0 0 0 0 1.5h6.5a.75.75 0 0 0 0-1.5h-6.5Z"
-              clipRule="evenodd"
-            />
-          </svg>
-        </button>
-      )}
-
-      {/* Slide-out panel */}
+      {/* Slide-out panel (open via board right-click context menu) */}
       <AnimatePresence>
         {isOpen && (
           <motion.div
@@ -90,7 +83,7 @@ export function GameLogPanel() {
                 Game Log
               </h3>
               <button
-                onClick={() => setIsOpen(false)}
+                onClick={() => setLogPanelOpen(false)}
                 className="rounded p-1 text-gray-500 transition-colors hover:bg-gray-800 hover:text-gray-300"
                 aria-label="Close game log"
               >

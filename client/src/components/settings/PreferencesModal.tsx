@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { audioManager } from "../../audio/AudioManager.ts";
 import { cacheThemeManifest, clearThemeCache } from "../../audio/audioCache.ts";
@@ -16,8 +16,12 @@ import { BATTLEFIELDS } from "../board/battlefields.ts";
 import { PLAIN_BACKGROUNDS } from "../board/plainBackgrounds.ts";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
 
+export type SettingsHighlight = "board-background";
+
 interface PreferencesModalProps {
   onClose: () => void;
+  initialTab?: SettingsTabId;
+  highlight?: SettingsHighlight;
 }
 
 const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
@@ -33,7 +37,7 @@ const SETTINGS_TABS = [
   { id: "multiplayer", label: "Multiplayer" },
 ] as const;
 
-type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
+export type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
 
 const BOARD_BACKGROUND_GROUPS: { label: string; options: { value: string; label: string }[] }[] = [
   {
@@ -61,7 +65,27 @@ const BOARD_BACKGROUND_GROUPS: { label: string; options: { value: string; label:
   },
 ];
 
-export function PreferencesModal({ onClose }: PreferencesModalProps) {
+export function PreferencesModal({
+  onClose,
+  initialTab = "gameplay",
+  highlight,
+}: PreferencesModalProps) {
+  const boardBackgroundRef = useRef<HTMLDivElement | null>(null);
+  const [highlightFlash, setHighlightFlash] = useState(highlight === "board-background");
+
+  useEffect(() => {
+    if (highlight !== "board-background") return;
+    // Scroll the highlighted section into view and flash a ring outline briefly.
+    const frame = requestAnimationFrame(() => {
+      boardBackgroundRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    const timer = window.setTimeout(() => setHighlightFlash(false), 1800);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+    };
+  }, [highlight]);
+
   const cardSize = usePreferencesStore((s) => s.cardSize);
   const logDefaultState = usePreferencesStore((s) => s.logDefaultState);
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
@@ -141,7 +165,7 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
   const serverAddress = useMultiplayerStore((s) => s.serverAddress);
   const setDisplayName = useMultiplayerStore((s) => s.setDisplayName);
   const setServerAddress = useMultiplayerStore((s) => s.setServerAddress);
-  const [activeTab, setActiveTab] = useState<SettingsTabId>("gameplay");
+  const [activeTab, setActiveTab] = useState<SettingsTabId>(initialTab);
   const [connTest, setConnTest] = useState<"idle" | "testing" | "ok" | "fail">("idle");
 
   return (
@@ -188,32 +212,41 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
                     />
                   </SettingGroup>
 
-                  <SettingGroup label="Board Background">
-                    <select
-                      value={boardBackground}
-                      onChange={(e) => setBoardBackground(e.target.value)}
-                      className="w-full rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-slate-100 focus:border-sky-400/40 focus:outline-none"
-                    >
-                      {BOARD_BACKGROUND_GROUPS.map((group) => (
-                        <optgroup key={group.label} label={group.label}>
-                          {group.options.map((bg) => (
-                            <option key={bg.value} value={bg.value}>
-                              {bg.label}
-                            </option>
-                          ))}
-                        </optgroup>
-                      ))}
-                    </select>
-                    {boardBackground === "custom" && (
-                      <input
-                        type="url"
-                        value={customBackgroundUrl}
-                        onChange={(e) => setCustomBackgroundUrl(e.target.value)}
-                        placeholder="https://example.com/image.jpg"
-                        className="mt-2 w-full rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-400/40 focus:outline-none"
-                      />
-                    )}
-                  </SettingGroup>
+                  <div
+                    ref={boardBackgroundRef}
+                    className={`-m-1 rounded-[16px] p-1 transition-shadow duration-500 ${
+                      highlightFlash
+                        ? "shadow-[0_0_0_2px_rgba(56,189,248,0.8),0_0_24px_rgba(56,189,248,0.35)]"
+                        : ""
+                    }`}
+                  >
+                    <SettingGroup label="Board Background">
+                      <select
+                        value={boardBackground}
+                        onChange={(e) => setBoardBackground(e.target.value)}
+                        className="w-full rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-slate-100 focus:border-sky-400/40 focus:outline-none"
+                      >
+                        {BOARD_BACKGROUND_GROUPS.map((group) => (
+                          <optgroup key={group.label} label={group.label}>
+                            {group.options.map((bg) => (
+                              <option key={bg.value} value={bg.value}>
+                                {bg.label}
+                              </option>
+                            ))}
+                          </optgroup>
+                        ))}
+                      </select>
+                      {boardBackground === "custom" && (
+                        <input
+                          type="url"
+                          value={customBackgroundUrl}
+                          onChange={(e) => setCustomBackgroundUrl(e.target.value)}
+                          placeholder="https://example.com/image.jpg"
+                          className="mt-2 w-full rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-400/40 focus:outline-none"
+                        />
+                      )}
+                    </SettingGroup>
+                  </div>
                 </SettingsSection>
               )}
 
