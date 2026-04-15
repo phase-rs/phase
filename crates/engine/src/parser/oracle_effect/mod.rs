@@ -10559,6 +10559,58 @@ mod tests {
     // --- Restriction clause extensions ---
 
     #[test]
+    fn effect_your_life_total_cant_change_under_until_end_of_turn() {
+        // CR 119.7 + CR 119.8: Teferi's-Protection-style first clause under a
+        // shared duration. Must produce a GenericEffect with BOTH CantGainLife
+        // and CantLoseLife scoped to controller, with AddStaticMode modifications
+        // so the layer system propagates the locks during the duration window.
+        let def = parse_effect_chain(
+            "Until end of turn, your life total can't change.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                let modes: Vec<_> = static_abilities.iter().map(|s| s.mode.clone()).collect();
+                assert!(
+                    modes.contains(&StaticMode::CantGainLife),
+                    "missing CantGainLife in {modes:?}"
+                );
+                assert!(
+                    modes.contains(&StaticMode::CantLoseLife),
+                    "missing CantLoseLife in {modes:?}"
+                );
+                for sd in static_abilities {
+                    assert!(
+                        matches!(
+                            sd.affected,
+                            Some(TargetFilter::Typed(TypedFilter {
+                                controller: Some(ControllerRef::You),
+                                ..
+                            }))
+                        ),
+                        "expected You-scoped affected, got {:?}",
+                        sd.affected
+                    );
+                    assert!(
+                        sd.modifications.iter().any(|m| matches!(
+                            m,
+                            ContinuousModification::AddStaticMode {
+                                mode: StaticMode::CantGainLife | StaticMode::CantLoseLife
+                            }
+                        )),
+                        "expected AddStaticMode for layer propagation, got {:?}",
+                        sd.modifications
+                    );
+                }
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+        assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+    }
+
+    #[test]
     fn effect_players_cant_gain_life() {
         // CR 119.7: "Players can't gain life this turn" → GenericEffect(CantGainLife)
         let def = parse_effect_chain("Players can't gain life this turn", AbilityKind::Spell);

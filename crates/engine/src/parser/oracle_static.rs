@@ -1325,6 +1325,27 @@ pub fn parse_static_line_multi(text: &str) -> Vec<StaticDefinition> {
         ];
     }
 
+    // CR 119.7 + CR 119.8: "[scope] life total can't change" — bidirectional
+    // life-lock. Emits both CantGainLife and CantLoseLife with the same
+    // player-scope filter (Platinum Emperion: "Your life total can't change.";
+    // also covers "Players' life totals can't change", "Your opponents' life
+    // totals can't change", etc.).
+    if nom_primitives::scan_contains(&lower, "life total can't change")
+        || nom_primitives::scan_contains(&lower, "life totals can't change")
+        || nom_primitives::scan_contains(&lower, "life total cannot change")
+        || nom_primitives::scan_contains(&lower, "life totals cannot change")
+    {
+        let affected = parse_life_total_scope_filter(&lower);
+        return vec![
+            StaticDefinition::new(StaticMode::CantGainLife)
+                .affected(affected.clone())
+                .description(stripped.to_string()),
+            StaticDefinition::new(StaticMode::CantLoseLife)
+                .affected(affected)
+                .description(stripped.to_string()),
+        ];
+    }
+
     // CR 602.5: Compound "can't attack/block" + "activated abilities can't be activated"
     // produces two static definitions (e.g., CantAttackOrBlock + CantBeActivated).
     if nom_primitives::scan_contains(&lower, "activated abilities can't be activated")
@@ -3177,6 +3198,32 @@ fn parse_player_scope_filter(tp: &TextPair<'_>) -> TargetFilter {
     } else {
         TargetFilter::Typed(TypedFilter::default())
     }
+}
+
+/// CR 119.7 + CR 119.8: Determine player scope for "[possessor] life total[s]
+/// can't change" patterns. The possessor is a possessive noun phrase ("your",
+/// "your opponents'", "each opponent's", "players'") rather than the bare
+/// subject form handled by `parse_player_scope_filter`.
+fn parse_life_total_scope_filter(lower: &str) -> TargetFilter {
+    // Opponent possessives — scoped to opponents only.
+    if nom_primitives::scan_contains(lower, "your opponents'")
+        || nom_primitives::scan_contains(lower, "each opponent's")
+        || nom_primitives::scan_contains(lower, "an opponent's")
+    {
+        return TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+    }
+    // Self possessive — "your life total" / "your life totals" — scoped to controller.
+    if nom_primitives::scan_contains(lower, "your life total") {
+        return TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You));
+    }
+    // All-players plural — "players' life totals" / "each player's life total".
+    if nom_primitives::scan_contains(lower, "players'")
+        || nom_primitives::scan_contains(lower, "each player's")
+    {
+        return TargetFilter::Typed(TypedFilter::default());
+    }
+    // Default: all players (matches "Players' life totals can't change" etc.).
+    TargetFilter::Typed(TypedFilter::default())
 }
 
 /// Parse the subject of "X can't be countered" lines.
@@ -10159,6 +10206,55 @@ mod tests {
         let def = parse_static_line("This creature can't be equipped.").unwrap();
         assert_eq!(def.mode, StaticMode::Other("CantBeEquipped".to_string()));
         assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn static_life_total_cant_change_emits_both_locks_self_scope() {
+        // CR 119.7 + CR 119.8: Platinum Emperion — "Your life total can't change."
+        // Must emit BOTH CantGainLife and CantLoseLife scoped to controller.
+        let defs = parse_static_line_multi("Your life total can't change.");
+        let modes: Vec<_> = defs.iter().map(|d| d.mode.clone()).collect();
+        assert_eq!(modes.len(), 2, "expected exactly 2 statics, got {modes:?}");
+        assert!(modes.contains(&StaticMode::CantGainLife));
+        assert!(modes.contains(&StaticMode::CantLoseLife));
+        for def in &defs {
+            assert!(matches!(
+                def.affected,
+                Some(TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::You),
+                    ..
+                }))
+            ));
+        }
+    }
+
+    #[test]
+    fn static_life_total_cant_change_opponent_scope() {
+        // CR 119.7 + CR 119.8: "Your opponents' life totals can't change."
+        let defs = parse_static_line_multi("Your opponents' life totals can't change.");
+        let modes: Vec<_> = defs.iter().map(|d| d.mode.clone()).collect();
+        assert_eq!(modes.len(), 2);
+        assert!(modes.contains(&StaticMode::CantGainLife));
+        assert!(modes.contains(&StaticMode::CantLoseLife));
+        for def in &defs {
+            assert!(matches!(
+                def.affected,
+                Some(TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::Opponent),
+                    ..
+                }))
+            ));
+        }
+    }
+
+    #[test]
+    fn static_life_total_cannot_change_alt_spelling() {
+        // "cannot" alternative phrasing should also work.
+        let defs = parse_static_line_multi("Your life total cannot change.");
+        let modes: Vec<_> = defs.iter().map(|d| d.mode.clone()).collect();
+        assert_eq!(modes.len(), 2);
+        assert!(modes.contains(&StaticMode::CantGainLife));
+        assert!(modes.contains(&StaticMode::CantLoseLife));
     }
 
     #[test]

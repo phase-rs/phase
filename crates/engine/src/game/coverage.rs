@@ -4430,8 +4430,20 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("cost") && effective_lower.contains("more")
             }
             StaticMode::CantBeCountered => effective_lower.contains("can't be countered"),
-            StaticMode::CantGainLife => effective_lower.contains("can't gain life"),
-            StaticMode::CantLoseLife => effective_lower.contains("can't lose life"),
+            // CR 119.7: "can't gain life" or its compound form "life total can't change"
+            // (Platinum Emperion / Teferi's Protection both emit CantGainLife from
+            // the bidirectional life-lock phrase).
+            StaticMode::CantGainLife => {
+                effective_lower.contains("can't gain life")
+                    || effective_lower.contains("life total can't change")
+                    || effective_lower.contains("life totals can't change")
+            }
+            // CR 119.8: "can't lose life" or the compound life-lock phrase.
+            StaticMode::CantLoseLife => {
+                effective_lower.contains("can't lose life")
+                    || effective_lower.contains("life total can't change")
+                    || effective_lower.contains("life totals can't change")
+            }
             StaticMode::CantLoseTheGame => {
                 effective_lower.contains("don't lose the game")
                     || effective_lower.contains("can't lose the game")

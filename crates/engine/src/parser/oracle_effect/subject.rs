@@ -15,6 +15,7 @@ use crate::types::ability::{
 use crate::types::game_state::DayNight;
 use crate::types::statics::StaticMode;
 
+use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::parse_continuous_modifications;
 use super::super::oracle_target::{parse_target, parse_type_phrase};
 use super::super::oracle_util::{
@@ -198,6 +199,31 @@ fn try_parse_subject_restriction_clause(
             sub_ability: None,
             condition: None,
         });
+    }
+
+    // CR 119.7 + CR 119.8: "[possessor] life total can't change" — bidirectional
+    // life-lock for the named player (Teferi's Protection: "your life total can't
+    // change"). Distinct from the generic " can't " split below because the
+    // subject is a possessive noun phrase ("your") rather than a player subject.
+    if let Some((before, _)) = tp.split_around(" life total can't change") {
+        let possessor = before.original.trim().to_lowercase();
+        let scope_filter = life_lock_scope_from_possessor(&possessor);
+        return Some(build_life_lock_clause(scope_filter));
+    }
+    if let Some((before, _)) = tp.split_around(" life totals can't change") {
+        let possessor = before.original.trim().to_lowercase();
+        let scope_filter = life_lock_scope_from_possessor(&possessor);
+        return Some(build_life_lock_clause(scope_filter));
+    }
+    if let Some((before, _)) = tp.split_around(" life total cannot change") {
+        let possessor = before.original.trim().to_lowercase();
+        let scope_filter = life_lock_scope_from_possessor(&possessor);
+        return Some(build_life_lock_clause(scope_filter));
+    }
+    if let Some((before, _)) = tp.split_around(" life totals cannot change") {
+        let possessor = before.original.trim().to_lowercase();
+        let scope_filter = life_lock_scope_from_possessor(&possessor);
+        return Some(build_life_lock_clause(scope_filter));
     }
 
     // CR 510.1a: "[subject] assigns no combat damage [this turn/this combat]"
@@ -1010,6 +1036,61 @@ fn try_parse_become_choice(
         multi_target: None,
         condition: None,
     })
+}
+
+/// CR 119.7 + CR 119.8: Map the possessive subject of a "life total can't change"
+/// clause to the player-scope filter for the resulting CantGainLife/CantLoseLife
+/// statics. Recognizes opponent possessives ("an opponent's", "your opponents'",
+/// "each opponent's"), the self possessive ("your"), and falls back to all
+/// players for plural-player possessives ("players'", "each player's").
+///
+/// Opponent forms are checked first so "your opponents'" is not misclassified as
+/// "your" (self-scope).
+fn life_lock_scope_from_possessor(possessor_lower: &str) -> TargetFilter {
+    if nom_primitives::scan_contains(possessor_lower, "opponent's")
+        || nom_primitives::scan_contains(possessor_lower, "opponents'")
+    {
+        return TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+    }
+    if nom_primitives::scan_contains(possessor_lower, "your") {
+        return TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You));
+    }
+    // "Players'" / "each player's" / unrecognized → all players.
+    TargetFilter::Typed(TypedFilter::default())
+}
+
+/// CR 119.7 + CR 119.8: Build a `GenericEffect` carrying both `CantGainLife`
+/// and `CantLoseLife` statics for a "[possessor] life total can't change"
+/// clause. The `AddStaticMode` modifications mirror the `CantUntap` pattern
+/// in `build_restriction_clause` so duration-scoped life-lock propagates
+/// through transient continuous effects (essential for Teferi's Protection,
+/// which is an instant rather than a permanent).
+fn build_life_lock_clause(scope_filter: TargetFilter) -> ParsedEffectClause {
+    let make_static = |mode: StaticMode| -> StaticDefinition {
+        StaticDefinition::new(mode.clone())
+            .affected(scope_filter.clone())
+            .modifications(vec![ContinuousModification::AddStaticMode { mode }])
+    };
+    ParsedEffectClause {
+        effect: Effect::GenericEffect {
+            static_abilities: vec![
+                make_static(StaticMode::CantGainLife),
+                make_static(StaticMode::CantLoseLife),
+            ],
+            // Duration left unset — the parent chain parser injects the shared
+            // "Until your next turn" duration when the clause appears under a
+            // leading "Until X, A, B, and C." sentence. Permanents (Platinum
+            // Emperion-style) take the bare-static path in `oracle_static.rs`
+            // instead and don't reach this function.
+            duration: None,
+            target: None,
+        },
+        distribute: None,
+        multi_target: None,
+        duration: None,
+        sub_ability: None,
+        condition: None,
+    }
 }
 
 fn build_restriction_clause(
