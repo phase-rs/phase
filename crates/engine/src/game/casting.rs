@@ -7414,11 +7414,16 @@ mod tests {
             "Life Lock".to_string(),
             Zone::Battlefield,
         );
-        state.objects.get_mut(&lock_id).unwrap().static_definitions.push(
-            StaticDefinition::new(StaticMode::CantLoseLife).affected(TargetFilter::Typed(
-                TypedFilter::default().controller(ControllerRef::You),
-            )),
-        );
+        state
+            .objects
+            .get_mut(&lock_id)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantLoseLife).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            );
 
         assert!(
             !can_cast_object_now(&state, PlayerId(0), obj_id),

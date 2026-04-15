@@ -128,9 +128,7 @@ pub fn pay_life_as_cost(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{
-        ControllerRef, StaticDefinition, TargetFilter, TypedFilter,
-    };
+    use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter, TypedFilter};
     use crate::types::identifiers::CardId;
     use crate::types::statics::StaticMode;
     use crate::types::zones::Zone;

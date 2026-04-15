@@ -353,11 +353,9 @@ fn pay_life_cost(
     // CantLoseLife lock identically to every other pay-life path.
     match life_costs::pay_life_as_cost(state, player, amount, events) {
         PayLifeCostResult::Paid { .. } => Ok(()),
-        PayLifeCostResult::InsufficientLife | PayLifeCostResult::LockedCantLoseLife => {
-            Err(EngineError::ActionNotAllowed(
-                "Cannot pay life cost for mana ability".to_string(),
-            ))
-        }
+        PayLifeCostResult::InsufficientLife | PayLifeCostResult::LockedCantLoseLife => Err(
+            EngineError::ActionNotAllowed("Cannot pay life cost for mana ability".to_string()),
+        ),
     }
 }
 

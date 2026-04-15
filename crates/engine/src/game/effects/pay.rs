@@ -224,9 +224,7 @@ mod tests {
     #[test]
     fn life_payment_blocked_by_cant_lose_life() {
         use crate::game::zones::create_object;
-        use crate::types::ability::{
-            ControllerRef, StaticDefinition, TargetFilter, TypedFilter,
-        };
+        use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter, TypedFilter};
         use crate::types::identifiers::CardId;
         use crate::types::statics::StaticMode;
         use crate::types::zones::Zone;

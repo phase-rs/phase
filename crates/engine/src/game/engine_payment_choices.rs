@@ -7,11 +7,11 @@ use crate::types::zones::Zone;
 
 use super::casting;
 use super::effects;
-use super::life_costs::{pay_life_as_cost, PayLifeCostResult};
 use super::engine::{
     handle_tap_land_for_mana, handle_untap_land_for_mana, resume_pending_continuation_if_priority,
     EngineError,
 };
+use super::life_costs::{pay_life_as_cost, PayLifeCostResult};
 use super::mana_abilities;
 use super::restrictions;
 use super::zones;
@@ -225,8 +225,7 @@ pub(super) fn handle_unless_payment(
                 let life_amount = u32::try_from(amount.max(0)).unwrap_or(0);
                 match pay_life_as_cost(state, player, life_amount, events) {
                     PayLifeCostResult::Paid { .. } => {}
-                    PayLifeCostResult::InsufficientLife
-                    | PayLifeCostResult::LockedCantLoseLife => {
+                    PayLifeCostResult::InsufficientLife | PayLifeCostResult::LockedCantLoseLife => {
                         payment_failed = true;
                     }
                 }
