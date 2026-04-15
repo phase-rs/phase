@@ -105,6 +105,10 @@ fn resolve_double_counters(
 /// If life > 0: gain life equal to current total (new total = 2x).
 /// If life < 0: lose life equal to |current total| (new total = 2x negative).
 /// If life == 0: no change.
+///
+/// Routes the gain/loss through `apply_life_gain` / `apply_damage_life_loss`
+/// so the same replacement-pipeline and can't-gain / can't-lose short-circuits
+/// that govern all other life-change events apply here too (CR 119.7 + 119.8).
 fn resolve_double_life(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -113,31 +117,31 @@ fn resolve_double_life(
 ) -> Result<(), EffectError> {
     let player_id = resolve_player_target(ability, target);
 
-    let player = state
+    let current_life = state
         .players
-        .iter_mut()
+        .iter()
         .find(|p| p.id == player_id)
-        .ok_or(EffectError::PlayerNotFound)?;
+        .ok_or(EffectError::PlayerNotFound)?
+        .life;
 
-    let current_life = player.life;
     if current_life > 0 {
-        // CR 701.10d: Gain life equal to current total
-        player.life += current_life;
-        player.life_gained_this_turn += current_life as u32;
-        state.layers_dirty = true;
-        events.push(GameEvent::LifeChanged {
+        // CR 701.10d: Gain life equal to current total.
+        let _ = crate::game::effects::life::apply_life_gain(
+            state,
             player_id,
-            amount: current_life,
-        });
+            current_life as u32,
+            events,
+        );
     } else if current_life < 0 {
-        // CR 701.10d: Lose life to double the negative
-        player.life += current_life; // current_life is negative, so this subtracts
-        events.push(GameEvent::LifeChanged {
+        // CR 701.10d: Lose |current_life| additional life so the new total is 2x.
+        let _ = crate::game::effects::life::apply_damage_life_loss(
+            state,
             player_id,
-            amount: current_life, // negative amount
-        });
+            (-current_life) as u32,
+            events,
+        );
     }
-    // life == 0: no change
+    // life == 0: no change.
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Double,
@@ -402,6 +406,53 @@ mod tests {
 
         // CR 701.10d: 15 life → 30 life
         assert_eq!(state.players[0].life, 30);
+    }
+
+    /// CR 701.10d + CR 119.7: Doubling life routes through `apply_life_gain`, so
+    /// a CantGainLife static on the affected player suppresses the doubling.
+    #[test]
+    fn double_life_total_blocked_by_cant_gain_life() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{ControllerRef, StaticDefinition, TypedFilter};
+        use crate::types::identifiers::CardId;
+        use crate::types::statics::StaticMode;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 15;
+
+        // Attach a CantGainLife static affecting PlayerId(0).
+        let lock_id = create_object(
+            &mut state,
+            CardId(999),
+            PlayerId(0),
+            "Life Lock".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&lock_id)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantGainLife).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            );
+
+        let mut events = Vec::new();
+        let ability = make_double_ability(
+            DoubleTarget::LifeTotal,
+            TargetFilter::Controller,
+            PlayerId(0),
+            vec![],
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Life total must be unchanged — the Double effect's life-gain half is
+        // short-circuited by the CantGainLife lock before the pipeline runs.
+        assert_eq!(state.players[0].life, 15);
     }
 
     #[test]
