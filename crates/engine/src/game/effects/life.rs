@@ -336,7 +336,13 @@ pub fn resolve_lose(
 }
 
 /// CR 119.5: Set a player's life total to a specific number.
-/// The player gains or loses the necessary amount of life to reach the target.
+///
+/// Per CR 119.5: "If an effect sets a player's life total to a specific number,
+/// the player gains or loses the necessary amount of life to end up with the
+/// new total." The delta is therefore dispatched as either a `LifeGain` or
+/// `LifeLoss` event through [`apply_life_gain`] / [`apply_damage_life_loss`] so
+/// the full replacement pipeline fires and the CantGainLife / CantLoseLife
+/// short-circuits are consistent with every other life-change event.
 pub fn resolve_set_life_total(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -361,45 +367,27 @@ pub fn resolve_set_life_total(
         })
         .unwrap_or(ability.controller);
 
-    // CR 119.5 + CR 119.7 + CR 119.8: A set-life-total is adjudicated as a gain
-    // or loss of the difference. Each direction is independently gated by the
-    // corresponding can't-gain / can't-lose static.
-    let cant_gain =
-        crate::game::static_abilities::player_has_cant_gain_life(state, target_player_id);
-    let cant_lose =
-        crate::game::static_abilities::player_has_cant_lose_life(state, target_player_id);
-
-    let player = state
+    let current_life = state
         .players
-        .iter_mut()
+        .iter()
         .find(|p| p.id == target_player_id)
-        .ok_or(EffectError::PlayerNotFound)?;
-
-    let current_life = player.life;
+        .ok_or(EffectError::PlayerNotFound)?
+        .life;
     let diff = amount - current_life;
 
-    // CR 119.5: If the new total is higher, the player gains the difference.
-    // If lower, the player loses the difference.
-    if diff > 0 && !cant_gain {
-        player.life = amount;
-        player.life_gained_this_turn += diff as u32;
-    } else if diff < 0 && !cant_lose {
-        player.life = amount;
-        player.life_lost_this_turn += (-diff) as u32;
-    }
-    state.layers_dirty = true;
-
-    let effective_diff = match diff.signum() {
-        1 if cant_gain => 0,
-        -1 if cant_lose => 0,
-        _ => diff,
+    // CR 119.5: Decompose into the matching gain/loss event. A diff of 0 is a
+    // no-op. apply_life_gain / apply_damage_life_loss each handle their own
+    // CR 119.7 / CR 119.8 short-circuits and replacement pipeline routing.
+    let deferred = match diff.signum() {
+        1 => apply_life_gain(state, target_player_id, diff as u32, events).err(),
+        -1 => apply_damage_life_loss(state, target_player_id, (-diff) as u32, events).err(),
+        _ => None,
     };
-
-    if effective_diff != 0 {
-        events.push(GameEvent::LifeChanged {
-            player_id: target_player_id,
-            amount: effective_diff,
-        });
+    if deferred.is_some() {
+        // CR 614.7: A competing replacement required a player choice; the
+        // helper already installed the WaitingFor state. Return without
+        // emitting EffectResolved — the resume path will complete resolution.
+        return Ok(());
     }
 
     events.push(GameEvent::EffectResolved {
