@@ -47,6 +47,40 @@ pub(super) fn default_earthbend_target() -> TargetFilter {
     TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You))
 }
 
+/// Shared ControlNextTurn suffix parser (CR 722.1). Called after a prefix
+/// combinator ("you control " or "gain control of ") has matched; parses the
+/// target, then " during that player's next turn", then the optional extra-turn
+/// tail (CR 722.1 doesn't require it; some cards like Emrakul grant it).
+/// Returns `None` when the suffix doesn't apply, allowing the caller to treat
+/// the match as a different effect (e.g., plain `GainControl`).
+fn try_parse_control_next_turn_suffix(text: &str, rest: &str) -> Option<(TargetFilter, bool)> {
+    let (target_text, _) = super::strip_optional_target_prefix(rest);
+    let (target, rem) = parse_target(target_text);
+    let rem_lower = rem.to_ascii_lowercase();
+    tag::<_, _, VerboseError<&str>>(" during that player's next turn")
+        .parse(rem_lower.as_str())
+        .ok()?;
+    let rem_after_during = &rem[" during that player's next turn".len()..];
+    let rem_after_during_lower = rem_after_during.to_ascii_lowercase();
+    let (_tail, grant_extra_turn_after) = if let Ok((tail, _)) = alt((
+        tag::<_, _, VerboseError<&str>>(". after that turn, that player takes an extra turn"),
+        tag(" after that turn, that player takes an extra turn"),
+        tag("after that turn, that player takes an extra turn"),
+    ))
+    .parse(rem_after_during_lower.as_str())
+    {
+        (
+            &rem_after_during[rem_after_during.len() - tail.len()..],
+            true,
+        )
+    } else {
+        (rem_after_during, false)
+    };
+    #[cfg(debug_assertions)]
+    super::types::assert_no_compound_remainder(_tail, text);
+    Some((target, grant_extra_turn_after))
+}
+
 /// Parse "earthbend [N] [target <type>]" from the text after "earthbend ".
 /// Returns `(target, power, toughness)`. Defaults to "target land you control"
 /// when no explicit target remains (reminder text stripped, sequence connectors,
@@ -443,38 +477,37 @@ pub(super) fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<Targe
         super::types::assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::Fight { target });
     }
+    // CR 722.1: "You control target player during that player's next turn"
+    // (Mindslaver). Declarative form — "you" is not stripped as an imperative
+    // subject because this isn't a verb-on-controller pattern. Must match
+    // before the "gain control of" branch below since the prefixes differ.
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
-        value((), tag("gain control of ")).parse(input)
+        value((), tag("you control ")).parse(input)
     }) {
-        let (target_text, _) = super::strip_optional_target_prefix(rest);
-        let (target, rem) = parse_target(target_text);
-        let rem_lower = rem.to_ascii_lowercase();
-        if tag::<_, _, VerboseError<&str>>(" during that player's next turn")
-            .parse(rem_lower.as_str())
-            .is_ok()
+        if let Some((target, grant_extra_turn_after)) =
+            try_parse_control_next_turn_suffix(text, rest)
         {
-            let rem = &rem[" during that player's next turn".len()..];
-            let rem_lower = rem.to_ascii_lowercase();
-            let (_rem, grant_extra_turn_after) = if let Ok((rest, _)) = alt((
-                tag::<_, _, VerboseError<&str>>(
-                    ". after that turn, that player takes an extra turn",
-                ),
-                tag(" after that turn, that player takes an extra turn"),
-                tag("after that turn, that player takes an extra turn"),
-            ))
-            .parse(rem_lower.as_str())
-            {
-                (&rem[rem.len() - rest.len()..], true)
-            } else {
-                (rem, false)
-            };
-            #[cfg(debug_assertions)]
-            super::types::assert_no_compound_remainder(_rem, text);
             return Some(TargetedImperativeAst::ControlNextTurn {
                 target,
                 grant_extra_turn_after,
             });
         }
+    }
+    if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
+        value((), tag("gain control of ")).parse(input)
+    }) {
+        // Check for ControlNextTurn suffix first (rare phrasing combining both
+        // forms) before falling back to the standard GainControl effect.
+        if let Some((target, grant_extra_turn_after)) =
+            try_parse_control_next_turn_suffix(text, rest)
+        {
+            return Some(TargetedImperativeAst::ControlNextTurn {
+                target,
+                grant_extra_turn_after,
+            });
+        }
+        let (target_text, _) = super::strip_optional_target_prefix(rest);
+        let (target, rem) = parse_target(target_text);
         #[cfg(debug_assertions)]
         super::types::assert_no_compound_remainder(rem, text);
         return Some(TargetedImperativeAst::GainControl { target });
@@ -2160,6 +2193,22 @@ pub(super) fn parse_imperative_family_ast(
         ));
     }
 
+    // CR 722.1: "You control target player during that player's next turn"
+    // (Mindslaver / Word of Command class). "You" is the spell/ability controller
+    // in a declarative sentence (not an imperative verb), so this bypasses the
+    // first_word dispatch below. Delegates to the ControlNextTurn combinator
+    // in `parse_targeted_action_ast`.
+    if tag::<_, _, VerboseError<&str>>("you control ")
+        .parse(lower)
+        .is_ok()
+    {
+        if let Some(ast) = parse_targeted_action_ast(text, lower) {
+            return Some(ImperativeFamilyAst::Structured(ImperativeAst::Targeted(
+                ast,
+            )));
+        }
+    }
+
     // NOTE: when adding verbs here, also add them to IMPERATIVE_EXTRA_VERBS
     // in game/gap_analysis.rs so the parser gap analyzer can classify them.
     match first_word {
@@ -3387,6 +3436,68 @@ mod tests {
             }
             other => panic!("Expected Effect::Animate, got {other:?}"),
         }
+    }
+
+    // CR 722.1: Mindslaver's declarative "You control target player during that
+    // player's next turn" must route through the ControlNextTurn combinator.
+    #[test]
+    fn parse_mindslaver_control_next_turn() {
+        let text = "You control target player during that player's next turn.";
+        let lower = text.to_lowercase();
+        let result = parse_targeted_action_ast(text, &lower);
+        assert!(
+            result.is_some(),
+            "Should parse Mindslaver's 'you control ...' declarative"
+        );
+        let effect = lower_targeted_action_ast(result.unwrap());
+        match effect {
+            Effect::ControlNextTurn {
+                target,
+                grant_extra_turn_after,
+            } => {
+                assert!(matches!(target, TargetFilter::Player));
+                assert!(!grant_extra_turn_after);
+            }
+            other => panic!("Expected Effect::ControlNextTurn, got {other:?}"),
+        }
+    }
+
+    // CR 722.1: variant that grants an extra turn afterward (e.g., Emrakul-style).
+    #[test]
+    fn parse_control_next_turn_with_extra_turn_tail() {
+        let text = "You control target player during that player's next turn. \
+                    After that turn, that player takes an extra turn.";
+        let lower = text.to_lowercase();
+        let result = parse_targeted_action_ast(text, &lower);
+        assert!(result.is_some());
+        let effect = lower_targeted_action_ast(result.unwrap());
+        match effect {
+            Effect::ControlNextTurn {
+                grant_extra_turn_after,
+                ..
+            } => assert!(grant_extra_turn_after),
+            other => panic!("Expected Effect::ControlNextTurn, got {other:?}"),
+        }
+    }
+
+    // Regression guard: Mindslaver Toolkit's "Target opponent gains control of"
+    // still parses to GainControl (not ControlNextTurn) after the refactor.
+    #[test]
+    fn parse_gain_control_of_not_control_next_turn() {
+        let text = "Target opponent gains control of Mindslaver Toolkit";
+        let lower = text.to_lowercase();
+        // Subject-strip happens upstream; imperative dispatcher sees the
+        // stripped form "gain control of Mindslaver Toolkit".
+        let stripped = "gain control of Mindslaver Toolkit";
+        let stripped_lower = stripped.to_lowercase();
+        let result = parse_targeted_action_ast(stripped, &stripped_lower);
+        assert!(result.is_some());
+        let effect = lower_targeted_action_ast(result.unwrap());
+        assert!(
+            matches!(effect, Effect::GainControl { .. }),
+            "Expected GainControl, got {effect:?}"
+        );
+        let _ = (text, lower);
     }
 
     #[test]
