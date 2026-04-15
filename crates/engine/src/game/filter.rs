@@ -258,6 +258,8 @@ fn filter_inner(
         // StackAbility/StackSpell targeting is handled directly at call sites, not via filter
         TargetFilter::StackAbility | TargetFilter::StackSpell => false,
         TargetFilter::SpecificObject { id: target_id } => object_id == *target_id,
+        // SpecificPlayer scopes to a player, not an object — no object matches.
+        TargetFilter::SpecificPlayer { .. } => false,
         TargetFilter::AttachedTo => state
             .objects
             .get(&source_id)
@@ -378,6 +380,9 @@ fn zone_change_filter_inner(
             zone_change_filter_inner(state, record, inner, source_id, source_controller, ability)
         }),
         TargetFilter::SpecificObject { id } => record.object_id == *id,
+        // SpecificPlayer scopes to a player, not an object — a zone-change
+        // record is always an object transition.
+        TargetFilter::SpecificPlayer { .. } => false,
         TargetFilter::HasChosenName => {
             let chosen_name = state.objects.get(&source_id).and_then(|obj| {
                 obj.chosen_attributes.iter().find_map(|a| match a {
@@ -532,6 +537,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::StackAbility
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::TrackedSet { .. }
@@ -636,6 +642,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::StackAbility
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::TrackedSet { .. }

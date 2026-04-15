@@ -1148,6 +1148,14 @@ pub enum TargetFilter {
     SpecificObject {
         id: ObjectId,
     },
+    /// CR 113.10 + CR 702.16j: Matches a specific player by `PlayerId`.
+    /// Used for duration-based statics scoped to a single player
+    /// (e.g., Teferi's-Protection-style "you gain protection from everything").
+    /// Registered at resolution time by `register_transient_effect` when the
+    /// static's `affected` resolves to the ability's controller.
+    SpecificPlayer {
+        id: PlayerId,
+    },
     /// Matches the permanent that the trigger source (Equipment/Aura) is attached to.
     /// Used for "equipped creature" / "enchanted creature" trigger subjects.
     AttachedTo,

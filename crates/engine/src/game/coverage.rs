@@ -212,6 +212,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::ParentTargetController => "parent target's controller".into(),
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
+        TargetFilter::SpecificPlayer { id } => format!("player #{}", id.0),
         TargetFilter::TrackedSet { id } => format!("tracked set #{}", id.0),
         TargetFilter::ExiledBySource => "cards exiled by source".into(),
         TargetFilter::HasChosenName => "card with the chosen name".into(),
