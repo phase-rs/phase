@@ -1461,8 +1461,8 @@ impl StackEntry {
     pub fn ability(&self) -> Option<&ResolvedAbility> {
         match &self.kind {
             StackEntryKind::Spell { ability, .. } => ability.as_ref(),
-            StackEntryKind::ActivatedAbility { ability, .. }
-            | StackEntryKind::TriggeredAbility { ability, .. } => Some(ability),
+            StackEntryKind::ActivatedAbility { ability, .. } => Some(ability),
+            StackEntryKind::TriggeredAbility { ability, .. } => Some(ability),
         }
     }
 
@@ -1471,8 +1471,8 @@ impl StackEntry {
     pub fn ability_mut(&mut self) -> Option<&mut ResolvedAbility> {
         match &mut self.kind {
             StackEntryKind::Spell { ability, .. } => ability.as_mut(),
-            StackEntryKind::ActivatedAbility { ability, .. }
-            | StackEntryKind::TriggeredAbility { ability, .. } => Some(ability),
+            StackEntryKind::ActivatedAbility { ability, .. } => Some(ability),
+            StackEntryKind::TriggeredAbility { ability, .. } => Some(ability),
         }
     }
 }
@@ -1533,7 +1533,7 @@ pub enum StackEntryKind {
     },
     TriggeredAbility {
         source_id: ObjectId,
-        ability: ResolvedAbility,
+        ability: Box<ResolvedAbility>,
         #[serde(default)]
         condition: Option<TriggerCondition>,
         /// CR 603.7c: The event that caused this trigger, for event-context resolution.

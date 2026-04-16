@@ -980,7 +980,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
         controller: P0,
         kind: engine::types::game_state::StackEntryKind::TriggeredAbility {
             source_id,
-            ability: search_ability,
+            ability: Box::new(search_ability),
             condition: None,
             trigger_event: None,
             description: None,
@@ -1336,7 +1336,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
         controller: P0,
         kind: engine::types::game_state::StackEntryKind::TriggeredAbility {
             source_id: enchantment_id,
-            ability: animate_ability,
+            ability: Box::new(animate_ability),
             condition: None,
             trigger_event: None,
             description: None,

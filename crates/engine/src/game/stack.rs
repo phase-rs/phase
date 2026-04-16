@@ -1,4 +1,4 @@
-use crate::types::ability::CastingPermission;
+use crate::types::ability::{CastingPermission, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{CastingVariant, GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::ObjectId;
@@ -68,9 +68,12 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         StackEntryKind::ActivatedAbility { ability, .. } => {
             (Some(ability.clone()), false, CastingVariant::Normal, 0)
         }
-        StackEntryKind::TriggeredAbility { ability, .. } => {
-            (Some(ability.clone()), false, CastingVariant::Normal, 0)
-        }
+        StackEntryKind::TriggeredAbility { ability, .. } => (
+            Some(ResolvedAbility::clone(ability)),
+            false,
+            CastingVariant::Normal,
+            0,
+        ),
     };
 
     // Capture targets for Aura attachment after resolution
@@ -552,7 +555,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::TriggeredAbility {
                 source_id: ObjectId(50),
-                ability: resolved,
+                ability: Box::new(resolved),
                 condition: None,
                 trigger_event: Some(trigger_event.clone()),
                 description: None,

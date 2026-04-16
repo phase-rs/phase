@@ -1554,7 +1554,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::TriggeredAbility {
                 source_id: id,
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     Effect::Unimplemented {
                         name: "chapter".into(),
                         description: None,
@@ -1562,7 +1562,7 @@ mod tests {
                     vec![],
                     id,
                     PlayerId(0),
-                ),
+                )),
                 condition: None,
                 trigger_event: None,
                 description: None,

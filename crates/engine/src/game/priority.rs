@@ -430,7 +430,7 @@ mod tests {
             controller: PlayerId(0),
             kind: crate::types::game_state::StackEntryKind::TriggeredAbility {
                 source_id,
-                ability,
+                ability: Box::new(ability),
                 condition: None,
                 trigger_event: None,
                 description: None,

@@ -907,7 +907,7 @@ pub fn push_pending_trigger_to_stack(
         controller: trigger.controller,
         kind: StackEntryKind::TriggeredAbility {
             source_id: trigger.source_id,
-            ability: trigger.ability,
+            ability: Box::new(trigger.ability),
             condition: trigger.condition,
             trigger_event: trigger.trigger_event,
             description: trigger.description,

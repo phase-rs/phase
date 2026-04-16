@@ -378,7 +378,7 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::TriggeredAbility {
                 source_id: source_permanent,
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     Effect::Unimplemented {
                         name: "Dummy".to_string(),
                         description: None,
@@ -386,7 +386,7 @@ mod tests {
                     vec![],
                     source_permanent,
                     PlayerId(1),
-                ),
+                )),
                 condition: None,
                 trigger_event: None,
                 description: None,
