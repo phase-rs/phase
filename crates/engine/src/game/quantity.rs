@@ -253,6 +253,28 @@ fn resolve_ref(
                 .map(|obj| obj.counters.get(&ct).copied().unwrap_or(0) as i32)
                 .unwrap_or(0)
         }
+        QuantityRef::CountersOnObjects {
+            counter_type,
+            filter,
+        } => {
+            let ct = parse_counter_type(counter_type);
+            let zone = filter
+                .extract_in_zone()
+                .unwrap_or(crate::types::zones::Zone::Battlefield);
+            crate::game::targeting::zone_object_ids(state, zone)
+                .iter()
+                .filter_map(|&id| {
+                    if matches_target_filter(state, id, filter, &filter_ctx) {
+                        state
+                            .objects
+                            .get(&id)
+                            .map(|obj| obj.counters.get(&ct).copied().unwrap_or(0) as i32)
+                    } else {
+                        None
+                    }
+                })
+                .sum()
+        }
         QuantityRef::TargetPower => {
             // Find the first object target and return its power.
             targets
@@ -893,6 +915,75 @@ mod tests {
 
         // Should count 3 (2 instants + 1 sorcery in graveyard)
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 3);
+    }
+
+    #[test]
+    fn counters_on_objects_sums_matching_counters_not_permanents() {
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+
+        let land_with_two = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Animated Land".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&land_with_two).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.counters.insert(CounterType::Plus1Plus1, 2);
+        }
+
+        let other_land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other Land".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&other_land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        for i in 0..10 {
+            let id = create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(0),
+                format!("Permanent {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let source = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::CountersOnObjects {
+                counter_type: "P1P1".to_string(),
+                filter: TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
+            },
+        };
+
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 2);
     }
 
     #[test]

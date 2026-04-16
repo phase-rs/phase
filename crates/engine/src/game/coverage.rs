@@ -478,6 +478,12 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::CountersOnTarget { counter_type } => {
             format!("{counter_type} counters on target")
         }
+        QuantityRef::CountersOnObjects {
+            counter_type,
+            filter,
+        } => {
+            format!("{counter_type} counters on {}", fmt_target(filter))
+        }
         QuantityRef::Variable { name } => name.clone(),
         QuantityRef::SelfPower => "self power".into(),
         QuantityRef::SelfToughness => "self toughness".into(),
@@ -3334,6 +3340,7 @@ fn quantity_ref_variant_name(qref: &QuantityRef) -> &'static str {
         QuantityRef::PlayerCount { .. } => "PlayerCount",
         QuantityRef::CountersOnSelf { .. } => "CountersOnSelf",
         QuantityRef::CountersOnTarget { .. } => "CountersOnTarget",
+        QuantityRef::CountersOnObjects { .. } => "CountersOnObjects",
         QuantityRef::Variable { .. } => "Variable",
         QuantityRef::SelfPower => "SelfPower",
         QuantityRef::SelfToughness => "SelfToughness",
@@ -3426,6 +3433,8 @@ fn resolver_handled_features() -> HashSet<&'static str> {
         "quantity_ref:ObjectCount",
         "quantity_ref:PlayerCount",
         "quantity_ref:CountersOnSelf",
+        "quantity_ref:CountersOnTarget",
+        "quantity_ref:CountersOnObjects",
         "quantity_ref:Variable",
         "quantity_ref:SelfPower",
         "quantity_ref:SelfToughness",

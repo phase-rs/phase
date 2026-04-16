@@ -9,7 +9,7 @@
 use std::str::FromStr;
 
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take_until};
 use nom::combinator::value;
 use nom::Parser;
 use nom_language::error::VerboseError;
@@ -75,6 +75,38 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
         let counter_type = normalize_counter_type(raw_type);
         if !counter_type.is_empty() {
             return Some(QuantityRef::CountersOnTarget { counter_type });
+        }
+    }
+
+    // "the number of [counter type] counters on [filter]" — total counters across
+    // all matching objects, distinct from object count.
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("the number of ").parse(trimmed) {
+        for suffix in [
+            " counters on ",
+            " counter on ",
+            " counters among ",
+            " counter among ",
+        ] {
+            let Ok((after_suffix, counter_text)) =
+                take_until::<_, _, VerboseError<&str>>(suffix).parse(rest)
+            else {
+                continue;
+            };
+            let Ok((after_filter, _)) = tag::<_, _, VerboseError<&str>>(suffix).parse(after_suffix)
+            else {
+                continue;
+            };
+            let counter_type = normalize_counter_type(counter_text.trim());
+            if counter_type.is_empty() {
+                continue;
+            }
+            let (filter, remainder) = parse_type_phrase(after_filter);
+            if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+                return Some(QuantityRef::CountersOnObjects {
+                    counter_type,
+                    filter,
+                });
+            }
         }
     }
 
@@ -582,6 +614,24 @@ mod tests {
     }
 
     #[test]
+    fn quantity_ref_counters_on_objects() {
+        let qty = parse_quantity_ref("the number of +1/+1 counters on lands you control").unwrap();
+        match qty {
+            QuantityRef::CountersOnObjects {
+                counter_type,
+                filter,
+            } => {
+                assert_eq!(counter_type, "P1P1");
+                assert!(
+                    !matches!(filter, TargetFilter::Any),
+                    "expected a concrete land filter, got {filter:?}"
+                );
+            }
+            other => panic!("Expected CountersOnObjects, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_quantity_ref_object_count() {
         let qty = parse_quantity_ref("the number of creatures you control").unwrap();
         assert!(
@@ -666,6 +716,27 @@ mod tests {
                 qty: QuantityRef::CountersOnSelf { counter_type },
             } => assert_eq!(counter_type, "P1P1"),
             other => panic!("Expected CountersOnSelf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cda_quantity_counters_on_objects() {
+        let qty = parse_cda_quantity("the number of +1/+1 counters on lands you control").unwrap();
+        match qty {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::CountersOnObjects {
+                        counter_type,
+                        filter,
+                    },
+            } => {
+                assert_eq!(counter_type, "P1P1");
+                assert!(
+                    !matches!(filter, TargetFilter::Any),
+                    "expected a concrete land filter, got {filter:?}"
+                );
+            }
+            other => panic!("Expected CountersOnObjects, got {other:?}"),
         }
     }
 
