@@ -2010,15 +2010,13 @@ fn handle_play_land(
             // the choice prompt would fire at a random later resolution point with
             // the wrong controller context.
             if let Some(effect_def) = state.post_replacement_effect.take() {
-                if let Some(next_waiting_for) =
-                    engine_replacement::apply_post_replacement_effect(
-                        state,
-                        &effect_def,
-                        Some(object_id),
-                        None,
-                        events,
-                    )
-                {
+                if let Some(next_waiting_for) = engine_replacement::apply_post_replacement_effect(
+                    state,
+                    &effect_def,
+                    Some(object_id),
+                    None,
+                    events,
+                ) {
                     state.lands_played_this_turn += 1;
                     record_graveyard_play_permission(state, gy_permission_source);
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
