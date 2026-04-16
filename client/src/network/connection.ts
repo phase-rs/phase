@@ -113,6 +113,112 @@ export function parseRoomCode(input: string): string | null {
   return code;
 }
 
+export interface HostRoomOptions {
+  /**
+   * Reuse a specific room code instead of generating a random one. Used
+   * by host-resume flows to dial back in on the same peer id so guests'
+   * persisted tokens (keyed on `phase-<roomCode>`) still match.
+   *
+   * If the PeerJS signaling server still holds the prior registration
+   * (e.g., the old Peer hasn't fully GC'd), registration fails with
+   * `unavailable-id`. `hostRoom` retries 3x with 3s backoff; if all
+   * retries fail, it rejects — the caller decides whether to surface
+   * "try again later" vs. fall back to a fresh code. We NEVER silently
+   * swap to a fresh code: that would orphan every guest's persisted
+   * token.
+   */
+  preferredRoomCode?: string;
+}
+
+const UNAVAILABLE_ID_RETRY_BACKOFF_MS = [3_000, 3_000, 3_000];
+
+/**
+ * Attempt to register a host Peer on the signaling server, retrying
+ * on `unavailable-id` when `allowUnavailableIdRetry` is set. Each
+ * attempt uses a fresh `Peer` instance — PeerJS objects are single-use
+ * after an error, so retrying requires full reconstruction.
+ *
+ * Throws `AbortError` if the signal fires, a preserved `Error` with
+ * an `.cause` carrying the PeerJS error type on failure, or resolves
+ * with the opened Peer on success.
+ */
+async function openHostPeer(
+  peerId: string,
+  roomCode: string,
+  allowUnavailableIdRetry: boolean,
+  signal?: AbortSignal,
+): Promise<Peer> {
+  const maxAttempts = allowUnavailableIdRetry
+    ? UNAVAILABLE_ID_RETRY_BACKOFF_MS.length + 1
+    : 1;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
+    const peer = new Peer(peerId, { config: PEER_CONFIG });
+    traceP2P("Host", "create-peer", { roomCode, peerId, attempt });
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => {
+          traceP2P("Host", "abort-before-open", { peerId });
+          peer.off("open", onOpen);
+          peer.off("error", onError);
+          try { peer.destroy(); } catch { /* best-effort */ }
+          reject(new DOMException("Aborted", "AbortError"));
+        };
+        const onOpen = () => {
+          traceP2P("Host", "peer-open", { roomCode, peerId, attempt });
+          signal?.removeEventListener("abort", onAbort);
+          console.log("[P2P Host] registered on signaling server, code:", roomCode);
+          peer.off("error", onError);
+          resolve();
+        };
+        const onError = (err: Error & { type?: string }) => {
+          traceP2P("Host", "peer-open-error", {
+            peerId,
+            attempt,
+            type: err.type,
+            message: err.message,
+          });
+          signal?.removeEventListener("abort", onAbort);
+          peer.off("open", onOpen);
+          try { peer.destroy(); } catch { /* best-effort */ }
+          // Preserve the PeerJS error type on `.cause` so callers can
+          // classify without parsing the message.
+          const wrapped = new Error(`Failed to create room: ${err.message}`);
+          Object.assign(wrapped, { cause: err, peerErrorType: err.type });
+          reject(wrapped);
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+        peer.once("open", onOpen);
+        peer.once("error", onError);
+      });
+      return peer;
+    } catch (err) {
+      const peerErrorType = (err as { peerErrorType?: string }).peerErrorType;
+      const canRetry =
+        allowUnavailableIdRetry
+        && peerErrorType === "unavailable-id"
+        && attempt < UNAVAILABLE_ID_RETRY_BACKOFF_MS.length;
+      if (!canRetry) throw err;
+
+      const delay = UNAVAILABLE_ID_RETRY_BACKOFF_MS[attempt];
+      traceP2P("Host", "unavailable-id-retry", { peerId, attempt, delay });
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(resolve, delay);
+        signal?.addEventListener("abort", () => {
+          clearTimeout(t);
+          reject(new DOMException("Aborted", "AbortError"));
+        }, { once: true });
+      });
+    }
+  }
+  throw new Error(
+    `Failed to create room on ${peerId}: peer ID remained unavailable after retries`,
+  );
+}
+
 /**
  * Host creates a room and returns a subscription handle. The host adapter
  * subscribes via `onGuestConnected` to wrap each incoming guest in a
@@ -125,11 +231,13 @@ export function parseRoomCode(input: string): string | null {
  * Returns a Promise so the caller can await the host being registered on the
  * signaling server before exposing the room code to guests.
  */
-export async function hostRoom(signal?: AbortSignal): Promise<HostResult> {
-  const roomCode = generateRoomCode();
+export async function hostRoom(
+  signal?: AbortSignal,
+  options: HostRoomOptions = {},
+): Promise<HostResult> {
+  const roomCode = options.preferredRoomCode ?? generateRoomCode();
   const peerId = PEER_ID_PREFIX + roomCode;
-  const peer = new Peer(peerId, { config: PEER_CONFIG });
-  traceP2P("Host", "create-peer", { roomCode, peerId });
+  const isResume = options.preferredRoomCode !== undefined;
 
   let destroyed = false;
   const guestHandlers = new Set<(conn: DataConnection) => void>();
@@ -142,36 +250,13 @@ export async function hostRoom(signal?: AbortSignal): Promise<HostResult> {
   // first subscribe so no inbound guest is silently dropped.
   const pendingConns: DataConnection[] = [];
 
-  await new Promise<void>((resolve, reject) => {
-    if (signal?.aborted) {
-      try { peer.destroy(); } catch { /* best-effort */ }
-      reject(new DOMException("Aborted", "AbortError"));
-      return;
-    }
-    const onAbort = () => {
-      traceP2P("Host", "abort-before-open", { peerId });
-      peer.off("open", onOpen);
-      peer.off("error", onError);
-      try { peer.destroy(); } catch { /* best-effort */ }
-      reject(new DOMException("Aborted", "AbortError"));
-    };
-    const onOpen = () => {
-      traceP2P("Host", "peer-open", { roomCode, peerId });
-      signal?.removeEventListener("abort", onAbort);
-      console.log("[P2P Host] registered on signaling server, code:", roomCode);
-      peer.off("error", onError);
-      resolve();
-    };
-    const onError = (err: Error) => {
-      traceP2P("Host", "peer-open-error", { peerId, message: err.message });
-      signal?.removeEventListener("abort", onAbort);
-      peer.off("open", onOpen);
-      reject(new Error(`Failed to create room: ${err.message}`));
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    peer.once("open", onOpen);
-    peer.once("error", onError);
-  });
+  // Open the Peer, retrying on `unavailable-id` when resuming: the PeerJS
+  // signaling server may still hold the previous registration for a few
+  // seconds after the prior host's TCP drops. Only resume gets the retry
+  // — fresh hosts generate random codes so the collision would be
+  // unrecoverable anyway.
+  const peer = await openHostPeer(peerId, roomCode, isResume, signal);
+  traceP2P("Host", "peer-open-final", { peerId, roomCode });
 
   // Multi-fire connection handler: every guest gets wrapped on `open`.
   peer.on("connection", (conn) => {
