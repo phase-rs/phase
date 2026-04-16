@@ -87,6 +87,21 @@ type ZoneRailStyle = CSSProperties & {
   "--card-h": string;
 };
 
+/**
+ * User-facing messages keyed by `P2PAdapterEvent.hostingFailed.reason`.
+ * Typed as `Record<ReasonUnion, string>` so adding a new reason to the
+ * adapter event union without adding a message here is a compile error —
+ * the idiomatic TS replacement for a `switch`-with-`never`-default when
+ * the union has a single arm today but will grow.
+ */
+const HOSTING_FAILURE_MESSAGES: Record<
+  Extract<P2PAdapterEvent, { type: "hostingFailed" }>["reason"],
+  string
+> = {
+  room_still_claimed:
+    "Your previous room is still winding down on the signaling server. Wait about a minute, then try Resume again.",
+};
+
 export function GamePage() {
   const navigate = useNavigate();
   const { id: gameId } = useParams<{ id: string }>();
@@ -357,8 +372,26 @@ export function GamePage() {
       case "error":
         setReconnectState({ status: "failed" });
         break;
+      case "hostingFailed": {
+        // Pre-game setup failure — distinct from `error` (catch-all for
+        // connection drops mid-game) because we haven't entered a game
+        // yet and `setReconnectState` would be semantically wrong (no
+        // connection to reconnect). Show the user what happened and
+        // send them back to the menu; the Resume button remains because
+        // `clearP2PHostSession` was NOT called — the persisted state is
+        // still valid, the signaling server just needs a moment.
+        //
+        // `HOSTING_FAILURE_MESSAGES` is typed as `Record<ReasonUnion, string>`
+        // so adding a new `reason` to the P2PAdapterEvent union without
+        // adding a message here is a compile error.
+        useMultiplayerStore
+          .getState()
+          .showToast(HOSTING_FAILURE_MESSAGES[event.reason]);
+        navigate("/");
+        break;
+      }
     }
-  }, []);
+  }, [navigate]);
 
   const handleReady = useCallback(() => {
     setWaitingForOpponent(false);

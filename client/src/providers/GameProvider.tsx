@@ -325,11 +325,15 @@ export function GameProvider({
             }
 
             // Only open a fresh broker client when starting a fresh
-            // game. On resume we skip broker re-register — the original
-            // lobby entry has expired via TTL (5 min), and new-guest
-            // discovery during resume is deferred for MVP. Existing
-            // guests reconnect via direct peer-id dial using their
-            // cached room code + token.
+            // game. Resume deliberately skips broker re-registration:
+            // resume requires `savedSession.gameStarted`, and once the
+            // game has started `handleNewGuest` rejects every new joiner
+            // ("Game already in progress"). A re-registered lobby entry
+            // would advertise a room that rejects its own click-throughs,
+            // which is worse than letting the original entry expire via
+            // the broker's 5-min TTL. Returning guests dial the host
+            // directly via their cached peer-id + token; they never go
+            // through the lobby list for reconnect.
             if (useBroker && !isResume) {
               const serverAddress = useMultiplayerStore.getState().serverAddress;
               broker = await openBrokerClient(serverAddress, { signal });
@@ -474,7 +478,21 @@ export function GameProvider({
           hostPeerHandle?.destroy();
           if (signal.aborted) return;
           const message = err instanceof Error ? err.message : String(err);
-          onP2PEventRef.current?.({ type: "error", message });
+          // Classify the PeerJS failure mode so the UI can render an
+          // actionable message. `unavailable-id` on resume means the
+          // signaling server still holds the prior Peer's registration —
+          // the user needs to wait, not retry immediately. Any other
+          // error falls through as a generic `error` event.
+          const peerErrorType = (err as { peerErrorType?: string }).peerErrorType;
+          if (peerErrorType === "unavailable-id") {
+            onP2PEventRef.current?.({
+              type: "hostingFailed",
+              reason: "room_still_claimed",
+              message,
+            });
+          } else {
+            onP2PEventRef.current?.({ type: "error", message });
+          }
         }
       };
 

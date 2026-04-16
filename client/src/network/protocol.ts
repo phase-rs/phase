@@ -37,6 +37,17 @@ export type P2PMessage =
   | { type: "reconnect_rejected"; reason: string }
   // Kick / forced removal (host → target).
   | { type: "kick"; reason: string }
+  // Host explicitly quit the game (host → all guests). Terminal: guests set
+  // their `terminated` flag and skip the reconnect backoff that normally
+  // fires on an unexpected connection drop. Distinct from the PeerSession
+  // `disconnect` wire message because that one is a pure session-close
+  // signal; `host_left` carries the game-level semantic that the room is
+  // permanently gone and reconnect attempts would spin against a destroyed
+  // Peer. Sent from `P2PHostAdapter.terminateGame()` only — component
+  // unmount (StrictMode, tab close) goes through `dispose()` which does NOT
+  // send this, since those cases may be transient and the reconnect loop is
+  // correct behavior there.
+  | { type: "host_left"; reason: string }
   // Lifecycle broadcasts (host → all remaining peers).
   | { type: "player_kicked"; playerId: number; reason: string }
   // Host chose "continue without them" OR guest self-conceded mid-game. Wire
@@ -65,6 +76,7 @@ const VALID_TYPES = new Set([
   "reconnect_ack",
   "reconnect_rejected",
   "kick",
+  "host_left",
   "player_kicked",
   "player_conceded",
   "player_disconnected",

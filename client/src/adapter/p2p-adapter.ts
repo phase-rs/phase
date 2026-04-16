@@ -39,6 +39,15 @@ export type P2PAdapterEvent =
   | { type: "opponentDisconnected"; reason: string }
   | { type: "gameOver"; winner: PlayerId | null; reason: string }
   | { type: "error"; message: string }
+  /**
+   * Pre-game setup failure on the host side. Distinct from the catch-all
+   * `error` event because it carries a typed `reason` for the UI to render
+   * a specific remediation — not every setup error is the same problem.
+   * Currently only `room_still_claimed` fires (PeerJS signaling server
+   * still holds the prior host's peer-id registration after a fast
+   * resume); future classifications slot in as additional `reason` arms.
+   */
+  | { type: "hostingFailed"; reason: "room_still_claimed"; message: string }
   | {
       type: "stateChanged";
       state: GameState;
@@ -704,6 +713,19 @@ export class P2PHostAdapter implements EngineAdapter {
    * persistence preserved and go through `dispose()`.
    */
   terminateGame(): void {
+    // Notify every live guest session BEFORE dispose tears the sessions down.
+    // Without this, guests interpret the ensuing DataConnection close as a
+    // transient network drop and burn through the full reconnect backoff
+    // (minutes of doomed retries against a Peer that was just destroyed).
+    // The wire message is sent synchronously while the sessions are still
+    // open; PeerJS buffers the RTCDataChannel write, and `dispose()` below
+    // runs on the next line so the message flushes before the channel tears
+    // down. This broadcast is intentionally skipped on `dispose()` — plain
+    // unmounts (StrictMode remount, tab close, navigation) may be transient
+    // and the guest's reconnect loop is the correct behavior there.
+    for (const session of this.guestSessions.values()) {
+      session.send({ type: "host_left", reason: "Host left the game" });
+    }
     if (this.gameId) {
       void clearP2PHostSession(this.gameId);
     }
@@ -1302,6 +1324,16 @@ export class P2PGuestAdapter implements EngineAdapter {
         break;
       }
       case "kick": {
+        this.terminated = true;
+        this.emit({ type: "gameOver", winner: null, reason: msg.reason });
+        break;
+      }
+      case "host_left": {
+        // Host explicitly quit — same terminal handling as `kick`: flip
+        // `terminated` so the post-disconnect `handleHostDisconnect` path
+        // skips `attemptReconnect`. Without this flag, the guest would
+        // spin the reconnect backoff indefinitely against a Peer the
+        // host already destroyed.
         this.terminated = true;
         this.emit({ type: "gameOver", winner: null, reason: msg.reason });
         break;

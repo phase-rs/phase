@@ -493,6 +493,38 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(wireKicked).toBeUndefined();
   });
 
+  it("terminateGame broadcasts host_left to every live guest session before disposing", async () => {
+    // `host_left` is the terminal counterpart to the transient
+    // session-close that `dispose()` performs — it tells guests their
+    // reconnect backoff would be pointless and short-circuits the
+    // `attemptReconnect` loop. Every connected guest must receive it,
+    // since guests that miss the signal would re-enter the backoff.
+    const { adapter, emitConnection } = makeHost(3, 5_000);
+    await adapter.initialize();
+    const g1 = joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    const g2 = joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    g1.sent.length = 0;
+    g2.sent.length = 0;
+
+    adapter.terminateGame();
+
+    // The send must happen before the PeerSession is closed — close()
+    // itself enqueues a `disconnect` wire message, so we verify
+    // `host_left` arrives first in the send queue (not merely present).
+    const g1Types = g1.sent.map((m) => (m as { type: string }).type);
+    const g2Types = g2.sent.map((m) => (m as { type: string }).type);
+    expect(g1Types[0]).toBe("host_left");
+    expect(g2Types[0]).toBe("host_left");
+  });
+
   it("blocks submitAction while paused-disconnect", async () => {
     const { adapter, emitConnection } = makeHost(3, 5_000);
     await adapter.initialize();
