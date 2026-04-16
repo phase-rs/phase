@@ -566,8 +566,8 @@ pub fn select_action_from_scores(
 }
 
 /// Apply a seat mutation to a seat state, using the TLS card database for deck
-/// resolution. Both arguments are JSON strings; returns the `SeatDelta` as a JS
-/// object on success, or a JS error string on failure.
+/// resolution. Both arguments are JSON strings; returns `{ state, delta }` as
+/// a JS object on success, or a JS error string on failure.
 #[wasm_bindgen]
 pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsValue, JsValue> {
     struct WasmDeckResolver;
@@ -603,8 +603,15 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
         deck_resolver: &WasmDeckResolver,
     };
 
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SeatMutationResult {
+        state: SeatState,
+        delta: seat_reducer::types::SeatDelta,
+    }
+
     match seat_reducer::apply(&mut state, mutation, &ctx) {
-        Ok(delta) => Ok(to_js(&delta)),
+        Ok(delta) => Ok(to_js(&SeatMutationResult { state, delta })),
         Err(e) => Err(JsValue::from_str(&format!("{e:?}"))),
     }
 }

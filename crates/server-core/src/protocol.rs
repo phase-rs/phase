@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// (clients see "Invalid message: unknown variant") rather than at the
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Git short-hash of the build. Emitted by `build.rs`; falls back to `"dev"`
 /// when git isn't available (containers, source tarballs).
@@ -176,6 +176,9 @@ pub enum ClientMessage {
         game_code: String,
         current_players: u8,
         max_players: u8,
+    },
+    SeatMutate {
+        mutation: SeatMutation,
     },
     /// Sent by a P2P host on a `LobbyOnly` server once their game is live
     /// (guest(s) have dialed in and the P2P session is established) so the

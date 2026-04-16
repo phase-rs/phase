@@ -1,4 +1,5 @@
 import type { GameAction, GameEvent, GameState } from "../adapter/types";
+import type { SeatMutation, SeatView } from "../multiplayer/seatTypes";
 
 export type P2PMessage =
   | { type: "guest_deck"; deckData: unknown; displayName?: string }
@@ -60,7 +61,9 @@ export type P2PMessage =
   | { type: "game_paused"; reason: string }
   | { type: "game_resumed" }
   // Pre-game lobby progress (host → all peers in the lobby).
-  | { type: "lobby_progress"; joined: number; total: number };
+  | { type: "lobby_progress"; joined: number; total: number }
+  | { type: "seat_mutate"; mutation: SeatMutation }
+  | { type: "seat_snapshot"; view: SeatView };
 
 const VALID_TYPES = new Set([
   "guest_deck",
@@ -85,6 +88,8 @@ const VALID_TYPES = new Set([
   "game_paused",
   "game_resumed",
   "lobby_progress",
+  "seat_mutate",
+  "seat_snapshot",
 ]);
 
 /** Validate an already-parsed object as a P2PMessage. Throws on malformed data. */

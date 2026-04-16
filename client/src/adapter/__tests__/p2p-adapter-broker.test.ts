@@ -126,6 +126,7 @@ function makeHost(
     undefined,
     5_000,
     broker,
+    true,
     brokerGameCode,
   );
   return { adapter, emitConnection };
@@ -163,6 +164,7 @@ describe("P2PHostAdapter — broker integration", () => {
           undefined,
           5_000,
           broker,
+          true,
         ),
     ).toThrow("brokerGameCode is required");
   });

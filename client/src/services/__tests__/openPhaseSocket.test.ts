@@ -44,7 +44,7 @@ function helloFrame(
     data: {
       server_version: "0.0.0-test",
       build_commit: "testhash",
-      protocol_version: 2,
+      protocol_version: 3,
       mode: "Full",
       ...overrides,
     },
@@ -64,7 +64,7 @@ describe("openPhaseSocket", () => {
 
     const socket = await promise;
     expect(socket.serverInfo.mode).toBe("Full");
-    expect(socket.serverInfo.protocolVersion).toBe(2);
+    expect(socket.serverInfo.protocolVersion).toBe(3);
     expect(ws.send).toHaveBeenCalledWith(
       expect.stringContaining('"type":"ClientHello"'),
     );

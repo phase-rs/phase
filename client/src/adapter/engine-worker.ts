@@ -18,6 +18,7 @@ import init, {
   restore_game_state,
   resume_multiplayer_host_state,
   load_card_database,
+  apply_seat_mutation,
   export_game_state_json,
   clear_game_state,
   set_multiplayer_mode,
@@ -65,7 +66,8 @@ type EngineRequest =
   | { type: "loadCardDbFromUrl"; id: number }
   | { type: "resetGame"; id: number }
   | { type: "setMultiplayerMode"; id: number; enabled: boolean }
-  | { type: "ping"; id: number };
+  | { type: "ping"; id: number }
+  | { type: "applySeatMutation"; id: number; stateJson: string; mutationJson: string };
 
 type EngineResponse =
   | { type: "ready" }
@@ -248,6 +250,12 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "ping": {
         result(msg.id, ping());
+        break;
+      }
+
+      case "applySeatMutation": {
+        const delta = apply_seat_mutation(msg.stateJson, msg.mutationJson);
+        result(msg.id, delta ?? null);
         break;
       }
     }

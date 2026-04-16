@@ -1422,6 +1422,7 @@ dependencies = [
  "http",
  "phase-ai",
  "rusqlite",
+ "seat-reducer",
  "serde",
  "serde_json",
  "server-core",

@@ -22,6 +22,7 @@ use engine::game::{validate_deck_for_format, DeckCompatibilityRequest};
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use http::HeaderValue;
+use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
 use server_core::lobby::{LobbyManager, RegisterGameRequest};
 use server_core::protocol::{
     build_commit, ClientMessage, ServerMessage, ServerMode, PROTOCOL_VERSION,
@@ -251,6 +252,7 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Action { .. }
         | ClientMessage::Reconnect { .. }
+        | ClientMessage::SeatMutate { .. }
         | ClientMessage::Concede
         | ClientMessage::Emote { .. }
         | ClientMessage::SpectatorJoin { .. } => match mode {
@@ -833,6 +835,153 @@ fn delete_session_async(game_db: &SharedGameDb, game_code: &str) {
             error!(game = %code, error = %e, "failed to delete persisted session");
         }
     });
+}
+
+struct ServerDeckResolver<'a> {
+    db: &'a CardDatabase,
+}
+
+impl DeckResolver for ServerDeckResolver<'_> {
+    fn resolve(
+        &self,
+        choice: &DeckChoice,
+    ) -> Result<engine::game::deck_loading::PlayerDeckPayload, String> {
+        let deck = match choice {
+            DeckChoice::Random => server_core::starter_decks::random_starter_deck(),
+            DeckChoice::Named(name) => server_core::starter_decks::find_starter_deck(name)
+                .ok_or_else(|| format!("Starter deck not found: {name}"))?,
+        };
+        server_core::resolve_deck(self.db, &deck)
+    }
+}
+
+async fn broadcast_game_started(
+    state: &SharedState,
+    connections: &SharedConnections,
+    game_db: &SharedGameDb,
+    game_code: &str,
+) {
+    let (player_messages, ai_results, player_count) = {
+        let mut mgr = state.lock().await;
+        let Some(session) = mgr.sessions.get_mut(game_code) else {
+            return;
+        };
+
+        let (legal_actions, spell_costs_all) = engine_legal_actions_with_costs(&session.state);
+        let auto_pass = engine_auto_pass(&session.state, &legal_actions);
+        let actor = server_core::acting_player(&session.state);
+        let player_names = session.display_names.clone();
+
+        let player_messages = (0..session.player_count)
+            .filter(|pid| !session.ai_seats.contains(&PlayerId(*pid)))
+            .map(|pid| {
+                let player = PlayerId(pid);
+                let filtered = server_core::filter_state_for_player(&session.state, player);
+                let opponent_name = engine::game::players::opponents(&session.state, player)
+                    .first()
+                    .and_then(|opp| {
+                        let name = &session.display_names[opp.0 as usize];
+                        if name.is_empty() {
+                            None
+                        } else {
+                            Some(name.clone())
+                        }
+                    });
+                let is_actor = actor == Some(player);
+                (
+                    player,
+                    ServerMessage::GameStarted {
+                        state: filtered,
+                        your_player: player,
+                        opponent_name,
+                        player_names: player_names.clone(),
+                        legal_actions: if is_actor {
+                            legal_actions.clone()
+                        } else {
+                            Vec::new()
+                        },
+                        auto_pass_recommended: if is_actor { auto_pass } else { false },
+                        spell_costs: if is_actor {
+                            spell_costs_all.clone()
+                        } else {
+                            HashMap::new()
+                        },
+                        player_token: None,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let ai_results = session.run_ai();
+        let player_count = session.player_count;
+        persist_session_async(game_db, game_code, session);
+        (player_messages, ai_results, player_count)
+    };
+
+    {
+        let conns = connections.lock().await;
+        if let Some(players) = conns.get(game_code) {
+            for (pid, msg) in &player_messages {
+                if let Some(sender) = players.get(pid) {
+                    let _ = sender.send(msg.clone());
+                }
+            }
+        }
+    }
+
+    for result in ai_results {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let (raw_state, events, legal_actions, log_entries, auto_pass, spell_costs) = result;
+        let actor = {
+            let mgr = state.lock().await;
+            mgr.sessions
+                .get(game_code)
+                .and_then(|session| server_core::acting_player(&session.state))
+        };
+        let filtered_states: Vec<(PlayerId, GameState)> = (0..player_count)
+            .map(PlayerId)
+            .map(|pid| (pid, server_core::filter_state_for_player(&raw_state, pid)))
+            .collect();
+
+        let conns = connections.lock().await;
+        if let Some(players) = conns.get(game_code) {
+            for (pid, pstate) in &filtered_states {
+                if let Some(sender) = players.get(pid) {
+                    let is_actor = actor == Some(*pid);
+                    let _ = sender.send(ServerMessage::StateUpdate {
+                        state: pstate.clone(),
+                        events: events.clone(),
+                        legal_actions: if is_actor {
+                            legal_actions.clone()
+                        } else {
+                            Vec::new()
+                        },
+                        auto_pass_recommended: if is_actor { auto_pass } else { false },
+                        eliminated_players: Vec::new(),
+                        log_entries: log_entries.clone(),
+                        spell_costs: if is_actor {
+                            spell_costs.clone()
+                        } else {
+                            HashMap::new()
+                        },
+                    });
+                }
+            }
+        }
+    }
+}
+
+async fn require_host(identity: &SocketIdentity, socket: &mut WebSocket) -> Result<(), ()> {
+    if identity.player_id != Some(PlayerId(0)) {
+        let msg = ServerMessage::Error {
+            message: "Only the host can modify seats.".to_string(),
+        };
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _ = socket.send(Message::text(json)).await;
+        }
+        return Err(());
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2139,11 +2288,8 @@ async fn handle_client_message(
                     persist_session_async(game_db, &game_code, session);
                     identity.set_session(game_code.clone(), joiner, player_token.clone());
 
-                    let player_names = session.display_names.clone();
-
                     // Build slot info before releasing session borrow
                     let slot_info = session.player_slot_info();
-                    let is_full = session.is_full();
                     let current_count = session.current_player_count();
 
                     let mut conns = connections.lock().await;
@@ -2160,122 +2306,31 @@ async fn handle_client_message(
                         }
                     }
 
-                    // Keep the public lobby listing's `current_players` in sync
-                    // for games that are still waiting. When the game becomes
-                    // full the `if is_full` branch below unregisters it from
-                    // the lobby entirely, so no update is needed there.
-                    if !is_full {
-                        let updated = {
-                            let mut lob = lobby.lock().await;
-                            lob.set_current_players(&game_code, current_count);
-                            // Private games aren't listed in the public lobby,
-                            // so `public_game` returns None and no update is
-                            // broadcast — which is the correct behavior.
-                            lob.public_game(&game_code)
-                        };
-                        if let Some(game) = updated {
-                            broadcast_to_lobby_subscribers(
-                                lobby_subscribers,
-                                ServerMessage::LobbyGameUpdated { game },
-                            )
-                            .await;
-                        }
+                    let updated = {
+                        let mut lob = lobby.lock().await;
+                        lob.set_current_players(&game_code, current_count);
+                        lob.public_game(&game_code)
+                    };
+                    if let Some(game) = updated {
+                        broadcast_to_lobby_subscribers(
+                            lobby_subscribers,
+                            ServerMessage::LobbyGameUpdated { game },
+                        )
+                        .await;
                     }
 
-                    // Only send GameStarted when the game is full
-                    if is_full {
-                        let (legal_actions, spell_costs_all) =
-                            engine_legal_actions_with_costs(&session.state);
-                        let auto_pass = engine_auto_pass(&session.state, &legal_actions);
-                        let actor = server_core::acting_player(&session.state);
-
-                        // Find first opponent name for backward compat
-                        let joiner_opp_name =
-                            engine::game::players::opponents(&session.state, joiner)
-                                .first()
-                                .and_then(|&opp| {
-                                    let name = &session.display_names[opp.0 as usize];
-                                    if name.is_empty() {
-                                        None
-                                    } else {
-                                        Some(name.clone())
-                                    }
-                                });
-
-                        let is_joiner_actor = actor == Some(joiner);
-                        let joiner_legals = if is_joiner_actor {
-                            legal_actions.clone()
-                        } else {
-                            vec![]
-                        };
-                        let msg = ServerMessage::GameStarted {
-                            state: filtered_state,
-                            your_player: joiner,
-                            opponent_name: joiner_opp_name,
-                            player_names: player_names.clone(),
-                            legal_actions: joiner_legals,
-                            auto_pass_recommended: if is_joiner_actor { auto_pass } else { false },
-                            spell_costs: if is_joiner_actor {
-                                spell_costs_all.clone()
-                            } else {
-                                HashMap::new()
-                            },
-                            player_token: Some(player_token.clone()),
-                        };
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            let _ = socket.send(Message::text(json)).await;
-                        }
-
-                        // Send GameStarted to all other connected players
-                        for (&pid, sender) in conns.get(&game_code).unwrap().iter() {
-                            if pid != joiner {
-                                let p_state =
-                                    server_core::filter_state_for_player(&session.state, pid);
-                                let opp_name =
-                                    engine::game::players::opponents(&session.state, pid)
-                                        .first()
-                                        .and_then(|&opp| {
-                                            let name = &session.display_names[opp.0 as usize];
-                                            if name.is_empty() {
-                                                None
-                                            } else {
-                                                Some(name.clone())
-                                            }
-                                        });
-                                let is_actor = actor == Some(pid);
-                                let p_legals = if is_actor {
-                                    legal_actions.clone()
-                                } else {
-                                    vec![]
-                                };
-                                let _ = sender.send(ServerMessage::GameStarted {
-                                    state: p_state,
-                                    your_player: pid,
-                                    opponent_name: opp_name,
-                                    player_names: player_names.clone(),
-                                    legal_actions: p_legals,
-                                    auto_pass_recommended: if is_actor { auto_pass } else { false },
-                                    spell_costs: if is_actor {
-                                        spell_costs_all.clone()
-                                    } else {
-                                        HashMap::new()
-                                    },
-                                    player_token: None,
-                                });
-                            }
-                        }
+                    let msg = ServerMessage::StateUpdate {
+                        state: filtered_state,
+                        events: vec![],
+                        legal_actions: vec![],
+                        auto_pass_recommended: false,
+                        eliminated_players: vec![],
+                        log_entries: vec![],
+                        spell_costs: HashMap::new(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
                     }
-
-                    let mut lob = lobby.lock().await;
-                    lob.unregister_game(&game_code);
-
-                    broadcast_to_lobby_subscribers(
-                        lobby_subscribers,
-                        ServerMessage::LobbyGameRemoved {
-                            game_code: game_code.clone(),
-                        },
-                    )
-                    .await;
 
                     let count = player_count.load(Ordering::Relaxed);
                     broadcast_player_count(lobby_subscribers, count).await;
@@ -2394,6 +2449,142 @@ async fn handle_client_message(
             let msg = ServerMessage::Pong { timestamp };
             if let Ok(json) = serde_json::to_string(&msg) {
                 let _ = socket.send(Message::text(json)).await;
+            }
+        }
+
+        ClientMessage::SeatMutate { mutation } => {
+            if matches!(mode, ServerMode::LobbyOnly) {
+                let msg = ServerMessage::Error {
+                    message: "Seat mutations are not available on lobby-only servers.".to_string(),
+                };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+            if require_host(identity, socket).await.is_err() {
+                return;
+            }
+
+            let Some(game_code) = identity.game_code.clone() else {
+                return;
+            };
+
+            let (slot_info, kicked_players, started, current_players, max_players, public_before) = {
+                let mut mgr = state.lock().await;
+                let Some(session) = mgr.sessions.get_mut(&game_code) else {
+                    let msg = ServerMessage::Error {
+                        message: format!("Game not found: {game_code}"),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                };
+
+                let public_before = session.lobby_meta.as_ref().is_some_and(|meta| meta.public);
+                let mut seat_state = session.seat_state();
+                let delta_result = {
+                    let resolver = ServerDeckResolver { db: db.as_ref() };
+                    let ctx = ReducerCtx {
+                        platform: phase_ai::config::Platform::Native,
+                        deck_resolver: &resolver,
+                    };
+                    seat_reducer::apply(&mut seat_state, mutation, &ctx)
+                };
+                let delta = match delta_result {
+                    Ok(delta) => delta,
+                    Err(err) => {
+                        let msg = ServerMessage::Error {
+                            message: format!("Seat mutation failed: {err:?}"),
+                        };
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = socket.send(Message::text(json)).await;
+                        }
+                        return;
+                    }
+                };
+
+                let kicked_players = delta
+                    .invalidated_tokens
+                    .iter()
+                    .filter_map(|token| {
+                        session
+                            .player_for_token(token)
+                            .map(|pid| (pid, token.clone()))
+                    })
+                    .collect::<Vec<_>>();
+
+                session.apply_seat_delta(seat_state, &delta);
+                if delta.now_started {
+                    session.start_game();
+                }
+                let slot_info = session.player_slot_info();
+                let current_players = session.current_player_count();
+                let max_players = session.player_count;
+                let started = delta.now_started;
+                persist_session_async(game_db, &game_code, session);
+                (
+                    slot_info,
+                    kicked_players,
+                    started,
+                    current_players,
+                    max_players,
+                    public_before,
+                )
+            };
+
+            {
+                let mut conns = connections.lock().await;
+                if let Some(players) = conns.get_mut(&game_code) {
+                    for (pid, _) in &kicked_players {
+                        if let Some(sender) = players.remove(pid) {
+                            let _ = sender.send(ServerMessage::Error {
+                                message: "You were removed from the room by the host.".to_string(),
+                            });
+                        }
+                    }
+
+                    let msg = ServerMessage::PlayerSlotsUpdate {
+                        slots: slot_info.clone(),
+                    };
+                    for sender in players.values() {
+                        let _ = sender.send(msg.clone());
+                    }
+                }
+            }
+
+            if started {
+                let removed = {
+                    let mut lob = lobby.lock().await;
+                    let existed = lob.has_game(&game_code);
+                    lob.unregister_game(&game_code);
+                    existed
+                };
+                if removed && public_before {
+                    broadcast_to_lobby_subscribers(
+                        lobby_subscribers,
+                        ServerMessage::LobbyGameRemoved {
+                            game_code: game_code.clone(),
+                        },
+                    )
+                    .await;
+                }
+                broadcast_game_started(state, connections, game_db, &game_code).await;
+            } else {
+                let updated = {
+                    let mut lob = lobby.lock().await;
+                    lob.set_current_players(&game_code, current_players);
+                    lob.set_max_players(&game_code, max_players);
+                    lob.public_game(&game_code)
+                };
+                if let Some(game) = updated {
+                    broadcast_to_lobby_subscribers(
+                        lobby_subscribers,
+                        ServerMessage::LobbyGameUpdated { game },
+                    )
+                    .await;
+                }
             }
         }
 

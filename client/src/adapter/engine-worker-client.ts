@@ -198,6 +198,14 @@ export class EngineWorkerClient {
     await this.request<null>({ type: "setMultiplayerMode", enabled });
   }
 
+  async applySeatMutation(stateJson: string, mutationJson: string): Promise<unknown> {
+    return this.request<unknown>({
+      type: "applySeatMutation",
+      stateJson,
+      mutationJson,
+    });
+  }
+
   async ping(): Promise<string> {
     return this.request<string>({ type: "ping" });
   }

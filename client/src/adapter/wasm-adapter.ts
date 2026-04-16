@@ -227,6 +227,15 @@ export class WasmAdapter implements EngineAdapter {
     }
   }
 
+  async applySeatMutation(stateJson: string, mutationJson: string): Promise<unknown> {
+    this.assertInitialized();
+    await this.ensureCardDb();
+    if (this.engine) {
+      return this.engine.applySeatMutation(stateJson, mutationJson);
+    }
+    return this.fallback!.applySeatMutation(stateJson, mutationJson);
+  }
+
   /**
    * Resume a P2P host session from a persisted `GameState`. Stamps a fresh
    * RNG seed (so continued play diverges from the pre-save sequence) and
@@ -352,6 +361,7 @@ interface MainThreadFallback {
   restoreState(stateJson: string): void;
   resumeMultiplayerHostState(stateJson: string): void;
   setMultiplayerMode(enabled: boolean): void;
+  applySeatMutation(stateJson: string, mutationJson: string): Promise<unknown>;
   ping(): string;
   initializeGame(
     deckData: unknown | null,
@@ -424,6 +434,9 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
     setMultiplayerMode: (enabled: boolean) => {
       enqueue(() => wasm.set_multiplayer_mode(enabled));
     },
+
+    applySeatMutation: (stateJson: string, mutationJson: string) =>
+      enqueue(() => wasm.apply_seat_mutation(stateJson, mutationJson)),
 
     ping: () => wasm.ping(),
 

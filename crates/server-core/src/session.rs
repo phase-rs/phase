@@ -18,7 +18,7 @@ use engine::types::match_config::MatchConfig;
 use engine::types::player::PlayerId;
 use phase_ai::config::{AiConfig, AiDifficulty, Platform};
 use rand::{Rng, SeedableRng};
-use seat_reducer::types::{DeckChoice, SeatKind};
+use seat_reducer::types::{DeckChoice, SeatDelta, SeatKind, SeatState};
 use tracing::{debug, info, warn};
 
 use crate::filter::filter_state_for_player;
@@ -147,6 +147,171 @@ impl GameSession {
                 }
             })
             .collect()
+    }
+
+    pub fn seat_state(&self) -> SeatState {
+        SeatState {
+            seats: (0..self.player_count as usize)
+                .map(|i| {
+                    let pid = PlayerId(i as u8);
+                    if i == 0 {
+                        SeatKind::HostHuman
+                    } else if self.ai_seats.contains(&pid) {
+                        let difficulty = self
+                            .ai_configs
+                            .get(&pid)
+                            .map(|c| c.difficulty)
+                            .unwrap_or(AiDifficulty::Medium);
+                        SeatKind::Ai {
+                            difficulty,
+                            deck: DeckChoice::Random,
+                        }
+                    } else if !self.player_tokens[i].is_empty() {
+                        SeatKind::JoinedHuman
+                    } else {
+                        SeatKind::WaitingHuman
+                    }
+                })
+                .collect(),
+            tokens: self.player_tokens.clone(),
+            format: self.state.format_config.clone(),
+            game_started: self.game_started,
+        }
+    }
+
+    fn rebuild_pregame_state(&mut self, player_count: u8) {
+        let format_config = self.state.format_config.clone();
+        let match_config = self.state.match_config;
+        self.state = GameState::new(format_config, player_count, rand::rng().random());
+        self.state.match_config = if player_count == 2 {
+            match_config
+        } else {
+            MatchConfig::default()
+        };
+    }
+
+    pub fn apply_seat_delta(&mut self, new_state: SeatState, delta: &SeatDelta) {
+        let old_player_count = self.player_count;
+        let new_player_count = new_state.seats.len() as u8;
+
+        let mut old_to_new: Vec<Option<usize>> = (0..old_player_count as usize).map(Some).collect();
+        if let Some(renumbering) = &delta.renumbering {
+            old_to_new[renumbering.removed_index as usize] = None;
+            for &(old_idx, new_idx) in &renumbering.remapping {
+                old_to_new[old_idx as usize] = Some(new_idx as usize);
+            }
+        }
+
+        let mut next_tokens = vec![String::new(); new_player_count as usize];
+        let mut next_connected = vec![false; new_player_count as usize];
+        let mut next_decks = vec![None; new_player_count as usize];
+        let mut next_names = vec![String::new(); new_player_count as usize];
+
+        for (old_idx, maybe_new_idx) in old_to_new
+            .iter()
+            .enumerate()
+            .take(old_player_count as usize)
+        {
+            let Some(new_idx) = *maybe_new_idx else {
+                continue;
+            };
+            next_tokens[new_idx] = self.player_tokens[old_idx].clone();
+            next_connected[new_idx] = self.connected[old_idx];
+            next_decks[new_idx] = self.decks[old_idx].clone();
+            next_names[new_idx] = self.display_names[old_idx].clone();
+        }
+
+        self.player_count = new_player_count;
+        self.player_tokens = next_tokens;
+        self.connected = next_connected;
+        self.decks = next_decks;
+        self.display_names = next_names;
+        self.ai_seats.clear();
+
+        let mut next_ai_configs = HashMap::new();
+        for (seat_idx, kind) in new_state.seats.iter().enumerate() {
+            match kind {
+                SeatKind::HostHuman | SeatKind::JoinedHuman => {}
+                SeatKind::WaitingHuman => {
+                    self.player_tokens[seat_idx].clear();
+                    self.connected[seat_idx] = false;
+                    self.decks[seat_idx] = None;
+                    if seat_idx != 0 {
+                        self.display_names[seat_idx].clear();
+                    }
+                }
+                SeatKind::Ai { difficulty, .. } => {
+                    let pid = PlayerId(seat_idx as u8);
+                    self.ai_seats.insert(pid);
+                    self.player_tokens[seat_idx].clear();
+                    self.connected[seat_idx] = true;
+                    self.display_names[seat_idx] = format!("AI ({difficulty:?})");
+                    let config = phase_ai::config::create_config_for_players(
+                        *difficulty,
+                        Platform::Native,
+                        new_player_count,
+                    );
+                    next_ai_configs.insert(pid, config);
+                }
+            }
+        }
+
+        for &(seat_idx, _, ref deck) in &delta.new_ai {
+            self.decks[seat_idx as usize] = Some(deck.clone());
+        }
+        for &seat_idx in &delta.removed_ai {
+            if seat_idx as usize >= self.decks.len() {
+                continue;
+            }
+            if !delta
+                .new_ai
+                .iter()
+                .any(|(new_idx, _, _)| *new_idx == seat_idx)
+            {
+                self.decks[seat_idx as usize] = None;
+            }
+        }
+
+        self.ai_configs = next_ai_configs;
+        self.game_started = new_state.game_started;
+
+        if old_player_count != new_player_count {
+            self.rebuild_pregame_state(new_player_count);
+        }
+    }
+
+    pub fn start_game(&mut self) {
+        let player_deck = self.decks[0].clone().unwrap_or(PlayerDeckPayload {
+            main_deck: Vec::new(),
+            sideboard: Vec::new(),
+        });
+        let opponent_deck = self.decks[1].clone().unwrap_or(PlayerDeckPayload {
+            main_deck: Vec::new(),
+            sideboard: Vec::new(),
+        });
+        let ai_decks: Vec<PlayerDeckPayload> = self.decks[2..]
+            .iter()
+            .map(|deck| {
+                deck.clone().unwrap_or(PlayerDeckPayload {
+                    main_deck: Vec::new(),
+                    sideboard: Vec::new(),
+                })
+            })
+            .collect();
+
+        self.rebuild_pregame_state(self.player_count);
+        load_deck_into_state(
+            &mut self.state,
+            &DeckPayload {
+                player: player_deck,
+                opponent: opponent_deck,
+                ai_decks,
+            },
+        );
+        self.state.log_player_names = self.display_names.clone();
+        let _ = start_game(&mut self.state);
+        self.game_started = true;
+        self.lobby_meta = None;
     }
 
     /// Run AI actions and return per-action broadcast data.
@@ -396,35 +561,6 @@ impl SessionManager {
 
         info!(game = %game_code, player = ?player_id, seat, "player joined session");
 
-        // Start the game when the last human seat is filled
-        if session.is_full() {
-            // Game is no longer in lobby
-            session.lobby_meta = None;
-
-            // Load deck data into game state before starting
-            let player_deck = session.decks[0].clone().unwrap_or(PlayerDeckPayload {
-                main_deck: Vec::new(),
-                sideboard: Vec::new(),
-            });
-            let opponent_deck = session.decks[1].clone().unwrap_or(PlayerDeckPayload {
-                main_deck: Vec::new(),
-                sideboard: Vec::new(),
-            });
-            let payload = DeckPayload {
-                player: player_deck,
-                opponent: opponent_deck,
-                ai_decks: vec![],
-            };
-            load_deck_into_state(&mut session.state, &payload);
-
-            // Set player names for log resolution
-            session.state.log_player_names = session.display_names.clone();
-
-            // Initialize the game via engine
-            let _result = start_game(&mut session.state);
-            session.game_started = true;
-        }
-
         let filtered = filter_state_for_player(&session.state, player_id);
         Ok((player_token, filtered))
     }
@@ -477,34 +613,8 @@ impl SessionManager {
             session.ai_configs.insert(pid, config);
         }
 
-        // Build DeckPayload: seat 0 → player, seat 1 → opponent, seats 2+ → ai_decks
-        let player_deck = session.decks[0].clone().unwrap_or(PlayerDeckPayload {
-            main_deck: Vec::new(),
-            sideboard: Vec::new(),
-        });
-        let opponent_deck = session.decks[1].clone().unwrap_or(PlayerDeckPayload {
-            main_deck: Vec::new(),
-            sideboard: Vec::new(),
-        });
-        let ai_decks: Vec<PlayerDeckPayload> = session.decks[2..]
-            .iter()
-            .map(|d| {
-                d.clone().unwrap_or(PlayerDeckPayload {
-                    main_deck: Vec::new(),
-                    sideboard: Vec::new(),
-                })
-            })
-            .collect();
-        let payload = DeckPayload {
-            player: player_deck,
-            opponent: opponent_deck,
-            ai_decks,
-        };
-        load_deck_into_state(&mut session.state, &payload);
         session.state.all_card_names = card_names.into();
-        session.state.log_player_names = session.display_names.clone();
-        let _result = start_game(&mut session.state);
-        session.game_started = true;
+        session.start_game();
 
         (game_code, player_token)
     }

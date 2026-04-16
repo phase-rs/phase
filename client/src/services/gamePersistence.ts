@@ -1,6 +1,7 @@
 import { createStore, del, get, set } from "idb-keyval";
 
 import type { FormatConfig, GameState, MatchConfig } from "../adapter/types";
+import type { SeatState } from "../multiplayer/seatTypes";
 import { ACTIVE_GAME_KEY, GAME_CHECKPOINTS_PREFIX, GAME_KEY_PREFIX } from "../constants/storage";
 
 export interface ActiveGameMeta {
@@ -41,6 +42,8 @@ export interface PersistedP2PHostSession {
   playerTokens: Record<number, string>;
   /** PlayerId.0 → deck submitted by that guest (pre-game data). */
   guestDecks: Record<number, unknown>;
+  /** PlayerId.0 → resolved AI deck for AI-controlled seats. */
+  aiDecks?: Record<number, unknown>;
   /** Tokens that were kicked — refused on reconnect on resume. */
   kickedTokens: string[];
   /** PlayerId.0 values that conceded. */
@@ -51,6 +54,7 @@ export interface PersistedP2PHostSession {
   hostDeckData: unknown;
   /** True once `initializeGame` has run; false while still in lobby. */
   gameStarted: boolean;
+  seatState?: SeatState;
 }
 
 const P2P_HOST_KEY_PREFIX = "phase-p2p-host:";

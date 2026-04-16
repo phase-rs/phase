@@ -17,6 +17,14 @@ import { AdapterError } from "./types";
 import { WasmAdapter } from "./wasm-adapter";
 import { createPeerSession, type PeerSession } from "../network/peer";
 import type { P2PMessage } from "../network/protocol";
+import type {
+  PlayerSlot,
+  SeatKind,
+  SeatMutation,
+  SeatState,
+  SeatMutationResult,
+  SeatView,
+} from "../multiplayer/seatTypes";
 import type { BrokerClient } from "../services/brokerClient";
 import {
   clearP2PHostSession,
@@ -66,15 +74,16 @@ export type P2PAdapterEvent =
   | { type: "gamePaused"; reason: string }
   | { type: "gameResumed" }
   | { type: "lobbyProgress"; joined: number; total: number }
+  | { type: "playerSlotsUpdated"; slots: PlayerSlot[] }
   | { type: "reconnecting"; attempt: number }
   | { type: "reconnectFailed"; reason: string };
 
 type P2PAdapterEventListener = (event: P2PAdapterEvent) => void;
 
 interface DeckListPayload {
-  player: { main_deck: string[]; sideboard: string[] };
-  opponent: { main_deck: string[]; sideboard: string[] };
-  ai_decks: Array<{ main_deck: string[]; sideboard: string[] }>;
+  player: { main_deck: string[]; sideboard: string[]; commander: string[] };
+  opponent: { main_deck: string[]; sideboard: string[]; commander: string[] };
+  ai_decks: Array<{ main_deck: string[]; sideboard: string[]; commander: string[] }>;
 }
 
 /**
@@ -114,37 +123,59 @@ const RESUME_GRACE_PERIOD_MS = 5 * 60_000;
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000];
 const RECONNECT_STEADY_STATE_MS = 60_000;
 
-function traceAdapter(side: "Host" | "Guest", event: string, data?: Record<string, unknown>): void {
-  console.debug(`[P2P ${side} Adapter]`, performance.now().toFixed(1), event, data ?? {});
+function defaultSeatState(playerCount: number, formatConfig?: FormatConfig): SeatState {
+  return {
+    seats: [
+      { type: "HostHuman" },
+      ...Array.from({ length: playerCount - 1 }, () => ({ type: "WaitingHuman" as const })),
+    ],
+    tokens: Array.from({ length: playerCount }, (_, idx) => (idx === 0 ? "host" : "")),
+    format: formatConfig ?? {
+      format: "Standard",
+      starting_life: 20,
+      min_players: 2,
+      max_players: 2,
+      deck_size: 60,
+      singleton: false,
+      command_zone: false,
+      commander_damage_threshold: null,
+      range_of_influence: null,
+      team_based: false,
+    },
+    gameStarted: false,
+  };
 }
 
-/**
- * Build the engine deck payload from per-seat decks.
- *
- * The WASM `initialize_game` accepts `{ player, opponent, ai_decks }` where
- * `ai_decks[i]` becomes seat `PlayerId(i + 2)`. For 3-4p P2P we use the same
- * shape: host is `player`, guest 1 is `opponent`, guests 2..N go into
- * `ai_decks` in seat order.
- */
-function buildDeckPayload(
-  hostDeck: DeckListPayload["player"],
-  guestDecks: Map<PlayerId, DeckListPayload["player"]>,
-): DeckListPayload {
-  const sortedSeats = [...guestDecks.keys()].sort((a, b) => a - b);
-  if (sortedSeats.length === 0) {
-    throw new AdapterError(
-      "P2P_NO_GUESTS",
-      "Cannot start P2P game with zero guests",
-      false,
-    );
-  }
-  const opponent = guestDecks.get(sortedSeats[0])!;
-  const aiDecks = sortedSeats.slice(1).map((seat) => guestDecks.get(seat)!);
+function seatStateToView(state: SeatState): SeatView {
   return {
-    player: hostDeck,
-    opponent,
-    ai_decks: aiDecks,
+    seats: state.seats,
+    format: state.format,
+    isFull: state.seats.every((seat) => seat.type !== "WaitingHuman"),
+    gameStarted: state.gameStarted,
   };
+}
+
+function occupiedSeatCount(state: SeatState): number {
+  return state.seats.filter((seat) => seat.type !== "WaitingHuman").length;
+}
+
+function playerSlotsFromSeatView(view: SeatView): PlayerSlot[] {
+  return view.seats.map((kind, playerId) => ({
+    playerId,
+    kind,
+    name:
+      playerId === 0
+        ? "Host"
+        : kind.type === "Ai"
+          ? `AI (${kind.data.difficulty})`
+          : kind.type === "WaitingHuman"
+            ? ""
+            : `Player ${playerId + 1}`,
+  }));
+}
+
+function traceAdapter(side: "Host" | "Guest", event: string, data?: Record<string, unknown>): void {
+  console.debug(`[P2P ${side} Adapter]`, performance.now().toFixed(1), event, data ?? {});
 }
 
 /**
@@ -165,7 +196,8 @@ export class P2PHostAdapter implements EngineAdapter {
   private listeners: P2PAdapterEventListener[] = [];
 
   private guestSessions = new Map<PlayerId, PeerSession>();
-  private guestDecks = new Map<PlayerId, unknown>();
+  private guestDecks = new Map<PlayerId, DeckListPayload["player"]>();
+  private aiDecks = new Map<PlayerId, DeckListPayload["player"]>();
   private playerTokens = new Map<PlayerId, string>();
   /**
    * Mid-game disconnect tracker. `timer` is nullable: it is set when the grace
@@ -187,12 +219,14 @@ export class P2PHostAdapter implements EngineAdapter {
   private eliminatedSeats = new Set<PlayerId>();
   private gameRunState: GameRunState = "running";
 
-  private nextSeat: PlayerId = 1;
   private gameStarted = false;
   private guestDeckResolvers: Array<() => void> = [];
   private hostConnectionUnsub: (() => void) | null = null;
   private guestNames = new Map<PlayerId, string>();
   private hostDisplayName: string | null = null;
+  private pregameSeatState: SeatState;
+  private pregameOpQueue: Promise<void> = Promise.resolve();
+  private allowPartialStart = false;
 
   /**
    * Identifier used as the key when this adapter writes its resume
@@ -239,6 +273,7 @@ export class P2PHostAdapter implements EngineAdapter {
      * where no server-side listing exists.
      */
     private readonly broker?: BrokerClient,
+    private readonly ownsBroker: boolean = true,
     /**
      * Server-assigned game code for the lobby entry the broker holds.
      * Required when `broker` is set; unused otherwise. Distinct from the
@@ -276,6 +311,7 @@ export class P2PHostAdapter implements EngineAdapter {
         false,
       );
     }
+    this.pregameSeatState = defaultSeatState(playerCount, formatConfig);
     this.gameId = persistence?.gameId ?? null;
     this.roomCode = persistence?.roomCode ?? null;
     this.hostDisplayName = persistence?.hostDisplayName ?? null;
@@ -298,21 +334,22 @@ export class P2PHostAdapter implements EngineAdapter {
    * only handles adapter-owned transport + security state.
    */
   private rehydrateFromPersistedSession(session: PersistedP2PHostSession): void {
+    if (session.seatState) {
+      this.pregameSeatState = session.seatState;
+    }
     for (const [pidStr, token] of Object.entries(session.playerTokens)) {
       this.playerTokens.set(Number(pidStr), token);
     }
     for (const [pidStr, deck] of Object.entries(session.guestDecks)) {
-      this.guestDecks.set(Number(pidStr), deck);
+      this.guestDecks.set(Number(pidStr), deck as DeckListPayload["player"]);
+    }
+    for (const [pidStr, deck] of Object.entries(session.aiDecks ?? {})) {
+      this.aiDecks.set(Number(pidStr), deck as DeckListPayload["player"]);
     }
     for (const token of session.kickedTokens) this.kickedTokens.add(token);
     for (const pid of session.eliminatedSeats) {
       this.eliminatedSeats.add(pid);
     }
-    // `nextSeat` is the smallest seat index not yet assigned. For a
-    // 3-player resumed game with seats 0/1/2 filled, it must be 3 so
-    // no new joiner clobbers an existing seat.
-    const seatIds = Object.keys(session.playerTokens).map(Number);
-    this.nextSeat = seatIds.length > 0 ? Math.max(...seatIds) + 1 : 1;
     this.gameStarted = session.gameStarted;
 
     // Every persisted guest is "disconnected" from the resumed host's
@@ -371,6 +408,10 @@ export class P2PHostAdapter implements EngineAdapter {
     for (const [pid, deck] of this.guestDecks.entries()) {
       guestDecks[pid] = deck;
     }
+    const aiDecks: Record<number, unknown> = {};
+    for (const [pid, deck] of this.aiDecks.entries()) {
+      aiDecks[pid] = deck;
+    }
     return {
       gameId: this.gameId,
       roomCode: this.roomCode,
@@ -378,6 +419,7 @@ export class P2PHostAdapter implements EngineAdapter {
       useBroker: this.broker !== undefined,
       playerTokens,
       guestDecks,
+      aiDecks,
       kickedTokens: [...this.kickedTokens],
       eliminatedSeats: [...this.eliminatedSeats],
       playerCount: this.playerCount,
@@ -385,7 +427,26 @@ export class P2PHostAdapter implements EngineAdapter {
       matchConfig: this.matchConfig,
       hostDeckData: this.hostDeckData,
       gameStarted: this.gameStarted,
+      seatState: this.pregameSeatState,
     };
+  }
+
+  getPlayerSlots(): PlayerSlot[] {
+    return this.pregameSeatState.seats.map((kind, playerId) => ({
+      playerId,
+      kind,
+      name: this.displayNameForSeat(playerId, kind),
+    }));
+  }
+
+  private displayNameForSeat(playerId: number, kind: SeatKind): string {
+    if (playerId === 0) {
+      return this.hostDisplayName ?? "Host";
+    }
+    if (kind.type === "Ai") {
+      return `AI (${kind.data.difficulty})`;
+    }
+    return this.guestNames.get(playerId) ?? "";
   }
 
   /**
@@ -413,8 +474,157 @@ export class P2PHostAdapter implements EngineAdapter {
    * broker-side lifecycle (per CLAUDE.md's "single authority" rule).
    */
   startNow(): void {
+    this.allowPartialStart = true;
     const resolvers = this.guestDeckResolvers.splice(0);
     for (const r of resolvers) r();
+  }
+
+  private enqueuePregameOp<T>(work: () => Promise<T>): Promise<T> {
+    const next = this.pregameOpQueue.then(work, work);
+    this.pregameOpQueue = next.then(() => undefined, () => undefined);
+    return next;
+  }
+
+  private firstWaitingSeat(): PlayerId | null {
+    for (let seat = 1; seat < this.pregameSeatState.seats.length; seat++) {
+      if (this.pregameSeatState.seats[seat]?.type === "WaitingHuman") {
+        return seat;
+      }
+    }
+    return null;
+  }
+
+  private remapSeatMap<T>(source: Map<PlayerId, T>, remapping: Array<[number, number]>): Map<PlayerId, T> {
+    const remapped = new Map<PlayerId, T>();
+    for (const [pid, value] of source.entries()) {
+      const mapped = remapping.find(([oldPid]) => oldPid === pid)?.[1] ?? pid;
+      remapped.set(mapped, value);
+    }
+    return remapped;
+  }
+
+  private remapSeatSet(source: Set<PlayerId>, remapping: Array<[number, number]>): Set<PlayerId> {
+    const remapped = new Set<PlayerId>();
+    for (const pid of source.values()) {
+      remapped.add(remapping.find(([oldPid]) => oldPid === pid)?.[1] ?? pid);
+    }
+    return remapped;
+  }
+
+  private broadcastSeatSnapshot(): void {
+    const view = seatStateToView(this.pregameSeatState);
+    for (const session of this.guestSessions.values()) {
+      session.send({ type: "seat_snapshot", view });
+    }
+    this.emit({ type: "playerSlotsUpdated", slots: this.getPlayerSlots() });
+  }
+
+  private syncLobbyMetadata(): void {
+    const currentPlayers = occupiedSeatCount(this.pregameSeatState);
+    const maxPlayers = this.pregameSeatState.seats.length;
+    this.emit({ type: "lobbyProgress", joined: currentPlayers, total: maxPlayers });
+    if (this.broker && this.brokerGameCode) {
+      this.broker.updateMetadata(this.brokerGameCode, currentPlayers, maxPlayers);
+    }
+  }
+
+  async applySeatMutation(mutation: SeatMutation): Promise<void> {
+    await this.enqueuePregameOp(async () => {
+      if (this.gameStarted) {
+        throw new AdapterError("P2P_ERROR", "Pregame seats can no longer be edited", false);
+      }
+      if (mutation.type === "Start") {
+        throw new AdapterError("P2P_ERROR", "Use startPregameGame() for Start mutations", false);
+      return;
+      }
+
+      const result = await this.wasm.applySeatMutation(
+        JSON.stringify(this.pregameSeatState),
+        JSON.stringify(mutation),
+      ) as SeatMutationResult;
+
+      for (const token of result.delta.invalidatedTokens) {
+        for (const [pid, seatToken] of this.playerTokens.entries()) {
+          if (seatToken !== token) continue;
+          const session = this.guestSessions.get(pid);
+          if (session) {
+            session.send({ type: "kick", reason: "Removed from the room by the host" });
+            try {
+              session.close("Removed by host");
+            } catch {
+              /* best-effort */
+            }
+          }
+          this.guestSessions.delete(pid);
+          this.playerTokens.delete(pid);
+          this.guestDecks.delete(pid);
+          this.guestNames.delete(pid);
+          break;
+        }
+      }
+
+      for (const seatIndex of result.delta.removedAi) {
+        this.aiDecks.delete(seatIndex);
+      }
+      for (const [seatIndex, _difficulty, deck] of result.delta.newAi) {
+        this.aiDecks.set(seatIndex, deck as DeckListPayload["player"]);
+      }
+
+      if (result.delta.renumbering) {
+        const { remapping } = result.delta.renumbering;
+        this.guestSessions = this.remapSeatMap(this.guestSessions, remapping);
+        this.guestDecks = this.remapSeatMap(this.guestDecks, remapping);
+        this.aiDecks = this.remapSeatMap(this.aiDecks, remapping);
+        this.playerTokens = this.remapSeatMap(this.playerTokens, remapping);
+        this.guestNames = this.remapSeatMap(this.guestNames, remapping);
+        this.disconnectedSeats = this.remapSeatMap(this.disconnectedSeats, remapping);
+        this.eliminatedSeats = this.remapSeatSet(this.eliminatedSeats, remapping);
+      }
+
+      this.pregameSeatState = result.state;
+      this.saveSession();
+      for (const session of this.guestSessions.values()) {
+        session.send({ type: "seat_mutate", mutation });
+      }
+      this.broadcastSeatSnapshot();
+      this.syncLobbyMetadata();
+    });
+  }
+
+  private async runAiLoop(): Promise<void> {
+    if (!this.gameStarted) return;
+
+    for (;;) {
+      const state = await this.wasm.getState();
+      if (!state || typeof state !== "object" || !("waiting_for" in state)) {
+        return;
+      }
+      const waitingFor = state.waiting_for;
+      if (!waitingFor || typeof waitingFor !== "object") {
+        return;
+      }
+      if (!("data" in waitingFor) || !waitingFor.data || !("player" in waitingFor.data)) {
+        return;
+      }
+      const aiSeat = this.pregameSeatState.seats[waitingFor.data.player];
+      if (!aiSeat || aiSeat.type !== "Ai") {
+        return;
+      }
+      const action = await this.wasm.getAiAction(aiSeat.data.difficulty, waitingFor.data.player);
+      if (!action) {
+        return;
+      }
+      const result = await this.wasm.submitAction(action, waitingFor.data.player);
+      await this.broadcastStateUpdate(result.events);
+      const nextState = await this.wasm.getState();
+      const legalResult = await this.wasm.getLegalActions();
+      this.emit({
+        type: "stateChanged",
+        state: nextState,
+        events: result.events,
+        legalResult,
+      });
+    }
   }
 
   onEvent(listener: P2PAdapterEventListener): () => void {
@@ -458,6 +668,10 @@ export class P2PHostAdapter implements EngineAdapter {
       });
     } else {
       await this.wasm.setMultiplayerMode(true);
+    }
+    if (!this.gameStarted) {
+      this.broadcastSeatSnapshot();
+      this.syncLobbyMetadata();
     }
     traceAdapter("Host", "initialize-complete", {});
   }
@@ -511,119 +725,122 @@ export class P2PHostAdapter implements EngineAdapter {
       session.close("Game in progress");
       return;
     }
-    if (this.guestSessions.size >= this.playerCount - 1) {
+    const pid = this.firstWaitingSeat();
+    if (pid === null) {
       session.send({ type: "kick", reason: "Lobby full" });
       session.close("Lobby full");
       return;
     }
-
-    const pid = this.nextSeat;
-    this.nextSeat++;
 
     // Issue a token immediately on join. The guest needs it for reconnect
     // even during the deck-collection window.
     const token = crypto.randomUUID();
     this.playerTokens.set(pid, token);
     this.guestSessions.set(pid, session);
-    this.guestDecks.set(pid, deckData);
+    this.guestDecks.set(pid, (deckData as DeckListPayload).player);
     if (displayName) this.guestNames.set(pid, displayName);
+    this.pregameSeatState.seats[pid] = { type: "JoinedHuman" };
+    this.pregameSeatState.tokens[pid] = token;
     this.saveSession();
 
     // Route subsequent messages from this guest.
     session.onMessage((msg) => this.handleGuestMessage(pid, msg));
 
-    this.broadcastLobbyProgress();
-
-    // If all guest decks are in, resolve the deck-collection promise.
-    if (this.guestDecks.size === this.playerCount - 1) {
-      const resolvers = this.guestDeckResolvers.splice(0);
-      for (const r of resolvers) r();
-    }
+    this.broadcastSeatSnapshot();
+    this.syncLobbyMetadata();
   }
 
-  private broadcastLobbyProgress(): void {
-    const joined = this.guestSessions.size + 1;
-    const total = this.playerCount;
-    for (const [, session] of this.guestSessions) {
-      session.send({ type: "lobby_progress", joined, total });
-    }
-    this.emit({ type: "lobbyProgress", joined, total });
-    if (this.broker && this.brokerGameCode) {
-      this.broker.updateMetadata(this.brokerGameCode, joined, total);
-    }
+  async initializeGame(): Promise<SubmitResult> {
+    return this.startPregameGame();
   }
 
-  async initializeGame(
-    _deckData?: unknown,
-    _formatConfig?: FormatConfig,
-    _playerCount?: number,
-    _matchConfig?: MatchConfig,
-    _firstPlayer?: number,
-  ): Promise<SubmitResult> {
-    // Wait until all guest decks are in.
-    if (this.guestDecks.size < this.playerCount - 1) {
-      await new Promise<void>((resolve) => {
-        this.guestDeckResolvers.push(resolve);
-      });
-    }
+  async startPregameGame(): Promise<SubmitResult> {
+    return this.enqueuePregameOp(() => this.startPregameGameInner());
+  }
 
-    const hostDeck = this.hostDeckData as DeckListPayload;
-    const guestDeckMap = new Map<PlayerId, DeckListPayload["player"]>();
-    for (const [pid, raw] of this.guestDecks) {
-      guestDeckMap.set(pid, (raw as DeckListPayload).player);
-    }
-    const deckPayload = buildDeckPayload(hostDeck.player, guestDeckMap);
+  private async startPregameGameInner(): Promise<SubmitResult> {
+      if (this.gameStarted) {
+        return { events: [] };
+      }
+      const allowPartialStart = this.allowPartialStart;
+      this.allowPartialStart = false;
+      const hasWaitingSeats = this.pregameSeatState.seats.some((seat) => seat.type === "WaitingHuman");
+      if (hasWaitingSeats && !allowPartialStart) {
+        throw new AdapterError("P2P_ERROR", "Fill or remove all open seats before starting", false);
+      }
 
-    const result = await this.wasm.initializeGame(
-      deckPayload,
-      this.formatConfig,
-      this.playerCount,
-      this.matchConfig,
-      undefined,
-    );
-    this.gameStarted = true;
-    // Mark the session as started-and-playable. From this point forward
-    // a reload can resume mid-game; before this, reload goes back to
-    // the lobby and guests must rejoin fresh.
-    this.saveSession();
-    const allNames: Record<number, string> = {};
-    if (this.hostDisplayName) allNames[0] = this.hostDisplayName;
-    for (const [pid, name] of this.guestNames) allNames[pid] = name;
-    this.emit({ type: "playerIdentity", playerId: 0, playerNames: allNames });
+      const hostDeck = this.hostDeckData as DeckListPayload;
+      const orderedOpponents: DeckListPayload["player"][] = [];
+      for (let seat = 1; seat < this.pregameSeatState.seats.length; seat++) {
+        const kind = this.pregameSeatState.seats[seat];
+        if (kind.type === "JoinedHuman") {
+          const deck = this.guestDecks.get(seat);
+          if (!deck) {
+            throw new AdapterError("P2P_ERROR", `Seat ${seat} has no submitted deck`, false);
+          }
+          orderedOpponents.push(deck);
+          continue;
+        }
+        if (kind.type === "Ai") {
+          const deck = this.aiDecks.get(seat);
+          if (!deck) {
+            throw new AdapterError("P2P_ERROR", `AI seat ${seat} is missing a resolved deck`, false);
+          }
+          orderedOpponents.push(deck);
+        }
+      }
+      if (orderedOpponents.length === 0) {
+        throw new AdapterError("P2P_ERROR", "Cannot start P2P game with zero opponents", false);
+      }
 
-    // Tear down the public lobby entry only *after* the engine is live.
-    // If the earlier `initializeGame` had thrown (deck resolution, WASM
-    // panic, etc.), firing unregister first would leave the lobby gone
-    // with a dead game — a "room listed but un-joinable" stuck state.
-    // Best-effort: a failure here falls back on the server's 5-minute
-    // `check_expired` backstop; the local game proceeds regardless.
-    if (this.broker && this.brokerGameCode) {
-      void this.broker
-        .unregister(this.brokerGameCode)
-        .catch(() => {
-          /* best-effort — see comment above */
+      const deckPayload: DeckListPayload = {
+        player: hostDeck.player,
+        opponent: orderedOpponents[0],
+        ai_decks: orderedOpponents.slice(1),
+      };
+      const playerCount = allowPartialStart
+        ? orderedOpponents.length + 1
+        : this.pregameSeatState.seats.length;
+      const result = await this.wasm.initializeGame(
+        deckPayload,
+        this.formatConfig,
+        playerCount,
+        this.matchConfig,
+        undefined,
+      );
+      this.gameStarted = true;
+      this.pregameSeatState.gameStarted = true;
+      this.saveSession();
+
+      const allNames: Record<number, string> = {};
+      if (this.hostDisplayName) allNames[0] = this.hostDisplayName;
+      for (const [pid, name] of this.guestNames) allNames[pid] = name;
+      this.emit({ type: "playerIdentity", playerId: 0, playerNames: allNames });
+
+      if (this.broker && this.brokerGameCode) {
+        void this.broker.unregister(this.brokerGameCode).catch(() => {
+          /* best-effort */
         });
-    }
+      }
 
-    // Per-guest game_setup: each guest receives their unique
-    // assignedPlayerId, playerToken, and filtered state.
-    const legal = await this.wasm.getLegalActions();
-    for (const [pid, session] of this.guestSessions) {
-      const token = this.playerTokens.get(pid)!;
-      const filteredState = await this.wasm.getFilteredState(pid);
-      session.send({
-        type: "game_setup",
-        assignedPlayerId: pid,
-        playerToken: token,
-        state: filteredState,
-        events: result.events,
-        legalActions: legal.actions,
-        autoPassRecommended: legal.autoPassRecommended,
-        playerNames: allNames,
-      });
-    }
+      const legal = await this.wasm.getLegalActions();
+      for (const [pid, session] of this.guestSessions) {
+        const token = this.playerTokens.get(pid)!;
+        const filteredState = await this.wasm.getFilteredState(pid);
+        session.send({
+          type: "game_setup",
+          assignedPlayerId: pid,
+          playerToken: token,
+          state: filteredState,
+          events: result.events,
+          legalActions: legal.actions,
+          autoPassRecommended: legal.autoPassRecommended,
+          playerNames: allNames,
+        });
+      }
 
-    return result;
+      await this.runAiLoop();
+      return result;
   }
 
   async submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult> {
@@ -640,6 +857,7 @@ export class P2PHostAdapter implements EngineAdapter {
     }
     const result = await this.wasm.submitAction(action, actor);
     await this.broadcastStateUpdate(result.events);
+    await this.runAiLoop();
     return result;
   }
 
@@ -700,17 +918,19 @@ export class P2PHostAdapter implements EngineAdapter {
     this.kickedTokens.clear();
     this.playerTokens.clear();
     this.guestDecks.clear();
+    this.aiDecks.clear();
     try {
       this.hostPeer.destroy();
     } catch {
       /* best-effort */
     }
     this.wasm.dispose();
-    // The broker (when set) wraps a PhaseSocket that the adapter adopted
-    // at construction. Ownership transferred here, so dispose is the last
-    // authority that can close it. `close()` is idempotent via the internal
-    // `closed` flag, so a prior error-path close in GameProvider is safe.
-    this.broker?.close();
+    // Close the broker only when the adapter owns it. When the multiplayer
+    // store owns the broker (externally managed), it survives adapter disposal
+    // so the lobby entry stays alive across page navigations.
+    if (this.ownsBroker) {
+      this.broker?.close();
+    }
     this.listeners = [];
   }
 
@@ -845,12 +1065,12 @@ export class P2PHostAdapter implements EngineAdapter {
       // `nextSeat` rewind so the next joiner takes the same slot.
       this.playerTokens.delete(pid);
       this.guestDecks.delete(pid);
-      // Rewind nextSeat if this was the most recent join.
-      if (pid === this.nextSeat - 1) {
-        this.nextSeat = pid;
-      }
+      this.guestNames.delete(pid);
+      this.pregameSeatState.seats[pid] = { type: "WaitingHuman" };
+      this.pregameSeatState.tokens[pid] = "";
       this.saveSession();
-      this.broadcastLobbyProgress();
+      this.broadcastSeatSnapshot();
+      this.syncLobbyMetadata();
       return;
     }
 
@@ -1001,6 +1221,7 @@ export class P2PHostAdapter implements EngineAdapter {
       // on behalf of (e.g. grace-expiry or kick).
       const result = await this.wasm.submitAction(concedeAction, pid);
       await this.broadcastStateUpdate(result.events);
+      await this.runAiLoop();
       const state = await this.wasm.getState();
       const legalResult = await this.wasm.getLegalActions();
       this.emit({
@@ -1422,6 +1643,16 @@ export class P2PGuestAdapter implements EngineAdapter {
           joined: msg.joined,
           total: msg.total,
         });
+        break;
+      }
+      case "seat_snapshot": {
+        this.emit({
+          type: "playerSlotsUpdated",
+          slots: playerSlotsFromSeatView(msg.view),
+        });
+        break;
+      }
+      case "seat_mutate": {
         break;
       }
       default:

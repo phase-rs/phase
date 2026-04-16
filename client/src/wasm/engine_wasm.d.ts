@@ -3,8 +3,8 @@
 
 /**
  * Apply a seat mutation to a seat state, using the TLS card database for deck
- * resolution. Both arguments are JSON strings; returns the `SeatDelta` as a JS
- * object on success, or a JS error string on failure.
+ * resolution. Both arguments are JSON strings; returns `{ state, delta }` as
+ * a JS object on success, or a JS error string on failure.
  */
 export function apply_seat_mutation(state_json: string, mutation_json: string): any;
 

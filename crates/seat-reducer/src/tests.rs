@@ -7,7 +7,10 @@ use crate::types::*;
 struct NoOpResolver;
 impl DeckResolver for NoOpResolver {
     fn resolve(&self, _choice: &DeckChoice) -> Result<PlayerDeckPayload, String> {
-        Err("no-op".to_string())
+        Ok(PlayerDeckPayload {
+            main_deck: vec![],
+            sideboard: vec![],
+        })
     }
 }
 
@@ -106,9 +109,9 @@ fn is_pregame_reflects_game_started() {
 }
 
 #[test]
-fn set_kind_returns_placeholder_error() {
+fn waiting_seat_can_become_ai() {
     let mut state = two_player_waiting();
-    let err = crate::apply(
+    let delta = crate::apply(
         &mut state,
         SeatMutation::SetKind {
             seat_index: 1,
@@ -119,13 +122,40 @@ fn set_kind_returns_placeholder_error() {
         },
         &ctx(),
     )
-    .unwrap_err();
-    assert_eq!(err, SeatError::InvalidTransition);
+    .unwrap();
+    assert_eq!(delta.new_ai.len(), 1);
+    assert!(matches!(state.seats[1], SeatKind::Ai { .. }));
 }
 
 #[test]
-fn remove_returns_placeholder_error() {
-    let mut state = two_player_waiting();
+fn remove_waiting_seat_respects_min_players() {
+    let mut state = SeatState {
+        seats: vec![
+            SeatKind::HostHuman,
+            SeatKind::WaitingHuman,
+            SeatKind::WaitingHuman,
+        ],
+        tokens: vec!["host".to_string(), String::new(), String::new()],
+        format: FormatConfig::commander(),
+        game_started: false,
+    };
+    let delta = crate::apply(&mut state, SeatMutation::Remove { seat_index: 2 }, &ctx()).unwrap();
+    assert_eq!(state.seats.len(), 2);
+    assert!(delta.renumbering.is_some());
+}
+
+#[test]
+fn remove_rejects_claimed_human_seat() {
+    let mut state = SeatState {
+        seats: vec![
+            SeatKind::HostHuman,
+            SeatKind::JoinedHuman,
+            SeatKind::WaitingHuman,
+        ],
+        tokens: vec!["host".to_string(), "guest".to_string(), String::new()],
+        format: FormatConfig::commander(),
+        game_started: false,
+    };
     let err = crate::apply(&mut state, SeatMutation::Remove { seat_index: 1 }, &ctx()).unwrap_err();
-    assert_eq!(err, SeatError::InvalidTransition);
+    assert_eq!(err, SeatError::SeatClaimed);
 }

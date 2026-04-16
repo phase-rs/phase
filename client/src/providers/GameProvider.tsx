@@ -13,10 +13,7 @@ import type { FeedDeck } from "../types/feed";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
 import { hostRoom, joinRoom } from "../network/connection";
-import {
-  openBrokerClient,
-  type BrokerClient,
-} from "../services/brokerClient";
+import type { BrokerClient } from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
 import type { ParsedDeck } from "../services/deckParser";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
@@ -187,6 +184,7 @@ export interface GameProviderProps {
    * the P2P host flow.
    */
   useBroker?: boolean;
+  roomName?: string;
   onWsEvent?: (event: WsAdapterEvent) => void;
   onP2PEvent?: (event: P2PAdapterEvent) => void;
   onReady?: () => void;
@@ -207,6 +205,7 @@ export function GameProvider({
   matchConfig,
   firstPlayer,
   useBroker = false,
+  roomName,
   onWsEvent,
   onP2PEvent,
   onReady,
@@ -311,6 +310,14 @@ export function GameProvider({
 
         try {
           if (mode === "p2p-host") {
+            const activeHost = useMultiplayerStore.getState().getActiveP2PHost();
+            if (activeHost?.gameId === gameId) {
+              const adapter = activeHost.adapter;
+              p2pAdapter = adapter;
+              wireP2PEvents(adapter);
+              await resumeP2PHost(gameId, adapter);
+              signal.throwIfAborted();
+            } else {
             // Resume detection: if both the engine state and the P2P
             // host session were persisted for this gameId, the host
             // crashed/reloaded mid-game and should dial back in on the
@@ -343,12 +350,6 @@ export function GameProvider({
             // the broker's 5-min TTL. Returning guests dial the host
             // directly via their cached peer-id + token; they never go
             // through the lobby list for reconnect.
-            if (useBroker && !isResume) {
-              const serverAddress = useMultiplayerStore.getState().serverAddress;
-              broker = await openBrokerClient(serverAddress, { signal });
-              signal.throwIfAborted();
-            }
-
             const host = await hostRoom(signal, {
               preferredRoomCode: isResume ? savedSession.roomCode : undefined,
             });
@@ -358,11 +359,12 @@ export function GameProvider({
             hostPeerHandle = host;
             signal.throwIfAborted();
 
-            if (broker) {
-              const registered = await broker.registerHost({
+            if (useBroker && !isResume) {
+              const store = useMultiplayerStore.getState();
+              const result = await store.openBroker({
                 hostPeerId: host.peer.id,
                 deck: deckList.player,
-                displayName: useMultiplayerStore.getState().displayName || "Host",
+                displayName: store.displayName || "Host",
                 public: true,
                 password: null,
                 timerSeconds: null,
@@ -370,10 +372,13 @@ export function GameProvider({
                 matchConfig: matchConfig ?? { match_type: "Bo1" },
                 formatConfig: formatConfig ?? null,
                 aiSeats: [],
-                roomName: null,
+                roomName: roomName ?? null,
               });
-              serverGameCode = registered.gameCode;
               signal.throwIfAborted();
+              if (result) {
+                broker = result.broker;
+                serverGameCode = result.gameCode;
+              }
             }
 
             // Always display the peer `roomCode` to the host — it's the
@@ -405,6 +410,7 @@ export function GameProvider({
               matchConfig,
               undefined,
               broker ?? undefined,
+              false,
               serverGameCode ?? undefined,
               {
                 gameId,
@@ -436,6 +442,7 @@ export function GameProvider({
               saveActiveGame({ id: gameId, mode: "p2p-host", difficulty: "" });
             }
             signal.throwIfAborted();
+            }
           } else {
             // p2p-join
             const code = joinCode!;
@@ -485,7 +492,6 @@ export function GameProvider({
               /* best-effort */
             });
           }
-          broker?.close();
           hostPeerHandle?.destroy();
           if (signal.aborted) return;
           const message = err instanceof Error ? err.message : String(err);
@@ -764,7 +770,7 @@ export function GameProvider({
         scheduleStoreReset(reset);
       }
     };
-  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker]);
+  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName]);
 
   return (
     <GameDispatchContext.Provider value={dispatchAction}>

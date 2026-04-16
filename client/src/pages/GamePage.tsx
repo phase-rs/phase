@@ -78,6 +78,7 @@ import {
   getPlayerDisplayName,
   playerToastKey,
   useMultiplayerStore,
+  type PlayerSlot,
 } from "../stores/multiplayerStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
@@ -128,6 +129,7 @@ export function GamePage() {
   const playersParam = searchParams.get("players");
   const matchParam = searchParams.get("match");
   const firstParam = searchParams.get("first");
+  const roomNameParam = searchParams.get("roomName");
   const playerCount = playersParam ? Number(playersParam) : undefined;
   // Memoize so the `GameProvider` `useEffect` dep array doesn't
   // tear-down/rebuild the P2P session on every parent re-render. Without
@@ -321,9 +323,35 @@ export function GamePage() {
 
   const handleP2PEvent = useCallback((event: P2PAdapterEvent) => {
     switch (event.type) {
-      case "roomCreated":
+      case "roomCreated": {
         setHostGameCode(event.roomCode);
+        const effectivePlayerCount = playerCount ?? formatConfig?.max_players ?? 2;
+        const slots: PlayerSlot[] = [
+          {
+            playerId: 0,
+            name: useMultiplayerStore.getState().displayName || "Host",
+            kind: { type: "HostHuman" },
+          },
+          ...Array.from({ length: effectivePlayerCount - 1 }, (_, i) => ({
+            playerId: i + 1,
+            name: "",
+            kind: { type: "WaitingHuman" as const },
+          })),
+        ];
+        useMultiplayerStore.setState({
+          hostGameCode: event.roomCode,
+          hostingStatus: "waiting",
+          hostSession: formatConfig
+            ? {
+                formatConfig,
+                timerSeconds: null,
+                matchType: matchConfig?.match_type === "Bo3" ? "Bo3" : "Bo1",
+              }
+            : null,
+          playerSlots: slots,
+        });
         break;
+      }
       case "waitingForGuest":
         setWaitingForOpponent(true);
         break;
@@ -364,6 +392,10 @@ export function GamePage() {
         if (event.joined >= event.total) {
           setLobbyProgress(null);
           setWaitingForOpponent(false);
+          useMultiplayerStore.setState({
+            hostGameCode: null,
+            hostingStatus: "idle",
+          });
         }
         break;
       }
@@ -393,7 +425,7 @@ export function GamePage() {
         break;
       }
     }
-  }, [navigate]);
+  }, [navigate, formatConfig, matchConfig, playerCount]);
 
   const handleReady = useCallback(() => {
     setWaitingForOpponent(false);
@@ -425,6 +457,7 @@ export function GamePage() {
       matchConfig={matchConfig}
       firstPlayer={firstPlayer}
       useBroker={useBroker}
+      roomName={roomNameParam ?? undefined}
       onWsEvent={mode === "online" ? handleWsEvent : undefined}
       onP2PEvent={
         mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined
@@ -498,7 +531,7 @@ function GamePageContent({
   mode,
   isOnlineMode,
   hostGameCode,
-  waitingForOpponent,
+  waitingForOpponent: _waitingForOpponent,
   opponentDisconnected,
   reconnectState,
   showCardDataMissing,
@@ -918,64 +951,6 @@ function GamePageContent({
         />
       )}
 
-      {/* Host game: show game code while waiting */}
-      {waitingForOpponent && hostGameCode && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/70" />
-          <div className="relative z-10 w-full max-w-md rounded-[24px] border border-white/10 bg-[#0b1020]/96 p-8 text-center shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md">
-            <h2 className="mb-2 text-xl font-bold text-white">
-              Waiting for Opponent
-            </h2>
-            <p className="mb-4 text-sm text-gray-400">
-              Share this code with your opponent:
-            </p>
-            <div className="mb-4 flex items-center justify-center gap-3">
-              {/* `select-all` + `cursor-text` + explicit `user-select: text`
-                  so the entire code highlights on a single click even if a
-                  parent has set `user-select: none` for the game surface. */}
-              <span
-                className="select-all font-mono text-4xl font-bold tracking-widest text-emerald-400"
-                style={{ userSelect: "text" }}
-              >
-                {hostGameCode}
-              </span>
-              <button
-                type="button"
-                onClick={() => {
-                  void navigator.clipboard?.writeText(hostGameCode);
-                }}
-                title="Copy code"
-                aria-label="Copy code to clipboard"
-                className="rounded-lg border border-white/10 bg-white/5 p-2 text-slate-300 transition-colors hover:border-white/18 hover:bg-white/10 hover:text-white"
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 20 20"
-                  fill="currentColor"
-                  className="h-4 w-4"
-                  aria-hidden="true"
-                >
-                  <path d="M7 3a2 2 0 0 0-2 2v1H4a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-1h1a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2H7Zm0 2h8v8h-1V8a2 2 0 0 0-2-2H7V5Zm-3 3h8v8H4V8Z" />
-                </svg>
-              </button>
-            </div>
-            <p className="text-xs text-gray-500">
-              The game will start when your opponent joins.
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* Join game: waiting overlay */}
-      {waitingForOpponent && !hostGameCode && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/70" />
-          <div className="relative z-10 w-full max-w-sm rounded-[24px] border border-white/10 bg-[#0b1020]/96 p-6 text-center shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md">
-            <h2 className="text-lg font-bold text-white">Joining Game...</h2>
-            <p className="mt-2 text-sm text-gray-400">Connecting to game</p>
-          </div>
-        </div>
-      )}
 
       {/*
         Opponent-disconnected overlay for server (WS) games. The live

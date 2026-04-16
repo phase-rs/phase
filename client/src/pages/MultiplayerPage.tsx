@@ -49,6 +49,7 @@ export function MultiplayerPage() {
   const navigate = useNavigate();
 
   const startHosting = useMultiplayerStore((s) => s.startHosting);
+  const startP2PHostingSession = useMultiplayerStore((s) => s.startP2PHostingSession);
   const showToast = useMultiplayerStore((s) => s.showToast);
 
   const [view, setView] = useState<MultiplayerView>("lobby");
@@ -182,32 +183,6 @@ export function MultiplayerPage() {
     }
     setView(deckSelectReturn);
   };
-
-  // Expand a ParsedDeck into flat name arrays for the server
-  // Extract the per-game URL params + navigate for the P2P host path.
-  // Same shape is used by the happy path (broker reachable) and the
-  // "continue without lobby" fallback, so factoring out keeps them in
-  // lockstep.
-  const navigateToP2PHost = useCallback(
-    (action: Extract<PendingAction, { type: "host" }>, useBroker: boolean) => {
-      const gameId = crypto.randomUUID();
-      useGameStore.setState({ gameId });
-      const params = new URLSearchParams({
-        mode: "p2p-host",
-        match: action.settings.matchType.toLowerCase(),
-        format: action.settings.formatConfig.format,
-        players: String(action.settings.formatConfig.max_players),
-      });
-      // `useBroker` travels via React Router location state — we
-      // intentionally avoid a URL param so a hard refresh re-evaluates
-      // broker reachability from scratch instead of pinning the user to
-      // "no listing" silently.
-      navigate(`/game/${gameId}?${params.toString()}`, {
-        state: { useBroker },
-      });
-    },
-    [navigate],
-  );
 
   const expandDeck = useCallback(() => {
     const deck = loadActiveDeck();
@@ -373,7 +348,14 @@ export function MultiplayerPage() {
             setBrokerOfflinePrompt({ action });
             return false;
           }
-          navigateToP2PHost(action, /* useBroker */ mode === "LobbyOnly");
+          const ok = await startP2PHostingSession(action.settings, deck, {
+            useBroker: mode === "LobbyOnly",
+            roomName: action.settings.roomName,
+          });
+          if (!ok) {
+            return false;
+          }
+          navigate("/");
         } else {
           // Server-mode host: if the server is unreachable, surface the
           // offline prompt and offer a P2P fallback rather than handing
@@ -414,7 +396,7 @@ export function MultiplayerPage() {
 
       return true;
     },
-    [expandDeck, startHosting, navigate, navigateToP2PHost, showToast],
+    [expandDeck, startHosting, startP2PHostingSession, navigate, showToast],
   );
 
   // Host setup complete → execute immediately if deck exists, otherwise prompt
@@ -683,7 +665,17 @@ export function MultiplayerPage() {
             const { action } = brokerOfflinePrompt;
             setBrokerOfflinePrompt(null);
             if (action.type === "host") {
-              navigateToP2PHost(action, /* useBroker */ false);
+              const deck = expandDeck();
+              if (!deck) {
+                showToast("Could not load deck. Try re-importing it.");
+                return;
+              }
+              void startP2PHostingSession(action.settings, deck, {
+                useBroker: false,
+                roomName: action.settings.roomName,
+              }).then((ok) => {
+                if (ok) navigate("/");
+              });
             }
           }}
         />
