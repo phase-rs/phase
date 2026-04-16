@@ -791,8 +791,7 @@ mod tests {
         // RNG seed was replaced with a fresh random value — stale seed would
         // replay the pre-save ChaCha20 stream from position 0 and cause
         // deterministic redraws.
-        let restored: GameState =
-            serde_wasm_bindgen::from_value(get_game_state()).unwrap();
+        let restored: GameState = serde_wasm_bindgen::from_value(get_game_state()).unwrap();
         assert_ne!(
             restored.rng_seed, 0xDEAD_BEEF_0000_0001,
             "rng_seed should be freshly stamped, not preserved from the save"

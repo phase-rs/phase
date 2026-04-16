@@ -124,6 +124,32 @@ export function ping(): string;
 export function restore_game_state(json_str: string): void;
 
 /**
+ * Resume a multiplayer host session from a persisted `GameState`.
+ *
+ * Called when a P2P host returns after a crash/reload and needs to restore
+ * the authoritative game state from disk so returning guests (still in
+ * their reconnect backoff) can re-bind to their seats. Mirrors
+ * `server-core::GameSession::from_persisted` — the analogous pattern for
+ * the WebSocket-server authority.
+ *
+ * Differs from `restore_game_state` in two load-bearing ways:
+ *
+ * 1. **Fresh RNG seed.** `restore_game_state` re-seeds from the saved
+ *    `rng_seed`, which rewinds the ChaCha20 stream to position 0 —
+ *    correct for undo (replay from origin) but wrong for resume
+ *    (subsequent draws would replay the pre-save sequence). This
+ *    function stamps a fresh seed so continued play diverges.
+ * 2. **Atomic multiplayer-flag flip.** Sets `MULTIPLAYER_MODE` in the
+ *    same call that loads state, so there's no window where a stray
+ *    `restore_game_state` (undo) would be accepted on the resumed
+ *    session.
+ *
+ * Refuses when the engine is already in use — this is a fresh-instance
+ * entry point. Callers must clear any existing state first.
+ */
+export function resume_multiplayer_host_state(json_str: string): void;
+
+/**
  * Select an action from merged scores using softmax.
  * Called after collecting scored candidates from parallel workers and merging.
  * `scores_json` is a JSON array of `[GameAction, score]` tuples.
@@ -171,6 +197,7 @@ export interface InitOutput {
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly ping: () => [number, number];
     readonly restore_game_state: (a: number, b: number) => [number, number];
+    readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number];
     readonly select_action_from_scores: (a: number, b: number, c: number, d: number, e: bigint) => [number, number, number];
     readonly set_multiplayer_mode: (a: number) => void;
     readonly submit_action: (a: number, b: any) => any;
