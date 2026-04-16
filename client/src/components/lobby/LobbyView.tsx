@@ -301,24 +301,15 @@ export function LobbyView({
                   ? `No ${formatFilter} games right now.`
                   : "No open games right now."}
               </p>
-              <div className="flex gap-2">
+              {formatFilter && (
                 <button
                   type="button"
-                  onClick={onHostGame}
-                  className={menuButtonClass({ tone: "emerald", size: "sm" })}
+                  onClick={() => setFormatFilter(null)}
+                  className={menuButtonClass({ tone: "neutral", size: "sm" })}
                 >
-                  Host a game
+                  Show all formats
                 </button>
-                {formatFilter && (
-                  <button
-                    type="button"
-                    onClick={() => setFormatFilter(null)}
-                    className={menuButtonClass({ tone: "neutral", size: "sm" })}
-                  >
-                    Show all formats
-                  </button>
-                )}
-              </div>
+              )}
             </div>
           ) : (
             <div className="flex max-h-64 flex-col gap-2 overflow-y-auto">
