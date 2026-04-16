@@ -265,10 +265,12 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         | ClientMessage::JoinGameWithPassword { .. } => None,
 
         // Lobby-only-exclusive.
-        ClientMessage::UnregisterLobby { .. } => match mode {
-            ServerMode::Full => Some(FULL_MODE_REJECTION),
-            ServerMode::LobbyOnly => None,
-        },
+        ClientMessage::UpdateLobbyMetadata { .. } | ClientMessage::UnregisterLobby { .. } => {
+            match mode {
+                ServerMode::Full => Some(FULL_MODE_REJECTION),
+                ServerMode::LobbyOnly => None,
+            }
+        }
     }
 }
 
@@ -2395,6 +2397,40 @@ async fn handle_client_message(
             }
         }
 
+        ClientMessage::UpdateLobbyMetadata {
+            game_code,
+            current_players,
+            max_players,
+        } => {
+            let is_owner = identity
+                .lobby_host_game
+                .as_deref()
+                .is_some_and(|g| g == game_code);
+            if !is_owner {
+                let msg = ServerMessage::Error {
+                    message: "Only the lobby host can update metadata".to_string(),
+                };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
+            let updated = {
+                let mut lob = lobby.lock().await;
+                lob.set_current_players(&game_code, current_players as u32);
+                lob.set_max_players(&game_code, max_players);
+                lob.public_game(&game_code)
+            };
+            if let Some(game) = updated {
+                broadcast_to_lobby_subscribers(
+                    lobby_subscribers,
+                    ServerMessage::LobbyGameUpdated { game },
+                )
+                .await;
+            }
+        }
+
         ClientMessage::UnregisterLobby { game_code } => {
             // Ownership check: only the socket that registered this entry
             // (stored in `identity.lobby_host_game`) may tear it down.
@@ -2492,6 +2528,11 @@ mod mode_gate_tests {
             ClientMessage::SubscribeLobby,
             ClientMessage::UnsubscribeLobby,
             ClientMessage::Ping { timestamp: 0 },
+            ClientMessage::UpdateLobbyMetadata {
+                game_code: "X".into(),
+                current_players: 2,
+                max_players: 4,
+            },
             ClientMessage::UnregisterLobby {
                 game_code: "X".into(),
             },
@@ -2505,11 +2546,23 @@ mod mode_gate_tests {
     }
 
     #[test]
-    fn full_mode_rejects_unregister_lobby() {
-        let msg = ClientMessage::UnregisterLobby {
-            game_code: "X".into(),
-        };
-        assert!(reject_if_disabled(&msg, ServerMode::Full).is_some());
+    fn full_mode_rejects_lobby_only_messages() {
+        let msgs = vec![
+            ClientMessage::UpdateLobbyMetadata {
+                game_code: "X".into(),
+                current_players: 2,
+                max_players: 4,
+            },
+            ClientMessage::UnregisterLobby {
+                game_code: "X".into(),
+            },
+        ];
+        for msg in msgs {
+            assert!(
+                reject_if_disabled(&msg, ServerMode::Full).is_some(),
+                "expected {msg:?} to be rejected in full mode"
+            );
+        }
     }
 
     #[test]

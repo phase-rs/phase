@@ -12,6 +12,7 @@ import type {
   PlayerId,
   SubmitResult,
 } from "./types";
+import { getPlayerDisplayName } from "../stores/multiplayerStore";
 
 import { AdapterError } from "./types";
 import { WasmAdapter } from "./wasm-adapter";
@@ -543,6 +544,9 @@ export class P2PHostAdapter implements EngineAdapter {
       session.send({ type: "lobby_progress", joined, total });
     }
     this.emit({ type: "lobbyProgress", joined, total });
+    if (this.broker && this.brokerGameCode) {
+      this.broker.updateMetadata(this.brokerGameCode, joined, total);
+    }
   }
 
   async initializeGame(
@@ -1371,7 +1375,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       case "player_disconnected": {
         this.emit({
           type: "opponentDisconnected",
-          reason: `Player ${msg.playerId} disconnected`,
+          reason: `${getPlayerDisplayName(msg.playerId)} disconnected`,
         });
         break;
       }

@@ -168,6 +168,15 @@ pub enum ClientMessage {
     Ping {
         timestamp: u64,
     },
+    /// Sent by a P2P host to update the lobby listing's player counts as
+    /// guests join or leave over P2P. The server has no visibility into P2P
+    /// connections, so the host must push count updates explicitly. Rejected
+    /// if the caller's socket isn't the one that registered the game.
+    UpdateLobbyMetadata {
+        game_code: String,
+        current_players: u8,
+        max_players: u8,
+    },
     /// Sent by a P2P host on a `LobbyOnly` server once their game is live
     /// (guest(s) have dialed in and the P2P session is established) so the
     /// lobby listing is removed immediately instead of waiting for the host

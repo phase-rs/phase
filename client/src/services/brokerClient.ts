@@ -53,6 +53,7 @@ export type ResolveResult =
 export interface BrokerClient {
   readonly serverInfo: ServerInfo;
   registerHost(req: RegisterHostRequest): Promise<RegisteredGame>;
+  updateMetadata(gameCode: string, currentPlayers: number, maxPlayers: number): void;
   unregister(gameCode: string): Promise<void>;
   close(): void;
 }
@@ -148,6 +149,16 @@ function makeBrokerClient(socket: PhaseSocket): BrokerClient {
     });
   };
 
+  const updateMetadata = (gameCode: string, currentPlayers: number, maxPlayers: number): void => {
+    if (closed || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(
+      JSON.stringify({
+        type: "UpdateLobbyMetadata",
+        data: { game_code: gameCode, current_players: currentPlayers, max_players: maxPlayers },
+      }),
+    );
+  };
+
   const unregister = async (gameCode: string): Promise<void> => {
     if (closed || ws.readyState !== WebSocket.OPEN) {
       // Best-effort: if the socket is already gone the server's
@@ -166,6 +177,7 @@ function makeBrokerClient(socket: PhaseSocket): BrokerClient {
   return {
     serverInfo,
     registerHost,
+    updateMetadata,
     unregister,
     close: () => {
       if (closed) return;

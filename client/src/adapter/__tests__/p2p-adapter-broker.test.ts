@@ -100,6 +100,7 @@ function makeBrokerMock(): BrokerClient & {
       gameCode: "GAME01",
       playerToken: "tok",
     })),
+    updateMetadata: vi.fn(),
     unregister,
     close: vi.fn(),
   };
