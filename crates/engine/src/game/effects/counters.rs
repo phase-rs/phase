@@ -253,12 +253,26 @@ pub fn resolve_move(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // Read source counters (clone — we never remove from source)
-    let source_counters = state
-        .objects
-        .get(&ability.source_id)
-        .map(|obj| obj.counters.clone())
-        .unwrap_or_default();
+    // CR 400.7: Read source counters, falling back to LKI cache for objects that
+    // have changed zones (e.g., dies triggers — counters are removed on zone change
+    // per CR 121.2, but the LKI snapshot preserves them).
+    let source_counters = {
+        let current = state
+            .objects
+            .get(&ability.source_id)
+            .map(|obj| obj.counters.clone())
+            .unwrap_or_default();
+        if current.is_empty() {
+            // Object may have lost counters during zone change — check LKI
+            state
+                .lki_cache
+                .get(&ability.source_id)
+                .map(|lki| lki.counters.clone())
+                .unwrap_or_default()
+        } else {
+            current
+        }
+    };
 
     if source_counters.is_empty() {
         // No counters to copy — no-op
@@ -733,6 +747,76 @@ mod tests {
                 .counters
                 .contains_key(&CounterType::Plus1Plus1),
             "dying copy in graveyard should not receive counters"
+        );
+    }
+
+    /// Regression test: MoveCounters must use LKI when the source has changed zones.
+    /// Simulates Essence Channeler's "When this creature dies, put its counters on
+    /// target creature you control" — the source is in the graveyard with no counters,
+    /// but the LKI cache preserves the counters it had on the battlefield.
+    #[test]
+    fn move_counters_uses_lki_when_source_changed_zones() {
+        use crate::types::game_state::LKISnapshot;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Source creature (Essence Channeler) — already in graveyard, no counters
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Essence Channeler".to_string(),
+            Zone::Graveyard,
+        );
+
+        // Destination creature on battlefield
+        let dest_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Populate LKI cache as if the source died with 3 +1/+1 counters
+        let mut lki_counters = std::collections::HashMap::new();
+        lki_counters.insert(CounterType::Plus1Plus1, 3);
+        state.lki_cache.insert(
+            source_id,
+            LKISnapshot {
+                name: "Essence Channeler".to_string(),
+                power: Some(5),
+                toughness: Some(4),
+                mana_value: 2,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![],
+                counters: lki_counters,
+            },
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::MoveCounters {
+                source: TargetFilter::SelfRef,
+                counter_type: None,
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(dest_id)],
+            source_id,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve_move(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&dest_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            3,
+            "destination should receive counters from LKI cache"
         );
     }
 }
