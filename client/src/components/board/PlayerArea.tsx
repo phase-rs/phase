@@ -87,14 +87,27 @@ export function PlayerArea({
     const obj = gameState.objects[id];
     return obj?.is_emblem && obj.controller === playerId;
   });
-  const planeswalkerSection = (hasPlaneswalkers || hasEmblems) ? (
+  const commanderSection = isCommander ? (
+    <div className="flex shrink-0 flex-col items-end gap-1">
+      <CommanderDisplay playerId={playerId} compact={mode === "focused"} />
+      <CommanderDamage playerId={playerId} />
+    </div>
+  ) : null;
+  const supportExtras = (
+    <>
+      {partitioned?.planeswalkers.map((g) => (
+        <GroupedPermanentDisplay key={g.ids[0]} group={g} />
+      ))}
+      <CommandZone playerId={playerId} />
+      {commanderSection}
+    </>
+  );
+  const hasSupportExtras = hasPlaneswalkers || hasEmblems || commanderSection != null;
+  const supportSection = hasSupportExtras ? (
     <>
       <div className="mx-2 h-3/4 w-px shrink-0 bg-white/20" />
       <div className="flex shrink-0 items-center gap-2" style={zoneStyle(OTHER_BASE_SCALE)}>
-        {partitioned?.planeswalkers.map((g) => (
-          <GroupedPermanentDisplay key={g.ids[0]} group={g} />
-        ))}
-        <CommandZone playerId={playerId} />
+        {supportExtras}
       </div>
     </>
   ) : null;
@@ -127,7 +140,7 @@ export function PlayerArea({
           rowType="support"
           className="ml-auto w-full justify-end px-0"
         />
-        {planeswalkerSection}
+        {supportSection}
       </div>
     </div>
   );
@@ -143,8 +156,6 @@ export function PlayerArea({
       <div
         className={`flex min-w-0 flex-1 flex-col gap-2 px-1 ${
           mode === "full" ? "pt-1 pb-2" : "justify-end py-1"
-        } ${
-          isCommander ? (mode === "focused" ? "pb-16" : "pb-24") : ""
         }`}
       >
         {isMirrored ? (
@@ -169,13 +180,6 @@ export function PlayerArea({
           </>
         )}
       </div>
-      {/* Commander display overlay */}
-      {isCommander && (
-        <div className="absolute right-2 bottom-2 z-20 flex flex-col gap-1">
-          <CommanderDisplay playerId={playerId} compact={mode === "focused"} />
-          <CommanderDamage playerId={playerId} />
-        </div>
-      )}
       {/* Eliminated badge */}
       {isEliminated && (
         <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">
