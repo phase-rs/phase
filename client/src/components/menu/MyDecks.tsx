@@ -670,12 +670,20 @@ export function MyDecks({
               <path fillRule="evenodd" d="M2 4a1 1 0 0 1 1-1h10a1 1 0 0 1 .8 1.6L10 9.333V13a1 1 0 0 1-.553.894l-2 1A1 1 0 0 1 6 14V9.333L2.2 4.6A1 1 0 0 1 2 4Z" clipRule="evenodd" />
             </svg>
             <span className="text-indigo-100">
-              Showing decks legal in <span className="font-semibold">{selectedFormat}</span>
+              {activeFilter === "all"
+                ? <>Showing all saved decks for <span className="font-semibold">{selectedFormat}</span></>
+                : <>Showing decks legal in <span className="font-semibold">{selectedFormat}</span></>}
             </span>
             <span className="text-xs text-indigo-300/70">
               · {searchFiltered.length} of {deckNames.length}
             </span>
           </div>
+          <button
+            onClick={() => setActiveFilter((current) => (current === "all" ? (contextualFilter ?? "all") : "all"))}
+            className="rounded border border-indigo-300/25 bg-indigo-400/10 px-2.5 py-1 text-xs font-medium text-indigo-100 transition-colors hover:bg-indigo-400/18"
+          >
+            {activeFilter === "all" ? "Show legal only" : "Show all decks"}
+          </button>
         </div>
       )}
 

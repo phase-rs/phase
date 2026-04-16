@@ -1,4 +1,4 @@
-import { STORAGE_KEY_PREFIX } from "../../constants/storage";
+import { loadSavedDeck } from "../../constants/storage";
 import { getDeckFeedOrigin, getCachedFeed } from "../../services/feedService";
 import type { ParsedDeck } from "../../services/deckParser";
 
@@ -13,13 +13,7 @@ export const COLOR_DOT_CLASS: Record<string, string> = {
 };
 
 export function loadDeck(deckName: string): ParsedDeck | null {
-  const raw = localStorage.getItem(STORAGE_KEY_PREFIX + deckName);
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as ParsedDeck;
-  } catch {
-    return null;
-  }
+  return loadSavedDeck(deckName);
 }
 
 export function getDeckColorIdentity(deckName: string): string[] {

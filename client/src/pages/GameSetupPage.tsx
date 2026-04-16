@@ -137,10 +137,11 @@ export function GameSetupPage() {
     navigate("/multiplayer");
   };
 
-  const noDeckSelected = !activeDeckName;
-
   // Sidebar deck preview
   const selectedCompat = activeDeckName ? compatibilities[activeDeckName] : undefined;
+  const noDeckSelected = !activeDeckName;
+  const deckBlockedForSelectedFormat = selectedCompat?.selected_format_compatible === false;
+  const cannotStartAi = noDeckSelected || deckBlockedForSelectedFormat;
   const representativeCard = useMemo(
     () => (activeDeckName ? getRepresentativeCard(activeDeckName) : null),
     [activeDeckName],
@@ -239,6 +240,12 @@ export function GameSetupPage() {
                           Unknown {selectedCompat.unknown_cards.length}
                         </span>
                       )}
+                    </div>
+                  )}
+                  {deckBlockedForSelectedFormat && (
+                    <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                      {selectedCompat.selected_format_reasons[0]
+                        ?? `Deck is not legal in ${selectedFormat}.`}
                     </div>
                   )}
                 </div>
@@ -357,9 +364,9 @@ export function GameSetupPage() {
                 <div className="flex overflow-hidden rounded-[14px] border border-indigo-300/18 shadow-[0_10px_28px_rgba(49,46,129,0.24)]">
                   <button
                     onClick={handleStartAI}
-                    disabled={noDeckSelected}
+                    disabled={cannotStartAi}
                     className={`min-h-10 flex-1 px-4 text-sm font-medium transition-colors ${
-                      noDeckSelected
+                      cannotStartAi
                         ? "cursor-not-allowed bg-white/5 text-white/30"
                         : "bg-indigo-400/10 text-indigo-100 hover:bg-indigo-400/14"
                     }`}

@@ -105,7 +105,7 @@ export function CommanderPanel({
       {eligibleCommanders.length > 0 && (
         <div className="space-y-1">
           <span className="text-[10px] text-gray-500">Set as commander:</span>
-          {eligibleCommanders.slice(0, 5).map((name) => (
+          {eligibleCommanders.map((name) => (
             <button
               key={name}
               onClick={() => onSetCommander(name)}

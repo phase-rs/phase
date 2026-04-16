@@ -7,7 +7,7 @@ import { WasmAdapter, getSharedAdapter } from "../adapter/wasm-adapter";
 import { WebSocketAdapter } from "../adapter/ws-adapter";
 import { audioManager } from "../audio/AudioManager";
 import type { DeckData, WsAdapterEvent } from "../adapter/ws-adapter";
-import { STORAGE_KEY_PREFIX, loadActiveDeck } from "../constants/storage";
+import { STORAGE_KEY_PREFIX, loadActiveDeck, loadSavedDeck } from "../constants/storage";
 import { getCachedFeed, listSubscriptions } from "../services/feedService";
 import type { FeedDeck } from "../types/feed";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
@@ -90,13 +90,13 @@ function pickOpponentDeck(playerDeck: ParsedDeck, formatConfig?: FormatConfig): 
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i);
     if (key?.startsWith(STORAGE_KEY_PREFIX)) {
-      try {
-        const deck = JSON.parse(localStorage.getItem(key)!) as ParsedDeck;
-        const cardCount = deck.main.reduce((s, e) => s + e.count, 0);
-        if (cardCount >= 40 && cardCount <= 80 && !deck.commander?.length) {
-          candidates.push(deck);
-        }
-      } catch { /* skip malformed */ }
+      const deckName = key.slice(STORAGE_KEY_PREFIX.length);
+      const deck = loadSavedDeck(deckName);
+      if (!deck) continue;
+      const cardCount = deck.main.reduce((s, e) => s + e.count, 0);
+      if (cardCount >= 40 && cardCount <= 80 && !deck.commander?.length) {
+        candidates.push(deck);
+      }
     }
   }
   if (candidates.length > 0) {

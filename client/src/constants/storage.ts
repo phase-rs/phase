@@ -1,5 +1,5 @@
 import type { FeedSubscription } from "../types/feed";
-import type { ParsedDeck } from "../services/deckParser";
+import { repairParsedDeck, type ParsedDeck } from "../services/deckParser";
 
 /** Prefix for saved deck data in localStorage. Full key: `${STORAGE_KEY_PREFIX}${deckName}` */
 export const STORAGE_KEY_PREFIX = "phase-deck:";
@@ -96,22 +96,35 @@ export function listSavedDeckNames(): string[] {
   return names.sort();
 }
 
+export function loadSavedDeck(deckName: string): ParsedDeck | null {
+  const raw = localStorage.getItem(STORAGE_KEY_PREFIX + deckName);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as ParsedDeck & Record<string, unknown>;
+    const repaired = repairParsedDeck(parsed);
+    if (parsed.companion && !repaired.sideboard.some((e) => e.name === parsed.companion)) {
+      repaired.sideboard.push({ count: 1, name: parsed.companion });
+    }
+
+    const repairedPayload = {
+      ...parsed,
+      ...repaired,
+    };
+    const repairedRaw = JSON.stringify(repairedPayload);
+    if (repairedRaw !== raw) {
+      localStorage.setItem(STORAGE_KEY_PREFIX + deckName, repairedRaw);
+    }
+    return repaired;
+  } catch {
+    return null;
+  }
+}
+
 /** Load the currently active deck from localStorage. */
 export function loadActiveDeck(): ParsedDeck | null {
   const activeName = localStorage.getItem(ACTIVE_DECK_KEY);
   if (!activeName) return null;
-  const raw = localStorage.getItem(STORAGE_KEY_PREFIX + activeName);
-  if (!raw) return null;
-  try {
-    const deck = JSON.parse(raw) as ParsedDeck;
-    // CR 702.139a: Ensure companion is in sideboard for decks saved before this was fixed.
-    if (deck.companion && !deck.sideboard.some((e) => e.name === deck.companion)) {
-      deck.sideboard.push({ count: 1, name: deck.companion });
-    }
-    return deck;
-  } catch {
-    return null;
-  }
+  return loadSavedDeck(activeName);
 }
 
 // --- Feed storage helpers ---

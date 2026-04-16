@@ -197,6 +197,43 @@ Deck
       { count: 2, name: "Lim-Dul's Vault" },
     ]);
   });
+
+  it('promotes a trailing singleton sideboard card to commander for commander-shaped imports', () => {
+    const content = `1 Sol Ring
+90 Swamp
+8 Plains
+
+1 Dark Leo & Shredder`;
+    const result = parseMtgaDeck(content);
+    expect(result.main).toEqual([
+      { count: 1, name: 'Sol Ring' },
+      { count: 90, name: 'Swamp' },
+      { count: 8, name: 'Plains' },
+    ]);
+    expect(result.sideboard).toEqual([]);
+    expect(result.commander).toEqual(['Dark Leo & Shredder']);
+  });
+
+  it('normalizes split-card names during import', () => {
+    const result = parseMtgaDeck('1 Revival/Revenge');
+    expect(result.main).toEqual([
+      { count: 1, name: 'Revival // Revenge' },
+    ]);
+  });
+
+  it('preserves an explicit sideboard header instead of promoting commander heuristically', () => {
+    const content = `Deck
+1 Sol Ring
+90 Swamp
+8 Plains
+Sideboard
+1 Dark Leo & Shredder`;
+    const result = parseMtgaDeck(content);
+    expect(result.commander).toBeUndefined();
+    expect(result.sideboard).toEqual([
+      { count: 1, name: 'Dark Leo & Shredder' },
+    ]);
+  });
 });
 
 describe('detectAndParseDeck', () => {

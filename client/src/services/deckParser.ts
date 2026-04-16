@@ -12,6 +12,7 @@ export interface ParsedDeck {
 
 type DeckSection = "main" | "sideboard" | "commander" | "companion";
 const SIMPLE_DECK_LINE_PATTERN = /^\d+x?\s+.+$/;
+const BASIC_LANDS = new Set(["Plains", "Island", "Swamp", "Mountain", "Forest"]);
 
 function getNamedSection(line: string): DeckSection | null {
   const normalized = line.trim().toLowerCase();
@@ -42,6 +43,77 @@ function parseDeckEntryLine(line: string): DeckEntry | null {
   return null;
 }
 
+function normalizeCardName(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed.includes("/")) return trimmed;
+
+  const slashParts = trimmed.split("/").map((part) => part.trim()).filter(Boolean);
+  if (slashParts.length === 2) {
+    return `${slashParts[0]} // ${slashParts[1]}`;
+  }
+
+  return trimmed.replace(/\s*\/{2,}\s*/g, " // ");
+}
+
+function normalizeEntries(entries: DeckEntry[]): DeckEntry[] {
+  return entries.map((entry) => ({
+    ...entry,
+    name: normalizeCardName(entry.name),
+  }));
+}
+
+function totalCards(entries: DeckEntry[]): number {
+  return entries.reduce((sum, entry) => sum + entry.count, 0);
+}
+
+function looksCommanderSingleton(entries: DeckEntry[]): boolean {
+  return entries.every((entry) => entry.count === 1 || BASIC_LANDS.has(entry.name));
+}
+
+function normalizeParsedDeck(
+  deck: ParsedDeck,
+  options: { explicitCommander: boolean; explicitSideboard: boolean },
+): ParsedDeck {
+  const normalized: ParsedDeck = {
+    main: deduplicateEntries(normalizeEntries(deck.main)),
+    sideboard: deduplicateEntries(normalizeEntries(deck.sideboard)),
+  };
+
+  if (deck.commander?.length) {
+    normalized.commander = deck.commander.map(normalizeCardName);
+  }
+
+  if (deck.companion) {
+    normalized.companion = normalizeCardName(deck.companion);
+  }
+
+  if (options.explicitCommander || options.explicitSideboard || normalized.commander?.length) {
+    return normalized;
+  }
+
+  const mainCount = totalCards(normalized.main);
+  const sideboardCount = totalCards(normalized.sideboard);
+  if (
+    sideboardCount >= 1
+    && sideboardCount <= 2
+    && mainCount + sideboardCount === 100
+    && looksCommanderSingleton(normalized.main)
+    && normalized.sideboard.every((entry) => entry.count === 1)
+  ) {
+    normalized.commander = normalized.sideboard.map((entry) => entry.name);
+    normalized.sideboard = [];
+  }
+
+  return normalized;
+}
+
+export function repairParsedDeck(deck: ParsedDeck): ParsedDeck {
+  return normalizeParsedDeck(deck, {
+    explicitCommander: false,
+    explicitSideboard: false,
+  });
+}
+
 export function deduplicateEntries(entries: DeckEntry[]): DeckEntry[] {
   const map = new Map<string, number>();
   for (const entry of entries) {
@@ -64,6 +136,8 @@ export function parseDeckFile(content: string): ParsedDeck {
   const deck: ParsedDeck = { main: [], sideboard: [] };
   const commanderEntries: DeckEntry[] = [];
   let currentSection: DeckSection = "main";
+  let explicitCommander = false;
+  let explicitSideboard = false;
 
   for (const raw of lines) {
     const line = raw.trim();
@@ -72,6 +146,8 @@ export function parseDeckFile(content: string): ParsedDeck {
     const namedSection = getNamedSection(line);
     if (namedSection) {
       currentSection = namedSection;
+      if (namedSection === "commander") explicitCommander = true;
+      if (namedSection === "sideboard") explicitSideboard = true;
       continue;
     }
 
@@ -95,9 +171,10 @@ export function parseDeckFile(content: string): ParsedDeck {
     deck.commander = commanderEntries.map((e) => e.name);
   }
 
-  deck.main = deduplicateEntries(deck.main);
-  deck.sideboard = deduplicateEntries(deck.sideboard);
-  return deck;
+  return normalizeParsedDeck(deck, {
+    explicitCommander,
+    explicitSideboard,
+  });
 }
 
 const MTGA_LINE_PATTERN = /^\d+\s+.+\s+\([A-Z0-9]+\)\s+\d+$/;
@@ -115,6 +192,8 @@ export function parseMtgaDeck(content: string): ParsedDeck {
   const commanderEntries: DeckEntry[] = [];
   let currentSection: DeckSection = "main";
   let seenCards = false;
+  let explicitCommander = false;
+  let explicitSideboard = false;
 
   for (const raw of lines) {
     const line = raw.trim();
@@ -124,6 +203,8 @@ export function parseMtgaDeck(content: string): ParsedDeck {
     const namedSection = getNamedSection(line);
     if (namedSection) {
       currentSection = namedSection;
+      if (namedSection === "commander") explicitCommander = true;
+      if (namedSection === "sideboard") explicitSideboard = true;
       continue;
     }
 
@@ -160,9 +241,10 @@ export function parseMtgaDeck(content: string): ParsedDeck {
     deck.commander = commanderEntries.map((e) => e.name);
   }
 
-  deck.main = deduplicateEntries(deck.main);
-  deck.sideboard = deduplicateEntries(deck.sideboard);
-  return deck;
+  return normalizeParsedDeck(deck, {
+    explicitCommander,
+    explicitSideboard,
+  });
 }
 
 /**

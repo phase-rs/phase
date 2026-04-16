@@ -4,7 +4,7 @@ import type { ScryfallCard } from "../../services/scryfall";
 import type { ParsedDeck } from "../../services/deckParser";
 import { deduplicateEntries } from "../../services/deckParser";
 import { evaluateDeckCompatibility, type DeckCompatibilityResult } from "../../services/deckCompatibility";
-import { STORAGE_KEY_PREFIX, stampDeckMeta } from "../../constants/storage";
+import { STORAGE_KEY_PREFIX, loadSavedDeck, stampDeckMeta } from "../../constants/storage";
 import { useDeckCardData } from "../../hooks/useDeckCardData";
 import { CardSearch } from "./CardSearch";
 import { CardGrid } from "./CardGrid";
@@ -178,14 +178,14 @@ export function DeckBuilder({
   };
 
   const handleLoad = useCallback((name: string) => {
+    const parsed = loadSavedDeck(name);
     const data = localStorage.getItem(STORAGE_KEY_PREFIX + name);
-    if (data) {
-      const parsed = JSON.parse(data);
-      setDeck({ main: deduplicateEntries(parsed.main ?? []), sideboard: deduplicateEntries(parsed.sideboard ?? []) });
-      setCommanders(parsed.commander ?? []);
-      if (parsed.format) onFormatChange(parsed.format);
-      setDeckName(name);
-    }
+    if (!parsed || !data) return;
+    const persisted = JSON.parse(data) as ParsedDeck & { format?: DeckFormat };
+    setDeck({ main: deduplicateEntries(parsed.main ?? []), sideboard: deduplicateEntries(parsed.sideboard ?? []) });
+    setCommanders(parsed.commander ?? []);
+    if (persisted.format) onFormatChange(persisted.format);
+    setDeckName(name);
   }, [onFormatChange]);
 
   useEffect(() => {

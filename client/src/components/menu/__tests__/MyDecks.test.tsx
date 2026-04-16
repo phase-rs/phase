@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 import { MyDecks } from "../MyDecks";
 import { STORAGE_KEY_PREFIX } from "../../../constants/storage";
@@ -28,7 +29,7 @@ describe("MyDecks", () => {
     cleanup();
   });
 
-  it("prefilters commander selection context and hides incompatible decks", async () => {
+  it("prefilters commander selection context and can reveal incompatible decks on demand", async () => {
     saveDeck("Commander Ready", {
       main: [{ name: "Island", count: 99 }],
       sideboard: [],
@@ -76,9 +77,9 @@ describe("MyDecks", () => {
       expect(screen.queryByText("Off Format")).not.toBeInTheDocument();
     });
     expect(screen.getByText("Commander Ready")).toBeInTheDocument();
-
-    // In select mode, no show-all override — incompatible decks stay hidden
-    expect(screen.queryByRole("button", { name: "Show all decks" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Show all decks" }));
+    expect(await screen.findByText("Off Format")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show legal only" })).toBeInTheDocument();
   });
 
   it("does not prefilter in free-for-all context", async () => {
