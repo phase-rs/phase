@@ -475,6 +475,32 @@ pub(crate) fn controller_for_relative_filter(
     }
 }
 
+/// CR 117.3a: Determine which player receives the "may" prompt for an optional
+/// effect. Most optional effects go to the caster (CR 609.3). Subject-anchored
+/// optional effects — "its controller may search their library" (Assassin's
+/// Trophy, Path to Exile, Ghost Quarter, Oblation, …) — route the prompt to the
+/// acting subject (the target permanent's controller). This mirrors the
+/// `resolve_library_owner` logic in `search_library.rs` but applies generally
+/// to any optional effect whose embedded player-scope target is a context-ref.
+fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> PlayerId {
+    // Subject-anchored SearchLibrary: prompt the library owner / searcher.
+    if let Effect::SearchLibrary {
+        target_player: Some(TargetFilter::ParentTargetController),
+        ..
+    } = &ability.effect
+    {
+        if let Some(parent_obj_id) = ability.targets.iter().find_map(|t| match t {
+            TargetRef::Object(id) => Some(*id),
+            _ => None,
+        }) {
+            if let Some(obj) = state.objects.get(&parent_obj_id) {
+                return obj.controller;
+            }
+        }
+    }
+    ability.controller
+}
+
 /// CR 603.7c: Extract an event-context target filter from an effect, if present.
 /// Returns the filter only for event-context variants (TriggeringSpellController, etc.)
 /// that auto-resolve from `state.current_trigger_event` at resolution time.
@@ -709,12 +735,16 @@ pub fn resolve_ability_chain(
         return Ok(());
     }
 
-    // CR 609.3: "You may" effects prompt the controller before execution.
+    // CR 117.3a + CR 609.3: "You may" effects prompt the acting player before
+    // execution. For subject-anchored optional effects ("its controller may
+    // search their library" — Assassin's Trophy), the acting player is the
+    // resolved subject (the target permanent's controller), NOT the caster.
     if ability.optional {
         let description = ability.description.clone();
+        let prompt_player = optional_prompt_player(state, ability);
         state.pending_optional_effect = Some(Box::new(ability.clone()));
         state.waiting_for = WaitingFor::OptionalEffectChoice {
-            player: ability.controller,
+            player: prompt_player,
             source_id: ability.source_id,
             description,
         };

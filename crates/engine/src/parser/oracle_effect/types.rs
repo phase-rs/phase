@@ -25,6 +25,10 @@ pub(super) struct ParsedEffectClause {
     /// Set when `parse_clause_ast` detects a leading conditional and the condition
     /// text is parseable by the nom condition combinator pipeline.
     pub(super) condition: Option<AbilityCondition>,
+    /// CR 608.2c + CR 117.3a: Set when the parsed subject phrase carried a "may"
+    /// modal (e.g., "its controller may search their library"). Lowered into
+    /// `AbilityDefinition.optional` so the resolver prompts the acting player.
+    pub(super) optional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +37,11 @@ pub(super) struct SubjectApplication {
     pub(super) target: Option<TargetFilter>,
     pub(super) multi_target: Option<MultiTargetSpec>,
     pub(super) inherits_parent: bool,
+    /// CR 608.2c: Set when the subject phrase includes a "may" modal
+    /// (e.g., "its controller may search their library"). Lowered into
+    /// `AbilityDefinition.optional` so the resolver treats the sub-ability
+    /// as a player choice.
+    pub(super) is_optional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +107,8 @@ pub(super) struct SubjectPhraseAst {
     pub(super) target: Option<TargetFilter>,
     pub(super) multi_target: Option<MultiTargetSpec>,
     pub(super) inherits_parent: bool,
+    /// CR 608.2c: Propagated from `SubjectApplication.is_optional`.
+    pub(super) is_optional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -718,6 +729,7 @@ pub(super) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     }
 }
 

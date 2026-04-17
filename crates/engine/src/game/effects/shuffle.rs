@@ -1,6 +1,8 @@
 use rand::seq::SliceRandom;
 
-use crate::types::ability::{EffectError, EffectKind, ResolvedAbility, TargetRef};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -10,17 +12,34 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let target_player = ability
-        .targets
-        .iter()
-        .find_map(|t| {
-            if let TargetRef::Player(pid) = t {
-                Some(*pid)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(ability.controller);
+    // CR 608.2c: Resolve the shuffle's acting player from targets. When an
+    // explicit `TargetRef::Player` is present (propagated from an upstream
+    // SearchChoice or target-selected opponent), use it. Otherwise, for a
+    // subject-anchored `ParentTargetController` target, resolve against the
+    // first Object in targets (the parent target's controller). Falls back to
+    // the caster for plain `Controller` / `Any` targets.
+    let target_player = if let Some(pid) = ability.targets.iter().find_map(|t| match t {
+        TargetRef::Player(pid) => Some(*pid),
+        _ => None,
+    }) {
+        pid
+    } else if matches!(
+        &ability.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ParentTargetController
+        }
+    ) {
+        ability
+            .targets
+            .iter()
+            .find_map(|t| match t {
+                TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
+                _ => None,
+            })
+            .unwrap_or(ability.controller)
+    } else {
+        ability.controller
+    };
 
     // CR 701.24: "Can't shuffle" suppresses library shuffling. Per CR 701.24d,
     // if a player would shuffle their library and can't, they don't shuffle.
@@ -200,5 +219,58 @@ mod tests {
 
         assert_eq!(state.players[0].library, p0_lib_before);
         assert_eq!(state.players[1].library.len(), p1_lib_before.len());
+    }
+
+    /// CR 608.2c + CR 701.24a: Assassin's Trophy-shape — `Effect::Shuffle
+    /// { target: ParentTargetController }` resolves the acting player from the
+    /// first Object in `ability.targets` (the destroyed permanent), and shuffles
+    /// that object's controller's library. Works on the fail-to-find path where
+    /// the `SearchChoice` continuation never injected a Player target.
+    #[test]
+    fn shuffle_parent_target_controller_shuffles_target_objects_controller() {
+        use crate::types::ability::Effect;
+        let mut state = GameState::new_two_player(42);
+        for i in 0..4 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(1),
+                format!("Card {}", i),
+                Zone::Library,
+            );
+        }
+        let destroyed = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(1),
+            "Opponent Land".to_string(),
+            Zone::Graveyard,
+        );
+        let p0_lib_before = state.players[0].library.clone();
+        let p1_lib_before = state.players[1].library.clone();
+
+        // Ability.controller = caster (P0). Target = destroyed permanent (P1-owned).
+        // No TargetRef::Player in targets — must resolve via ParentTargetController.
+        let ability = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::ParentTargetController,
+            },
+            vec![TargetRef::Object(destroyed)],
+            ObjectId(9000),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Caster's library untouched; opponent's library shuffled.
+        assert_eq!(
+            state.players[0].library, p0_lib_before,
+            "caster's library must not be shuffled"
+        );
+        assert_eq!(
+            state.players[1].library.len(),
+            p1_lib_before.len(),
+            "opponent's library size preserved under shuffle"
+        );
     }
 }

@@ -867,9 +867,13 @@ pub(super) fn parse_intrinsic_continuation_ast(
                 return None;
             }
             let lower = text.to_lowercase();
-            let attach_to_source = nom_primitives::scan_contains(&lower, "attached to");
-            // CR 701.23a: "onto the battlefield tapped" — the searched card enters tapped.
-            let enter_tapped = nom_primitives::scan_contains(&lower, "battlefield tapped");
+            let attach_to_source = nom_primitives::scan_contains(&full_lower, "attached to")
+                || nom_primitives::scan_contains(&lower, "attached to");
+            // CR 701.23a + CR 701.18a: Scan "onto the battlefield tapped" across
+            // the whole sentence (full_lower) so the destination compound's
+            // "enters tapped" modifier is detected even when the put-step is
+            // in a sibling clause (Assassin's Trophy-style split).
+            let enter_tapped = nom_primitives::scan_contains(&full_lower, "battlefield tapped");
             let reveal = nom_primitives::scan_contains(&lower, "reveal")
                 || nom_primitives::scan_contains(&full_lower, "reveal that card")
                 || nom_primitives::scan_contains(&full_lower, "reveal it");
@@ -896,8 +900,15 @@ pub(super) fn parse_intrinsic_continuation_ast(
                     );
                 }
             }
+            // CR 701.23a + CR 701.18a: The "put [it] onto the battlefield" /
+            // "put [it] into your hand" destination clause for a library search
+            // compound lives in the same sentence as the search, but may have
+            // been split into a subsequent chunk by the comma-splitter (e.g.,
+            // "search their library for a basic land card, put it onto the
+            // battlefield, then shuffle"). Use full_lower so we scan across the
+            // whole sentence rather than only the chunk containing "search".
             Some(ContinuationAst::SearchDestination {
-                destination: super::parse_search_destination(&lower),
+                destination: super::parse_search_destination(&full_lower),
                 enter_tapped,
                 reveal,
                 attach_to_source,
@@ -1285,6 +1296,27 @@ pub(super) fn parse_followup_continuation_ast(
                 | "reveal it"
                 | "put that card into your hand"
                 | "put it into your hand"
+        ) =>
+        {
+            Some(ContinuationAst::SearchResultClauseHandled)
+        }
+        // CR 701.23a + CR 701.18a: When the preceding SearchDestination
+        // continuation already moved the found card onto the battlefield
+        // (e.g., Assassin's Trophy / Ranging Raptors / Harrow compound), the
+        // explicit "put it onto the battlefield" chunk in the same sentence is
+        // a paraphrase and must be absorbed to avoid a duplicate ChangeZone.
+        Effect::ChangeZone {
+            origin: Some(Zone::Library),
+            destination: Zone::Battlefield,
+            ..
+        } if matches!(
+            lower.trim().trim_end_matches('.'),
+            "put that card onto the battlefield"
+                | "put it onto the battlefield"
+                | "put them onto the battlefield"
+                | "put those cards onto the battlefield"
+                | "put that card onto the battlefield tapped"
+                | "put it onto the battlefield tapped"
         ) =>
         {
             Some(ContinuationAst::SearchResultClauseHandled)

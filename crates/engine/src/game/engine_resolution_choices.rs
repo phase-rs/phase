@@ -417,6 +417,15 @@ pub(super) fn handle_resolution_choice(
             set_priority(state, player);
             if let Some(cont) = state.pending_continuation.as_mut() {
                 cont.chain.targets = chosen.iter().map(|&id| TargetRef::Object(id)).collect();
+                // CR 701.23a + CR 701.24a: When the searcher is not the caster
+                // (e.g., "its controller may search their library, ..., then
+                // shuffle" for Assassin's Trophy), propagate the searcher's
+                // PlayerId into the continuation chain's targets so downstream
+                // untargeted-Shuffle / Library-owner-sensitive effects pick up
+                // the correct player via `ability.target_player()`.
+                if player != cont.chain.controller {
+                    cont.chain.targets.push(TargetRef::Player(player));
+                }
             }
             effects::drain_pending_continuation(state, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
