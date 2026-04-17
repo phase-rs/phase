@@ -261,7 +261,7 @@ function CardPreviewInner({
           backFaceHint={backFaceName != null && !showOtherFace
             ? `Hold Ctrl for ${isTransformed ? "front" : "back"} face`
             : null}
-          altHint={frontParseDetails || engineFrontFace ? "Alt: parsed abilities" : null}
+          altAvailable={Boolean(frontParseDetails || engineFrontFace)}
         />
       )}
     </div>
@@ -312,7 +312,7 @@ function CardImagePreview({
   isLoading,
   src,
   backFaceHint,
-  altHint,
+  altAvailable,
   mobileMode,
 }: {
   cardName: string;
@@ -322,7 +322,7 @@ function CardImagePreview({
   isLoading: boolean;
   src: string | null;
   backFaceHint: string | null;
-  altHint: string | null;
+  altAvailable: boolean;
   mobileMode?: boolean;
 }) {
   const sizeClass = mobileMode
@@ -362,12 +362,12 @@ function CardImagePreview({
           </div>
         )}
       </div>
-      {showInfoPanel && obj && <CardInfoPanel obj={obj} />}
+      {showInfoPanel && obj && <CardInfoPanel obj={obj} altAvailable={altAvailable} />}
       {backFaceHint && (
         <div className="bg-gray-900/80 text-center py-1 text-[10px] text-gray-400">{backFaceHint}</div>
       )}
-      {altHint && (
-        <div className="bg-gray-900/80 text-center py-1 text-[10px] text-gray-400">{altHint}</div>
+      {!showInfoPanel && altAvailable && (
+        <div className="bg-gray-900/80 text-center py-1 text-[10px] text-gray-400">Alt: parsed abilities</div>
       )}
     </div>
   );
@@ -501,7 +501,7 @@ function ParsedAbilitiesPanel({ name, cardTypes, parseDetails, maxHeight }: Pars
   );
 }
 
-function CardInfoPanel({ obj }: { obj: GameObject }) {
+function CardInfoPanel({ obj, altAvailable }: { obj: GameObject; altAvailable: boolean }) {
   const ptDisplay = computePTDisplay(obj);
   const counters = Object.entries(obj.counters).filter(([type]) => type !== "loyalty");
   const keywords = sortKeywords(obj.keywords);
@@ -510,7 +510,15 @@ function CardInfoPanel({ obj }: { obj: GameObject }) {
     obj.color.some((c, i) => c !== obj.base_color[i]);
 
   return (
-    <div className="w-full border-t border-gray-600 bg-gray-900/95 px-3 py-2 text-xs text-gray-200">
+    <div className="relative w-full border-t border-gray-600 bg-gray-900/95 px-3 py-2 text-xs text-gray-200">
+      {altAvailable && (
+        <div className="pointer-events-none absolute bottom-2 right-3 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-gray-300">
+          <kbd className="rounded border border-gray-600 bg-gray-800 px-1.5 py-0.5 font-mono text-[10px] leading-none text-gray-200 shadow-sm">
+            Alt
+          </kbd>
+          <span>Parse</span>
+        </div>
+      )}
       {/* Type line */}
       <div className="font-semibold text-gray-300">
         {formatTypeLine(obj.card_types)}
