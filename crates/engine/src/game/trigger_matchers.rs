@@ -103,6 +103,9 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::Crewed | TriggerMode::BecomesCrewed => match_vehicle_crewed,
         TriggerMode::Stationed => match_stationed,
         TriggerMode::Saddled | TriggerMode::BecomesSaddled => match_saddled,
+        TriggerMode::Crews => match_crews,
+        TriggerMode::Saddles => match_saddles,
+        TriggerMode::SaddlesOrCrews => match_saddles_or_crews,
         TriggerMode::NinjutsuActivated => match_ninjutsu_activated,
         TriggerMode::Firebend => match_firebend,
         TriggerMode::Airbend => match_airbend,
@@ -406,6 +409,13 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // saddled" fires when the saddle ability resolves for this specific Mount.
     r.insert(TriggerMode::Saddled, match_saddled);
     r.insert(TriggerMode::BecomesSaddled, match_saddled);
+
+    // CR 702.122 + CR 702.171c: Actor-side Saddle/Crew matchers — consult
+    // `valid_card` against event.creatures via matches_target_filter so that
+    // compound subjects (e.g., Tiana) fire on the non-self branch.
+    r.insert(TriggerMode::Crews, match_crews);
+    r.insert(TriggerMode::Saddles, match_saddles);
+    r.insert(TriggerMode::SaddlesOrCrews, match_saddles_or_crews);
 
     // CR 702.49a: Ninjutsu activation trigger
     r.insert(TriggerMode::NinjutsuActivated, match_ninjutsu_activated);
@@ -1938,6 +1948,69 @@ pub(super) fn match_saddled(
     _state: &GameState,
 ) -> bool {
     matches!(event, GameEvent::Saddled { mount_id, .. } if *mount_id == source_id)
+}
+
+/// CR 702.122: Actor-side crew trigger — fires when any creature in the crew
+/// ability's tapped-cost list matches the trigger's `valid_card` filter.
+/// For self-only triggers (Gearshift Ace: "Whenever ~ crews a Vehicle"), the
+/// filter is `SelfRef` and reduces to a source_id membership check. For
+/// compound-subject triggers (Tiana: "Tiana or another legendary creature
+/// you control crews a Vehicle"), the filter's Or-branches are evaluated
+/// against each creature via `matches_target_filter`.
+pub(super) fn match_crews(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::VehicleCrewed { creatures, .. } = event else {
+        return false;
+    };
+    match_actor_against_filter(creatures, trigger, source_id, state)
+}
+
+/// CR 702.171c: Actor-side saddle trigger — analogous to `match_crews`.
+pub(super) fn match_saddles(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::Saddled { creatures, .. } = event else {
+        return false;
+    };
+    match_actor_against_filter(creatures, trigger, source_id, state)
+}
+
+/// CR 702.122 + CR 702.171c: Compound actor-side trigger — fires on either
+/// saddling a Mount OR crewing a Vehicle.
+pub(super) fn match_saddles_or_crews(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    match_saddles(event, trigger, source_id, state) || match_crews(event, trigger, source_id, state)
+}
+
+/// Shared helper: checks whether any object_id in `actors` matches the trigger's
+/// `valid_card` filter. Falls back to `source_id` membership if `valid_card` is
+/// `None` (pre-filter trigger definitions, e.g., Forge-format ingest).
+fn match_actor_against_filter(
+    actors: &[ObjectId],
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    match &trigger.valid_card {
+        None => actors.contains(&source_id),
+        Some(filter) => {
+            let ctx = super::filter::FilterContext::from_source(state, source_id);
+            actors
+                .iter()
+                .any(|&cid| super::filter::matches_target_filter(state, cid, filter, &ctx))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3980,5 +4053,173 @@ mod tests {
         };
         // Crew events don't trigger station listeners.
         assert!(!match_stationed(&event, &trigger, ObjectId(42), &state));
+    }
+
+    // ---------------------------------------------------------------------------
+    // CR 702.122 + CR 702.171c: Actor-side Saddle/Crew matcher tests.
+    // These guard the compound-subject generalization: the matcher consults
+    // `trigger.valid_card` against event.creatures via `matches_target_filter`,
+    // so compound subjects (e.g. Tiana) fire on the non-self branch.
+    // ---------------------------------------------------------------------------
+
+    /// Insert a creature at a specific object id with an explicit controller and
+    /// (optionally) the Legendary supertype. Helper for actor-filter tests.
+    fn add_creature(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        legendary: bool,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            crate::types::identifiers::CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        if legendary {
+            obj.card_types
+                .supertypes
+                .push(crate::types::card_type::Supertype::Legendary);
+        }
+        id
+    }
+
+    #[test]
+    fn match_crews_fires_on_self_actor() {
+        // Gearshift Ace shape: "Whenever ~ crews a Vehicle". valid_card = SelfRef.
+        let mut state = setup();
+        let ace = add_creature(&mut state, PlayerId(0), "Gearshift Ace", false);
+        let mut trigger = make_trigger(TriggerMode::Crews);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+
+        let event = GameEvent::VehicleCrewed {
+            vehicle_id: ObjectId(999),
+            creatures: vec![ace],
+        };
+        assert!(match_crews(&event, &trigger, ace, &state));
+    }
+
+    #[test]
+    fn match_crews_fires_on_compound_non_self_branch() {
+        // C5 CRITICAL regression guard. Tiana shape: compound subject
+        // Or { SelfRef, Typed(Creature, Legendary, Controller::You, [Another]) }.
+        // When a DIFFERENT legendary creature the controller owns crews the Vehicle,
+        // the trigger MUST still fire via the Typed branch — source_id membership
+        // alone is not enough.
+        let mut state = setup();
+        let tiana = add_creature(&mut state, PlayerId(0), "Tiana, Angelic Mechanic", true);
+        let other_legendary = add_creature(&mut state, PlayerId(0), "Other Legendary", true);
+
+        let mut trigger = make_trigger(TriggerMode::Crews);
+        trigger.valid_card = Some(TargetFilter::Or {
+            filters: vec![
+                TargetFilter::SelfRef,
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![
+                            FilterProp::HasSupertype {
+                                value: crate::types::card_type::Supertype::Legendary,
+                            },
+                            FilterProp::Another,
+                        ]),
+                ),
+            ],
+        });
+
+        let event = GameEvent::VehicleCrewed {
+            vehicle_id: ObjectId(999),
+            creatures: vec![other_legendary],
+        };
+        // source_id = tiana (trigger owner); actor = other_legendary (not source).
+        // Must fire via the Typed Legendary branch.
+        assert!(match_crews(&event, &trigger, tiana, &state));
+    }
+
+    #[test]
+    fn match_crews_does_not_fire_when_actor_does_not_match_filter() {
+        // Negative: compound-subject filter requires Legendary + You-controlled.
+        // A non-legendary creature (even if controlled by You) must NOT match.
+        let mut state = setup();
+        let tiana = add_creature(&mut state, PlayerId(0), "Tiana, Angelic Mechanic", true);
+        let bear = add_creature(&mut state, PlayerId(0), "Grizzly Bears", false);
+
+        let mut trigger = make_trigger(TriggerMode::Crews);
+        trigger.valid_card = Some(TargetFilter::Or {
+            filters: vec![
+                TargetFilter::SelfRef,
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![
+                            FilterProp::HasSupertype {
+                                value: crate::types::card_type::Supertype::Legendary,
+                            },
+                            FilterProp::Another,
+                        ]),
+                ),
+            ],
+        });
+
+        let event = GameEvent::VehicleCrewed {
+            vehicle_id: ObjectId(999),
+            creatures: vec![bear],
+        };
+        assert!(!match_crews(&event, &trigger, tiana, &state));
+    }
+
+    #[test]
+    fn match_saddles_or_crews_fires_on_either_event_type() {
+        // Canyon Vaulter shape: the compound matcher must fire on both Saddled and
+        // VehicleCrewed events.
+        let mut state = setup();
+        let vaulter = add_creature(&mut state, PlayerId(0), "Canyon Vaulter", false);
+        let mut trigger = make_trigger(TriggerMode::SaddlesOrCrews);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+
+        let crew_event = GameEvent::VehicleCrewed {
+            vehicle_id: ObjectId(999),
+            creatures: vec![vaulter],
+        };
+        let saddle_event = GameEvent::Saddled {
+            mount_id: ObjectId(998),
+            creatures: vec![vaulter],
+        };
+        assert!(match_saddles_or_crews(
+            &crew_event,
+            &trigger,
+            vaulter,
+            &state
+        ));
+        assert!(match_saddles_or_crews(
+            &saddle_event,
+            &trigger,
+            vaulter,
+            &state
+        ));
+    }
+
+    #[test]
+    fn match_actor_against_filter_falls_back_to_source_id_when_valid_card_is_none() {
+        // Forge-format ingest produces trigger defs without valid_card. The matcher
+        // must degrade gracefully to a source_id membership check.
+        let state = setup();
+        let trigger = make_trigger(TriggerMode::Crews); // valid_card defaults to None
+        let source = ObjectId(42);
+
+        let event = GameEvent::VehicleCrewed {
+            vehicle_id: ObjectId(999),
+            creatures: vec![source],
+        };
+        assert!(match_crews(&event, &trigger, source, &state));
+
+        let wrong_event = GameEvent::VehicleCrewed {
+            vehicle_id: ObjectId(999),
+            creatures: vec![ObjectId(7)],
+        };
+        assert!(!match_crews(&wrong_event, &trigger, source, &state));
     }
 }

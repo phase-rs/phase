@@ -1284,6 +1284,11 @@ fn check_trigger_constraint(
         TriggerConstraint::OncePerGame => !state.triggers_fired_this_game.contains(&key),
         TriggerConstraint::OnlyDuringYourTurn => state.active_player == controller,
         TriggerConstraint::OnlyDuringOpponentsTurn => state.active_player != controller,
+        // CR 505.1: Main phases are precombat and postcombat.
+        TriggerConstraint::OnlyDuringYourMainPhase => {
+            state.active_player == controller
+                && matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
+        }
         // CR 603.2: Per-caster spell count. The caster is extracted from the SpellCast
         // event; the count comes from the per-player map (not the global counter).
         // When `filter` contains `TypeFilter::Non(Creature)`, use the noncreature counter.
@@ -1749,6 +1754,7 @@ fn record_trigger_fired(
         }
         TriggerConstraint::OnlyDuringYourTurn
         | TriggerConstraint::OnlyDuringOpponentsTurn
+        | TriggerConstraint::OnlyDuringYourMainPhase
         | TriggerConstraint::NthSpellThisTurn { .. }
         | TriggerConstraint::NthDrawThisTurn { .. }
         | TriggerConstraint::AtClassLevel { .. } => {
@@ -4468,5 +4474,105 @@ pub mod tests {
             1,
             "Utopia Sprawl must add one Red mana (the chosen color) to the pool"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 505.1: OnlyDuringYourMainPhase constraint runtime enforcement.
+    // Fires only when the active player is the trigger controller AND the
+    // phase is precombat or postcombat main.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn only_during_your_main_phase_fires_in_precombat_main() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+
+        let mut trig_def = make_trigger(TriggerMode::SaddlesOrCrews);
+        trig_def.constraint = Some(TriggerConstraint::OnlyDuringYourMainPhase);
+
+        let event = GameEvent::VehicleCrewed {
+            vehicle_id: ObjectId(42),
+            creatures: vec![ObjectId(5)],
+        };
+        assert!(check_trigger_constraint(
+            &state,
+            &trig_def,
+            ObjectId(42),
+            0,
+            PlayerId(0),
+            &event,
+        ));
+    }
+
+    #[test]
+    fn only_during_your_main_phase_fires_in_postcombat_main() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.phase = Phase::PostCombatMain;
+
+        let mut trig_def = make_trigger(TriggerMode::SaddlesOrCrews);
+        trig_def.constraint = Some(TriggerConstraint::OnlyDuringYourMainPhase);
+
+        let event = GameEvent::VehicleCrewed {
+            vehicle_id: ObjectId(42),
+            creatures: vec![ObjectId(5)],
+        };
+        assert!(check_trigger_constraint(
+            &state,
+            &trig_def,
+            ObjectId(42),
+            0,
+            PlayerId(0),
+            &event,
+        ));
+    }
+
+    #[test]
+    fn only_during_your_main_phase_blocks_outside_main_phase() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.phase = Phase::Upkeep;
+
+        let mut trig_def = make_trigger(TriggerMode::SaddlesOrCrews);
+        trig_def.constraint = Some(TriggerConstraint::OnlyDuringYourMainPhase);
+
+        let event = GameEvent::VehicleCrewed {
+            vehicle_id: ObjectId(42),
+            creatures: vec![ObjectId(5)],
+        };
+        assert!(!check_trigger_constraint(
+            &state,
+            &trig_def,
+            ObjectId(42),
+            0,
+            PlayerId(0),
+            &event,
+        ));
+    }
+
+    #[test]
+    fn only_during_your_main_phase_blocks_on_opponents_turn() {
+        // Even during Player 1's precombat main, Player 0's trigger must NOT fire —
+        // "your main phase" is scoped to the trigger's controller.
+        let mut state = setup();
+        state.active_player = PlayerId(1);
+        state.phase = Phase::PreCombatMain;
+
+        let mut trig_def = make_trigger(TriggerMode::SaddlesOrCrews);
+        trig_def.constraint = Some(TriggerConstraint::OnlyDuringYourMainPhase);
+
+        let event = GameEvent::VehicleCrewed {
+            vehicle_id: ObjectId(42),
+            creatures: vec![ObjectId(5)],
+        };
+        assert!(!check_trigger_constraint(
+            &state,
+            &trig_def,
+            ObjectId(42),
+            0,
+            PlayerId(0),
+            &event,
+        ));
     }
 }

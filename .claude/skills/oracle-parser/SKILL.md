@@ -523,6 +523,12 @@ Cross-reference the `/add-engine-effect` skill for the full 8-phase lifecycle (t
 
 Cross-reference the `/add-trigger` skill. Parser-specific: add pattern in `try_parse_event()`, wire subject into `valid_card`/`valid_source`, add tests.
 
+**Simple-verb events** (e.g., `stations`, `crews a vehicle`, `saddles a mount`, `becomes saddled`): add a `SimpleEvent::*` variant in `parse_simple_event`, then a `tag(...)` arm in the appropriate `alt()` group. Compound events (e.g., `saddles a mount or crews a vehicle`) MUST precede their singular components so the compound matches first. Dispatch sets `def.mode` + `valid_card` (or `valid_source` for pronoun-context subjects).
+
+**Actor-side compound-subject matchers**: when a trigger's subject filter may include non-source creatures (e.g., "Tiana or another legendary creature you control crews a Vehicle"), the runtime matcher MUST consult `trigger.valid_card` against the event's actor list (e.g., `event.creatures`) via `matches_target_filter` from `game/filter.rs`. See `match_crews` / `match_saddles` / `match_saddles_or_crews` + the shared `match_actor_against_filter` helper in `trigger_matchers.rs` for the canonical pattern.
+
+**Condition-scoped constraint recognition**: trigger-frequency qualifiers like `"for the first time each turn"` must be detected against the post-`split_trigger` condition text only, NOT the full Oracle text — otherwise any card whose EFFECT text coincidentally contains the phrase is silently constrained. The phrase is then stripped from `condition_text` before dispatch so verbatim handlers (e.g., `"whenever you cycle another card"`) hit unchanged, and the constraint is applied as a fallback in `parse_trigger_line` only when no stronger text-based constraint (`OnlyDuringYourMainPhase`, `OncePerTurn` via explicit text) was set. See the condition-scoped assignment block in `parse_trigger_line` for the canonical pattern.
+
 ### 9d. Adding a New Phrase Helper
 
 1. Identify phrase variants

@@ -11,7 +11,9 @@ use nom_language::error::VerboseError;
 use super::oracle_effect::{parse_effect_chain_with_context, ParseContext};
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::error::OracleResult;
-use super::oracle_nom::primitives::{self as nom_primitives, scan_contains, scan_split_at_phrase};
+use super::oracle_nom::primitives::{
+    self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
+};
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_target::{parse_type_phrase, starts_with_type_word};
 use super::oracle_util::{
@@ -108,6 +110,42 @@ pub fn parse_trigger_lines(text: &str, card_name: &str) -> Vec<TriggerDefinition
     vec![parse_trigger_line(text, card_name)]
 }
 
+/// Part D: If `"for the first time each turn"` appears as a word-boundary
+/// phrase in `condition`, strip it and return `(stripped, true)`; otherwise
+/// return `(condition, false)` unchanged.
+///
+/// Stripping is load-bearing. The generic cycle-trigger handlers in
+/// `try_parse_player_trigger` (and several other condition-level handlers)
+/// use `matches!(lower, "exact" | "exact")` exact-string dispatch — so
+/// Valiant Rescuer's condition `"whenever you cycle another card for the
+/// first time each turn"` must have the qualifier removed before dispatch
+/// or it falls through to `TriggerMode::Unknown`. Stripping once at the
+/// condition-parse boundary is strictly smaller than adding a
+/// `"... for the first time each turn"` variant to every exact-match arm.
+///
+/// Implementation: `scan_preceded` locates the phrase at a word boundary
+/// (consistent with `scan_contains`), returning both the prefix and
+/// post-phrase remainder in a single pass — no `str::find` fallback.
+fn strip_first_time_each_turn_qualifier(condition: &str) -> (String, bool) {
+    const PHRASE: &str = "for the first time each turn";
+    let lower = condition.to_lowercase();
+    let Some((before_lower, _, rest_lower)) =
+        scan_preceded(&lower, |i| tag::<_, _, VerboseError<&str>>(PHRASE).parse(i))
+    else {
+        return (condition.to_string(), false);
+    };
+    // ASCII-only phrase → byte offsets in `condition` align with `lower`.
+    let start = before_lower.len();
+    let end = condition.len() - rest_lower.len();
+    let mut joined = String::with_capacity(condition.len() - (end - start));
+    joined.push_str(&condition[..start]);
+    joined.push_str(&condition[end..]);
+    // Collapse any leading / trailing / double whitespace introduced by
+    // removing the phrase.
+    let stripped = joined.split_whitespace().collect::<Vec<_>>().join(" ");
+    (stripped, true)
+}
+
 /// Parse a full trigger line into a TriggerDefinition.
 /// Input: a line starting with "When", "Whenever", or "At".
 /// The card_name is used for self-reference substitution.
@@ -120,7 +158,16 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     let tp = TextPair::new(&normalized, &lower);
 
     // Split condition from effect at first ", " after the trigger phrase
-    let (condition_text, effect_text) = split_trigger(tp);
+    let (condition_text_raw, effect_text) = split_trigger(tp);
+
+    // CR-uniform: `"for the first time each turn"` in trigger CONDITION text is
+    // a trigger-frequency qualifier that maps to `OncePerTurn`. Detect and strip
+    // before the condition is dispatched. Scoped to condition text (NOT full
+    // text) so triggers whose EFFECT text coincidentally contains the phrase
+    // aren't retroactively constrained.
+    let (condition_text_stripped, first_time_each_turn_in_condition) =
+        strip_first_time_each_turn_qualifier(&condition_text_raw);
+    let condition_text: &str = &condition_text_stripped;
 
     let effect_lower = effect_text.to_lowercase();
     // CR 609.3: "You may" at the start of the effect text makes the triggered
@@ -143,7 +190,7 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
 
     // CR 608.2k: Extract trigger subject for pronoun resolution in effect text.
     // "it"/"its"/"itself" in the effect refer to the trigger subject, not the source permanent.
-    let trigger_subject = extract_trigger_subject_for_context(&condition_text);
+    let trigger_subject = extract_trigger_subject_for_context(condition_text);
     let effect_ctx = ParseContext {
         subject: Some(trigger_subject),
         ..Default::default()
@@ -169,7 +216,7 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     };
 
     // Parse the condition
-    let (_, mut def) = parse_trigger_condition(&condition_text);
+    let (_, mut def) = parse_trigger_condition(condition_text);
     def.execute = execute;
     def.optional = optional;
     def.unless_pay = unless_pay;
@@ -179,6 +226,16 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     // Text-based constraints take precedence; fall back to any constraint already set
     // by the trigger condition parser (e.g. NthSpellThisTurn from try_parse_nth_spell_trigger).
     def.constraint = parse_trigger_constraint(&lower).or(def.constraint.take());
+
+    // CR-uniform: apply OncePerTurn as a fallback ONLY if no stronger constraint
+    // was already set. An explicit "during your main phase" (OnlyDuringYourMainPhase)
+    // or "triggers only once each turn" (OncePerTurn) takes precedence. If both
+    // "for the first time each turn" and "during your main phase" appeared on the
+    // same trigger, the timing restriction is strictly stronger, so we prefer it
+    // (no current card hits this case).
+    if first_time_each_turn_in_condition && def.constraint.is_none() {
+        def.constraint = Some(TriggerConstraint::OncePerTurn);
+    }
 
     // Preserve the original oracle text for coverage/UI annotation
     def.description = Some(text.to_string());
@@ -212,6 +269,12 @@ fn parse_trigger_constraint(lower: &str) -> Option<TriggerConstraint> {
     }
     if scan_contains(lower, "only during your turn") {
         return Some(TriggerConstraint::OnlyDuringYourTurn);
+    }
+    // CR 505.1: "during your main phase" restricts the trigger to precombat or postcombat
+    // main phase of the controller's turn. Used by actor-side Saddle/Crew triggers
+    // (Canyon Vaulter, Reckless Velocitaur).
+    if scan_contains(lower, "during your main phase") {
+        return Some(TriggerConstraint::OnlyDuringYourMainPhase);
     }
     // CR 603.4: "this ability triggers only the first N times each turn"
     // Delegates to nom_primitives::parse_number for the count (input already lowercase).
@@ -1888,6 +1951,8 @@ fn try_parse_event(
     #[derive(Clone)]
     enum SimpleEvent {
         BecomesBlocked,
+        BecomesSaddled,
+        BecomesCrewed,
         BecomesTargetSpellOrAbility,
         BecomesTargetSpellOnly,
         DealtCombatDamage,
@@ -1900,10 +1965,20 @@ fn try_parse_event(
         ExploitsCreature,
         Exploits,
         Transforms,
+        Stations,
+        SaddlesOrCrews,
+        Crews,
+        Saddles,
     }
     fn parse_simple_event(input: &str) -> OracleResult<'_, SimpleEvent> {
         alt((
             value(SimpleEvent::BecomesBlocked, tag("becomes blocked")),
+            // CR 702.171b: Mount becomes saddled (saddled designation acquired).
+            value(SimpleEvent::BecomesSaddled, tag("becomes saddled")),
+            // CR 702.122d: "Whenever [this Vehicle] becomes crewed" — trigger fires
+            // when a crew ability of this Vehicle resolves. Needed for Mighty Servant
+            // of Leuk-O, Mindlink Mech, etc.
+            value(SimpleEvent::BecomesCrewed, tag("becomes crewed")),
             value(
                 SimpleEvent::BecomesTargetSpellOrAbility,
                 tag("becomes the target of a spell or ability"),
@@ -1930,6 +2005,19 @@ fn try_parse_event(
             value(SimpleEvent::Exploits, tag("exploits")),
             // CR 712.14: "transforms" / "transforms into"
             value(SimpleEvent::Transforms, tag("transforms")),
+            // CR 702.184a: "stations ~" — actor-side Station trigger.
+            value(SimpleEvent::Stations, tag("stations ")),
+            // CR 702.122 + CR 702.171c: compound actor-side — MUST precede singular
+            // arms so "saddles a mount or crews a vehicle" is matched whole.
+            value(
+                SimpleEvent::SaddlesOrCrews,
+                tag("saddles a mount or crews a vehicle"),
+            ),
+            // CR 702.122: Actor-side crew trigger.
+            value(SimpleEvent::Crews, tag("crews a vehicle")),
+            // CR 702.171c: Actor-side saddle trigger (reserved — no cards today without
+            // the compound, but the arm is ready for future printings).
+            value(SimpleEvent::Saddles, tag("saddles a mount")),
         )))
         .parse(input)
     }
@@ -1985,6 +2073,43 @@ fn try_parse_event(
             SimpleEvent::Transforms => {
                 def.mode = TriggerMode::Transformed;
                 def.valid_source = Some(subject.clone());
+            }
+            SimpleEvent::Stations => {
+                // CR 702.184a: Station ability resolution; "a creature stations ~"
+                // is the Oracle idiom. valid_source records the actor (pronoun context);
+                // match_stationed filters on spacecraft_id == source_id regardless.
+                def.mode = TriggerMode::Stationed;
+                def.valid_source = Some(subject.clone());
+            }
+            SimpleEvent::BecomesSaddled => {
+                // CR 702.171b: Mount becomes saddled (saddled designation acquired).
+                def.mode = TriggerMode::BecomesSaddled;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::BecomesCrewed => {
+                // CR 702.122d: "Whenever [this Vehicle] becomes crewed" — fires when
+                // a crew ability of this Vehicle resolves. Runtime matcher
+                // (match_vehicle_crewed) already handles TriggerMode::BecomesCrewed.
+                def.mode = TriggerMode::BecomesCrewed;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::Crews => {
+                // CR 702.122: Actor-side crew trigger. valid_card records the actor
+                // filter; match_crews evaluates it against each creature in
+                // event.creatures via matches_target_filter.
+                def.mode = TriggerMode::Crews;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::Saddles => {
+                // CR 702.171c: Actor-side saddle trigger.
+                def.mode = TriggerMode::Saddles;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::SaddlesOrCrews => {
+                // CR 702.122 + CR 702.171c: Compound actor-side trigger. Fires on
+                // either saddling a Mount or crewing a Vehicle.
+                def.mode = TriggerMode::SaddlesOrCrews;
+                def.valid_card = Some(subject.clone());
             }
         }
         return Some((def.mode.clone(), def));
@@ -2776,18 +2901,6 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         def.valid_card = Some(TargetFilter::Typed(
             TypedFilter::default().properties(vec![FilterProp::Another]),
         ));
-        return Some((TriggerMode::Cycled, def));
-    }
-
-    // CR 702.29: "whenever you cycle another card for the first time each turn"
-    if lower == "whenever you cycle another card for the first time each turn" {
-        let mut def = make_base();
-        def.mode = TriggerMode::Cycled;
-        def.valid_target = Some(TargetFilter::Controller);
-        def.valid_card = Some(TargetFilter::Typed(
-            TypedFilter::default().properties(vec![FilterProp::Another]),
-        ));
-        def.secondary = true;
         return Some((TriggerMode::Cycled, def));
     }
 
@@ -7745,5 +7858,233 @@ mod tests {
             }
             other => panic!("expected LoseLife, got: {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Parts A–E: Station / Saddle / Crew triggers + OnlyDuringYourMainPhase
+    // + condition-scoped OncePerTurn sweep.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn monoist_gravliner_stations_trigger_parses() {
+        // CR 702.184a: "Whenever a creature stations this Spacecraft, ..."
+        let def = parse_trigger_line(
+            "Whenever a creature stations this Spacecraft, that creature perpetually gains deathtouch and lifelink.",
+            "Monoist Gravliner",
+        );
+        assert_eq!(def.mode, TriggerMode::Stationed);
+    }
+
+    #[test]
+    fn another_creature_stations_subject_threading() {
+        // valid_source carries the actor subject (pronoun context).
+        let def = parse_trigger_line(
+            "Whenever another creature stations ~, draw a card.",
+            "Test Spacecraft",
+        );
+        assert_eq!(def.mode, TriggerMode::Stationed);
+        // Subject is a Typed(Creature) with FilterProp::Another.
+        match &def.valid_source {
+            Some(TargetFilter::Typed(tf)) => {
+                use crate::types::ability::FilterProp;
+                assert!(
+                    tf.properties.contains(&FilterProp::Another),
+                    "expected FilterProp::Another in subject, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected Typed subject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn burrowfiend_becomes_saddled_parses_with_once_per_turn() {
+        // CR 702.171b + Part D: BecomesSaddled mode + OncePerTurn from condition-scoped scan.
+        let def = parse_trigger_line(
+            "Whenever this creature becomes saddled for the first time each turn, mill two cards.",
+            "Stubborn Burrowfiend",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesSaddled);
+        assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    }
+
+    #[test]
+    fn gearshift_ace_crews_trigger_parses() {
+        // CR 702.122: "Whenever ~ crews a Vehicle, ..."
+        let def = parse_trigger_line(
+            "Whenever Gearshift Ace crews a Vehicle, that Vehicle gains flying until end of turn.",
+            "Gearshift Ace",
+        );
+        assert_eq!(def.mode, TriggerMode::Crews);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn canyon_vaulter_compound_trigger_parses() {
+        // CR 702.122 + CR 702.171c + CR 505.1: SaddlesOrCrews + OnlyDuringYourMainPhase.
+        let def = parse_trigger_line(
+            "Whenever Canyon Vaulter saddles a Mount or crews a Vehicle during your main phase, that Mount or Vehicle gains flying until end of turn.",
+            "Canyon Vaulter",
+        );
+        assert_eq!(def.mode, TriggerMode::SaddlesOrCrews);
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringYourMainPhase)
+        );
+    }
+
+    #[test]
+    fn saddles_a_mount_singular_parses() {
+        // Pre-stage: no card prints this today without the compound; the arm must still fire.
+        let def = parse_trigger_line(
+            "Whenever ~ saddles a Mount, draw a card.",
+            "Hypothetical Saddler",
+        );
+        assert_eq!(def.mode, TriggerMode::Saddles);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn first_time_each_turn_in_condition_sets_once_per_turn() {
+        // Part D: condition-scoped constraint assignment.
+        let def = parse_trigger_line(
+            "Whenever ~ attacks for the first time each turn, draw a card.",
+            "Godo, Bandit Warlord",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    }
+
+    #[test]
+    fn first_time_each_turn_in_effect_only_does_not_set_constraint() {
+        // Part D scope guard: the phrase in EFFECT text alone must not set the constraint.
+        // Contrived input — no real card prints this, but the guard is important.
+        let def = parse_trigger_line(
+            "Whenever ~ attacks, for the first time each turn create a token.",
+            "Contrived Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(def.constraint, None);
+    }
+
+    #[test]
+    fn valiant_rescuer_regression() {
+        // Part D: the removed hardcoded handler must be replaced by the generic path
+        // + condition-scoped OncePerTurn. FilterProp::Another must still be present,
+        // and `secondary` must NOT be set (the removed hack is the only writer).
+        use crate::types::ability::FilterProp;
+        let def = parse_trigger_line(
+            "Whenever you cycle another card for the first time each turn, create a 2/2 red Dinosaur creature token.",
+            "Valiant Rescuer",
+        );
+        assert_eq!(def.mode, TriggerMode::Cycled);
+        assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+        assert!(!def.secondary, "removed hack should not set secondary");
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.properties.contains(&FilterProp::Another));
+            }
+            other => panic!("expected Typed filter with Another prop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn aurelia_attacks_first_time_has_constraint() {
+        // Regression guard: Aurelia was previously parsed as TriggerMode::Attacks
+        // but without the OncePerTurn constraint (latent multi-card bug).
+        let def = parse_trigger_line(
+            "Whenever Aurelia, the Warleader attacks for the first time each turn, untap all attacking creatures.",
+            "Aurelia, the Warleader",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    }
+
+    #[test]
+    fn during_your_main_phase_parser_arm_unit_test() {
+        // Isolated: parse_trigger_constraint arm.
+        assert_eq!(
+            parse_trigger_constraint("whenever ~ attacks during your main phase"),
+            Some(TriggerConstraint::OnlyDuringYourMainPhase)
+        );
+    }
+
+    #[test]
+    fn tiana_when_keyword_and_compound_subject_parses() {
+        // M9 + M10 guard: Tiana uses "When" (not "Whenever") AND a compound subject
+        // "Tiana, Angelic Mechanic or another legendary creature you control".
+        // normalize_card_name_refs must replace the full name → ~, and the compound
+        // subject parser must produce Or { SelfRef, Typed(Creature, Legendary, You, Another) }.
+        let def = parse_trigger_line(
+            "When Tiana, Angelic Mechanic or another legendary creature you control crews a Vehicle, that Vehicle perpetually gets +1/+0.",
+            "Tiana, Angelic Mechanic",
+        );
+        assert_eq!(def.mode, TriggerMode::Crews);
+        // valid_card must be an Or with both SelfRef and the Typed branch.
+        match &def.valid_card {
+            Some(TargetFilter::Or { filters }) => {
+                let has_self = filters.iter().any(|f| matches!(f, TargetFilter::SelfRef));
+                let has_typed_legendary = filters.iter().any(|f| {
+                    matches!(
+                        f,
+                        TargetFilter::Typed(tf)
+                        if tf.controller == Some(ControllerRef::You)
+                            && tf.properties.contains(&FilterProp::HasSupertype {
+                                value: crate::types::card_type::Supertype::Legendary,
+                            })
+                            && tf.properties.contains(&FilterProp::Another)
+                    )
+                });
+                assert!(
+                    has_self && has_typed_legendary,
+                    "expected Or{{SelfRef, Typed(Legendary, You, Another)}}, got {filters:?}"
+                );
+            }
+            other => panic!("expected Or filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mighty_servant_becomes_crewed_parses_with_once_per_turn() {
+        // M3 regression: "becomes crewed" was never recognized by parse_simple_event,
+        // so Mighty Servant of Leuk-O and Mindlink Mech silently parsed as Unknown
+        // despite carrying the OncePerTurn constraint. Part M3 adds the arm.
+        let def = parse_trigger_line(
+            "Whenever this Vehicle becomes crewed for the first time each turn, draw two cards.",
+            "Mighty Servant of Leuk-O",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesCrewed);
+        assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    }
+
+    #[test]
+    fn gourmand_talent_two_triggers_both_constrained() {
+        // D5 #4: Gourmand's Talent has two separate life-gain triggers. Each must
+        // carry OncePerTurn independently; runtime trig_idx (ordinal in the trigger
+        // list) keys the OncePerTurn state distinctly, so independent parse →
+        // independent runtime tracking.
+        let first = parse_trigger_line(
+            "Whenever you gain life for the first time each turn, draw a card.",
+            "Gourmand's Talent",
+        );
+        let second = parse_trigger_line(
+            "Whenever you gain life for the first time each turn, create a Food token.",
+            "Gourmand's Talent",
+        );
+        assert_eq!(first.constraint, Some(TriggerConstraint::OncePerTurn));
+        assert_eq!(second.constraint, Some(TriggerConstraint::OncePerTurn));
+    }
+
+    #[test]
+    fn stensia_generic_damage_trigger_constrained() {
+        // D5 #5 / M8: Stensia's "a creature deals damage to one or more players for
+        // the first time each turn" — phrase modifies the EVENT, not per-creature
+        // frequency. OncePerTurn keyed on Stensia's (obj_id, trig_idx) is
+        // source-level — one firing per turn regardless of which creature triggered.
+        let def = parse_trigger_line(
+            "Whenever a creature deals damage to one or more players for the first time each turn, put a +1/+1 counter on it.",
+            "Stensia, Condemner's Keep",
+        );
+        assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
     }
 }

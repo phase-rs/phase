@@ -179,8 +179,16 @@ pub enum TriggerMode {
     Exerted,
     /// CR 702.122: Triggers when a Vehicle becomes crewed.
     Crewed,
+    /// CR 702.122: Actor-side crew trigger — fires when this permanent crews a Vehicle.
+    Crews,
     /// CR 702.171b: Triggers when a creature becomes saddled.
     Saddled,
+    /// CR 702.171c: Actor-side saddle trigger — fires when this permanent saddles a Mount.
+    /// Reserved — no cards today print this without the compound form.
+    Saddles,
+    /// CR 702.122 + CR 702.171c: Compound actor-side trigger — fires on either
+    /// saddling a Mount OR crewing a Vehicle.
+    SaddlesOrCrews,
     /// CR 702.29: Triggers when a card is cycled.
     Cycled,
     /// CR 702.29d: Triggers when a card is cycled or discarded.
@@ -382,6 +390,7 @@ impl FromStr for TriggerMode {
             "CounterRemovedOnce" => TriggerMode::CounterRemovedOnce,
             "CrankContraption" => TriggerMode::CrankContraption,
             "Crewed" => TriggerMode::Crewed,
+            "Crews" => TriggerMode::Crews,
             "Cycled" => TriggerMode::Cycled,
             "CycledOrDiscarded" => TriggerMode::CycledOrDiscarded,
             "DamageAll" => TriggerMode::DamageAll,
@@ -454,6 +463,8 @@ impl FromStr for TriggerMode {
             "RolledDieOnce" => TriggerMode::RolledDieOnce,
             "RoomEntered" => TriggerMode::RoomEntered,
             "Saddled" => TriggerMode::Saddled,
+            "Saddles" => TriggerMode::Saddles,
+            "SaddlesOrCrews" => TriggerMode::SaddlesOrCrews,
             "Sacrificed" => TriggerMode::Sacrificed,
             "SacrificedOnce" => TriggerMode::SacrificedOnce,
             "PlayerPerformedAction" => TriggerMode::PlayerPerformedAction,
