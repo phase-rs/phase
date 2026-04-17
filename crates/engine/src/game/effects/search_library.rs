@@ -6,7 +6,60 @@ use crate::types::ability::{
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
+
+/// CR 701.23a: Resolve `SearchLibrary.target_player` to the library owner's
+/// `PlayerId`. Handles both the pre-resolved path (caster picked a Player at
+/// cast time, e.g., "search target opponent's library" → `TargetRef::Player`
+/// already in `ability.targets`) and the context-ref path (subject-inherited
+/// filter like `ParentTargetController`, which resolves against the parent
+/// target object's controller at resolution time).
+///
+/// Returns the caster as a safe fallback if neither resolves.
+fn resolve_library_owner(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_player: &TargetFilter,
+) -> PlayerId {
+    // Pre-resolved: a TargetRef::Player was picked at cast time.
+    if let Some(pid) = ability.targets.iter().find_map(|t| match t {
+        TargetRef::Player(pid) => Some(*pid),
+        _ => None,
+    }) {
+        return pid;
+    }
+    // CR 608.2c: Context-ref — "its controller" resolves against the first
+    // object in the parent ability chain's targets (the Destroyed permanent
+    // for Assassin's Trophy, the exiled spell for Praetor's Grasp variants, …).
+    if matches!(target_player, TargetFilter::ParentTargetController) {
+        if let Some(parent_obj_id) = ability.targets.iter().find_map(|t| match t {
+            TargetRef::Object(id) => Some(*id),
+            _ => None,
+        }) {
+            if let Some(obj) = state.objects.get(&parent_obj_id) {
+                return obj.controller;
+            }
+        }
+    }
+    ability.controller
+}
+
+/// CR 701.23a + CR 117.3a: The "searcher" is the player following the "search"
+/// instruction. For subject-anchored targets (e.g., "its controller may search
+/// their library"), the subject is both the library owner and the searcher —
+/// they pick the card from their own library. For target-selected libraries
+/// ("search target opponent's library"), the caster searches through the
+/// chosen opponent's library.
+fn searcher_is_library_owner(target_player: &TargetFilter) -> bool {
+    matches!(
+        target_player,
+        TargetFilter::ParentTargetController
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+    )
+}
 
 /// CR 701.23 + CR 609.3: Check if any active CantSearchLibrary static on the battlefield
 /// muzzles the source of this search. `ability.controller` is the player who controls
@@ -63,7 +116,7 @@ pub fn resolve(
 
     // CR 107.3a + CR 601.2b: Resolve the count expression against the ability so
     // `Variable("X")` picks up the caster's announced X. Fixed counts are unaffected.
-    let (filter, count, reveal, has_target_player) = match &ability.effect {
+    let (filter, count, reveal, target_player) = match &ability.effect {
         Effect::SearchLibrary {
             filter,
             count,
@@ -73,41 +126,39 @@ pub fn resolve(
             filter.clone(),
             resolve_quantity_with_targets(state, count, ability).max(0) as usize,
             *reveal,
-            target_player.is_some(),
+            target_player.clone(),
         ),
-        _ => (TargetFilter::Any, 1, false, false),
+        _ => (TargetFilter::Any, 1, false, None),
     };
 
-    // CR 701.23a: When target_player is set, search that player's library.
-    // The target player is resolved from ability.targets (player targets).
-    let search_player_id = if has_target_player {
-        ability
-            .targets
-            .iter()
-            .find_map(|t| {
-                if let TargetRef::Player(pid) = t {
-                    Some(*pid)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(ability.controller)
-    } else {
-        ability.controller
+    // CR 701.23a: Determine the library owner and the searcher.
+    //   - Library owner: the player whose library is searched (driven by
+    //     `target_player` when set, caster otherwise).
+    //   - Searcher: the player carrying out the "search" instruction
+    //     (library owner for subject-anchored target_player variants, caster
+    //     otherwise — matching the Oracle-text grammatical subject of
+    //     "search").
+    let library_owner_id = match target_player.as_ref() {
+        Some(filter) => resolve_library_owner(state, ability, filter),
+        None => ability.controller,
+    };
+    let searcher_id = match target_player.as_ref() {
+        Some(filter) if searcher_is_library_owner(filter) => library_owner_id,
+        _ => ability.controller,
     };
 
     let player = state
         .players
         .iter()
-        .find(|p| p.id == search_player_id)
+        .find(|p| p.id == library_owner_id)
         .ok_or(EffectError::PlayerNotFound)?;
     events.push(GameEvent::PlayerPerformedAction {
-        player_id: ability.controller,
+        player_id: searcher_id,
         action: PlayerActionKind::SearchedLibrary,
     });
     state
         .players_who_searched_library_this_turn
-        .insert(ability.controller);
+        .insert(searcher_id);
 
     // CR 107.3a + CR 601.2b: Evaluate the filter with the resolving ability
     // in scope so dynamic thresholds (e.g. `CmcLE { value: Variable("X") }`
@@ -133,7 +184,7 @@ pub fn resolve(
     let pick_count = count.min(matching.len());
 
     state.waiting_for = WaitingFor::SearchChoice {
-        player: ability.controller,
+        player: searcher_id,
         cards: matching,
         count: pick_count,
         reveal,
@@ -740,6 +791,113 @@ mod tests {
         assert!(
             matches!(state.waiting_for, WaitingFor::SearchChoice { .. }),
             "Non-muzzled search must transition to SearchChoice"
+        );
+    }
+
+    /// CR 608.2c + CR 701.23a: Assassin's Trophy-shape search with
+    /// `target_player = Some(ParentTargetController)` + parent target = an
+    /// opponent's permanent. The opponent (destroyed permanent's controller)
+    /// is both the library owner AND the searcher — `WaitingFor::SearchChoice`
+    /// must prompt them, and the turn-tracking flag must record them, not the
+    /// caster.
+    #[test]
+    fn parent_target_controller_search_prompts_opponent() {
+        let mut state = GameState::new_two_player(42);
+        // Opponent (P1) owns the destroyed permanent and the library to search.
+        let destroyed = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(1),
+            "Opponent Land".to_string(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&destroyed).unwrap().controller = PlayerId(1);
+        let _opp_basic = add_library_land(&mut state, 1, PlayerId(1), "Forest", true);
+
+        // Caster (P0) casts the spell. Parent target is the destroyed permanent.
+        let ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::land().properties(vec![
+                    crate::types::ability::FilterProp::HasSupertype {
+                        value: crate::types::card_type::Supertype::Basic,
+                    },
+                ])),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::ParentTargetController),
+            },
+            vec![TargetRef::Object(destroyed)],
+            ObjectId(9997),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { player, .. } => assert_eq!(
+                *player,
+                PlayerId(1),
+                "SearchChoice must prompt the destroyed permanent's controller (opponent), not the caster"
+            ),
+            other => panic!("expected SearchChoice, got {:?}", other),
+        }
+        assert!(
+            state
+                .players_who_searched_library_this_turn
+                .contains(&PlayerId(1)),
+            "turn-tracking flag must record the searcher (opponent)"
+        );
+        assert!(
+            !state
+                .players_who_searched_library_this_turn
+                .contains(&PlayerId(0)),
+            "caster did NOT search — turn-tracking flag must not record them"
+        );
+    }
+
+    /// CR 701.23a: Praetor's Grasp-shape regression — "search target opponent's
+    /// library". The caster picks through the opponent's library (searcher =
+    /// caster). Guards against the new ParentTargetController resolver arm
+    /// incorrectly re-routing all `target_player`-set searches to the library
+    /// owner.
+    #[test]
+    fn target_opponent_library_search_keeps_caster_as_searcher() {
+        use crate::types::ability::{ControllerRef, TypedFilter};
+        let mut state = GameState::new_two_player(42);
+        let _opp_card = add_library_creature(&mut state, 1, PlayerId(1), "Bribed Bear");
+
+        // "Search target opponent's library" — caster = P0, targeted player = P1.
+        let ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(9996),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { player, .. } => assert_eq!(
+                *player,
+                PlayerId(0),
+                "Praetor's Grasp-style search: the CASTER browses the opponent's library"
+            ),
+            other => panic!("expected SearchChoice, got {:?}", other),
+        }
+        assert!(
+            state
+                .players_who_searched_library_this_turn
+                .contains(&PlayerId(0)),
+            "caster is the searcher for 'search target opponent's library'"
         );
     }
 }

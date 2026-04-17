@@ -82,6 +82,7 @@ pub(super) fn try_parse_subject_predicate_ast(text: &str, ctx: &ParseContext) ->
                 target: None,
                 multi_target: None,
                 inherits_parent: false,
+                is_optional: false,
             });
         return Some(ClauseAst::SubjectPredicate {
             subject: Box::new(SubjectPhraseAst {
@@ -89,6 +90,7 @@ pub(super) fn try_parse_subject_predicate_ast(text: &str, ctx: &ParseContext) ->
                 target: application.target,
                 multi_target: application.multi_target,
                 inherits_parent: application.inherits_parent,
+                is_optional: application.is_optional,
             }),
             predicate: Box::new(PredicateAst::ImperativeFallback { text: stripped }),
         });
@@ -112,6 +114,7 @@ where
         target: None,
         multi_target: None,
         inherits_parent: false,
+        is_optional: false,
     });
 
     ClauseAst::SubjectPredicate {
@@ -120,6 +123,7 @@ where
             target: application.target,
             multi_target: application.multi_target,
             inherits_parent: application.inherits_parent,
+            is_optional: application.is_optional,
         }),
         predicate: Box::new(build_predicate(
             clause.effect,
@@ -198,6 +202,7 @@ fn try_parse_subject_restriction_clause(
             duration: Some(Duration::UntilEndOfTurn),
             sub_ability: None,
             condition: None,
+            optional: false,
         });
     }
 
@@ -251,6 +256,7 @@ fn try_parse_subject_restriction_clause(
             duration: Some(duration),
             sub_ability: None,
             condition: None,
+            optional: false,
         });
     }
 
@@ -307,6 +313,7 @@ fn try_parse_can_attack_with_defender(
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     })
 }
 
@@ -419,6 +426,7 @@ pub(super) fn parse_subject_application(
             target: None,
             multi_target: None,
             inherits_parent: false,
+            is_optional: false,
         });
     }
     // "those creatures" / "those lands" — anaphoric reference to previous targets.
@@ -461,6 +469,7 @@ pub(super) fn parse_subject_application(
             target: None,
             multi_target: None,
             inherits_parent: false,
+            is_optional: false,
         });
     }
     if lower == "that player" || lower == "the player" {
@@ -469,6 +478,7 @@ pub(super) fn parse_subject_application(
             target: None,
             multi_target: None,
             inherits_parent: false,
+            is_optional: false,
         });
     }
     // CR 109.5 "you" / "your" — the spell or ability's controller. Used as a
@@ -481,6 +491,7 @@ pub(super) fn parse_subject_application(
             target: None,
             multi_target: None,
             inherits_parent: false,
+            is_optional: false,
         });
     }
     // "an opponent" as subject — single opponent (two-player: equivalent to "each opponent").
@@ -500,6 +511,7 @@ pub(super) fn parse_subject_application(
             target: None,
             multi_target: None,
             inherits_parent: false,
+            is_optional: false,
         });
     }
     if lower == "that controller" {
@@ -508,7 +520,35 @@ pub(super) fn parse_subject_application(
             target: None,
             multi_target: None,
             inherits_parent: false,
+            is_optional: false,
         });
+    }
+    // CR 608.2c + CR 117.3a: "its controller" / "their controller" as anaphoric
+    // subject, optionally carrying a "may" modal ("its controller may search
+    // their library" — Assassin's Trophy, Path to Exile, Oblation, etc.). When
+    // "may" is present, the resulting ability is marked optional so the acting
+    // player is offered a yes/no prompt before the effect resolves.
+    //
+    // Only fires for the subject phrase "its controller may" — bare "its
+    // controller" / "their controller" falls through to the RevealUntil-family
+    // recognizers in `lower_subject_predicate_ast` (Polymorph, Balustrade Spy,
+    // etc.) which already handle the subject-ignorant "reveals cards from the
+    // top of their library until …" pattern as RevealUntil.
+    if let Ok((after_head, _)) = alt((
+        tag::<_, _, VerboseError<&str>>("its controller may"),
+        tag("their controller may"),
+    ))
+    .parse(lower.as_str())
+    {
+        if after_head.trim().is_empty() {
+            return Some(SubjectApplication {
+                affected: TargetFilter::ParentTargetController,
+                target: None,
+                multi_target: None,
+                inherits_parent: false,
+                is_optional: true,
+            });
+        }
     }
     if lower == "its controller" || lower == "their controller" {
         return Some(SubjectApplication {
@@ -516,6 +556,7 @@ pub(super) fn parse_subject_application(
             target: None,
             multi_target: None,
             inherits_parent: false,
+            is_optional: false,
         });
     }
     // Explicit self-reference — always SelfRef
@@ -528,6 +569,7 @@ pub(super) fn parse_subject_application(
             target: None,
             multi_target: None,
             inherits_parent: false,
+            is_optional: false,
         });
     }
     // CR 608.2k: Bare pronoun "it" — context-dependent
@@ -537,6 +579,7 @@ pub(super) fn parse_subject_application(
             target: None,
             multi_target: None,
             inherits_parent: false,
+            is_optional: false,
         });
     }
     // CR 608.2k: Bare pronoun "they" — context-dependent.
@@ -549,6 +592,7 @@ pub(super) fn parse_subject_application(
             target: None,
             multi_target: None,
             inherits_parent: false,
+            is_optional: false,
         });
     }
 
@@ -568,6 +612,7 @@ pub(super) fn parse_subject_application(
                 target: None,
                 multi_target: None,
                 inherits_parent: true,
+                is_optional: false,
             });
         }
     }
@@ -609,6 +654,7 @@ fn subject_filter_application(filter: TargetFilter, targeted: bool) -> Option<Su
         affected: filter,
         multi_target: None,
         inherits_parent: false,
+        is_optional: false,
     })
 }
 
@@ -719,6 +765,7 @@ fn try_split_pump_compound(
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     })
 }
 
@@ -748,6 +795,7 @@ fn build_continuous_clause(
             distribute: None,
             multi_target: None,
             condition: None,
+            optional: false,
         });
     }
 
@@ -785,6 +833,7 @@ fn build_continuous_clause(
             distribute: None,
             multi_target: None,
             condition: None,
+            optional: false,
         });
     }
 
@@ -802,6 +851,7 @@ fn build_continuous_clause(
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     })
 }
 
@@ -878,6 +928,7 @@ fn build_become_clause(
             distribute: None,
             multi_target: None,
             condition: None,
+            optional: false,
         });
     }
 
@@ -901,6 +952,7 @@ fn build_become_clause(
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     })
 }
 
@@ -959,6 +1011,7 @@ fn try_parse_set_life_total(
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     })
 }
 
@@ -1035,6 +1088,7 @@ fn try_parse_become_choice(
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     })
 }
 
@@ -1090,6 +1144,7 @@ fn build_life_lock_clause(scope_filter: TargetFilter) -> ParsedEffectClause {
         duration: None,
         sub_ability: None,
         condition: None,
+        optional: false,
     }
 }
 
@@ -1145,6 +1200,7 @@ fn build_restriction_clause(
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     })
 }
 
@@ -1535,6 +1591,46 @@ mod tests {
         assert!(result.is_some());
         let app = result.unwrap();
         assert_eq!(app.affected, TargetFilter::Player);
+    }
+
+    // CR 608.2c + CR 117.3a: "its/their controller [may]" anaphoric player subject.
+    #[test]
+    fn parse_subject_its_controller_bare() {
+        let ctx = ParseContext::default();
+        let result = parse_subject_application("its controller", &ctx);
+        let app = result.expect("should recognize 'its controller'");
+        assert_eq!(app.affected, TargetFilter::ParentTargetController);
+        assert!(!app.is_optional, "no 'may' modal → not optional");
+    }
+
+    #[test]
+    fn parse_subject_their_controller_bare() {
+        let ctx = ParseContext::default();
+        let result = parse_subject_application("their controller", &ctx);
+        let app = result.expect("should recognize 'their controller'");
+        assert_eq!(app.affected, TargetFilter::ParentTargetController);
+        assert!(!app.is_optional);
+    }
+
+    #[test]
+    fn parse_subject_its_controller_may() {
+        let ctx = ParseContext::default();
+        let result = parse_subject_application("its controller may", &ctx);
+        let app = result.expect("should recognize 'its controller may'");
+        assert_eq!(app.affected, TargetFilter::ParentTargetController);
+        assert!(
+            app.is_optional,
+            "'may' modal must mark the subject as optional"
+        );
+    }
+
+    #[test]
+    fn parse_subject_their_controller_may() {
+        let ctx = ParseContext::default();
+        let result = parse_subject_application("their controller may", &ctx);
+        let app = result.expect("should recognize 'their controller may'");
+        assert_eq!(app.affected, TargetFilter::ParentTargetController);
+        assert!(app.is_optional);
     }
 
     // CR 608.2c: "that [type]" anaphoric back-references

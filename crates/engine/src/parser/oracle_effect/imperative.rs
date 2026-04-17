@@ -1936,6 +1936,7 @@ pub(super) fn with_shuffle_sub_ability(effect: Effect) -> ParsedEffectClause {
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     }
 }
 

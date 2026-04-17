@@ -278,6 +278,7 @@ fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     })
 }
 
@@ -335,6 +336,7 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     })
 }
 
@@ -443,6 +445,7 @@ fn try_parse_inline_delayed_trigger(tp: TextPair) -> Option<ParsedEffectClause> 
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     })
 }
 
@@ -675,6 +678,7 @@ fn try_parse_damage_prevention_disabled(tp: TextPair) -> Option<ParsedEffectClau
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     })
 }
 
@@ -735,6 +739,7 @@ fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<Parsed
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     })
 }
 
@@ -849,6 +854,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
         distribute: None,
         multi_target,
         condition: None,
+        optional: false,
     })
 }
 
@@ -916,6 +922,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     })
 }
 
@@ -1054,6 +1061,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     })
 }
 
@@ -1659,6 +1667,7 @@ fn try_parse_mass_forced_block(tp: TextPair) -> Option<ParsedEffectClause> {
         condition: None,
         duration: Some(Duration::UntilEndOfTurn),
         sub_ability: None,
+        optional: false,
     })
 }
 
@@ -1703,6 +1712,7 @@ fn try_parse_still_a_type(tp: TextPair) -> Option<ParsedEffectClause> {
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     })
 }
 
@@ -2072,6 +2082,7 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
             distribute: None,
             multi_target: None,
             condition: None,
+            optional: false,
         });
     }
 
@@ -2798,6 +2809,7 @@ fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedE
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     })
 }
 
@@ -2897,6 +2909,7 @@ fn try_parse_compound_player_object_damage(lower: &str) -> Option<ParsedEffectCl
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     })
 }
 
@@ -2957,6 +2970,7 @@ fn try_split_damage_compound(text: &str, ctx: &ParseContext) -> Option<ParsedEff
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     })
 }
 
@@ -3092,6 +3106,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         distribute: None,
         multi_target: None,
         condition: None,
+        optional: false,
     })
 }
 
@@ -3219,6 +3234,7 @@ fn lower_subject_predicate_ast(
             distribute: None,
             multi_target,
             condition: None,
+            optional: subject.is_optional,
         },
         PredicateAst::Become {
             effect,
@@ -3231,6 +3247,7 @@ fn lower_subject_predicate_ast(
             distribute: None,
             multi_target,
             condition: None,
+            optional: subject.is_optional,
         },
         PredicateAst::Restriction { effect, duration } => ParsedEffectClause {
             effect,
@@ -3239,6 +3256,7 @@ fn lower_subject_predicate_ast(
             distribute: None,
             multi_target,
             condition: None,
+            optional: subject.is_optional,
         },
         PredicateAst::ImperativeFallback { text } => {
             let pred_lower = text.to_lowercase();
@@ -3333,6 +3351,7 @@ fn lower_subject_predicate_ast(
                         distribute: None,
                         multi_target: subject.multi_target,
                         condition: None,
+                        optional: subject.is_optional,
                     };
                 }
             }
@@ -3358,6 +3377,7 @@ fn lower_subject_predicate_ast(
                         distribute: None,
                         multi_target: subject.multi_target,
                         condition: None,
+                        optional: subject.is_optional,
                     };
                 }
 
@@ -3371,6 +3391,7 @@ fn lower_subject_predicate_ast(
                         distribute: None,
                         multi_target: subject.multi_target,
                         condition: None,
+                        optional: subject.is_optional,
                     };
                 }
             }
@@ -3386,6 +3407,12 @@ fn lower_subject_predicate_ast(
             retarget_player_scoped_keyword_grant(&mut clause.effect, &subject.affected);
             if clause.multi_target.is_none() {
                 clause.multi_target = subject.multi_target;
+            }
+            // CR 608.2c + CR 117.3a: Propagate the subject phrase's "may" modal
+            // so the lowered ability is marked optional (e.g., "its controller
+            // may search their library").
+            if subject.is_optional {
+                clause.optional = true;
             }
             clause
         }
@@ -3440,6 +3467,61 @@ fn retarget_player_scoped_keyword_grant(effect: &mut Effect, subject_filter: &Ta
 /// via string comparison.
 fn is_player_applicable_keyword(keyword: &crate::types::keywords::Keyword) -> bool {
     matches!(keyword, crate::types::keywords::Keyword::Protection(_))
+}
+
+/// CR 608.2c + CR 117.3a: Extract a non-caster player anchor from an effect's
+/// own subject. Used by `parse_effect_chain_impl` to remember "who is acting"
+/// when a later clause in the same chain has a caster-defaulted player target
+/// that should inherit the earlier subject (Assassin's Trophy's "then
+/// shuffle" inheriting "its controller" from the preceding search clause).
+///
+/// Returns None for caster-defaulted or object-scoped effects — these do not
+/// establish an acting-player anchor.
+fn extract_player_anchor(effect: &Effect) -> Option<TargetFilter> {
+    let candidate = match effect {
+        Effect::SearchLibrary {
+            target_player: Some(filter),
+            ..
+        } => filter,
+        Effect::Shuffle { target } => target,
+        Effect::ChangeZoneAll { target, .. } => target,
+        _ => return None,
+    };
+    if !target_filter_can_target_player(candidate) {
+        return None;
+    }
+    if matches!(candidate, TargetFilter::Controller | TargetFilter::Any) {
+        return None;
+    }
+    Some(candidate.clone())
+}
+
+/// CR 608.2c + CR 117.3a: Apply an anchor subject (tracked by the chain parser)
+/// to a caster-defaulted player-scope effect, so chained instructions like
+/// "then shuffle" inherit the earlier subject ("its controller").
+///
+/// Only overwrites effects whose player target is the caster default
+/// (`Controller`) and only when the anchor is a player-scope filter. Does not
+/// touch effects that already carry an explicit non-caster subject.
+fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter) {
+    if !target_filter_can_target_player(anchor) {
+        return;
+    }
+    match effect {
+        Effect::Shuffle { target } if *target == TargetFilter::Controller => {
+            *target = anchor.clone();
+        }
+        Effect::SearchLibrary {
+            target_player: tp @ None,
+            ..
+        } => {
+            *tp = Some(anchor.clone());
+        }
+        Effect::ChangeZoneAll { target, .. } if *target == TargetFilter::Controller => {
+            *target = anchor.clone();
+        }
+        _ => {}
+    }
 }
 
 fn target_filter_can_target_player(filter: &TargetFilter) -> bool {
@@ -3563,6 +3645,19 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         // Guard on is_none() to only inject when no target was explicitly parsed.
         Effect::LoseLife { ref mut target, .. } if target.is_none() => {
             *target = Some(subject_filter);
+        }
+        // CR 701.23a: "Its controller may search their library..." — the subject
+        // names the library owner (and, when the subject is a context-ref, the
+        // searcher). Only inject when the subject is a player-scope filter and
+        // no target_player has already been extracted from "search target X's
+        // library" earlier in the pipeline.
+        Effect::SearchLibrary {
+            target_player: target_player @ None,
+            ..
+        } if target_filter_can_target_player(&subject_filter)
+            && subject_filter != TargetFilter::Controller =>
+        {
+            *target_player = Some(subject_filter);
         }
         _ => {}
     }
@@ -4222,6 +4317,16 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
     let chunks = split_clause_sequence(text);
     let mut defs: Vec<AbilityDefinition> = Vec::new();
 
+    // CR 608.2c + CR 117.3a: "Anchor subject" for chain-level anaphoric
+    // inheritance. When a clause in the chain declares an explicit player-scope
+    // subject other than the caster (e.g., "its controller may search their
+    // library" → ParentTargetController), subsequent clauses in the same chain
+    // that produce caster-defaulted player-scope effects (e.g., "then shuffle"
+    // → `Shuffle { target: Controller }`) inherit this anchor so the correct
+    // player performs the action. Only propagates within a single sentence /
+    // chain; the anchor is reset at each top-level call.
+    let mut anchor_subject: Option<TargetFilter> = None;
+
     for chunk in &chunks {
         let normalized_text = strip_leading_sequence_connector(&chunk.text).trim();
         if normalized_text.is_empty() {
@@ -4613,9 +4718,25 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             clause
         };
 
+        // CR 608.2c + CR 117.3a: Anchor-subject inheritance. Before this chunk is
+        // lowered into an AbilityDefinition, check whether a caster-defaulted
+        // player-scope effect should inherit a previously-declared subject
+        // (e.g., "then shuffle" after "its controller may search their library"
+        // → Shuffle inherits the ParentTargetController anchor). Only
+        // overrides when the effect still carries the caster default (Controller).
+        let mut clause = clause;
+        if let Some(ref anchor) = anchor_subject {
+            apply_anchor_subject(&mut clause.effect, anchor);
+        }
+
         // CR 608.2c: TargetOnly is a structural wrapper — its sub_ability is the action
         // to perform on the target. Preserve this relationship rather than flattening.
         let is_target_only = matches!(clause.effect, Effect::TargetOnly { .. });
+        // Update anchor from this clause's subject (e.g., SearchLibrary.target_player
+        // set to a non-caster player-scope filter).
+        if let Some(extracted) = extract_player_anchor(&clause.effect) {
+            anchor_subject = Some(extracted);
+        }
         let mut def = AbilityDefinition::new(kind, clause.effect);
         let clause_sub = if is_target_only {
             def.sub_ability = clause.sub_ability;
@@ -4626,6 +4747,11 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         if is_optional {
             def.optional = true;
             def.optional_for = opponent_may_scope;
+        }
+        // CR 117.3a + CR 608.2c: Propagate subject-phrase "may" modal from the
+        // parsed clause (e.g., "its controller may search their library").
+        if clause.optional {
+            def.optional = true;
         }
         if let Some(qty) = repeat_for {
             if matches!(*def.effect, Effect::TargetOnly { .. }) {
@@ -5734,6 +5860,7 @@ fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<ParsedEffectCl
         distribute: Some(distribute_kind),
         multi_target,
         condition: None,
+        optional: false,
     })
 }
 
@@ -5809,6 +5936,7 @@ fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffect
         distribute: Some(DistributionUnit::Counters(raw_type.to_string())),
         multi_target,
         condition: None,
+        optional: false,
     })
 }
 
@@ -7960,6 +8088,83 @@ mod tests {
 
     // Remaining tests truncated for space — they are identical to the original file.
     // Including a representative subset to verify compilation.
+
+    // CR 608.2c + CR 117.3a + CR 701.23a: Assassin's Trophy-shape —
+    // "Destroy target permanent an opponent controls. Its controller may
+    // search their library for a basic land card, put it onto the
+    // battlefield, then shuffle." The subject "its controller" anchors the
+    // subsequent "put it onto the battlefield, then shuffle" clauses so the
+    // destroyed permanent's controller (a) searches their own library,
+    // (b) receives the found land onto the battlefield (as `ParentTarget`),
+    // and (c) shuffles their library. No spurious Library→Hand step emitted.
+    #[test]
+    fn assassins_trophy_its_controller_may_search_chain() {
+        use crate::types::ability::AbilityKind;
+        let def = parse_effect_chain(
+            "Destroy target permanent an opponent controls. Its controller may search their library for a basic land card, put it onto the battlefield, then shuffle.",
+            AbilityKind::Spell,
+        );
+        // Top-level: Destroy
+        assert!(
+            matches!(&*def.effect, Effect::Destroy { .. }),
+            "top-level should be Destroy, got {:?}",
+            def.effect
+        );
+        // First sub: SearchLibrary with ParentTargetController target_player + optional
+        let search = def
+            .sub_ability
+            .as_deref()
+            .expect("should chain SearchLibrary");
+        match &*search.effect {
+            Effect::SearchLibrary { target_player, .. } => {
+                assert_eq!(
+                    target_player.as_ref(),
+                    Some(&TargetFilter::ParentTargetController),
+                    "SearchLibrary must target the destroyed permanent's controller",
+                );
+            }
+            other => panic!("expected SearchLibrary, got {:?}", other),
+        }
+        assert!(search.optional, "SearchLibrary must be optional ('may')");
+        // Second sub: ChangeZone Library→Battlefield (NOT Hand)
+        let put = search
+            .sub_ability
+            .as_deref()
+            .expect("should chain put-step");
+        match &*put.effect {
+            Effect::ChangeZone {
+                origin,
+                destination,
+                ..
+            } => {
+                assert_eq!(*origin, Some(Zone::Library));
+                assert_eq!(
+                    *destination,
+                    Zone::Battlefield,
+                    "put-step destination must be Battlefield — no spurious Library→Hand"
+                );
+            }
+            other => panic!("expected ChangeZone, got {:?}", other),
+        }
+        // Third sub: Shuffle with ParentTargetController (the acting player)
+        let shuffle = put.sub_ability.as_deref().expect("should chain Shuffle");
+        match &*shuffle.effect {
+            Effect::Shuffle { target } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::ParentTargetController,
+                    "Shuffle must target the acting player (its controller), not the caster"
+                );
+            }
+            other => panic!("expected Shuffle, got {:?}", other),
+        }
+        // Chain must end there — no Library→Hand tail.
+        assert!(
+            shuffle.sub_ability.is_none(),
+            "chain must end after Shuffle; got extra: {:?}",
+            shuffle.sub_ability
+        );
+    }
 
     #[test]
     fn parse_search_basic_land_to_hand() {
