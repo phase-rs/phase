@@ -1,5 +1,6 @@
 import type { PlayerId } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import type { GroupedPermanent } from "../../viewmodel/battlefieldProps.ts";
 import type { PlayerBattlefieldView } from "../../viewmodel/gameStateView.ts";
 import { BattlefieldRow } from "./BattlefieldRow.tsx";
@@ -10,9 +11,14 @@ import { CommanderDamage } from "./CommanderDamage.tsx";
 import { CommanderCardZone } from "../zone/CommanderCardZone.tsx";
 import { CommandZone } from "../zone/CommandZone.tsx";
 
-/** Base scales — used when few cards; shrinks as more are added */
+/** Base scales — used when few cards; shrinks as more are added.
+ *  On compact-height (landscape phones), lands shrink hard so creatures
+ *  (which players actually interact with — attack, block, P/T, abilities)
+ *  get vertical breathing room. */
 const LAND_BASE_SCALE = 0.78;
+const LAND_BASE_SCALE_COMPACT = 0.42;
 const OTHER_BASE_SCALE = 1.0;
+const OTHER_BASE_SCALE_COMPACT = 0.42;
 /** Minimum scale floor */
 const MIN_ZONE_SCALE = 0.35;
 
@@ -58,6 +64,7 @@ export function PlayerArea({
   battlefieldView,
 }: PlayerAreaProps) {
   const gameState = useGameStore((s) => s.gameState);
+  const isCompactHeight = useIsCompactHeight();
 
   if (!gameState) return null;
 
@@ -113,7 +120,10 @@ export function PlayerArea({
   const supportSection = hasSupportExtras ? (
     <>
       <div className="mx-2 h-3/4 w-px shrink-0 bg-white/20" />
-      <div className="flex shrink-0 items-center gap-2" style={zoneStyle(OTHER_BASE_SCALE)}>
+      <div
+        className="flex shrink-0 items-center gap-2"
+        style={zoneStyle(isCompactHeight ? OTHER_BASE_SCALE_COMPACT : OTHER_BASE_SCALE)}
+      >
         {supportExtras}
       </div>
     </>
@@ -122,8 +132,10 @@ export function PlayerArea({
 
   const landCount = partitioned?.lands.length ?? 0;
   const supportCount = partitioned?.support.length ?? 0;
-  const landStyle = zoneStyle(zoneScale(LAND_BASE_SCALE, landCount));
-  const supportStyle = zoneStyle(zoneScale(OTHER_BASE_SCALE, supportCount));
+  const landBase = isCompactHeight ? LAND_BASE_SCALE_COMPACT : LAND_BASE_SCALE;
+  const supportBase = isCompactHeight ? OTHER_BASE_SCALE_COMPACT : OTHER_BASE_SCALE;
+  const landStyle = zoneStyle(zoneScale(landBase, landCount));
+  const supportStyle = zoneStyle(zoneScale(supportBase, supportCount));
 
   const middleRow = (
     <div className="flex min-h-0 items-stretch justify-between gap-4" data-debug-label="Middle Row">
@@ -161,8 +173,12 @@ export function PlayerArea({
       data-phased-out={isPhasedOut ? "true" : undefined}
     >
       <div
-        className={`flex min-w-0 flex-1 flex-col gap-2 px-1 ${
-          mode === "full" ? "pt-1 pb-2" : "justify-end py-1"
+        className={`flex min-w-0 flex-1 flex-col px-1 ${
+          isCompactHeight ? "gap-0.5" : "gap-2"
+        } ${
+          mode === "full"
+            ? isCompactHeight ? "pt-0 pb-0.5" : "pt-1 pb-2"
+            : isCompactHeight ? "justify-end py-0" : "justify-end py-1"
         }`}
       >
         {isMirrored ? (
