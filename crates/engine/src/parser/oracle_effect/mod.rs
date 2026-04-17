@@ -1307,7 +1307,8 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
     }
 
     // CR 701.20a: "reveal cards from the top of your library until you reveal a [filter]"
-    if let Some(clause) = try_parse_reveal_until(tp) {
+    // Bare imperative (no explicit subject) → activator's library (CR 109.5).
+    if let Some(clause) = try_parse_reveal_until(tp, TargetFilter::Controller) {
         return clause;
     }
 
@@ -1927,14 +1928,52 @@ fn try_parse_exile_from_top_until(tp: TextPair) -> Option<ParsedEffectClause> {
     Some(parsed_clause(Effect::ExileFromTopUntil { filter }))
 }
 
-/// CR 701.20a: Parse "reveal cards from the top of your library until you reveal a [filter]".
+/// CR 701.20a: Parse the prefix `"reveal[s] cards from the top of <possessive>
+/// library until <pronoun> reveal[s] "` and return the remaining text containing
+/// the filter clause. Handles both second-person ("reveal cards from the top of
+/// your library until you reveal") and third-person possessive variants
+/// ("their/his/her/its library until they/he/she/it reveal[s]").
+///
+/// Returns the slice after the matched article (`a`/`an`), so the caller can
+/// extract the filter text directly.
+fn parse_reveal_until_prefix(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+    // CR 701.20a: verb form — bare imperative ("reveal") or third-person ("reveals")
+    let (input, _) = alt((tag("reveals "), tag("reveal "))).parse(input)?;
+    let (input, _) = tag("cards from the top of ").parse(input)?;
+    // CR 109.5: possessive determiner identifying the library owner. Both English
+    // possessive forms ("your"/"their"/"his"/"her"/"its") map to the same parsed
+    // structure; the actual player is supplied by the caller via subject context.
+    let (input, _) = alt((
+        tag("your "),
+        tag("their "),
+        tag("his "),
+        tag("her "),
+        tag("its "),
+    ))
+    .parse(input)?;
+    let (input, _) = tag("library until ").parse(input)?;
+    // Pronoun + matching verb form.
+    let (input, _) = alt((
+        tag("you reveal "),
+        tag("they reveal "),
+        tag("he reveals "),
+        tag("she reveals "),
+        tag("it reveals "),
+    ))
+    .parse(input)?;
+    let (input, _) = nom_primitives::parse_article(input)?;
+    Ok((input, ()))
+}
+
+/// CR 701.20a: Parse "reveal[s] cards from the top of <possessive> library
+/// until <pronoun> reveal[s] a [filter]". Builds the [`Effect::RevealUntil`]
+/// with `player` identifying whose library is revealed.
+///
 /// Defaults: kept_destination = Hand, rest_destination = Library (bottom).
-/// Subsequent "put that card" / "put the rest" sentences override via ContinuationAst.
-fn try_parse_reveal_until(tp: TextPair) -> Option<ParsedEffectClause> {
-    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, |i| {
-        let (i, _) = tag("reveal cards from the top of your library until you reveal ").parse(i)?;
-        nom_primitives::parse_article(i)
-    })?;
+/// Subsequent "put that card" / "put the rest" sentences override via
+/// ContinuationAst.
+fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEffectClause> {
+    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, parse_reveal_until_prefix)?;
     let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
 
     // Strip trailing period and " card" suffix to get the filter text.
@@ -1956,6 +1995,7 @@ fn try_parse_reveal_until(tp: TextPair) -> Option<ParsedEffectClause> {
     // Subsequent "put that card" / "put the rest" sentences refine these via
     // RevealUntilKept / PutRest continuations.
     Some(parsed_clause(Effect::RevealUntil {
+        player,
         filter,
         kept_destination: Zone::Hand,
         rest_destination: Zone::Library,
@@ -3251,6 +3291,18 @@ fn lower_subject_predicate_ast(
                 return parsed_clause(Effect::Shuffle {
                     target: subject.affected,
                 });
+            }
+            // CR 701.20a: "<player> reveals cards from the top of their library
+            // until they reveal a [filter]" — third-person form. The subject
+            // (e.g., "its controller", "that player", "target opponent") was
+            // extracted into `subject.affected` and identifies whose library is
+            // revealed. Must be checked BEFORE the RevealTop fallback below,
+            // which would otherwise greedy-match the "reveals/top/library" verbs.
+            {
+                let pred_tp = TextPair::new(text.as_str(), pred_lower.as_str());
+                if let Some(clause) = try_parse_reveal_until(pred_tp, subject.affected.clone()) {
+                    return clause;
+                }
             }
             // CR 701.20a: "<player> reveals the top [N] card(s) of their library"
             if alt((tag::<_, _, VerboseError<&str>>("reveal "), tag("reveals ")))
@@ -12182,17 +12234,143 @@ mod tests {
             matches!(
                 &*def.effect,
                 Effect::RevealUntil {
+                    player: TargetFilter::Controller,
                     filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
                     kept_destination: Zone::Hand,
                     rest_destination: Zone::Library,
                     enter_tapped: false,
                 } if type_filters.contains(&TypeFilter::Creature)
             ),
-            "expected RevealUntil creature->hand, rest->library, got: {:?}",
+            "expected RevealUntil player=Controller, creature->hand, rest->library, got: {:?}",
             def.effect
         );
         // No sub_ability — destinations are baked in
         assert!(def.sub_ability.is_none(), "should have no sub_ability");
+    }
+
+    /// CR 109.5 + CR 701.20a: Third-person form ("Its controller reveals cards
+    /// from the top of their library until they reveal a creature card.") —
+    /// must dispatch to RevealUntil with player=ParentTargetController, not to
+    /// RevealTop. This is the building block underpinning Polymorph, Proteus
+    /// Staff, Transmogrify, and 30+ other cards in the class.
+    #[test]
+    fn reveal_until_its_controller_third_person() {
+        let def = parse_effect_chain(
+            "Its controller reveals cards from the top of their library until they reveal a creature card.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::RevealUntil {
+                    player: TargetFilter::ParentTargetController,
+                    filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
+                    kept_destination: Zone::Hand,
+                    rest_destination: Zone::Library,
+                    enter_tapped: false,
+                } if type_filters.contains(&TypeFilter::Creature)
+            ),
+            "expected RevealUntil player=ParentTargetController, got: {:?}",
+            def.effect
+        );
+    }
+
+    /// CR 109.5: "That creature's controller reveals cards from the top of
+    /// their library until they reveal a creature card." (Proteus Staff,
+    /// Transmogrify form).
+    #[test]
+    fn reveal_until_that_creatures_controller_third_person() {
+        let def = parse_effect_chain(
+            "That creature's controller reveals cards from the top of their library until they reveal a creature card.",
+            AbilityKind::Activated,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::RevealUntil {
+                    player: TargetFilter::ParentTargetController,
+                    ..
+                }
+            ),
+            "expected RevealUntil player=ParentTargetController, got: {:?}",
+            def.effect
+        );
+    }
+
+    /// CR 109.5: "That player reveals cards from the top of their library until
+    /// they reveal a creature card." (Curse of Unbinding, Mind Funeral form).
+    /// Subject "that player" extracts to TargetFilter::Player; the player
+    /// parameter is preserved through to the resolver.
+    #[test]
+    fn reveal_until_that_player_third_person() {
+        let def = parse_effect_chain(
+            "That player reveals cards from the top of their library until they reveal a creature card.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::RevealUntil {
+                    player: TargetFilter::Player,
+                    ..
+                }
+            ),
+            "expected RevealUntil player=Player, got: {:?}",
+            def.effect
+        );
+    }
+
+    /// CR 701.20a: Polymorph end-to-end — "Its controller reveals cards from
+    /// the top of their library until they reveal a creature card. The player
+    /// puts that card onto the battlefield, then shuffles all other cards
+    /// revealed this way into their library." The combined sentence must lower
+    /// kept_destination=Battlefield (RevealUntilKept continuation) and
+    /// rest_destination=Library (the new "shuffles ... library" PutRest match).
+    #[test]
+    fn reveal_until_polymorph_continuations_lower_destinations() {
+        let def = parse_effect_chain(
+            "Its controller reveals cards from the top of their library until they reveal a creature card. The player puts that card onto the battlefield, then shuffles all other cards revealed this way into their library.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::RevealUntil {
+                    player: TargetFilter::ParentTargetController,
+                    kept_destination: Zone::Battlefield,
+                    rest_destination: Zone::Library,
+                    ..
+                }
+            ),
+            "expected Polymorph-style chain to lower to RevealUntil(Battlefield, Library), got: {:?}",
+            def.effect
+        );
+    }
+
+    /// CR 701.20a: Proteus Staff post-bounce reveal — "That creature's
+    /// controller reveals cards from the top of their library until they reveal
+    /// a creature card. The player puts that card onto the battlefield and the
+    /// rest on the bottom of their library in any order." The compound "and
+    /// the rest" form is handled by the existing RevealUntilKept continuation.
+    #[test]
+    fn reveal_until_proteus_staff_compound_continuation() {
+        let def = parse_effect_chain(
+            "That creature's controller reveals cards from the top of their library until they reveal a creature card. The player puts that card onto the battlefield and the rest on the bottom of their library in any order.",
+            AbilityKind::Activated,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::RevealUntil {
+                    player: TargetFilter::ParentTargetController,
+                    kept_destination: Zone::Battlefield,
+                    rest_destination: Zone::Library,
+                    ..
+                }
+            ),
+            "expected Proteus-Staff-style chain to lower to RevealUntil(Battlefield, Library), got: {:?}",
+            def.effect
+        );
     }
 
     #[test]
@@ -12205,13 +12383,14 @@ mod tests {
             matches!(
                 &*def.effect,
                 Effect::RevealUntil {
+                    player: TargetFilter::Controller,
                     filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
                     kept_destination: Zone::Battlefield,
                     rest_destination: Zone::Library,
                     enter_tapped: false,
                 } if type_filters.contains(&TypeFilter::Artifact)
             ),
-            "expected RevealUntil artifact->battlefield, got: {:?}",
+            "expected RevealUntil player=Controller, artifact->battlefield, got: {:?}",
             def.effect
         );
     }

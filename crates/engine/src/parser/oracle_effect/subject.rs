@@ -518,6 +518,32 @@ pub(super) fn parse_subject_application(
             inherits_parent: false,
         });
     }
+    // CR 608.2c: Definite/anaphoric "[the|that] <noun>'s controller" /
+    // "[the|that] <noun>'s owner" — the parent target's controller/owner.
+    // Mirrors the generic "the <noun>'s controller" path in `parse_target`
+    // (oracle_target.rs) but as a subject-phrase entry-point so subject-shifted
+    // clauses like "That creature's controller reveals…" (Proteus Staff,
+    // Transmogrify) route to ParentTargetController. Uses nom dispatch on the
+    // determiner; the noun-then-suffix structure is verified by a structural
+    // `ends_with` check on the remainder (post-tokenization classification, not
+    // parsing dispatch).
+    if let Ok((after_det, _)) =
+        alt((tag::<_, _, VerboseError<&str>>("that "), tag("the "))).parse(lower.as_str())
+    {
+        // structural: not dispatch — the nom `alt(tag(...))` above is the dispatch
+        // step that consumes the determiner; this `ends_with` is a post-tokenization
+        // structural check that the remaining tail is `<noun>'s controller` /
+        // `<noun>'s owner`, mirroring the existing `parse_target` path that uses
+        // `find("'s controller")` for the same purpose.
+        if after_det.ends_with("'s controller") || after_det.ends_with("'s owner") {
+            return Some(SubjectApplication {
+                affected: TargetFilter::ParentTargetController,
+                target: None,
+                multi_target: None,
+                inherits_parent: false,
+            });
+        }
+    }
     // Explicit self-reference — always SelfRef
     if matches!(lower.as_str(), "~" | "this")
         || SELF_REF_PARSE_ONLY_PHRASES.iter().any(|p| lower == *p)

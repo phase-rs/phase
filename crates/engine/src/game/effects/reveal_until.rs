@@ -2,10 +2,13 @@ use rand::seq::SliceRandom;
 
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::zones;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
 /// CR 701.20a: Reveal cards from the top of the controller's library one at a
@@ -20,20 +23,35 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (filter, kept_destination, rest_destination, enter_tapped) = match &ability.effect {
-        Effect::RevealUntil {
-            filter,
-            kept_destination,
-            rest_destination,
-            enter_tapped,
-        } => (filter, *kept_destination, *rest_destination, *enter_tapped),
-        _ => return Err(EffectError::MissingParam("RevealUntil".to_string())),
-    };
+    let (player_filter, filter, kept_destination, rest_destination, enter_tapped) =
+        match &ability.effect {
+            Effect::RevealUntil {
+                player,
+                filter,
+                kept_destination,
+                rest_destination,
+                enter_tapped,
+            } => (
+                player,
+                filter,
+                *kept_destination,
+                *rest_destination,
+                *enter_tapped,
+            ),
+            _ => return Err(EffectError::MissingParam("RevealUntil".to_string())),
+        };
+
+    // CR 109.5 + CR 701.20a: Resolve which player's library is revealed.
+    // `Controller` → activator (Jalira-style "you reveal..."); `ParentTargetController`
+    // → controller of the parent ability's targeted object (Polymorph, Proteus Staff,
+    // Transmogrify); other player-resolving filters → player extracted from
+    // `ability.targets` (e.g., Telemin Performance "target opponent reveals...").
+    let revealing_player = resolve_revealing_player(state, ability, player_filter);
 
     let player = state
         .players
         .iter()
-        .find(|p| p.id == ability.controller)
+        .find(|p| p.id == revealing_player)
         .ok_or(EffectError::PlayerNotFound)?;
 
     // Snapshot library (top = index 0) to iterate without borrow conflicts.
@@ -70,7 +88,7 @@ pub fn resolve(
         .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
         .collect();
     events.push(GameEvent::CardsRevealed {
-        player: ability.controller,
+        player: revealing_player,
         card_ids: all_revealed.clone(),
         card_names,
     });
@@ -132,6 +150,40 @@ pub fn resolve(
     Ok(())
 }
 
+/// CR 109.5: Resolve the `player` filter on a [`RevealUntil`] effect into a
+/// concrete [`PlayerId`]. Mirrors [`crate::game::effects::token::resolve_token_owner`]:
+/// `Controller` → activator; `ParentTargetController` → controller of the parent
+/// ability's targeted object (Polymorph, Proteus Staff, Transmogrify); any other
+/// player-resolving filter → `TargetRef::Player` extracted from `ability.targets`
+/// (Telemin Performance / Mind Funeral "target opponent reveals..."). Falls
+/// back to the activator when the filter cannot be resolved (defensive default
+/// matching the historical behavior of this effect).
+fn resolve_revealing_player(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    player_filter: &TargetFilter,
+) -> PlayerId {
+    match player_filter {
+        TargetFilter::Controller => ability.controller,
+        TargetFilter::ParentTargetController => ability
+            .targets
+            .iter()
+            .find_map(|target| match target {
+                TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
+                TargetRef::Player(pid) => Some(*pid),
+            })
+            .unwrap_or(ability.controller),
+        _ => ability
+            .targets
+            .iter()
+            .find_map(|target| match target {
+                TargetRef::Player(pid) => Some(*pid),
+                TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
+            })
+            .unwrap_or(ability.controller),
+    }
+}
+
 /// Put cards on the bottom of the player's library in random order.
 fn shuffle_to_bottom(state: &mut GameState, cards: &[ObjectId], events: &mut Vec<GameEvent>) {
     let mut shuffled = cards.to_vec();
@@ -159,12 +211,35 @@ mod tests {
     ) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::RevealUntil {
+                player: TargetFilter::Controller,
                 filter,
                 kept_destination,
                 rest_destination,
                 enter_tapped: false,
             },
             vec![],
+            ObjectId(100),
+            controller,
+        )
+    }
+
+    fn make_reveal_until_ability_with_player(
+        controller: PlayerId,
+        player: TargetFilter,
+        targets: Vec<TargetRef>,
+        filter: TargetFilter,
+        kept_destination: Zone,
+        rest_destination: Zone,
+    ) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::RevealUntil {
+                player,
+                filter,
+                kept_destination,
+                rest_destination,
+                enter_tapped: false,
+            },
+            targets,
             ObjectId(100),
             controller,
         )
@@ -387,5 +462,106 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::EffectResolved { .. })));
+    }
+
+    /// CR 109.5 + CR 701.20a: When `player = ParentTargetController`, the library
+    /// of the parent ability's target's controller is revealed — the activator's
+    /// own library is left untouched. This is the Polymorph / Proteus Staff /
+    /// Transmogrify pattern.
+    #[test]
+    fn reveal_until_parent_target_controller_reveals_target_owner_library() {
+        let mut state = GameState::new_two_player(42);
+
+        // Activator is PlayerId(0); the targeted creature (and its library) belongs
+        // to PlayerId(1). The activator's library must NOT be touched.
+        let opponent_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&opponent_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Opponent's library: a land then a creature (top→bottom).
+        let opp_land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&opp_land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let opp_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Bear2".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&opp_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Activator's library: a creature on top — must NOT be touched.
+        let activator_creature = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "ActivatorBear".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&activator_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = make_reveal_until_ability_with_player(
+            PlayerId(0),
+            TargetFilter::ParentTargetController,
+            vec![TargetRef::Object(opponent_creature)],
+            TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+            Zone::Battlefield,
+            Zone::Library,
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Opponent's creature card moved to the battlefield (under its owner's control).
+        assert!(state.battlefield.contains(&opp_creature));
+        assert_eq!(
+            state.objects.get(&opp_creature).unwrap().controller,
+            PlayerId(1)
+        );
+        // Activator's library is undisturbed — their bear is still on top.
+        assert_eq!(
+            state.players[0].library.first().copied(),
+            Some(activator_creature)
+        );
+        // The CardsRevealed event names the revealing player (the opponent), not the activator.
+        let revealing_player = events.iter().find_map(|e| match e {
+            GameEvent::CardsRevealed { player, .. } => Some(*player),
+            _ => None,
+        });
+        assert_eq!(revealing_player, Some(PlayerId(1)));
     }
 }

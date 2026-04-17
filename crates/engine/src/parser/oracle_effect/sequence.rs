@@ -1110,10 +1110,14 @@ pub(super) fn parse_followup_continuation_ast(
         // CR 701.20a: "put that card into your hand / onto the battlefield" after RevealUntil
         // — overrides kept_destination. Also extracts rest_destination when the compound
         // sentence includes "and the rest" (the "and" split is suppressed because "the rest"
-        // does not start with a recognized imperative verb).
+        // does not start with a recognized imperative verb). Both bare imperative
+        // ("put that card", second-person reveal-until) and third-person ("the player puts
+        // that card", Polymorph / Proteus Staff / Transmogrify) forms are accepted.
         Effect::RevealUntil { .. }
             if nom_primitives::scan_contains(&lower, "put that card")
-                || nom_primitives::scan_contains(&lower, "put it") =>
+                || nom_primitives::scan_contains(&lower, "puts that card")
+                || nom_primitives::scan_contains(&lower, "put it")
+                || nom_primitives::scan_contains(&lower, "puts it") =>
         {
             let (destination, enter_tapped) =
                 if nom_primitives::scan_contains(&lower, "onto the battlefield") {
@@ -1145,19 +1149,33 @@ pub(super) fn parse_followup_continuation_ast(
         // CR 701.20a: "put the rest" / "the rest on the bottom" / "put the revealed cards"
         // after RevealUntil — overrides rest_destination. The "the rest" without "put"
         // occurs when split_clause_sequence splits "put X and the rest" on "and".
+        // Also recognizes:
+        //   • "shuffles ... revealed this way into <possessive> library" (Polymorph,
+        //     Transmogrify) — the engine's existing rest=Library destination already
+        //     random-orders, satisfying the shuffle semantics.
+        //   • Third-person "puts" verb form (Polymorph chain).
+        //   • "puts those cards" (Destroy the Evidence: "puts those cards into their
+        //     graveyard") — when no kept-card was specified separately, the entire
+        //     revealed pile is the rest.
         Effect::RevealUntil { .. }
             if nom_primitives::scan_contains(&lower, "put the rest")
+                || nom_primitives::scan_contains(&lower, "puts the rest")
                 || nom_primitives::scan_contains(&lower, "the rest on the bottom")
                 || nom_primitives::scan_contains(&lower, "the rest into your graveyard")
                 || nom_primitives::scan_contains(&lower, "put the revealed cards")
-                || nom_primitives::scan_contains(&lower, "put them back") =>
+                || nom_primitives::scan_contains(&lower, "put them back")
+                || nom_primitives::scan_contains(&lower, "puts those cards")
+                || nom_primitives::scan_contains(&lower, "put those cards")
+                || (nom_primitives::scan_contains(&lower, "shuffle")
+                    && nom_primitives::scan_contains(&lower, "library")) =>
         {
             let destination = if nom_primitives::scan_contains(&lower, "into your graveyard")
                 || nom_primitives::scan_contains(&lower, "into their graveyard")
             {
                 Zone::Graveyard
             } else {
-                // Default: bottom of library
+                // Default: bottom of library (covers "shuffles into their library",
+                // "on the bottom", and the no-zone "put the rest" variant)
                 Zone::Library
             };
             Some(ContinuationAst::PutRest { destination })

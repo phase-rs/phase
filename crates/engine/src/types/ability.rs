@@ -3033,16 +3033,23 @@ pub enum Effect {
     ExileFromTopUntil {
         filter: TargetFilter,
     },
-    /// CR 701.20a: Reveal cards from the top of your library one at a time until
-    /// you reveal a card matching the filter. The matching card goes to
-    /// `kept_destination`, the rest go to `rest_destination`.
+    /// CR 701.20a: Reveal cards from the top of a player's library one at a time
+    /// until that player reveals a card matching the filter. The matching card
+    /// goes to `kept_destination`, the rest go to `rest_destination`.
     RevealUntil {
+        /// CR 109.5: Whose library is revealed. `Controller` for "you reveal..."
+        /// (the activator), `ParentTargetController` for "its controller reveals..."
+        /// or "that creature's controller reveals..." (Polymorph, Proteus Staff,
+        /// Transmogrify), and any player-resolving filter for cards like
+        /// "target opponent reveals..." (Telemin Performance, Mind Funeral).
+        #[serde(default = "default_target_filter_controller")]
+        player: TargetFilter,
         filter: TargetFilter,
         /// Where the matching card goes (Hand or Battlefield).
         kept_destination: Zone,
         /// Where non-matching revealed cards go (Library bottom or Graveyard).
         rest_destination: Zone,
-        /// CR 110.6d: When true, the matching card enters the battlefield tapped.
+        /// CR 110.5b: When true, the matching card enters the battlefield tapped.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         enter_tapped: bool,
     },
