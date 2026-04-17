@@ -1073,22 +1073,44 @@ fn strip_condition_clause(text: &str, clause_start: usize, clause_len: usize) ->
 /// condition extractor `strip_leading_general_conditional` in
 /// `parser/oracle_effect/conditions.rs`.
 ///
-/// Implementation: scan backward from `if_pos` to the last sentence boundary
-/// (". ") or inline "then " boundary. structural: punctuation scan, not parser
-/// dispatch.
+/// Implementation: two detection paths —
+///
+/// 1. Sentence-boundary form: the last ". " before `if_pos` is followed only
+///    by "then" / "then," (e.g. "effect. Then if Y, effect2").
+/// 2. Inline form: the token immediately preceding `if ` is "then" or "then,"
+///    with no sentence boundary required (covers punctuation-free variants).
+///
+/// Structural scan only — not parser dispatch.
 fn if_belongs_to_then_clause(lower: &str, if_pos: usize) -> bool {
-    // structural: find the last sentence boundary before if_pos
     let before = &lower[..if_pos];
+
+    // Path 1: sentence-boundary form. The segment between the last ". " and
+    // the `if` is exactly "then" / "then," (Felidar Sovereign: "...double your
+    // life total. Then, if you have 1,000 or more life, you lose the game").
     let sentence_start = before.rfind(". ").map_or(0, |i| i + 2);
     let between = lower[sentence_start..if_pos].trim_start();
-    // A "then"-introduced clause: the segment between the last sentence boundary
-    // and the `if` is "then " or "then, " (Felidar Sovereign-style: "...double
-    // your life total. Then, if you have 1,000 or more life, you lose the game").
-    // Both forms scope the condition to the second clause, not the whole trigger.
-    alt((tag::<_, _, VerboseError<&str>>("then, "), tag("then ")))
+    if alt((tag::<_, _, VerboseError<&str>>("then, "), tag("then ")))
         .parse(between)
         .map(|(rest, _)| rest.trim().is_empty())
         .unwrap_or(false)
+    {
+        return true;
+    }
+
+    // Path 2: inline form. Find the last word boundary in `before` and run
+    // the same tag-based dispatch over the trailing word. Word-boundary
+    // lookup (rfind on space/comma) is structural; dispatch goes through
+    // the `tag` combinator per parser policy.
+    let trimmed = before.trim_end();
+    let word_start = trimmed.rfind([' ', ',']).map_or(0, |i| i + 1);
+    let candidate = &trimmed[word_start..];
+    alt((
+        tag::<_, _, VerboseError<&str>>("then,"),
+        tag::<_, _, VerboseError<&str>>("then"),
+    ))
+    .parse(candidate)
+    .map(|(rest, _)| rest.is_empty())
+    .unwrap_or(false)
 }
 
 /// Parse "if you control N or more [type]" → (condition, end_byte_offset).
@@ -4542,6 +4564,19 @@ mod tests {
         assert!(
             cond.is_some(),
             "leading intervening-if must still be hoisted, got {cond:?}",
+        );
+    }
+
+    /// CR 603.4: Inline "then if" without a sentence boundary ("X then if Y,
+    /// Z") — the condition still scopes to the then-clause sub_ability and
+    /// must not be hoisted. Covers punctuation-free variants of the pattern.
+    #[test]
+    fn extract_if_skips_inline_then_if_clause() {
+        let (_, cond) =
+            extract_if_condition("draw a card then if you control a creature, gain 1 life");
+        assert_eq!(
+            cond, None,
+            "inline `then if` (no sentence boundary) must not be hoisted",
         );
     }
 

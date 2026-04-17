@@ -1,6 +1,6 @@
 use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::combinator::value;
+use nom::combinator::{all_consuming, value};
 use nom::Parser;
 use nom_language::error::VerboseError;
 
@@ -484,21 +484,27 @@ pub(super) fn parse_subject_application(
     // event-context combinator for the mapping.
     // Outside trigger context, fall back to TargetFilter::Player (preserving
     // pre-existing behavior for non-trigger phrasings).
-    if matches!(lower.as_str(), "that player" | "the player") {
-        let affected = if ctx.subject.is_some() {
-            parse_event_context_ref(lower.as_str())
-                .map(|(_, filter)| filter)
-                .unwrap_or(TargetFilter::Player)
-        } else {
-            TargetFilter::Player
-        };
-        return Some(SubjectApplication {
-            affected,
-            target: None,
-            multi_target: None,
-            inherits_parent: false,
-            is_optional: false,
-        });
+    //
+    // Dispatch via the single-authority event-context combinator —
+    // `parse_event_context_ref` already recognizes both "that player" and
+    // "the player" as TriggeringPlayer. `all_consuming` restricts the match
+    // to standalone subject phrases (no trailing text) and restricts the
+    // TriggeringPlayer branch here to the two player-referencing forms.
+    if let Ok((_, ctx_filter)) = all_consuming(parse_event_context_ref).parse(lower.as_str()) {
+        if matches!(ctx_filter, TargetFilter::TriggeringPlayer) {
+            let affected = if ctx.subject.is_some() {
+                ctx_filter
+            } else {
+                TargetFilter::Player
+            };
+            return Some(SubjectApplication {
+                affected,
+                target: None,
+                multi_target: None,
+                inherits_parent: false,
+                is_optional: false,
+            });
+        }
     }
     // CR 109.5 "you" / "your" — the spell or ability's controller. Used as a
     // bare player subject (e.g., "you phase out", "you draw a card"). The

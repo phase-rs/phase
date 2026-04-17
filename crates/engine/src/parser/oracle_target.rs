@@ -1444,19 +1444,8 @@ fn parse_controller_suffix(text: &str) -> Option<(ControllerRef, usize)> {
     }
 
     // Additional patterns via nom tag().
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("target player controls")
-            .parse(trimmed)
-    {
-        // CR 109.4 + CR 115.1: "target player controls" → ControllerRef::TargetPlayer.
-        // The enclosing ability gains a companion TargetFilter::Player target slot
-        // (surfaced by collect_target_slots) so the player is chosen at target
-        // declaration; filter_inner resolves against ability.targets at match time.
-        return Some((
-            ControllerRef::TargetPlayer,
-            leading_ws + trimmed.len() - rest.len(),
-        ));
-    }
+    // Note: "target player controls" is handled by `parse_zone_controller` above
+    // (single-authority for `ControllerRef::TargetPlayer`).
     if let Ok((rest, _)) =
         tag::<_, _, nom_language::error::VerboseError<&str>>("that player controls").parse(trimmed)
     {

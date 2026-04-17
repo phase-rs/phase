@@ -53,6 +53,12 @@ pub fn parse_zone_controller(input: &str) -> OracleResult<'_, ControllerRef> {
         value(ControllerRef::Opponent, tag("an opponent controls")),
         value(ControllerRef::Opponent, tag("your opponents control")),
         value(ControllerRef::Opponent, tag("you don't control")),
+        // CR 109.4 + CR 115.1: "target player controls" — the filter controller
+        // is the player chosen as a target of the enclosing ability. The
+        // consumer must surface a companion TargetFilter::Player target slot
+        // (see `collect_target_slots` in `game/ability_utils.rs`) so the player
+        // is selected as part of target declaration.
+        value(ControllerRef::TargetPlayer, tag("target player controls")),
     ))
     .parse(input)
 }

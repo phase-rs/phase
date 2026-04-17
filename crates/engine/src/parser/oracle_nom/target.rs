@@ -251,6 +251,11 @@ pub fn parse_event_context_ref(input: &str) -> OracleResult<'_, TargetFilter> {
         // CR 506.3d: "defending player" / "the defending player"
         value(TargetFilter::DefendingPlayer, tag("the defending player")),
         value(TargetFilter::DefendingPlayer, tag("defending player")),
+        // CR 608.2k: "the player" in trigger context is synonymous with
+        // "that player" — anaphoric reference to the triggering player.
+        // Ordered after "the defending player" so longest-match-first is
+        // preserved for the specific defending-player phrasing.
+        value(TargetFilter::TriggeringPlayer, tag("the player")),
     ))
     .parse(input)
 }
@@ -458,6 +463,17 @@ mod tests {
         let (rest4, f4) = parse_event_context_ref("that spell is countered").unwrap();
         assert_eq!(rest4, " is countered");
         assert_eq!(f4, TargetFilter::TriggeringSource);
+
+        // CR 608.2k: "the player" in trigger context is anaphoric to
+        // the triggering player (synonym for "that player").
+        let (rest5, f5) = parse_event_context_ref("the player loses").unwrap();
+        assert_eq!(rest5, " loses");
+        assert_eq!(f5, TargetFilter::TriggeringPlayer);
+
+        // "the defending player" still wins over "the player" (longest-match).
+        let (rest6, f6) = parse_event_context_ref("the defending player gains").unwrap();
+        assert_eq!(rest6, " gains");
+        assert_eq!(f6, TargetFilter::DefendingPlayer);
     }
 
     #[test]

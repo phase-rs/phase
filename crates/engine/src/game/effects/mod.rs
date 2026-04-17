@@ -610,6 +610,15 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::Mill { target, .. }
         | Effect::Shuffle { target, .. }
         | Effect::GivePlayerCounter { target, .. }
+        // Additional player-targeted effects: when chained off a "that player"
+        // subject in trigger context, their target is an event-context ref
+        // (e.g., TriggeringPlayer) rather than a fresh target prompt.
+        | Effect::SetLifeTotal { target, .. }
+        | Effect::SkipNextTurn { target, .. }
+        | Effect::ControlNextTurn { target, .. }
+        | Effect::AdditionalCombatPhase { target, .. }
+        | Effect::GiveControl { target, .. }
+        | Effect::Detain { target, .. }
         | Effect::TargetOnly { target } => target,
         Effect::Token { owner, .. } => owner,
         Effect::RevealTop { player, .. } => player,
