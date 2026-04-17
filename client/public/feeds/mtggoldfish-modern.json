@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-04-30T00:00:00Z",
+  "updated": "2026-05-01T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -1028,120 +1028,20 @@
       "name": "Neobrand",
       "author": "MTGGoldfish",
       "colors": [
-        "G",
-        "U"
+        "U",
+        "G"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 1,
+          "count": 4,
           "name": "Allosaurus Rider"
         },
         {
           "count": 1,
-          "name": "Hooting Mandrills"
-        },
-        {
-          "count": 1,
-          "name": "Ureni, the Song Unending"
-        },
-        {
-          "count": 4,
-          "name": "Neoform"
-        },
-        {
-          "count": 2,
-          "name": "Generous Ent"
-        },
-        {
-          "count": 2,
-          "name": "Ghalta, Stampede Tyrant"
-        },
-        {
-          "count": 3,
-          "name": "Pact of Negation"
-        },
-        {
-          "count": 3,
-          "name": "Hedge Maze"
-        },
-        {
-          "count": 1,
-          "name": "Repudiate // Replicate"
-        },
-        {
-          "count": 1,
-          "name": "Endurance"
-        },
-        {
-          "count": 1,
-          "name": "Snow-Covered Forest"
-        },
-        {
-          "count": 4,
-          "name": "Planar Genesis"
-        },
-        {
-          "count": 1,
-          "name": "Wooded Foothills"
-        },
-        {
-          "count": 1,
-          "name": "Polluted Delta"
-        },
-        {
-          "count": 1,
-          "name": "Flooded Strand"
-        },
-        {
-          "count": 1,
-          "name": "Bridgeworks Battle"
-        },
-        {
-          "count": 2,
-          "name": "Disciple of Freyalise"
-        },
-        {
-          "count": 1,
-          "name": "Snow-Covered Island"
-        },
-        {
-          "count": 4,
-          "name": "Eldritch Evolution"
-        },
-        {
-          "count": 4,
-          "name": "Summoner's Pact"
-        },
-        {
-          "count": 3,
-          "name": "Veil of Summer"
-        },
-        {
-          "count": 1,
-          "name": "Griselbrand"
-        },
-        {
-          "count": 4,
-          "name": "Misty Rainforest"
-        },
-        {
-          "count": 1,
-          "name": "Xenagos, God of Revels"
-        },
-        {
-          "count": 2,
-          "name": "Nourishing Shoal"
-        },
-        {
-          "count": 3,
-          "name": "Allosaurus Rider"
-        },
-        {
-          "count": 1,
-          "name": "Scalding Tarn"
+          "name": "Atraxa, Grand Unifier"
         },
         {
           "count": 1,
@@ -1149,53 +1049,133 @@
         },
         {
           "count": 1,
-          "name": "Atraxa, Grand Unifier"
+          "name": "Xenagos, God of Revels"
+        },
+        {
+          "count": 1,
+          "name": "Bridgeworks Battle"
         },
         {
           "count": 3,
           "name": "Consign to Memory"
         },
         {
-          "count": 1,
-          "name": "Breeding Pool"
-        }
-      ],
-      "sideboard": [
+          "count": 2,
+          "name": "Disciple of Freyalise"
+        },
         {
-          "count": 1,
-          "name": "Hooting Mandrills"
+          "count": 4,
+          "name": "Eldritch Evolution"
         },
         {
           "count": 1,
           "name": "Endurance"
         },
         {
-          "count": 1,
-          "name": "Into the Flood Maw"
+          "count": 2,
+          "name": "Generous Ent"
+        },
+        {
+          "count": 4,
+          "name": "Summoner's Pact"
         },
         {
           "count": 1,
+          "name": "Snow-Covered Island"
+        },
+        {
+          "count": 3,
+          "name": "Hedge Maze"
+        },
+        {
+          "count": 1,
+          "name": "Hooting Mandrills"
+        },
+        {
+          "count": 3,
+          "name": "Pact of Negation"
+        },
+        {
+          "count": 4,
+          "name": "Neoform"
+        },
+        {
+          "count": 1,
+          "name": "Nourishing Shoal"
+        },
+        {
+          "count": 4,
+          "name": "Misty Rainforest"
+        },
+        {
+          "count": 4,
+          "name": "Planar Genesis"
+        },
+        {
+          "count": 2,
           "name": "Snow-Covered Forest"
         },
         {
-          "count": 3,
-          "name": "Mystical Dispute"
+          "count": 1,
+          "name": "Griselbrand"
+        },
+        {
+          "count": 2,
+          "name": "Ghalta, Stampede Tyrant"
+        },
+        {
+          "count": 1,
+          "name": "Ureni, the Song Unending"
         },
         {
           "count": 3,
-          "name": "Ice-Fang Coatl"
+          "name": "Veil of Summer"
         },
+        {
+          "count": 1,
+          "name": "Verdant Catacombs"
+        },
+        {
+          "count": 1,
+          "name": "Wistfulness"
+        },
+        {
+          "count": 1,
+          "name": "Breeding Pool"
+        },
+        {
+          "count": 3,
+          "name": "Polluted Delta"
+        }
+      ],
+      "sideboard": [
         {
           "count": 1,
           "name": "Abhorrent Oculus"
         },
         {
-          "count": 3,
-          "name": "Nature's Claim"
+          "count": 1,
+          "name": "Consign to Memory"
+        },
+        {
+          "count": 4,
+          "name": "Ice-Fang Coatl"
         },
         {
           "count": 1,
-          "name": "Elesh Norn, Grand Cenobite"
+          "name": "Into the Flood Maw"
+        },
+        {
+          "count": 4,
+          "name": "Mystical Dispute"
+        },
+        {
+          "count": 1,
+          "name": "Wistfulness"
+        },
+        {
+          "count": 3,
+          "name": "Nature's Claim"
         }
       ]
     },
