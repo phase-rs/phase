@@ -21,23 +21,12 @@ pub(crate) fn allowed_draw_count(
     };
 
     let mut allowed = count;
-    for &source_id in &state.battlefield {
-        let Some(source_obj) = state.objects.get(&source_id) else {
-            continue;
-        };
+    // CR 702.26b + CR 604.1: `battlefield_active_statics` owns the phased-out /
+    // command-zone / condition gate.
+    for (source_obj, def) in crate::game::functioning_abilities::battlefield_active_statics(state) {
+        let source_id = source_obj.id;
 
-        for def in &source_obj.static_definitions {
-            if def.condition.as_ref().is_some_and(|condition| {
-                !crate::game::layers::evaluate_condition(
-                    state,
-                    condition,
-                    source_obj.controller,
-                    source_id,
-                )
-            }) {
-                continue;
-            }
-
+        {
             match def.mode {
                 StaticMode::CantDraw { ref who }
                     if prohibition_scope_matches_player(who, player_id, source_id, state) =>

@@ -1,48 +1,13 @@
 use std::collections::HashMap;
 
 use crate::game::filter::{matches_target_filter, FilterContext};
-use crate::game::game_object::GameObject;
+use crate::game::functioning_abilities::{active_static_definitions, battlefield_active_statics};
 use crate::game::layers::evaluate_condition;
-use crate::types::ability::{StaticDefinition, TargetFilter, TypedFilter};
+use crate::types::ability::{TargetFilter, TypedFilter};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::statics::{ProhibitionScope, StaticMode};
-
-/// CR 604.1 + CR 613.1 + CR 702.26b + CR 114.4: Iterate over an object's static
-/// definitions that are currently *functioning* and whose `condition` (if any) holds.
-///
-/// Callers should use this in place of `obj.static_definitions.iter()` whenever they
-/// extract data-carrying modes (e.g. `GraveyardCastPermission`, `CastFromHandFree`,
-/// `CantAttack`) or gate behavior on a static's presence, so that `ClassLevelGE`,
-/// `HasCounters`, `DuringYourTurn`, and every other `StaticCondition` are honored
-/// uniformly across the engine.
-///
-/// This helper encodes three layered rules:
-/// - **CR 702.26b**: Phased-out permanents' abilities don't function.
-/// - **CR 114.4**: In the command zone, only emblems' abilities function.
-/// - **CR 613.1 + 604.1**: Each static's `condition` (e.g. "as long as") is
-///   re-evaluated continuously and gates whether the effect applies.
-pub(crate) fn active_static_definitions<'a>(
-    state: &'a GameState,
-    obj: &'a GameObject,
-) -> Box<dyn Iterator<Item = &'a StaticDefinition> + 'a> {
-    // CR 702.26b: Phased-out permanents' static abilities don't function.
-    if obj.is_phased_out() {
-        return Box::new(std::iter::empty());
-    }
-    // CR 114.4: Objects in the command zone don't function unless they are emblems.
-    if obj.zone == crate::types::zones::Zone::Command && !obj.is_emblem {
-        return Box::new(std::iter::empty());
-    }
-    let source_id = obj.id;
-    let controller = obj.controller;
-    Box::new(obj.static_definitions.iter().filter(move |def| {
-        def.condition
-            .as_ref()
-            .is_none_or(|cond| evaluate_condition(state, cond, controller, source_id))
-    }))
-}
 
 /// Handler function type for static ability modes.
 /// Receives the `StaticMode` variant the handler was registered under.
@@ -462,7 +427,9 @@ pub fn check_static_ability(
     context: &StaticCheckContext,
 ) -> bool {
     // CR 114.4: Abilities of emblems function in the command zone.
-    // Check both battlefield objects and command zone emblems.
+    // Check both battlefield objects and command zone emblems. The functioning
+    // gate (phased-out + command-zone + condition) is owned by
+    // `active_static_definitions`.
     let zones = state.battlefield.iter().chain(state.command_zone.iter());
     for &id in zones {
         let obj = match state.objects.get(&id) {
@@ -470,18 +437,7 @@ pub fn check_static_ability(
             None => continue,
         };
 
-        // Only check command zone objects that are emblems (skip commanders, etc.)
-        if obj.zone == crate::types::zones::Zone::Command && !obj.is_emblem {
-            continue;
-        }
-
-        // CR 702.26b: Phased-out permanents are treated as though they don't
-        // exist — their static abilities don't function.
-        if obj.is_phased_out() {
-            continue;
-        }
-
-        for def in &obj.static_definitions {
+        for def in active_static_definitions(state, obj) {
             if def.mode != mode {
                 continue;
             }
@@ -489,13 +445,6 @@ pub fn check_static_ability(
             // Check affected filter if present (typed TargetFilter)
             if let Some(ref affected) = def.affected {
                 if !static_filter_matches(state, context, affected, id) {
-                    continue;
-                }
-            }
-
-            // CR 604.1: Evaluate condition if present (e.g., "as long as you control a Reflection")
-            if let Some(ref condition) = def.condition {
-                if !evaluate_condition(state, condition, obj.controller, id) {
                     continue;
                 }
             }
@@ -633,31 +582,20 @@ pub fn player_has_protection_from_everything(state: &GameState, player_id: Playe
 /// allocate in potentially hot paths (damage resolution, sacrifice loops).
 fn check_static_other_by_name(state: &GameState, name: &str, context: &StaticCheckContext) -> bool {
     // CR 114.4: Abilities of emblems function in the command zone.
+    // Functioning gate owned by `active_static_definitions`.
     let zones = state.battlefield.iter().chain(state.command_zone.iter());
     for &id in zones {
         let obj = match state.objects.get(&id) {
             Some(o) => o,
             None => continue,
         };
-        if obj.zone == crate::types::zones::Zone::Command && !obj.is_emblem {
-            continue;
-        }
-        // CR 702.26b: Phased-out permanents don't function.
-        if obj.is_phased_out() {
-            continue;
-        }
-        for def in &obj.static_definitions {
+        for def in active_static_definitions(state, obj) {
             match &def.mode {
                 StaticMode::Other(s) if s == name => {}
                 _ => continue,
             }
             if let Some(ref affected) = def.affected {
                 if !static_filter_matches(state, context, affected, id) {
-                    continue;
-                }
-            }
-            if let Some(ref condition) = def.condition {
-                if !evaluate_condition(state, condition, obj.controller, id) {
                     continue;
                 }
             }
@@ -759,29 +697,25 @@ pub fn additional_land_drops(state: &GameState, player: PlayerId) -> u8 {
 
     let mut total: u8 = 0;
 
-    for &id in &state.battlefield {
-        let obj = match state.objects.get(&id) {
-            Some(o) => o,
-            None => continue,
+    // CR 702.26b + CR 604.1: `battlefield_active_statics` owns the phased-out
+    // / command-zone / condition gate, so Azusa phased out correctly stops
+    // granting land drops.
+    for (obj, def) in battlefield_active_statics(state) {
+        // CR 305.2: Determine the additional land count from the variant.
+        let count = match def.mode {
+            StaticMode::MayPlayAdditionalLand => 1,
+            StaticMode::AdditionalLandDrop { count } => count,
+            _ => continue,
         };
 
-        for def in &obj.static_definitions {
-            // CR 305.2: Determine the additional land count from the variant.
-            let count = match def.mode {
-                StaticMode::MayPlayAdditionalLand => 1,
-                StaticMode::AdditionalLandDrop { count } => count,
-                _ => continue,
-            };
-
-            // Check if this static applies to the given player
-            if let Some(ref affected) = def.affected {
-                if !static_filter_matches(state, &context, affected, id) {
-                    continue;
-                }
+        // Check if this static applies to the given player
+        if let Some(ref affected) = def.affected {
+            if !static_filter_matches(state, &context, affected, obj.id) {
+                continue;
             }
-
-            total = total.saturating_add(count);
         }
+
+        total = total.saturating_add(count);
     }
 
     total

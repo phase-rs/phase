@@ -239,31 +239,29 @@ fn event_is_suppressed_by_static_triggers(state: &GameState, event: &GameEvent) 
         _ => return false,
     };
 
-    for &bf_id in &state.battlefield {
-        let Some(bf_obj) = state.objects.get(&bf_id) else {
+    // CR 702.26b + CR 604.1: `battlefield_active_statics` owns the phased-out /
+    // command-zone / condition gate so Torpor Orb phased out no longer silently
+    // suppresses ETB triggers.
+    for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
+        let StaticMode::SuppressTriggers {
+            ref source_filter,
+            ref events,
+        } = def.mode
+        else {
             continue;
         };
-        for def in &bf_obj.static_definitions {
-            let StaticMode::SuppressTriggers {
-                ref source_filter,
-                ref events,
-            } = def.mode
-            else {
-                continue;
-            };
-            if !events.contains(&triggered_event) {
-                continue;
-            }
-            // CR 603.10a: Zone-change last-known information — use the record snapshot.
-            let filter_ctx = super::filter::FilterContext::from_source(state, bf_id);
-            if super::filter::matches_target_filter_on_zone_change_record(
-                state,
-                record,
-                source_filter,
-                &filter_ctx,
-            ) {
-                return true;
-            }
+        if !events.contains(&triggered_event) {
+            continue;
+        }
+        // CR 603.10a: Zone-change last-known information — use the record snapshot.
+        let filter_ctx = super::filter::FilterContext::from_source(state, bf_obj.id);
+        if super::filter::matches_target_filter_on_zone_change_record(
+            state,
+            record,
+            source_filter,
+            &filter_ctx,
+        ) {
+            return true;
         }
     }
     false
@@ -923,27 +921,16 @@ pub fn push_pending_trigger_to_stack(
 /// Scans battlefield for permanents with `StaticMode::Panharmonicon` statics,
 /// then clones matching pending triggers an additional time.
 fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTrigger>) {
-    // Collect doubling sources: (controller, source_id, affected filter)
+    // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating so a
+    // phased-out Panharmonicon no longer doubles triggers.
     let doublers: Vec<(PlayerId, ObjectId, Option<TargetFilter>)> = state
         .battlefield
         .iter()
         .filter_map(|&obj_id| {
             let obj = state.objects.get(&obj_id)?;
-            let has_panharmonicon = obj
-                .static_definitions
-                .iter()
-                .any(|sd| matches!(sd.mode, StaticMode::Panharmonicon));
-            if has_panharmonicon {
-                // Use the first Panharmonicon static's affected filter
-                let affected = obj
-                    .static_definitions
-                    .iter()
-                    .find(|sd| matches!(sd.mode, StaticMode::Panharmonicon))
-                    .and_then(|sd| sd.affected.clone());
-                Some((obj.controller, obj_id, affected))
-            } else {
-                None
-            }
+            let panharmonicon = super::functioning_abilities::active_static_definitions(state, obj)
+                .find(|sd| matches!(sd.mode, StaticMode::Panharmonicon))?;
+            Some((obj.controller, obj_id, panharmonicon.affected.clone()))
         })
         .collect();
 

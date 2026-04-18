@@ -179,7 +179,7 @@ fn player_has_cant_lose(state: &GameState, player_id: PlayerId) -> bool {
             Some(o) => o,
             None => return false,
         };
-        super::static_abilities::active_static_definitions(state, obj).any(|def| {
+        super::functioning_abilities::active_static_definitions(state, obj).any(|def| {
             def.mode == StaticMode::CantLoseTheGame
                 && static_affects_player(obj.controller, &def.affected, player_id)
         })

@@ -78,17 +78,13 @@ fn searcher_is_library_owner(target_player: &TargetFilter) -> bool {
 /// search effects are self-searches where the distinction does not matter. Tightening
 /// this to require `searcher == cause_controller` is tracked as a follow-up refinement.
 fn is_search_muzzled(state: &GameState, cause_controller: crate::types::player::PlayerId) -> bool {
-    for &bf_id in &state.battlefield {
-        let Some(bf_obj) = state.objects.get(&bf_id) else {
+    // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
+    for (bf_obj, def) in crate::game::functioning_abilities::battlefield_active_statics(state) {
+        let StaticMode::CantSearchLibrary { ref cause } = def.mode else {
             continue;
         };
-        for def in &bf_obj.static_definitions {
-            let StaticMode::CantSearchLibrary { ref cause } = def.mode else {
-                continue;
-            };
-            if prohibition_scope_matches_player(cause, cause_controller, bf_id, state) {
-                return true;
-            }
+        if prohibition_scope_matches_player(cause, cause_controller, bf_obj.id, state) {
+            return true;
         }
     }
     false

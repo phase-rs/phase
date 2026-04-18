@@ -753,12 +753,12 @@ fn find_defiler_reduction(
         return None;
     }
 
-    for &bf_id in &state.battlefield {
-        let bf_obj = state.objects.get(&bf_id)?;
+    // CR 702.26b + CR 604.1: `battlefield_active_statics` owns the gating.
+    for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
         if bf_obj.controller != caster {
             continue;
         }
-        for def in &bf_obj.static_definitions {
+        {
             if let StaticMode::DefilerCostReduction {
                 color,
                 life_cost,

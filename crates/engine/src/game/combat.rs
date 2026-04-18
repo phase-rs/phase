@@ -232,23 +232,22 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
         // CR 702.3b: Defender — a creature with defender can't attack,
         // unless overridden by CanAttackWithDefender (e.g., Assault Formation).
         if obj.has_keyword(&Keyword::Defender) {
-            let can_attack_with_defender = obj
-                .static_definitions
-                .iter()
-                .any(|sd| sd.mode == StaticMode::CanAttackWithDefender)
-                || crate::game::static_abilities::check_static_ability(
-                    state,
-                    StaticMode::CanAttackWithDefender,
-                    &crate::game::static_abilities::StaticCheckContext {
-                        target_id: Some(id),
-                        ..Default::default()
-                    },
-                );
+            let can_attack_with_defender =
+                super::functioning_abilities::active_static_definitions(state, obj)
+                    .any(|sd| sd.mode == StaticMode::CanAttackWithDefender)
+                    || crate::game::static_abilities::check_static_ability(
+                        state,
+                        StaticMode::CanAttackWithDefender,
+                        &crate::game::static_abilities::StaticCheckContext {
+                            target_id: Some(id),
+                            ..Default::default()
+                        },
+                    );
             if !can_attack_with_defender {
                 return Err(format!("{:?} has Defender", id));
             }
         }
-        if super::static_abilities::active_static_definitions(state, obj).any(|sd| {
+        if super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
             matches!(
                 sd.mode,
                 StaticMode::CantAttack | StaticMode::CantAttackOrBlock
@@ -348,7 +347,7 @@ pub fn validate_blockers(
         if blocker.tapped {
             return Err(format!("{:?} is tapped", blocker_id));
         }
-        if super::static_abilities::active_static_definitions(state, blocker).any(|sd| {
+        if super::functioning_abilities::active_static_definitions(state, blocker).any(|sd| {
             matches!(
                 sd.mode,
                 StaticMode::CantBlock | StaticMode::CantAttackOrBlock
@@ -368,10 +367,9 @@ pub fn validate_blockers(
             .get(&attacker_id)
             .ok_or_else(|| format!("Attacker {:?} not found", attacker_id))?;
 
-        // CantBeBlocked static ability: creature is completely unblockable
-        if attacker
-            .static_definitions
-            .iter()
+        // CantBeBlocked static ability: creature is completely unblockable.
+        // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
+        if super::functioning_abilities::active_static_definitions(state, attacker)
             .any(|sd| sd.mode == StaticMode::CantBeBlocked)
         {
             return Err(format!(
@@ -381,7 +379,7 @@ pub fn validate_blockers(
         }
 
         // CR 509.1b: "can't be blocked except by X" — blocker must match the exception filter.
-        for sd in &attacker.static_definitions {
+        for sd in super::functioning_abilities::active_static_definitions(state, attacker) {
             if let StaticMode::CantBeBlockedExceptBy { filter } = &sd.mode {
                 let (target_filter, _) = parse_target(filter);
                 if !matches_target_filter(
@@ -399,7 +397,7 @@ pub fn validate_blockers(
         }
 
         // CR 509.1b: "can't be blocked by X" — blocker matching the filter is prohibited.
-        for sd in &attacker.static_definitions {
+        for sd in super::functioning_abilities::active_static_definitions(state, attacker) {
             if let StaticMode::CantBeBlockedBy { filter } = &sd.mode {
                 if matches_target_filter(
                     state,
@@ -551,7 +549,7 @@ pub fn validate_blockers(
                 .get(&blocker_id)
                 .ok_or_else(|| format!("Blocker {:?} not found during limit check", blocker_id))?;
             // Find the best ExtraBlockers grant on this creature
-            let max_allowed = extra_block_limit(blocker);
+            let max_allowed = extra_block_limit(state, blocker);
             if num_blocked > max_allowed {
                 return Err(format!(
                     "{:?} is blocking {} attackers but can only block {}",
@@ -590,11 +588,11 @@ pub fn validate_blockers(
                 None => continue,
             };
 
-            // Check if this attacker has MustBeBlocked
-            let has_must_be_blocked = attacker
-                .static_definitions
-                .iter()
-                .any(|sd| sd.mode == StaticMode::MustBeBlocked);
+            // Check if this attacker has MustBeBlocked.
+            // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
+            let has_must_be_blocked =
+                super::functioning_abilities::active_static_definitions(state, attacker)
+                    .any(|sd| sd.mode == StaticMode::MustBeBlocked);
             if !has_must_be_blocked {
                 continue;
             }
@@ -650,18 +648,18 @@ pub fn validate_blockers(
             }
             // CR 509.1c: Check MustBlock — directly on this creature or from
             // a cross-permanent static (e.g., "All creatures block each combat if able").
-            let has_must_block = obj
-                .static_definitions
-                .iter()
-                .any(|sd| sd.mode == StaticMode::MustBlock)
-                || crate::game::static_abilities::check_static_ability(
-                    state,
-                    StaticMode::MustBlock,
-                    &crate::game::static_abilities::StaticCheckContext {
-                        target_id: Some(obj_id),
-                        ..Default::default()
-                    },
-                );
+            // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
+            let has_must_block =
+                super::functioning_abilities::active_static_definitions(state, obj)
+                    .any(|sd| sd.mode == StaticMode::MustBlock)
+                    || crate::game::static_abilities::check_static_ability(
+                        state,
+                        StaticMode::MustBlock,
+                        &crate::game::static_abilities::StaticCheckContext {
+                            target_id: Some(obj_id),
+                            ..Default::default()
+                        },
+                    );
             if !has_must_block {
                 continue;
             }
@@ -673,7 +671,7 @@ pub fn validate_blockers(
             if obj.tapped {
                 continue;
             }
-            if super::static_abilities::active_static_definitions(state, obj).any(|sd| {
+            if super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
                 matches!(
                     sd.mode,
                     StaticMode::CantBlock | StaticMode::CantAttackOrBlock
@@ -937,9 +935,7 @@ pub fn declare_attackers(
         }
         // CR 508.1d: Check for MustAttack — either directly on this creature
         // or from a cross-permanent static (e.g., "All creatures attack each combat if able").
-        let has_must_attack = obj
-            .static_definitions
-            .iter()
+        let has_must_attack = super::functioning_abilities::active_static_definitions(state, obj)
             .any(|sd| sd.mode == StaticMode::MustAttack)
             || crate::game::static_abilities::check_static_ability(
                 state,
@@ -964,18 +960,17 @@ pub fn declare_attackers(
         }
         // CR 702.3b: Defender — creature can't attack (unless overridden).
         if obj.has_keyword(&Keyword::Defender) {
-            let can_attack_with_defender = obj
-                .static_definitions
-                .iter()
-                .any(|sd| sd.mode == StaticMode::CanAttackWithDefender)
-                || crate::game::static_abilities::check_static_ability(
-                    state,
-                    StaticMode::CanAttackWithDefender,
-                    &crate::game::static_abilities::StaticCheckContext {
-                        target_id: Some(obj_id),
-                        ..Default::default()
-                    },
-                );
+            let can_attack_with_defender =
+                super::functioning_abilities::active_static_definitions(state, obj)
+                    .any(|sd| sd.mode == StaticMode::CanAttackWithDefender)
+                    || crate::game::static_abilities::check_static_ability(
+                        state,
+                        StaticMode::CanAttackWithDefender,
+                        &crate::game::static_abilities::StaticCheckContext {
+                            target_id: Some(obj_id),
+                            ..Default::default()
+                        },
+                    );
             if !can_attack_with_defender {
                 continue;
             }
@@ -1271,9 +1266,7 @@ pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
                 && obj.card_types.core_types.contains(&CoreType::Creature)
                 && !obj.tapped
                 && (!obj.has_keyword(&Keyword::Defender)
-                    || obj
-                        .static_definitions
-                        .iter()
+                    || super::functioning_abilities::active_static_definitions(state, obj)
                         .any(|sd| sd.mode == StaticMode::CanAttackWithDefender)
                     || crate::game::static_abilities::check_static_ability(
                         state,
@@ -1283,7 +1276,7 @@ pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
                             ..Default::default()
                         },
                     ))
-                && !super::static_abilities::active_static_definitions(state, obj).any(|sd| {
+                && !super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
                     matches!(
                         sd.mode,
                         StaticMode::CantAttack | StaticMode::CantAttackOrBlock
@@ -1313,7 +1306,7 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
     let Some(attacker) = state.objects.get(&attacker_id) else {
         return false;
     };
-    if super::static_abilities::active_static_definitions(state, blocker).any(|sd| {
+    if super::functioning_abilities::active_static_definitions(state, blocker).any(|sd| {
         matches!(
             sd.mode,
             StaticMode::CantBlock | StaticMode::CantAttackOrBlock
@@ -1321,15 +1314,15 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
     }) {
         return false;
     }
-    if attacker
-        .static_definitions
-        .iter()
+    // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating for
+    // CantBeBlocked / CantBeBlockedExceptBy / CantBeBlockedBy.
+    if super::functioning_abilities::active_static_definitions(state, attacker)
         .any(|sd| sd.mode == StaticMode::CantBeBlocked)
     {
         return false;
     }
     // CR 509.1b: "can't be blocked except by X" — blocker must match the exception filter.
-    for sd in &attacker.static_definitions {
+    for sd in super::functioning_abilities::active_static_definitions(state, attacker) {
         if let StaticMode::CantBeBlockedExceptBy { filter } = &sd.mode {
             let (target_filter, _) = parse_target(filter);
             if !matches_target_filter(
@@ -1343,7 +1336,7 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
         }
     }
     // CR 509.1b: "can't be blocked by X" — blocker matching the filter is prohibited.
-    for sd in &attacker.static_definitions {
+    for sd in super::functioning_abilities::active_static_definitions(state, attacker) {
         if let StaticMode::CantBeBlockedBy { filter } = &sd.mode {
             if matches_target_filter(
                 state,
@@ -1421,9 +1414,10 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
 /// CR 509.1a + CR 509.1b: Compute the maximum number of attackers a creature can block.
 /// Default is 1. ExtraBlockers { count: Some(n) } adds n (so 1+n). count: None = unlimited (u32::MAX).
 /// Multiple ExtraBlockers stack: the best (highest) limit wins.
-fn extra_block_limit(blocker: &GameObject) -> u32 {
+fn extra_block_limit(state: &GameState, blocker: &GameObject) -> u32 {
     let mut max: u32 = 1;
-    for sd in &blocker.static_definitions {
+    // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
+    for sd in super::functioning_abilities::active_static_definitions(state, blocker) {
         if let StaticMode::ExtraBlockers { count } = &sd.mode {
             match count {
                 None => return u32::MAX, // unlimited
@@ -1613,9 +1607,7 @@ pub fn has_potential_attackers(state: &GameState) -> bool {
                     && obj.card_types.core_types.contains(&CoreType::Creature)
                     && !obj.tapped
                     && (!obj.has_keyword(&Keyword::Defender)
-                        || obj
-                            .static_definitions
-                            .iter()
+                        || super::functioning_abilities::active_static_definitions(state, obj)
                             .any(|sd| sd.mode == StaticMode::CanAttackWithDefender)
                         || crate::game::static_abilities::check_static_ability(
                             state,
@@ -1625,12 +1617,14 @@ pub fn has_potential_attackers(state: &GameState) -> bool {
                                 ..Default::default()
                             },
                         ))
-                    && !super::static_abilities::active_static_definitions(state, obj).any(|sd| {
-                        matches!(
-                            sd.mode,
-                            StaticMode::CantAttack | StaticMode::CantAttackOrBlock
-                        )
-                    })
+                    && !super::functioning_abilities::active_static_definitions(state, obj).any(
+                        |sd| {
+                            matches!(
+                                sd.mode,
+                                StaticMode::CantAttack | StaticMode::CantAttackOrBlock
+                            )
+                        },
+                    )
                     && (obj.has_keyword(&Keyword::Haste)
                         || obj.entered_battlefield_turn.is_some_and(|etb| etb < turn))
             })

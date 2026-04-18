@@ -29,12 +29,12 @@ use super::casting_costs::{
     self, auto_tap_mana_sources, check_additional_cost_or_pay, pay_and_push_adventure,
 };
 use super::engine::EngineError;
+use super::functioning_abilities::active_static_definitions;
 use super::mana_payment;
 use super::quantity::resolve_quantity;
 use super::restrictions;
 use super::speed::{effective_speed, set_speed};
 use super::stack;
-use super::static_abilities::active_static_definitions;
 use super::targeting;
 
 pub(crate) fn variable_speed_payment_range(cost: &AbilityCost, max_speed: u8) -> Option<(u8, u8)> {
@@ -326,37 +326,27 @@ fn granted_spell_keywords(
     let origin_zone = pending_cast_origin_zone_for(state, object_id).unwrap_or(spell_obj.zone);
 
     let mut keywords = Vec::new();
-    for &bf_id in &state.battlefield {
-        let Some(source_obj) = state.objects.get(&bf_id) else {
+    // CR 702.26b + CR 604.1: Functioning gate owned by
+    // `battlefield_active_statics`; inline `def.condition` check removed.
+    for (source_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
+        let StaticMode::CastWithKeyword { keyword } = &def.mode else {
             continue;
         };
 
-        for def in &source_obj.static_definitions {
-            let StaticMode::CastWithKeyword { keyword } = &def.mode else {
-                continue;
-            };
-
-            if def.condition.as_ref().is_some_and(|condition| {
-                !super::layers::evaluate_condition(state, condition, source_obj.controller, bf_id)
-            }) {
-                continue;
-            }
-
-            let matches = def.affected.as_ref().is_none_or(|filter| {
-                super::filter::spell_object_matches_filter_from(
-                    spell_obj,
-                    origin_zone,
-                    caster,
-                    filter,
-                    source_obj.controller,
-                )
-            });
-            if !matches {
-                continue;
-            }
-
-            upsert_keyword_by_kind(&mut keywords, keyword.clone());
+        let matches = def.affected.as_ref().is_none_or(|filter| {
+            super::filter::spell_object_matches_filter_from(
+                spell_obj,
+                origin_zone,
+                caster,
+                filter,
+                source_obj.controller,
+            )
+        });
+        if !matches {
+            continue;
         }
+
+        upsert_keyword_by_kind(&mut keywords, keyword.clone());
     }
 
     keywords
@@ -940,13 +930,16 @@ fn apply_battlefield_cost_modifiers(
 ) {
     use crate::types::ability::ControllerRef;
 
-    for &bf_id in &state.battlefield {
-        let Some(bf_obj) = state.objects.get(&bf_id) else {
-            continue;
-        };
+    // CR 702.26b + CR 604.1: Functioning gate owned by
+    // `battlefield_active_statics`; the inline condition check is intentionally
+    // preserved below because it must re-evaluate against `caster`, not the
+    // static's controller, so `SpellsCastThisTurn` resolves against the casting
+    // player's history.
+    for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
+        let bf_id = bf_obj.id;
         let source_controller = bf_obj.controller;
 
-        for def in &bf_obj.static_definitions {
+        {
             let (amount, spell_filter, dynamic_count, is_raise) = match &def.mode {
                 StaticMode::ReduceCost {
                     amount,
@@ -2806,24 +2799,20 @@ fn is_blocked_from_casting_from_zone(
     }
 
     let object_id = obj.id;
-    for &bf_id in &state.battlefield {
-        let Some(bf_obj) = state.objects.get(&bf_id) else {
+    // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
+    for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
+        if def.mode != StaticMode::CantCastFrom {
             continue;
-        };
-        for def in &bf_obj.static_definitions {
-            if def.mode != StaticMode::CantCastFrom {
-                continue;
-            }
-            // The affected filter encodes zone restrictions via InAnyZone.
-            if let Some(ref filter) = def.affected {
-                if super::filter::matches_target_filter(
-                    state,
-                    object_id,
-                    filter,
-                    &super::filter::FilterContext::from_source(state, bf_id),
-                ) {
-                    return true;
-                }
+        }
+        // The affected filter encodes zone restrictions via InAnyZone.
+        if let Some(ref filter) = def.affected {
+            if super::filter::matches_target_filter(
+                state,
+                object_id,
+                filter,
+                &super::filter::FilterContext::from_source(state, bf_obj.id),
+            ) {
+                return true;
             }
         }
     }
@@ -2856,43 +2845,40 @@ fn is_blocked_by_cant_be_activated(
     activating_source_id: ObjectId,
     activating_ability: &AbilityDefinition,
 ) -> bool {
-    for &bf_id in &state.battlefield {
-        let Some(bf_obj) = state.objects.get(&bf_id) else {
+    // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
+    for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
+        let bf_id = bf_obj.id;
+        let StaticMode::CantBeActivated {
+            ref who,
+            ref source_filter,
+            ref exemption,
+        } = def.mode
+        else {
             continue;
         };
-        for def in &bf_obj.static_definitions {
-            let StaticMode::CantBeActivated {
-                ref who,
-                ref source_filter,
-                ref exemption,
-            } = def.mode
-            else {
-                continue;
-            };
-            // CR 109.5: The "who" axis — is the caster within the scope?
-            if !casting_prohibition_scope_matches(who, caster, bf_obj, state) {
-                continue;
-            }
-            // CR 602.5: The permanent-axis — does the object whose ability is being
-            // activated match the static's filter? `ControllerRef` is resolved against
-            // the static's source controller (`bf_id`), not the caster.
-            let filter_ctx = super::filter::FilterContext::from_source(state, bf_id);
-            if !super::filter::matches_target_filter(
-                state,
-                activating_source_id,
-                source_filter,
-                &filter_ctx,
-            ) {
-                continue;
-            }
-            // CR 605.1a: Apply the exemption gate. Routes through the single
-            // `mana_abilities::is_mana_ability` classifier — no duplicated logic.
-            match exemption {
-                ActivationExemption::None => return true,
-                ActivationExemption::ManaAbilities => {
-                    if !super::mana_abilities::is_mana_ability(activating_ability) {
-                        return true;
-                    }
+        // CR 109.5: The "who" axis — is the caster within the scope?
+        if !casting_prohibition_scope_matches(who, caster, bf_obj, state) {
+            continue;
+        }
+        // CR 602.5: The permanent-axis — does the object whose ability is being
+        // activated match the static's filter? `ControllerRef` is resolved against
+        // the static's source controller (`bf_id`), not the caster.
+        let filter_ctx = super::filter::FilterContext::from_source(state, bf_id);
+        if !super::filter::matches_target_filter(
+            state,
+            activating_source_id,
+            source_filter,
+            &filter_ctx,
+        ) {
+            continue;
+        }
+        // CR 605.1a: Apply the exemption gate. Routes through the single
+        // `mana_abilities::is_mana_ability` classifier — no duplicated logic.
+        match exemption {
+            ActivationExemption::None => return true,
+            ActivationExemption::ManaAbilities => {
+                if !super::mana_abilities::is_mana_ability(activating_ability) {
+                    return true;
                 }
             }
         }
@@ -2907,11 +2893,9 @@ fn is_blocked_by_cant_be_activated(
 fn is_blocked_by_cant_cast_during(state: &GameState, caster: PlayerId) -> bool {
     use crate::types::phase::Phase;
 
-    for &bf_id in &state.battlefield {
-        let Some(bf_obj) = state.objects.get(&bf_id) else {
-            continue;
-        };
-        for def in &bf_obj.static_definitions {
+    // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
+    for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
+        {
             let StaticMode::CantCastDuring { ref who, ref when } = def.mode else {
                 continue;
             };
@@ -2960,41 +2944,26 @@ fn is_blocked_by_cant_be_cast(
     caster: PlayerId,
     spell_obj: &super::game_object::GameObject,
 ) -> bool {
-    for &bf_id in &state.battlefield {
-        let Some(bf_obj) = state.objects.get(&bf_id) else {
+    // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`
+    // — including the per-static `condition` check; no inline duplication needed.
+    for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
+        let StaticMode::CantBeCast { ref who } = def.mode else {
             continue;
         };
-        for def in &bf_obj.static_definitions {
-            let StaticMode::CantBeCast { ref who } = def.mode else {
-                continue;
-            };
 
-            // CR 101.2: Check if the caster is in the affected scope.
-            if !casting_prohibition_scope_matches(who, caster, bf_obj, state) {
-                continue;
-            }
-
-            // CR 604.1: Check spell filter if present.
-            if let Some(ref affected) = def.affected {
-                if !cant_cast_filter_matches(state, spell_obj, affected, bf_obj) {
-                    continue;
-                }
-            }
-
-            // CR 604.1: Evaluate condition if present (e.g., "as long as ...").
-            if let Some(ref condition) = def.condition {
-                if !crate::game::layers::evaluate_condition(
-                    state,
-                    condition,
-                    bf_obj.controller,
-                    bf_id,
-                ) {
-                    continue;
-                }
-            }
-
-            return true;
+        // CR 101.2: Check if the caster is in the affected scope.
+        if !casting_prohibition_scope_matches(who, caster, bf_obj, state) {
+            continue;
         }
+
+        // CR 604.1: Check spell filter if present.
+        if let Some(ref affected) = def.affected {
+            if !cant_cast_filter_matches(state, spell_obj, affected, bf_obj) {
+                continue;
+            }
+        }
+
+        return true;
     }
     false
 }
@@ -3064,11 +3033,9 @@ fn is_blocked_by_per_turn_cast_limit(
     caster: PlayerId,
     spell_obj: &super::game_object::GameObject,
 ) -> bool {
-    for &bf_id in &state.battlefield {
-        let Some(bf_obj) = state.objects.get(&bf_id) else {
-            continue;
-        };
-        for def in &bf_obj.static_definitions {
+    // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
+    for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
+        {
             let StaticMode::PerTurnCastLimit {
                 ref who,
                 max,

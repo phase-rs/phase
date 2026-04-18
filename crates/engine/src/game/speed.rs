@@ -85,13 +85,13 @@ pub fn controls_start_your_engines(state: &GameState, player: PlayerId) -> bool 
 
 /// Card-specific rule modification for effects like Gomif.
 pub fn can_increase_speed_beyond_4(state: &GameState, player: PlayerId) -> bool {
+    // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
     state.battlefield.iter().any(|&id| {
         state.objects.get(&id).is_some_and(|obj| {
             if obj.controller != player {
                 return false;
             }
-            obj.static_definitions
-                .iter()
+            crate::game::functioning_abilities::active_static_definitions(state, obj)
                 .any(|def| def.mode == StaticMode::SpeedCanIncreaseBeyondFour)
         })
     })

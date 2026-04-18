@@ -461,26 +461,24 @@ fn apply_ability_cost_reduction(
     ability_keyword: &str,
     mut cost: ManaCost,
 ) -> ManaCost {
-    for &bf_id in &state.battlefield {
-        let Some(bf_obj) = state.objects.get(&bf_id) else {
-            continue;
-        };
+    // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
+    for (bf_obj, static_def) in
+        crate::game::functioning_abilities::battlefield_active_statics(state)
+    {
         if bf_obj.controller != player {
             continue;
         }
-        for static_def in &bf_obj.static_definitions {
-            if let StaticMode::ReduceAbilityCost {
-                ref keyword,
-                amount,
-            } = static_def.mode
-            {
-                if keyword == ability_keyword {
-                    if let ManaCost::Cost {
-                        ref mut generic, ..
-                    } = cost
-                    {
-                        *generic = generic.saturating_sub(amount);
-                    }
+        if let StaticMode::ReduceAbilityCost {
+            ref keyword,
+            amount,
+        } = static_def.mode
+        {
+            if keyword == ability_keyword {
+                if let ManaCost::Cost {
+                    ref mut generic, ..
+                } = cost
+                {
+                    *generic = generic.saturating_sub(amount);
                 }
             }
         }

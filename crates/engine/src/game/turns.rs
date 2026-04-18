@@ -315,18 +315,21 @@ pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
         .copied()
         .filter(|id| {
             state.objects.get(id).is_some_and(|obj| {
+                // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
                 obj.controller == active
-                    && obj.static_definitions.iter().any(|sd| {
-                        sd.mode == StaticMode::CantUntap
-                            && super::static_abilities::check_static_ability(
-                                state,
-                                StaticMode::CantUntap,
-                                &super::static_abilities::StaticCheckContext {
-                                    target_id: Some(*id),
-                                    ..Default::default()
-                                },
-                            )
-                    })
+                    && super::functioning_abilities::active_static_definitions(state, obj).any(
+                        |sd| {
+                            sd.mode == StaticMode::CantUntap
+                                && super::static_abilities::check_static_ability(
+                                    state,
+                                    StaticMode::CantUntap,
+                                    &super::static_abilities::StaticCheckContext {
+                                        target_id: Some(*id),
+                                        ..Default::default()
+                                    },
+                                )
+                        },
+                    )
             })
         })
         .collect();
@@ -592,12 +595,9 @@ fn compute_maximum_hand_size(state: &GameState, player: PlayerId) -> usize {
             None => continue,
         };
 
-        // Skip non-emblem command zone objects (commanders, etc.)
-        if obj.zone == Zone::Command && !obj.is_emblem {
-            continue;
-        }
-
-        for def in &obj.static_definitions {
+        // CR 702.26b + CR 604.1 + CR 114.4: `active_static_definitions` owns the
+        // phased-out / command-zone / condition gate.
+        for def in super::functioning_abilities::active_static_definitions(state, obj) {
             let modification = match &def.mode {
                 StaticMode::MaximumHandSize { modification } => modification,
                 _ => continue,
@@ -606,13 +606,6 @@ fn compute_maximum_hand_size(state: &GameState, player: PlayerId) -> usize {
             // Check affected filter
             if let Some(ref affected) = def.affected {
                 if !super::static_abilities::static_filter_matches(state, &context, affected, id) {
-                    continue;
-                }
-            }
-
-            // Evaluate condition if present
-            if let Some(ref condition) = def.condition {
-                if !super::layers::evaluate_condition(state, condition, obj.controller, id) {
                     continue;
                 }
             }
@@ -703,12 +696,11 @@ pub fn should_skip_draw(state: &GameState) -> bool {
 /// due to a "skip your [step] step" static ability on a permanent they control.
 fn should_skip_step(state: &GameState, step: Phase) -> bool {
     let active = state.active_player;
+    // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
     state.battlefield.iter().any(|id| {
         state.objects.get(id).is_some_and(|obj| {
             obj.controller == active
-                && obj
-                    .static_definitions
-                    .iter()
+                && super::functioning_abilities::active_static_definitions(state, obj)
                     .any(|sd| sd.mode == StaticMode::SkipStep { step })
         })
     })

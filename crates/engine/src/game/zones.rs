@@ -365,25 +365,23 @@ pub fn add_to_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, owner
 /// e.g., Grafdigger's Cage: "Creature cards in graveyards and libraries can't enter the battlefield."
 fn is_blocked_from_entering_battlefield(state: &GameState, obj: &GameObject) -> bool {
     let object_id = obj.id;
-    for &bf_id in &state.battlefield {
-        let Some(bf_obj) = state.objects.get(&bf_id) else {
+    // CR 702.26b + CR 604.1: `battlefield_active_statics` owns the phased-out /
+    // command-zone / condition gate so Grafdigger's Cage phased out no longer
+    // blocks ETB from graveyard/library.
+    for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
+        if def.mode != StaticMode::CantEnterBattlefieldFrom {
             continue;
-        };
-        for def in &bf_obj.static_definitions {
-            if def.mode != StaticMode::CantEnterBattlefieldFrom {
-                continue;
-            }
-            // The affected filter encodes both card type and zone restrictions
-            // (e.g., Creature + InAnyZone[Graveyard, Library]).
-            if let Some(ref filter) = def.affected {
-                if super::filter::matches_target_filter(
-                    state,
-                    object_id,
-                    filter,
-                    &super::filter::FilterContext::from_source(state, bf_id),
-                ) {
-                    return true;
-                }
+        }
+        // The affected filter encodes both card type and zone restrictions
+        // (e.g., Creature + InAnyZone[Graveyard, Library]).
+        if let Some(ref filter) = def.affected {
+            if super::filter::matches_target_filter(
+                state,
+                object_id,
+                filter,
+                &super::filter::FilterContext::from_source(state, bf_obj.id),
+            ) {
+                return true;
             }
         }
     }
