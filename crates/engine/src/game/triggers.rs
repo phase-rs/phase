@@ -975,7 +975,10 @@ fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTrigger>) 
 /// CR 702.26b: Phased-out permanents are treated as though they don't exist
 /// — their state triggers don't fire.
 pub fn check_state_triggers(state: &mut GameState) {
-    let source_ids: Vec<ObjectId> = state.battlefield_phased_in_ids();
+    // CR 702.26b: phased-out gating is owned by `active_trigger_definitions`
+    // below; we iterate the full battlefield and let the helper drop phased-
+    // out permanents rather than re-filtering here.
+    let source_ids: Vec<ObjectId> = state.battlefield.to_vec();
 
     let mut pending: Vec<PendingTrigger> = Vec::new();
 

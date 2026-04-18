@@ -153,8 +153,17 @@ pub struct GameObject {
     pub base_mana_cost: ManaCost,
     pub base_keywords: Vec<Keyword>,
     pub base_abilities: Vec<AbilityDefinition>,
+    /// CR 613.1: Printed baselines captured at `GameObject` construction —
+    /// the values on the card (or defined by the effect that created this
+    /// object) before any continuous effects apply. They are rebuilt, not
+    /// runtime-mutated, so they intentionally use plain `Vec<T>` rather
+    /// than the `Definitions<T>` wrapper that gates live reads.
     pub base_trigger_definitions: Vec<TriggerDefinition>,
+    /// CR 613.1: printed-card baseline for replacement definitions. See
+    /// `base_trigger_definitions`.
     pub base_replacement_definitions: Vec<ReplacementDefinition>,
+    /// CR 613.1: printed-card baseline for static definitions. See
+    /// `base_trigger_definitions`.
     pub base_static_definitions: Vec<StaticDefinition>,
     pub base_color: Vec<ManaColor>,
     #[serde(default)]

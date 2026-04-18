@@ -69,9 +69,15 @@ pub fn derive_display_state(state: &mut GameState) {
             .objects
             .iter()
             .filter_map(|(&id, obj)| {
+                // Classification scan: we only need to know whether this
+                // object *declares* a devotion-conditioned static so the
+                // dirty-tracker can pick it up. CR 604.1 / CR 702.26b
+                // gating is applied later when the static actually
+                // evaluates — here we must see every declared definition,
+                // so `iter_unchecked` is the correct intent.
                 let has_devotion_static =
                     obj.static_definitions
-                        .iter_all()
+                        .iter_unchecked()
                         .any(|def| match &def.condition {
                             Some(StaticCondition::DevotionGE { .. }) => true,
                             Some(StaticCondition::Not { condition })

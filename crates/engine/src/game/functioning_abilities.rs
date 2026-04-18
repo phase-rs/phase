@@ -18,12 +18,15 @@
 //! - **Statics / triggers**: gated to the battlefield by the caller's choice
 //!   of iteration (`battlefield_active_*`). Command-zone emblems pass the
 //!   phased-out/command-zone gate for per-object iteration.
-//! - **Replacements**: NOT battlefield-scoped. CR 903.9 commander-zone
-//!   replacement functions from graveyard / exile; Leyline-class
-//!   replacements function from hand. Each `ReplacementDefinition`'s
-//!   metadata governs its zone-of-function, so `active_replacements`
-//!   scans every object and only applies the phased-out/command-zone
-//!   gate shared with statics and triggers.
+//! - **Replacements**: NOT battlefield-scoped. Zone-of-function is a
+//!   per-replacement property on `ReplacementDefinition`, so
+//!   `active_replacements` scans every object and only applies the
+//!   phased-out / command-zone gate. Caller-side zone restriction still
+//!   lives in `find_applicable_replacements`, which today filters to
+//!   `[Battlefield, Command]` because no in-engine replacement functions
+//!   from hand / graveyard / exile. CR 903.9a commander redirection is
+//!   handled separately in `zones::move_to_zone` — it is not routed
+//!   through `ReplacementDefinition`.
 //!
 //! # Condition filtering
 //!
@@ -165,15 +168,22 @@ pub fn battlefield_active_triggers(
 /// All-zones iteration of `(index, source_obj, replacement_def)` triples
 /// with the CR 702.26b / CR 114.4 gate applied.
 ///
-/// This is NOT battlefield-scoped on purpose:
-/// - **CR 903.9**: commander-zone replacement functions while the
-///   commander is in graveyard / exile.
-/// - Leyline-class replacements function from the hand.
+/// This is deliberately NOT battlefield-scoped — zone-of-function is a
+/// per-replacement property governed by each `ReplacementDefinition`'s
+/// own `destination_zone` / `valid_card` metadata. The helper only
+/// enforces the shared phased-out / command-zone gate. CR 616 event-
+/// time evaluation remains in the replacement pipeline itself.
 ///
-/// Each `ReplacementDefinition`'s own `destination_zone` / `valid_card`
-/// metadata governs where it matches events; this helper only enforces
-/// the shared phased-out / command-zone gate. CR 616 event-time
-/// evaluation remains in the replacement pipeline itself.
+/// Zones callers actually scan today:
+/// - `find_applicable_replacements` in `game/replacement.rs` restricts
+///   to `[Battlefield, Command]` plus the entering card (CR 614.12
+///   self-replacement on ETB). That matches the shape of every
+///   replacement currently in the engine — no hand-zone (Leyline-class)
+///   replacements are wired up yet.
+/// - **CR 903.9a commander redirection** is not routed through
+///   `ReplacementDefinition` at all; it is a hard-coded redirect in
+///   `game/zones.rs::move_to_zone`. The helper's scan is future-proofed
+///   for per-replacement zones but no current caller needs it.
 pub fn active_replacements(
     state: &GameState,
 ) -> impl Iterator<Item = (usize, &GameObject, &ReplacementDefinition)> {

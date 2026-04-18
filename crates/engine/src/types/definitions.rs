@@ -20,10 +20,9 @@
 //! way to iterate is the `game::functioning_abilities` module, which applies
 //! the correct CR gates for each definition kind.
 //!
-//! Mutation APIs (`push`, `extend`, `clear`, `retain`, plus the internal
-//! `iter_all` / `iter_all_mut`) are crate-visible so construction and layer
-//! recomputation can rebuild the collection; external read paths must use the
-//! helpers.
+//! Mutation APIs (`push`, `clear`, `retain`, plus the internal
+//! `iter_all`) are crate-visible so construction and layer recomputation
+//! can rebuild the collection; external read paths must use the helpers.
 
 use serde::{Deserialize, Serialize};
 
@@ -116,12 +115,6 @@ impl<T> Definitions<T> {
     /// engine crate uses `functioning_abilities` helpers.
     pub fn iter_unchecked(&self) -> std::slice::Iter<'_, T> {
         self.0.iter()
-    }
-
-    /// Mutable iteration of all definitions without applying any CR gate.
-    #[allow(dead_code)]
-    pub(crate) fn iter_all_mut(&mut self) -> std::slice::IterMut<'_, T> {
-        self.0.iter_mut()
     }
 }
 
