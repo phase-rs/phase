@@ -68,7 +68,7 @@ jobs:
 
       - name: Generate card data and coverage report
         run: |
-          cargo run --release --bin oracle-gen --features cli -- data/ --stats > client/public/card-data.json
+          cargo run --release --bin oracle-gen --features cli -- data/ --stats --names-out client/public/card-names.json > client/public/card-data.json
           cp client/public/card-data.json data/card-data.json
           cargo run --release --bin coverage-report -- data/ --all > client/public/coverage-data.json
 

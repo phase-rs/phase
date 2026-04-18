@@ -82,10 +82,11 @@ jobs:
       - name: Generate card data and coverage (from source)
         run: |
           mkdir -p data
-          cargo run --release --bin oracle-gen --features cli -- data/ --stats > data/card-data.json
+          cargo run --release --bin oracle-gen --features cli -- data/ --stats --names-out data/card-names.json > data/card-data.json
           cargo run --release --bin coverage-report -- data/ --all > data/coverage-data.json
           jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' data/coverage-data.json > data/coverage-summary.json
           cp data/card-data.json client/public/card-data.json
+          cp data/card-names.json client/public/card-names.json
           cp data/coverage-data.json client/public/coverage-data.json
           cp data/coverage-summary.json client/public/coverage-summary.json
 

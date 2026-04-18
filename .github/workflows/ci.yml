@@ -67,7 +67,7 @@ jobs:
 
       - name: Generate card data
         run: |
-          cargo run --bin oracle-gen --features cli -- data/ --stats > data/card-data.json
+          cargo run --bin oracle-gen --features cli -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
       - name: Card support coverage report
         run: |
@@ -81,6 +81,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           npx wrangler r2 object put phase-rs-data/preview/card-data.json --file data/card-data.json --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+          npx wrangler r2 object put phase-rs-data/preview/card-names.json --file data/card-names.json --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/preview/coverage-data.json --file data/coverage-data.json --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/preview/coverage-summary.json --file data/coverage-summary.json --content-type application/json --cache-control "public, max-age=60, must-revalidate"
 
