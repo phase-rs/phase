@@ -2083,6 +2083,8 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
 pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
     let trigger_registry = build_trigger_registry();
     let static_registry = build_static_registry();
+    let valid_subtypes = collect_valid_subtypes(card_db);
+    let handled_features = resolver_handled_features();
 
     // Count distinct keyword variants across all cards (excluding Unknown)
     let keyword_count = {
@@ -2107,6 +2109,10 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
     for (key, face) in card_db.face_iter() {
         let mut missing = Vec::new();
 
+        // Build the parse tree once — it feeds both the silent-drop check
+        // (below) and gap_details (further down), so compute it up front.
+        let parse_details = build_parse_details(face, &trigger_registry, &static_registry);
+
         // Check abilities
         check_abilities(&face.abilities, &mut missing);
 
@@ -2127,6 +2133,19 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
 
         // Check parse warnings
         check_parse_warnings(&face.parse_warnings, &mut missing);
+
+        // Validate subtype references in AddSubtype modifications against
+        // the printed-corpus lexicon. Catches parser misfires where English
+        // filler words (`Gets`, `Until`, `And`) were tokenized as subtypes.
+        check_subtype_lexicon(face, &valid_subtypes, &mut missing);
+
+        // Flag cards whose parsed features have no runtime resolver. Without
+        // this, a card can parse cleanly yet silently do nothing on resolution.
+        check_resolver_features(face, &handled_features, &mut missing);
+
+        // Flag cards where the parser consumed Oracle text without producing
+        // a corresponding parse item. Uses the parse tree computed above.
+        check_silent_drops(&face.oracle_text, &parse_details, &mut missing);
 
         let supported = missing.is_empty();
 
@@ -2149,7 +2168,6 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
             }
         }
 
-        let parse_details = build_parse_details(face, &trigger_registry, &static_registry);
         let mut gap_details = extract_gap_details(&parse_details);
         // Append parse-warning gaps so they appear in per-card gap reporting.
         for warning in &face.parse_warnings {
@@ -2548,6 +2566,167 @@ fn check_replacements(replacements: &[ReplacementDefinition], missing: &mut Vec<
 
         if let Some(ReplacementCondition::Unrecognized { ref text }) = def.condition {
             let label = format!("Replacement:Unrecognized({})", truncate_label(text, 60));
+            if !missing.contains(&label) {
+                missing.push(label);
+            }
+        }
+    }
+}
+
+/// Build a lexicon of every subtype that appears on at least one printed
+/// card face. Used by [`check_subtype_lexicon`] to flag parser misfires:
+/// any `AddSubtype { subtype }` whose value isn't a real printed subtype
+/// (e.g. `"Gets"`, `"Until"`, `"+1/+1"`) signals that the animation or
+/// static-ability parser tokenized English filler words as subtypes.
+///
+/// The MTG Comprehensive Rules define valid subtypes (CR 205.3), but the
+/// printed corpus is the authoritative source for the engine — anything
+/// that has appeared on a real card's type line is valid.
+fn collect_valid_subtypes(card_db: &CardDatabase) -> HashSet<String> {
+    card_db
+        .face_iter()
+        .flat_map(|(_, face)| face.card_type.subtypes.iter().cloned())
+        .collect()
+}
+
+/// Visit every `ContinuousModification` reachable from a card face.
+///
+/// Walks abilities (including nested sub/mode chains and `GenericEffect`
+/// static modifications), static abilities, triggers' execute bodies, and
+/// replacements' execute/decline bodies. The visitor is invoked for each
+/// modification so callers can inspect or validate the payload.
+fn visit_face_modifications(face: &CardFace, visit: &mut impl FnMut(&ContinuousModification)) {
+    for ability in &face.abilities {
+        visit_ability_modifications(ability, visit);
+    }
+    for stat in &face.static_abilities {
+        for m in &stat.modifications {
+            visit(m);
+        }
+    }
+    for trigger in &face.triggers {
+        if let Some(execute) = &trigger.execute {
+            visit_ability_modifications(execute, visit);
+        }
+    }
+    for replacement in &face.replacements {
+        if let Some(execute) = &replacement.execute {
+            visit_ability_modifications(execute, visit);
+        }
+        if let ReplacementMode::Optional {
+            decline: Some(decline),
+        } = &replacement.mode
+        {
+            visit_ability_modifications(decline, visit);
+        }
+    }
+}
+
+/// Recursively visit modifications inside an ability's effect graph.
+/// Descends into `GenericEffect.static_abilities` (the typical carrier of
+/// continuous modifications emitted from animations), sub-abilities, and
+/// modal branches. Non-`GenericEffect` effects don't carry modifications.
+fn visit_ability_modifications(
+    def: &AbilityDefinition,
+    visit: &mut impl FnMut(&ContinuousModification),
+) {
+    if let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*def.effect
+    {
+        for stat in static_abilities {
+            for m in &stat.modifications {
+                visit(m);
+            }
+        }
+    }
+    if let Some(sub) = &def.sub_ability {
+        visit_ability_modifications(sub, visit);
+    }
+    if let Some(else_ab) = &def.else_ability {
+        visit_ability_modifications(else_ab, visit);
+    }
+    for mode_ability in &def.mode_abilities {
+        visit_ability_modifications(mode_ability, visit);
+    }
+}
+
+/// Validate every `AddSubtype` modification on the face against the lexicon
+/// of real printed subtypes. Flags each invalid subtype as a distinct gap
+/// label so the coverage reporter can group parser misfires by the bad value.
+///
+/// Background: the animation parser (see `parse_animation_types`) and static
+/// parser can over-eagerly tokenize English filler words as subtypes
+/// (e.g. `"Gets"`, `"Until"`, `"And"`). Those modifications never apply at
+/// runtime but contaminate the coverage signal — without this check a card
+/// whose only "supported" ability is a misparsed become would read as
+/// supported in the dashboard.
+fn check_subtype_lexicon(face: &CardFace, valid: &HashSet<String>, missing: &mut Vec<String>) {
+    visit_face_modifications(face, &mut |m| {
+        if let ContinuousModification::AddSubtype { subtype } = m {
+            if !valid.contains(subtype) {
+                let label = format!(
+                    "ParserMisfire:InvalidSubtype({})",
+                    truncate_label(subtype, 40)
+                );
+                if !missing.contains(&label) {
+                    missing.push(label);
+                }
+            }
+        }
+    });
+}
+
+/// Flag cards where the parser consumed Oracle text without emitting a
+/// corresponding parse item — a silent drop. Shares the oracle-line counting
+/// logic with [`audit_silent_drops`] (used by the CLI audit) so both views
+/// agree on what counts as a dropped line.
+///
+/// Background: `collect_ability_missing_parts` only flags `Effect::Unimplemented`
+/// at the top of an ability. A parser can silently swallow a whole Oracle line
+/// (or emit nothing at all) and the card still reports as supported. Folding
+/// this into the supported predicate unballoons coverage by cards where the
+/// parser accepted text but produced no runtime behavior for it.
+fn check_silent_drops(
+    oracle_text: &Option<String>,
+    parse_details: &[ParsedItem],
+    missing: &mut Vec<String>,
+) {
+    let Some(oracle_text) = oracle_text.as_ref().filter(|t| !t.is_empty()) else {
+        return;
+    };
+
+    let effective_oracle = count_effective_oracle_lines(oracle_text);
+    let effective_parsed = count_effective_parsed_items(parse_details);
+
+    if effective_oracle > effective_parsed {
+        let label = format!("SilentDrop:{}_of_{}", effective_parsed, effective_oracle);
+        if !missing.contains(&label) {
+            missing.push(label);
+        }
+    }
+}
+
+/// Flag cards whose parsed features aren't handled by any runtime resolver.
+/// Shares the per-card feature extraction with [`audit_resolver_features`]
+/// (used by the CLI audit) so both views agree on what counts as unhandled.
+///
+/// Background: `collect_ability_missing_parts` checks that the effect variant
+/// is non-Unimplemented, but doesn't verify the resolver actually does
+/// anything with the payload. E.g., a `Discover` effect may parse but have
+/// no runtime handler — the card reads as supported yet silently does
+/// nothing on resolution. Folding this into the supported predicate catches
+/// those resolver gaps at coverage time.
+fn check_resolver_features(
+    face: &CardFace,
+    handled: &HashSet<&'static str>,
+    missing: &mut Vec<String>,
+) {
+    let mut features = HashSet::new();
+    extract_card_features(face, &mut features);
+    for feat in features {
+        if !handled.contains(feat.as_str()) {
+            let label = format!("ResolverFeature:{feat}");
             if !missing.contains(&label) {
                 missing.push(label);
             }
@@ -6087,6 +6266,61 @@ mod tests {
     fn vanilla_object_has_no_unimplemented_mechanics() {
         let obj = make_obj();
         assert!(unimplemented_mechanics(&obj).is_empty());
+    }
+
+    /// Regression: [`check_subtype_lexicon`] must flag AddSubtype values
+    /// that aren't in the printed-corpus lexicon, catching parser misfires
+    /// where English filler words leak through as subtypes.
+    #[test]
+    fn check_subtype_lexicon_flags_unknown_subtype() {
+        let mut face = CardFace {
+            name: "Test".into(),
+            ..Default::default()
+        };
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous().modifications(vec![
+                    ContinuousModification::AddSubtype {
+                        subtype: "Dragon".into(),
+                    },
+                    ContinuousModification::AddSubtype {
+                        subtype: "Gets".into(),
+                    },
+                ])],
+                duration: None,
+                target: None,
+            },
+        ));
+
+        let valid: HashSet<String> = ["Dragon".to_string()].into_iter().collect();
+        let mut missing = Vec::new();
+        check_subtype_lexicon(&face, &valid, &mut missing);
+
+        assert_eq!(
+            missing,
+            vec!["ParserMisfire:InvalidSubtype(Gets)".to_string()]
+        );
+    }
+
+    #[test]
+    fn check_subtype_lexicon_accepts_valid_subtypes() {
+        let mut face = CardFace {
+            name: "Test".into(),
+            ..Default::default()
+        };
+        face.static_abilities
+            .push(StaticDefinition::continuous().modifications(vec![
+                ContinuousModification::AddSubtype {
+                    subtype: "Assassin".into(),
+                },
+            ]));
+
+        let valid: HashSet<String> = ["Assassin".to_string()].into_iter().collect();
+        let mut missing = Vec::new();
+        check_subtype_lexicon(&face, &valid, &mut missing);
+
+        assert!(missing.is_empty());
     }
 
     #[test]

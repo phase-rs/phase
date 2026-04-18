@@ -306,7 +306,7 @@ function CardCoverageView() {
       {/* Master-detail split */}
       <div className="flex min-h-0 flex-1" onKeyDown={handleKeyDown}>
         {/* Left panel: card list — hidden on mobile when a card is selected */}
-        <div className={`flex w-full flex-col border-r border-white/10 md:w-80 md:shrink-0 ${activeCard ? "hidden md:flex" : "flex"}`}>
+        <div className={`flex min-h-0 w-full flex-col border-r border-white/10 md:w-80 md:shrink-0 ${activeCard ? "hidden md:flex" : "flex"}`}>
           {/* Search, sort & filter */}
           <div className="space-y-2 px-3 py-3">
             <div className="flex gap-2">

@@ -1,7 +1,14 @@
 use std::str::FromStr;
 
+use nom::branch::alt;
+use nom::bytes::complete::tag_no_case;
+use nom::character::complete::{multispace1, satisfy};
+use nom::combinator::{peek, recognize, value};
+use nom::multi::{many0, separated_list1};
+use nom::sequence::pair;
 use nom::Parser;
 
+use super::super::oracle_nom::error::OracleResult;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_util::split_around;
 use super::token::{
@@ -225,6 +232,111 @@ fn split_animation_base_pt_clause(text: &str) -> Option<(&str, i32, i32)> {
     Some((descriptor, power, toughness))
 }
 
+/// Classification of a single token within a "becomes [type expression]" noun
+/// phrase. Encodes the full design space so callers can't conflate core types
+/// (emitted as `AddType`) with subtypes (emitted as `AddSubtype`) or leak
+/// supertypes (recognized-but-discarded: animations never change supertypes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AnimationTypeToken {
+    /// CR 205.2a core type — maps to `ContinuousModification::AddType`.
+    CoreType(&'static str),
+    /// CR 205.3 subtype — maps to `ContinuousModification::AddSubtype`.
+    Subtype(String),
+    /// CR 205.4 supertype — recognized to avoid halting the sequence, but
+    /// not emitted as a modification (animations don't grant supertypes).
+    Supertype,
+}
+
+/// Zero-width word-boundary check: next char must be non-alphabetic (whitespace,
+/// punctuation, or end-of-input). Mirrors the pattern used by `parse_article_number`
+/// and `parse_keyword_name` to prevent "land" from swallowing "landwalk".
+fn alpha_word_boundary(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        peek(alt((
+            nom::combinator::eof,
+            recognize(satisfy(|c: char| !c.is_ascii_alphabetic())),
+        ))),
+    )
+    .parse(input)
+}
+
+/// Parse a CR 205.2a core type keyword (case-insensitive, word-boundary terminated).
+fn parse_animation_core_type(input: &str) -> OracleResult<'_, AnimationTypeToken> {
+    let (rest, core) = alt((
+        value("Artifact", tag_no_case("artifact")),
+        value("Creature", tag_no_case("creature")),
+        value("Enchantment", tag_no_case("enchantment")),
+        value("Land", tag_no_case("land")),
+        value("Planeswalker", tag_no_case("planeswalker")),
+    ))
+    .parse(input)?;
+    let (rest, _) = alpha_word_boundary(rest)?;
+    Ok((rest, AnimationTypeToken::CoreType(core)))
+}
+
+/// Parse a CR 205.4 supertype keyword (case-insensitive, word-boundary terminated).
+fn parse_animation_supertype(input: &str) -> OracleResult<'_, AnimationTypeToken> {
+    let (rest, _) = alt((
+        tag_no_case("legendary"),
+        tag_no_case("basic"),
+        tag_no_case("snow"),
+    ))
+    .parse(input)?;
+    let (rest, _) = alpha_word_boundary(rest)?;
+    Ok((rest, AnimationTypeToken::Supertype))
+}
+
+/// Parse a CR 205.3 subtype: a capitalized proper-noun word of length ≥ 2,
+/// optionally hyphenated (`Power-Plant`, `Lhurgoyf`). Rejects single-letter
+/// tokens (`X` in "X/X"), lowercase connectives (`and`, `gets`, `gains`,
+/// `until`), and mid-word positions (if followed by `/`, `:`, digits, etc.).
+fn parse_animation_subtype(input: &str) -> OracleResult<'_, AnimationTypeToken> {
+    let (rest, word) = recognize(pair(
+        // First char: capital letter.
+        satisfy(|c: char| c.is_ascii_uppercase()),
+        // At least one more alphabetic/hyphen character — min length 2.
+        pair(
+            satisfy(|c: char| c.is_ascii_alphabetic() || c == '-'),
+            many0(satisfy(|c: char| c.is_ascii_alphabetic() || c == '-')),
+        ),
+    ))
+    .parse(input)?;
+    // Word-boundary: reject follow-ups like `/`, `:`, digits, `{`, `+`, `"` —
+    // these indicate we landed mid-P/T-token (`Dragon3/3`) or mid-cost (`B:`).
+    let (rest, _) = peek(alt((
+        nom::combinator::eof,
+        recognize(satisfy(|c: char| {
+            c.is_whitespace() || matches!(c, ',' | '.' | ';' | ')' | '!' | '?')
+        })),
+    )))
+    .parse(rest)?;
+    Ok((rest, AnimationTypeToken::Subtype(word.to_string())))
+}
+
+fn parse_animation_type_token(input: &str) -> OracleResult<'_, AnimationTypeToken> {
+    alt((
+        parse_animation_core_type,
+        parse_animation_supertype,
+        parse_animation_subtype,
+    ))
+    .parse(input)
+}
+
+/// Parse a whitespace-separated sequence of type tokens, halting at the first
+/// non-type token. Used by [`parse_animation_types`] as the grammar root.
+fn parse_animation_type_sequence(input: &str) -> OracleResult<'_, Vec<AnimationTypeToken>> {
+    separated_list1(multispace1, parse_animation_type_token).parse(input)
+}
+
+/// Parse the "becomes a [type expression]" noun phrase into core types +
+/// subtypes. Built on nom combinators: tokenizes a sequence of type/subtype
+/// words separated by whitespace, halting at the first token that doesn't
+/// classify — punctuation (`,`, `.`), lowercase connectives (`and`, `gets`,
+/// `gains`, `until`), P/T values (`3/3`, `X/X`), or cost tokens (`{B}:`).
+/// This prevents misparses like *"this creature becomes a Dragon, gets +5/+3,
+/// and gains flying"* from sweeping `Gets`, `And`, `Gains`, `Flying` in as
+/// AddSubtype modifications — a common coverage false-positive pattern.
 fn parse_animation_types(text: &str, infer_creature: bool) -> Vec<String> {
     let descriptor = text
         .trim()
@@ -235,18 +347,18 @@ fn parse_animation_types(text: &str, infer_creature: bool) -> Vec<String> {
         return Vec::new();
     }
 
+    let tokens = match parse_animation_type_sequence(descriptor) {
+        Ok((_, tokens)) => tokens,
+        Err(_) => return Vec::new(),
+    };
+
     let mut core_types = Vec::new();
     let mut subtypes = Vec::new();
-
-    for word in descriptor.split_whitespace() {
-        match word.to_lowercase().as_str() {
-            "artifact" => push_unique_string(&mut core_types, "Artifact"),
-            "creature" => push_unique_string(&mut core_types, "Creature"),
-            "enchantment" => push_unique_string(&mut core_types, "Enchantment"),
-            "land" => push_unique_string(&mut core_types, "Land"),
-            "planeswalker" => push_unique_string(&mut core_types, "Planeswalker"),
-            "legendary" | "basic" | "snow" | "" => {}
-            other => subtypes.push(title_case_word(other)),
+    for token in tokens {
+        match token {
+            AnimationTypeToken::CoreType(name) => push_unique_string(&mut core_types, name),
+            AnimationTypeToken::Subtype(name) => subtypes.push(title_case_word(&name)),
+            AnimationTypeToken::Supertype => {}
         }
     }
 
@@ -261,7 +373,6 @@ fn parse_animation_types(text: &str, infer_creature: bool) -> Vec<String> {
     for subtype in subtypes {
         push_unique_string(&mut types, subtype);
     }
-
     types
 }
 
@@ -301,5 +412,49 @@ mod test_den_bugbear {
         let spec = spec.unwrap();
         assert_eq!(spec.power, Some(3));
         assert_eq!(spec.toughness, Some(2));
+    }
+
+    /// Regression: parse_animation_types must halt at connectives and
+    /// punctuation rather than sweeping subsequent words in as subtypes.
+    /// Previously a text like "Dragon, gets +5/+3, and gains flying and trample"
+    /// produced subtypes ["Dragon", "Gets", "+5/+3", "And", "Gains", "Flying", "Trample"].
+    #[test]
+    fn animation_types_halts_at_connectives_and_punctuation() {
+        assert_eq!(
+            parse_animation_types("Dragon", true),
+            vec!["Creature", "Dragon"]
+        );
+        assert_eq!(
+            parse_animation_types("artifact creature Golem", false),
+            vec!["Artifact", "Creature", "Golem"]
+        );
+
+        // Trailing comma on a valid subtype: accept the subtype, stop after.
+        assert_eq!(
+            parse_animation_types("Dragon, gets +5/+3, and gains flying", true),
+            vec!["Creature", "Dragon"]
+        );
+
+        // Lowercase word immediately after subtype must terminate parsing.
+        assert_eq!(
+            parse_animation_types("Golem until end of combat", false),
+            vec!["Golem"]
+        );
+
+        // P/T tokens and quoted triggers must not become subtypes.
+        assert_eq!(
+            parse_animation_types("Cat X/X", true),
+            vec!["Creature", "Cat"]
+        );
+        assert_eq!(
+            parse_animation_types("Shade and gains \"{B}: This creature gets +1/+1\"", true),
+            vec!["Creature", "Shade"],
+        );
+
+        // Leading lowercase connective before any subtype → nothing parseable.
+        assert_eq!(
+            parse_animation_types("in addition to its other types and gains flying", false),
+            Vec::<String>::new()
+        );
     }
 }
