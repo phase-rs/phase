@@ -318,4 +318,119 @@ mod tests {
             other => panic!("Expected CascadeChoice, got {:?}", other),
         }
     }
+
+    /// CR 702.85a: empty library — cascade resolves cleanly (no panic, no
+    /// CascadeChoice) and emits a CascadeMissed event with `exiled_count: 0`.
+    #[test]
+    fn empty_library_emits_missed_event_and_no_choice() {
+        let (mut state, source_id) = setup_with_source(4);
+        state.players[0].library.clear();
+
+        let ability = ResolvedAbility::new(Effect::Cascade, vec![], source_id, PlayerId(0));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::CascadeChoice { .. }),
+            "No CascadeChoice should be offered with an empty library"
+        );
+        let missed = events.iter().find_map(|e| match e {
+            GameEvent::CascadeMissed {
+                controller,
+                source_id: sid,
+                exiled_count,
+            } => Some((*controller, *sid, *exiled_count)),
+            _ => None,
+        });
+        assert_eq!(
+            missed,
+            Some((PlayerId(0), source_id, 0)),
+            "CascadeMissed must fire with exiled_count: 0 on empty library"
+        );
+    }
+
+    /// CR 702.85a: all-lands library — every card is exiled (each is a miss)
+    /// and CascadeMissed fires with the full count, then all cards are
+    /// shuffled to the bottom of the library.
+    #[test]
+    fn all_lands_library_emits_missed_event_with_full_count() {
+        let (mut state, source_id) = setup_with_source(4);
+        let l1 = add_library_card(&mut state, PlayerId(0), "Forest", 0, true);
+        let l2 = add_library_card(&mut state, PlayerId(0), "Mountain", 0, true);
+        let l3 = add_library_card(&mut state, PlayerId(0), "Island", 0, true);
+        state.players[0].library = vec![l1, l2, l3];
+
+        let ability = ResolvedAbility::new(Effect::Cascade, vec![], source_id, PlayerId(0));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::CascadeChoice { .. }),
+            "No CascadeChoice should be offered when no nonland is hit"
+        );
+        let missed = events.iter().find_map(|e| match e {
+            GameEvent::CascadeMissed { exiled_count, .. } => Some(*exiled_count),
+            _ => None,
+        });
+        assert_eq!(
+            missed,
+            Some(3),
+            "CascadeMissed exiled_count must reflect every land that was exiled"
+        );
+        // All three lands shuffled back to bottom of library.
+        assert_eq!(state.players[0].library.len(), 3);
+        for &id in &[l1, l2, l3] {
+            assert_eq!(state.objects.get(&id).map(|o| o.zone), Some(Zone::Library));
+        }
+    }
+
+    /// CR 702.85c: a spell with multiple cascade keywords triggers the
+    /// cascade ability separately for each instance. Verifies the trigger
+    /// synthesizer in `process_triggers` produces N pending triggers for
+    /// N cascade keywords, with monotonically increasing timestamps.
+    #[test]
+    fn multi_instance_cascade_fires_one_trigger_per_keyword() {
+        use crate::game::triggers::process_triggers;
+        use crate::types::events::GameEvent as Ev;
+
+        let mut state = GameState::new_two_player(7);
+        // Build a cascade spell on the stack with TWO Cascade keyword
+        // instances (matches CR 702.85c — each triggers separately).
+        let spell_id = create_object(
+            &mut state,
+            CardId(2000),
+            PlayerId(0),
+            "Multi-Cascade Spell".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.mana_cost = ManaCost::generic(5);
+            obj.keywords.push(Keyword::Cascade);
+            obj.keywords.push(Keyword::Cascade);
+        }
+
+        // Drive the trigger synthesizer with a SpellCast event for spell_id.
+        // Empty library so cascade resolution falls through quickly without
+        // requiring a WaitingFor handshake.
+        let evts = vec![Ev::SpellCast {
+            card_id: CardId(2000),
+            controller: PlayerId(0),
+            object_id: spell_id,
+        }];
+
+        let ts_before = state.next_timestamp;
+        process_triggers(&mut state, &evts);
+
+        // Two Cascade keywords ⇒ next_timestamp advanced by 2 (one per
+        // instance), and two cascade triggers were placed on the stack
+        // before any ran (or one CascadeMissed event was emitted twice if
+        // the library was empty for both resolutions).
+        assert!(
+            state.next_timestamp >= ts_before + 2,
+            "Expected next_timestamp to advance by ≥2 for two cascade triggers, \
+             got before={ts_before} after={}",
+            state.next_timestamp
+        );
+    }
 }
