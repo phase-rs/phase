@@ -3178,10 +3178,19 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
-    /// CR 701.12a: Exchange control of two target permanents. Both targets come from
-    /// ability.targets (two TargetRef::Object entries). If both have the same controller,
-    /// the exchange does nothing (CR 701.12b). All-or-nothing semantics.
-    ExchangeControl,
+    /// CR 701.12a: Exchange control of two target permanents. Each slot carries its
+    /// own filter so patterns like "target X you control and target Y an opponent
+    /// controls" (Oko, Political Trickery, Shrewd Negotiation) declare distinct
+    /// legality per slot, while patterns like "two target X" (Switcheroo, Role
+    /// Reversal) reuse the same filter on both slots. Resolution reads exactly two
+    /// `TargetRef::Object` entries from `ability.targets`. CR 701.12b: same controller →
+    /// no effect. All-or-nothing semantics.
+    ExchangeControl {
+        #[serde(default = "default_target_filter_any")]
+        target_a: TargetFilter,
+        #[serde(default = "default_target_filter_any")]
+        target_b: TargetFilter,
+    },
     /// CR 115.7: Change the target(s) of a spell or ability on the stack.
     /// `target` filters which stack entries are valid to select (e.g. "instant or sorcery spell").
     /// `scope` controls whether a single target or all targets are changed.
@@ -3639,7 +3648,7 @@ impl Effect {
             | Effect::RevealUntil { .. }
             | Effect::Discover { .. }
             | Effect::GiftDelivery { .. }
-            | Effect::ExchangeControl
+            | Effect::ExchangeControl { .. }
             | Effect::ChangeTargets { .. }
             | Effect::Manifest { .. }
             | Effect::ManifestDread
@@ -3785,7 +3794,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::GiftDelivery { .. } => "GiftDelivery",
         Effect::Goad { .. } => "Goad",
         Effect::Detain { .. } => "Detain",
-        Effect::ExchangeControl => "ExchangeControl",
+        Effect::ExchangeControl { .. } => "ExchangeControl",
         Effect::ChangeTargets { .. } => "ChangeTargets",
         Effect::Incubate { .. } => "Incubate",
         Effect::Amass { .. } => "Amass",
@@ -4082,7 +4091,7 @@ impl From<&Effect> for EffectKind {
             Effect::GiftDelivery { .. } => EffectKind::GiftDelivery,
             Effect::Goad { .. } => EffectKind::Goad,
             Effect::Detain { .. } => EffectKind::Detain,
-            Effect::ExchangeControl => EffectKind::ExchangeControl,
+            Effect::ExchangeControl { .. } => EffectKind::ExchangeControl,
             Effect::ChangeTargets { .. } => EffectKind::ChangeTargets,
             Effect::Incubate { .. } => EffectKind::Incubate,
             Effect::Amass { .. } => EffectKind::Amass,

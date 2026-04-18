@@ -1,46 +1,67 @@
+use crate::types::ability::Duration;
 use crate::types::ability::{
-    ContinuousModification, Duration, EffectError, EffectKind, ResolvedAbility, TargetFilter,
+    ContinuousModification, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
     TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
-/// CR 701.12a: Exchange control of two permanents. Both targets come from ability.targets
-/// as two TargetRef::Object entries. If the entire exchange can't be completed, no part
-/// of the exchange occurs (all-or-nothing).
+/// CR 701.12a: Exchange control of two permanents.
 ///
-/// CR 701.12b: If both permanents are controlled by the same player, the exchange
-/// effect does nothing.
+/// Object resolution for each slot:
+/// - Filter `SelfRef` → resolver substitutes `ability.source_id` (the
+///   ability's source permanent), matching the Fight resolver pattern.
+///   Used by patterns like "exchange control of this artifact and target …"
+///   (Avarice Totem, Eyes Everywhere, Phyrexian Infiltrator).
+/// - Any other filter → consumed in order from `ability.targets`.
+///
+/// CR 701.12a: If the entire exchange can't be completed (missing object,
+/// off-battlefield), no part of the exchange occurs (all-or-nothing).
+/// CR 701.12b: If both permanents are controlled by the same player, the
+/// exchange effect does nothing.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // Extract exactly two object targets.
-    let obj_targets: Vec<_> = ability
-        .targets
-        .iter()
-        .filter_map(|t| {
-            if let TargetRef::Object(id) = t {
-                Some(*id)
-            } else {
-                None
-            }
-        })
-        .collect();
+    let Effect::ExchangeControl { target_a, target_b } = &ability.effect else {
+        // Should not be reached: dispatcher in effects/mod.rs only routes
+        // ExchangeControl variants here.
+        return Ok(());
+    };
 
-    if obj_targets.len() < 2 {
+    // Each non-SelfRef slot consumes one TargetRef::Object from ability.targets,
+    // in declaration order. SelfRef slots are filled with ability.source_id.
+    let mut object_targets = ability.targets.iter().filter_map(|t| match t {
+        TargetRef::Object(id) => Some(*id),
+        TargetRef::Player(_) => None,
+    });
+    let resolve_slot =
+        |filter: &TargetFilter, iter: &mut dyn Iterator<Item = ObjectId>| -> Option<ObjectId> {
+            if matches!(filter, TargetFilter::SelfRef) {
+                Some(ability.source_id)
+            } else {
+                iter.next()
+            }
+        };
+
+    let Some(id_a) = resolve_slot(target_a, &mut object_targets) else {
         // CR 701.12a: Can't complete exchange — do nothing.
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ExchangeControl,
             source_id: ability.source_id,
         });
         return Ok(());
-    }
-
-    let id_a = obj_targets[0];
-    let id_b = obj_targets[1];
+    };
+    let Some(id_b) = resolve_slot(target_b, &mut object_targets) else {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::ExchangeControl,
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    };
 
     // CR 701.12a: Both objects must exist on the battlefield.
     let (controller_a, controller_b) = {
@@ -114,7 +135,10 @@ mod tests {
 
     fn make_exchange_ability(target_a: ObjectId, target_b: ObjectId) -> ResolvedAbility {
         ResolvedAbility::new(
-            Effect::ExchangeControl,
+            Effect::ExchangeControl {
+                target_a: TargetFilter::Any,
+                target_b: TargetFilter::Any,
+            },
             vec![TargetRef::Object(target_a), TargetRef::Object(target_b)],
             ObjectId(100),
             PlayerId(0),
@@ -229,7 +253,10 @@ mod tests {
 
         // Only one target — can't complete exchange.
         let ability = ResolvedAbility::new(
-            Effect::ExchangeControl,
+            Effect::ExchangeControl {
+                target_a: TargetFilter::Any,
+                target_b: TargetFilter::Any,
+            },
             vec![TargetRef::Object(obj_a)],
             ObjectId(100),
             PlayerId(0),

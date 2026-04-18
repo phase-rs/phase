@@ -2632,16 +2632,26 @@ pub(super) fn parse_imperative_family_ast(
             }
         }
 
-        // CR 701.12a: "exchange control of target [type] and target [type]"
+        // CR 701.12a: "exchange control of <two-target-spec>"
+        // Two grammatical shapes the parser must extract per-slot filters from:
+        //   • Quantified: "two target Xs"        (Switcheroo, Role Reversal)
+        //   • Compound:   "target X and target Y" / "target X and another target Y"
+        //                                          (Phyrexian Infiltrator, Oko, Trade the Helm)
+        //                "this <type> and target Y" / "target X and this <type>"
+        //                                          (Avarice Totem, Eyes Everywhere — SelfRef one side)
+        // Both shapes lower to ExchangeControl { target_a, target_b }; in the
+        // quantified case both filters are identical.
         "exchange" => {
-            if tag::<_, _, VerboseError<&str>>("exchange control of ")
+            let (rest, _) = tag::<_, _, VerboseError<&str>>("exchange control of ")
                 .parse(lower)
-                .is_ok()
-            {
-                Some(ImperativeFamilyAst::ExchangeControl)
-            } else {
-                None
-            }
+                .ok()?;
+            // Strip trailing terminator from the candidate target span so per-slot
+            // parse_target sees clean input (parse_target is whitespace-tolerant
+            // but stops on punctuation only via its own grammar).
+            let span = rest.trim_end_matches(['.', ';']);
+            try_parse_exchange_control_targets(span).map(|(target_a, target_b)| {
+                ImperativeFamilyAst::ExchangeControl { target_a, target_b }
+            })
         }
 
         // ── Combat-related ──
@@ -2798,6 +2808,82 @@ pub(super) fn parse_imperative_family_ast(
             None
         }
     }
+}
+
+/// CR 701.12a: Extract the two per-slot target filters from the "<...>" body of
+/// "exchange control of <...>". Returns `None` for unrecognised shapes so the
+/// caller can fall through (no Effect is emitted) rather than silently dropping
+/// targets into a bare ExchangeControl.
+///
+/// Two grammatical shapes are recognised:
+/// 1. Quantified: "two target Xs" — both slot filters are identical. Driven by
+///    `parse_target`'s built-in "two " quantifier handling, which consumes the
+///    count word and returns a single filter.
+/// 2. Compound: "<slot> and <slot>" — each slot is parsed independently. A slot
+///    is either a "target …" phrase (with optional "another"/"other", delegated
+///    to `parse_target`) or "this <type>" (Avarice Totem, Eyes Everywhere,
+///    Phyrexian Infiltrator — lowered to `SelfRef`).
+///
+/// Each per-slot parse must consume its entire substring (no trailing remainder)
+/// so we don't accept malformed inputs like "target creature and dance" as a
+/// valid two-target phrase.
+fn try_parse_exchange_control_targets(span: &str) -> Option<(TargetFilter, TargetFilter)> {
+    // Quantified shape: "two target Xs" dispatched via nom. We peek for the
+    // `"two target "` prefix with `alt((tag(...), tag(...)))` (plural handled by
+    // `parse_target`'s QUANTIFIED_PREFIXES), then re-enter `parse_target` on the
+    // full span so its quantifier path runs and returns a single filter that
+    // applies to both slots.
+    if alt((
+        tag::<_, _, VerboseError<&str>>("two target "),
+        tag("two other target "),
+        tag("two another target "),
+    ))
+    .parse(span)
+    .is_ok()
+    {
+        let (filter, remainder) = parse_target(span);
+        if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+            return Some((filter.clone(), filter));
+        }
+    }
+
+    // Compound shape: locate the top-level " and " connective with nom's
+    // `take_until` (a combinator, not string-dispatch), then delegate each side
+    // to `parse_exchange_slot`. `take_until` is structural — it splits the
+    // span; all dispatch decisions happen inside `parse_exchange_slot` via nom.
+    let (right, (left, _)) = nom::sequence::pair(
+        take_until::<_, _, VerboseError<&str>>(" and "),
+        tag(" and "),
+    )
+    .parse(span)
+    .ok()?;
+    let target_a = parse_exchange_slot(left.trim())?;
+    let target_b = parse_exchange_slot(right.trim())?;
+    Some((target_a, target_b))
+}
+
+/// Parse a single exchange-control slot phrase. Returns the slot filter, or
+/// `None` if the phrase isn't a recognised slot. The slot must be fully
+/// consumed — a trailing remainder indicates the caller handed us malformed
+/// input and we must fall through rather than silently accepting a partial
+/// parse.
+fn parse_exchange_slot(phrase: &str) -> Option<TargetFilter> {
+    // Self-referential slot dispatch via nom: "this <type>" refers to the
+    // source permanent and resolves to SelfRef regardless of the type word
+    // (artifact, creature, enchantment …).
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("this ").parse(phrase) {
+        if !rest.trim().is_empty() {
+            return Some(TargetFilter::SelfRef);
+        }
+    }
+
+    // Standard target slot: "target …" / "another target …" / "other target …".
+    // parse_target absorbs all "target"/"another target"/"other target" prefixes.
+    let (filter, remainder) = parse_target(phrase);
+    if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+        return Some(filter);
+    }
+    None
 }
 
 /// CR 122.1: Parse "get/gets a/an/N [type] counter(s)" into a GivePlayerCounter AST.
@@ -2980,8 +3066,12 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::Goad => Effect::Goad {
             target: TargetFilter::Any,
         },
-        // CR 701.12a: Exchange control of two permanents. Targets come from ability.targets.
-        ImperativeFamilyAst::ExchangeControl => Effect::ExchangeControl,
+        // CR 701.12a: Exchange control of two permanents. The two slot filters
+        // come from the parser; resolution reads ability.targets for the chosen
+        // objects.
+        ImperativeFamilyAst::ExchangeControl { target_a, target_b } => {
+            Effect::ExchangeControl { target_a, target_b }
+        }
         // CR 509.1c: Must be blocked — grant transient MustBeBlocked static via GenericEffect.
         // Uses AddStaticMode so the mode propagates through the layer system to
         // static_definitions, where combat.rs checks it.

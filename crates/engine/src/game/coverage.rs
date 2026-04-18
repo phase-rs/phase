@@ -1400,7 +1400,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::ManifestDread
         | Effect::RuntimeHandled { .. }
         | Effect::ChangeTargets { .. }
-        | Effect::ExchangeControl
+        | Effect::ExchangeControl { .. }
         | Effect::Forage
         | Effect::Learn
         | Effect::SwitchPT { .. }

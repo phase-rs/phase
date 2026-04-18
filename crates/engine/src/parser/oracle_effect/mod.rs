@@ -11080,12 +11080,82 @@ mod tests {
     }
 
     #[test]
-    fn effect_exchange_control_of_two_targets() {
+    fn effect_exchange_control_compound_two_targets_creature() {
+        // Compound shape: "target X and target Y" — both slots independently parsed.
         let e = parse_effect("exchange control of target creature and target creature");
-        assert!(
-            matches!(e, Effect::ExchangeControl),
-            "Expected ExchangeControl, got {e:?}"
+        match e {
+            Effect::ExchangeControl { target_a, target_b } => {
+                assert!(
+                    matches!(target_a, TargetFilter::Typed(ref tf)
+                        if tf.type_filters == vec![crate::types::ability::TypeFilter::Creature]),
+                    "target_a should be a creature filter, got {target_a:?}"
+                );
+                assert!(
+                    matches!(target_b, TargetFilter::Typed(ref tf)
+                        if tf.type_filters == vec![crate::types::ability::TypeFilter::Creature]),
+                    "target_b should be a creature filter, got {target_b:?}"
+                );
+            }
+            other => panic!("Expected ExchangeControl, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_exchange_control_quantified_two_target_creatures() {
+        // Quantified shape: "two target Xs" (Switcheroo). Both slots share one filter.
+        let e = parse_effect("exchange control of two target creatures");
+        match e {
+            Effect::ExchangeControl { target_a, target_b } => {
+                assert_eq!(
+                    target_a, target_b,
+                    "quantified shape: both filters identical"
+                );
+                assert!(
+                    matches!(target_a, TargetFilter::Typed(ref tf)
+                        if tf.type_filters == vec![crate::types::ability::TypeFilter::Creature]),
+                    "target_a should be a creature filter, got {target_a:?}"
+                );
+            }
+            other => panic!("Expected ExchangeControl, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_exchange_control_compound_distinct_filters() {
+        // Compound shape with per-slot legality (Political Trickery / Trade the Helm shape):
+        // each slot carries its own controller-relative filter.
+        let e = parse_effect(
+            "exchange control of target land you control and target land an opponent controls",
         );
+        match e {
+            Effect::ExchangeControl { target_a, target_b } => {
+                assert_ne!(
+                    target_a, target_b,
+                    "per-slot filters should differ (you-control vs opponent-controls)"
+                );
+            }
+            other => panic!("Expected ExchangeControl, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_exchange_control_self_ref_slot() {
+        // "this artifact and target nonland permanent" (Avarice Totem shape).
+        // The "this <type>" slot resolves to SelfRef and is auto-filled at resolution.
+        let e = parse_effect("exchange control of this artifact and target nonland permanent");
+        match e {
+            Effect::ExchangeControl { target_a, target_b } => {
+                assert!(
+                    matches!(target_a, TargetFilter::SelfRef),
+                    "target_a (this artifact) should be SelfRef, got {target_a:?}"
+                );
+                assert!(
+                    !matches!(target_b, TargetFilter::Any | TargetFilter::SelfRef),
+                    "target_b should be a typed permanent filter, got {target_b:?}"
+                );
+            }
+            other => panic!("Expected ExchangeControl, got {other:?}"),
+        }
     }
 
     #[test]

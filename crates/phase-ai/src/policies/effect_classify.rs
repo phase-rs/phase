@@ -113,7 +113,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::GiftDelivery { .. }
         | Effect::Suspect { .. }
         | Effect::GivePlayerCounter { .. }
-        | Effect::ExchangeControl => EffectPolarity::Contextual,
+        | Effect::ExchangeControl { .. } => EffectPolarity::Contextual,
         _ => EffectPolarity::Contextual,
     }
 }
@@ -154,7 +154,8 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
         Effect::GenericEffect { target, .. } | Effect::LoseLife { target, .. } => {
             target.as_ref()
         }
-        // NOTE: ExchangeControl is a unit variant — no target field.
+        // NOTE: ExchangeControl carries two distinct target filters (target_a/target_b).
+        // Its slot collection is special-cased; no single filter is meaningful here.
         // NOTE: GiftDelivery { kind } has no target field.
         // NOTE: SearchLibrary uses `filter`, not `target`.
         _ => None,

@@ -302,7 +302,7 @@ fn redundancy_delta(
         | Effect::GiftDelivery { .. }
         | Effect::Goad { .. }
         | Effect::Detain { .. }
-        | Effect::ExchangeControl
+        | Effect::ExchangeControl { .. }
         | Effect::ChangeTargets { .. }
         | Effect::Manifest { .. }
         | Effect::ManifestDread

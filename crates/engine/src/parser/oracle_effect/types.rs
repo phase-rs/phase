@@ -252,8 +252,14 @@ pub(super) enum ImperativeFamilyAst {
     ForceBlock,
     /// CR 701.15a: Goad target creature.
     Goad,
-    /// CR 701.12a: Exchange control of two target permanents.
-    ExchangeControl,
+    /// CR 701.12a: Exchange control of two target permanents. Carries a distinct
+    /// filter per slot so patterns like "target X you control and target Y an
+    /// opponent controls" preserve per-slot legality, while "two target X" reuses
+    /// the same filter for both slots.
+    ExchangeControl {
+        target_a: TargetFilter,
+        target_b: TargetFilter,
+    },
     /// CR 509.1c: Must be blocked this turn if able.
     MustBeBlocked,
     Investigate,

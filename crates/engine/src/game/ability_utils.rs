@@ -530,6 +530,29 @@ fn collect_target_slots(
     ability: &ResolvedAbility,
     slots: &mut Vec<TargetSelectionSlot>,
 ) -> Result<(), EngineError> {
+    // CR 701.12a: ExchangeControl carries two distinct per-slot filters. SelfRef
+    // slots (e.g. "this artifact and target …") are filled by the resolver from
+    // ability.source_id and don't require a player choice. Surface one slot per
+    // non-SelfRef filter, in declaration order.
+    if let Effect::ExchangeControl { target_a, target_b } = &ability.effect {
+        for filter in [target_a, target_b] {
+            if matches!(filter, TargetFilter::SelfRef) {
+                continue;
+            }
+            let legal_targets = legal_targets_for_ability_filter(state, ability, filter, slots);
+            if legal_targets.is_empty() && !ability.optional_targeting {
+                return Err(EngineError::ActionNotAllowed(
+                    "No legal targets available".to_string(),
+                ));
+            }
+            slots.push(TargetSelectionSlot {
+                legal_targets,
+                optional: ability.optional_targeting,
+            });
+        }
+        return Ok(());
+    }
+
     // CR 109.4 + CR 115.1: If the effect contains a filter referencing
     // `ControllerRef::TargetPlayer` (e.g. "each creature target player controls"
     // on `PutCounterAll`), surface a companion `TargetFilter::Player` slot
@@ -643,6 +666,22 @@ fn filter_references_target_player(filter: &TargetFilter) -> bool {
 }
 
 fn collect_target_slot_specs(ability: &ResolvedAbility, specs: &mut Vec<TargetSlotSpec>) {
+    // CR 701.12a: Mirror the ExchangeControl branch in `collect_target_slots`
+    // so per-slot specs match the surfaced TargetSelectionSlots one-for-one
+    // (SelfRef slots are auto-resolved and not surfaced).
+    if let Effect::ExchangeControl { target_a, target_b } = &ability.effect {
+        for filter in [target_a, target_b] {
+            if matches!(filter, TargetFilter::SelfRef) {
+                continue;
+            }
+            specs.push(TargetSlotSpec {
+                filter: filter.clone(),
+                optional: ability.optional_targeting,
+            });
+        }
+        return;
+    }
+
     // CR 109.4 + CR 115.1: Companion TargetFilter::Player slot surfaced by
     // `collect_target_slots` must have a matching spec here so subsequent
     // slot recomputation treats it correctly.
@@ -2293,6 +2332,110 @@ mod tests {
                 chosen.0
             );
         }
+    }
+
+    /// CR 701.12a: ExchangeControl must surface two independent target slots,
+    /// each honouring its per-slot filter. This is the regression guard for Bug A:
+    /// the parser previously dropped both target clauses and the resolver's
+    /// early `targets.len() < 2` branch made the effect a no-op.
+    #[test]
+    fn build_target_slots_exchange_control_surfaces_two_slots() {
+        use crate::types::ability::{ControllerRef, TypeFilter};
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let p0_land = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "P0 Land".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&p0_land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Land);
+        let p1_land = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(2),
+            PlayerId(1),
+            "P1 Land".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&p1_land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Land);
+
+        let target_a = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Land],
+            controller: Some(ControllerRef::You),
+            ..Default::default()
+        });
+        let target_b = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Land],
+            controller: Some(ControllerRef::Opponent),
+            ..Default::default()
+        });
+        let ability = ResolvedAbility::new(
+            Effect::ExchangeControl { target_a, target_b },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("two slots should build");
+        assert_eq!(slots.len(), 2, "exchange-control must surface two slots");
+        // Slot 0: "land you control" → only p0_land legal (caster is PlayerId(0)).
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Object(p0_land)]);
+        // Slot 1: "land an opponent controls" → only p1_land legal.
+        assert_eq!(slots[1].legal_targets, vec![TargetRef::Object(p1_land)]);
+    }
+
+    /// CR 701.12a: SelfRef slots ("this artifact and target X") are filled by
+    /// the resolver from `ability.source_id` and must NOT be surfaced as a
+    /// user-selectable slot. Only the non-SelfRef slot appears.
+    #[test]
+    fn build_target_slots_exchange_control_self_ref_suppressed() {
+        use crate::types::ability::{ControllerRef, TypeFilter};
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let p1_artifact = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(1),
+            "Opponent Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&p1_artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Artifact);
+
+        let target_b = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Artifact],
+            controller: Some(ControllerRef::Opponent),
+            ..Default::default()
+        });
+        let ability = ResolvedAbility::new(
+            Effect::ExchangeControl {
+                target_a: TargetFilter::SelfRef,
+                target_b,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("one slot should build");
+        assert_eq!(slots.len(), 1, "SelfRef slot must not be surfaced");
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Object(p1_artifact)]);
     }
 
     #[test]

@@ -272,7 +272,7 @@ pub fn resolve_effect(
         Effect::GainControl { .. } => gain_control::resolve(state, ability, events),
         Effect::Goad { .. } => goad::resolve(state, ability, events),
         Effect::Detain { .. } => detain::resolve(state, ability, events),
-        Effect::ExchangeControl => exchange_control::resolve(state, ability, events),
+        Effect::ExchangeControl { .. } => exchange_control::resolve(state, ability, events),
         Effect::Attach { .. } => attach::resolve(state, ability, events),
         Effect::ControlNextTurn { .. } => control_next_turn::resolve(state, ability, events),
         Effect::Surveil { .. } => surveil::resolve(state, ability, events),
