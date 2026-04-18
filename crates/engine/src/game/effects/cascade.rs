@@ -35,20 +35,49 @@ pub fn resolve(
         .map(|obj| obj.mana_cost.mana_value() + obj.cost_x_paid.unwrap_or(0))
         .unwrap_or(0);
 
-    let player = state
-        .players
-        .iter()
-        .find(|p| p.id == ability.controller)
-        .ok_or(EffectError::PlayerNotFound)?;
+    // CR 702.85a: Validate the controller exists, then iterate per-card by
+    // re-reading the live library top each pass. A snapshot taken once would
+    // desync if a replacement effect (e.g., "if a card would be exiled from
+    // your library, instead ...") redirects, blocks, or reorders the move,
+    // because the snapshot remembers the pre-replacement order.
+    if !state.players.iter().any(|p| p.id == ability.controller) {
+        return Err(EffectError::PlayerNotFound);
+    }
 
-    let library: Vec<ObjectId> = player.library.clone();
     let mut exiled_misses: Vec<ObjectId> = Vec::new();
     let mut hit_card: Option<ObjectId> = None;
 
     // CR 702.85a: Exile one at a time until a nonland with MV < source_mv is
-    // exiled, or the library is exhausted.
-    for &card_id in &library {
+    // exiled, or the library is exhausted. Each iteration reads `library[0]`
+    // off the live player record so any replacement effect that mutated the
+    // library mid-loop is observed.
+    while let Some(card_id) = state
+        .players
+        .iter()
+        .find(|p| p.id == ability.controller)
+        .and_then(|p| p.library.first().copied())
+    {
         zones::move_to_zone(state, card_id, Zone::Exile, events);
+
+        // CR 614.1: A replacement effect may have moved the card to a zone
+        // other than Exile, or removed it entirely. Only count it as exiled
+        // (a hit or a miss) if it actually landed in Exile.
+        let zone_after = state.objects.get(&card_id).map(|o| o.zone);
+        if zone_after != Some(Zone::Exile) {
+            // Replacement redirected or removed; do not loop on the same card.
+            // Re-read the next library top on the next iteration.
+            if state
+                .players
+                .iter()
+                .find(|p| p.id == ability.controller)
+                .is_some_and(|p| p.library.first().copied() == Some(card_id))
+            {
+                // Defensive: if the card is somehow still on top, break to
+                // avoid an infinite loop.
+                break;
+            }
+            continue;
+        }
 
         let is_hit = state.objects.get(&card_id).is_some_and(|obj| {
             let is_land = obj.card_types.core_types.contains(&CoreType::Land);
