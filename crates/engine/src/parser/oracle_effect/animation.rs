@@ -295,9 +295,10 @@ fn parse_animation_subtype(input: &str) -> OracleResult<'_, AnimationTypeToken> 
     let (rest, word) = recognize(pair(
         // First char: capital letter.
         satisfy(|c: char| c.is_ascii_uppercase()),
-        // At least one more alphabetic/hyphen character — min length 2.
+        // Second char must be alphabetic (no leading-hyphen tokens like "A-B").
+        // Subsequent chars may be alphabetic or hyphen (for "Power-Plant").
         pair(
-            satisfy(|c: char| c.is_ascii_alphabetic() || c == '-'),
+            satisfy(|c: char| c.is_ascii_alphabetic()),
             many0(satisfy(|c: char| c.is_ascii_alphabetic() || c == '-')),
         ),
     ))
@@ -456,5 +457,35 @@ mod test_den_bugbear {
             parse_animation_types("in addition to its other types and gains flying", false),
             Vec::<String>::new()
         );
+    }
+
+    /// Regression: supertypes (CR 205.4) must be recognized-and-discarded
+    /// so they don't halt the sequence. Animations never grant supertypes,
+    /// but a leading `legendary` / `basic` / `snow` word in the noun phrase
+    /// must not prevent the subtype that follows from being captured.
+    #[test]
+    fn animation_types_discards_supertypes_without_halting_sequence() {
+        assert_eq!(
+            parse_animation_types("legendary Angel creature", false),
+            vec!["Creature", "Angel"]
+        );
+        assert_eq!(parse_animation_types("basic Forest", false), vec!["Forest"]);
+        // Supertype between core type and subtype must not halt.
+        assert_eq!(
+            parse_animation_types("snow Creature Elemental", false),
+            vec!["Creature", "Elemental"]
+        );
+    }
+
+    /// Regression: the subtype grammar must reject tokens where a capital
+    /// letter is followed directly by a hyphen (`A-B`). Real MTG subtypes
+    /// like `Power-Plant` have at least two alphabetic chars before the
+    /// hyphen, so tightening the grammar here closes a lexicon-laxness gap.
+    #[test]
+    fn animation_subtype_rejects_leading_hyphen_tokens() {
+        assert!(parse_animation_subtype("A-B").is_err());
+        // Valid hyphenated subtype still parses.
+        let (_, token) = parse_animation_subtype("Power-Plant").expect("hyphenated subtype");
+        assert_eq!(token, AnimationTypeToken::Subtype("Power-Plant".into()));
     }
 }
