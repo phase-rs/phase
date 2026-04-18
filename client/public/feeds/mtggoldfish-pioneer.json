@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-05-01T00:00:00Z",
+  "updated": "2026-05-02T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -1111,32 +1111,80 @@
           "name": "Arclight Phoenix"
         },
         {
-          "count": 3,
-          "name": "Lightning Axe"
-        },
-        {
-          "count": 3,
-          "name": "Picklock Prankster"
-        },
-        {
           "count": 4,
-          "name": "Treasure Cruise"
+          "name": "Artist's Talent"
         },
         {
           "count": 4,
           "name": "Consider"
         },
         {
+          "count": 3,
+          "name": "Cori-Steel Cutter"
+        },
+        {
+          "count": 3,
+          "name": "Fiery Impulse"
+        },
+        {
+          "count": 1,
+          "name": "Hall of Storm Giants"
+        },
+        {
+          "count": 2,
+          "name": "Into the Flood Maw"
+        },
+        {
           "count": 4,
-          "name": "Opt"
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 1,
+          "name": "Shivan Reef"
+        },
+        {
+          "count": 1,
+          "name": "Multiversal Passage"
+        },
+        {
+          "count": 1,
+          "name": "Pyroclasm"
+        },
+        {
+          "count": 1,
+          "name": "Otawara, Soaring City"
+        },
+        {
+          "count": 3,
+          "name": "Picklock Prankster"
         },
         {
           "count": 1,
           "name": "Proft's Eidetic Memory"
         },
         {
+          "count": 1,
+          "name": "Opt"
+        },
+        {
+          "count": 4,
+          "name": "Riverglide Pathway"
+        },
+        {
           "count": 3,
-          "name": "Fiery Impulse"
+          "name": "Opt"
+        },
+        {
+          "count": 4,
+          "name": "Sleight of Hand"
+        },
+        {
+          "count": 1,
+          "name": "Spikefield Hazard"
+        },
+        {
+          "count": 3,
+          "name": "Lightning Axe"
         },
         {
           "count": 2,
@@ -1144,77 +1192,29 @@
         },
         {
           "count": 1,
-          "name": "Multiversal Passage"
+          "name": "Stormcarved Coast"
         },
         {
           "count": 4,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
+          "name": "Treasure Cruise"
         },
         {
           "count": 4,
           "name": "Steam Vents"
-        },
-        {
-          "count": 1,
-          "name": "Stormcarved Coast"
-        },
-        {
-          "count": 1,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 4,
-          "name": "Sleight of Hand"
-        },
-        {
-          "count": 4,
-          "name": "Artist's Talent"
-        },
-        {
-          "count": 1,
-          "name": "Spikefield Hazard"
-        },
-        {
-          "count": 2,
-          "name": "Into the Flood Maw"
-        },
-        {
-          "count": 1,
-          "name": "Shivan Reef"
-        },
-        {
-          "count": 3,
-          "name": "Cori-Steel Cutter"
-        },
-        {
-          "count": 1,
-          "name": "Hall of Storm Giants"
-        },
-        {
-          "count": 1,
-          "name": "Pyroclasm"
         }
       ],
       "sideboard": [
         {
           "count": 2,
-          "name": "Abrade"
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 1,
+          "name": "Pyroclasm"
         },
         {
           "count": 3,
           "name": "Brazen Borrower"
-        },
-        {
-          "count": 1,
-          "name": "Annul"
-        },
-        {
-          "count": 2,
-          "name": "Spell Pierce"
         },
         {
           "count": 1,
@@ -1226,19 +1226,27 @@
         },
         {
           "count": 1,
+          "name": "Cori-Steel Cutter"
+        },
+        {
+          "count": 1,
+          "name": "Annul"
+        },
+        {
+          "count": 1,
+          "name": "Abrade"
+        },
+        {
+          "count": 1,
+          "name": "Abrade"
+        },
+        {
+          "count": 1,
           "name": "Third Path Iconoclast"
         },
         {
           "count": 2,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 1,
-          "name": "Pyroclasm"
-        },
-        {
-          "count": 1,
-          "name": "Cori-Steel Cutter"
+          "name": "Spell Pierce"
         }
       ]
     },
@@ -1253,12 +1261,12 @@
       ],
       "main": [
         {
-          "count": 3,
-          "name": "Swamp"
+          "count": 4,
+          "name": "Thoughtseize"
         },
         {
-          "count": 1,
-          "name": "Sulfurous Springs"
+          "count": 3,
+          "name": "Swamp"
         },
         {
           "count": 3,
@@ -1269,8 +1277,8 @@
           "name": "Blightstep Pathway"
         },
         {
-          "count": 4,
-          "name": "Blood Crypt"
+          "count": 1,
+          "name": "Sulfurous Springs"
         },
         {
           "count": 4,
@@ -1278,23 +1286,35 @@
         },
         {
           "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 4,
-          "name": "Fable of the Mirror-Breaker"
-        },
-        {
-          "count": 4,
           "name": "Mutavault"
+        },
+        {
+          "count": 1,
+          "name": "Go for the Throat"
         },
         {
           "count": 3,
           "name": "Fear of Missing Out"
         },
         {
+          "count": 4,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 4,
+          "name": "Unholy Annex // Ritual Chamber"
+        },
+        {
+          "count": 2,
+          "name": "Graveyard Trespasser"
+        },
+        {
           "count": 1,
-          "name": "Torch the Tower"
+          "name": "Kroxa, Titan of Death's Hunger"
+        },
+        {
+          "count": 1,
+          "name": "Duress"
         },
         {
           "count": 3,
@@ -1305,49 +1325,41 @@
           "name": "Sokenzan, Crucible of Defiance"
         },
         {
+          "count": 1,
+          "name": "Duress"
+        },
+        {
+          "count": 4,
+          "name": "Blood Crypt"
+        },
+        {
           "count": 4,
           "name": "Blackcleave Cliffs"
         },
         {
-          "count": 2,
-          "name": "Abrade"
+          "count": 1,
+          "name": "Torch the Tower"
         },
         {
-          "count": 4,
-          "name": "Unholy Annex // Ritual Chamber"
+          "count": 2,
+          "name": "Abrade"
         },
         {
           "count": 1,
           "name": "Urborg, Tomb of Yawgmoth"
         },
         {
-          "count": 1,
-          "name": "Go for the Throat"
-        },
-        {
-          "count": 2,
-          "name": "Graveyard Trespasser"
-        },
-        {
-          "count": 2,
-          "name": "Duress"
-        },
-        {
           "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 1,
-          "name": "Kroxa, Titan of Death's Hunger"
+          "name": "Fable of the Mirror-Breaker"
         }
       ],
       "sideboard": [
         {
           "count": 2,
-          "name": "Abrade"
+          "name": "Duress"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Go Blank"
         },
         {
@@ -1363,12 +1375,16 @@
           "name": "Shadows' Verdict"
         },
         {
+          "count": 1,
+          "name": "Torch the Tower"
+        },
+        {
           "count": 3,
           "name": "Unlicensed Hearse"
         },
         {
           "count": 2,
-          "name": "Duress"
+          "name": "Abrade"
         }
       ]
     },
