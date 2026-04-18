@@ -582,22 +582,20 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         return defs.into_iter().next();
     }
 
-    // CR 702.3b: "[subject] can attack as though they/it didn't have defender"
-    // Static grant of CanAttackWithDefender to a class of creatures.
-    if nom_primitives::scan_contains(&lower, "can attack as though")
-        && nom_primitives::scan_contains(&lower, "didn't have defender")
-    {
-        if let Some((prefix, _)) =
-            nom_primitives::scan_split_at_phrase(&lower, |i| tag(" can attack").parse(i))
-        {
-            let subject = text[..prefix.len()].trim();
-            let (affected, _) = super::oracle_target::parse_type_phrase(subject);
-            return Some(
-                StaticDefinition::new(StaticMode::CanAttackWithDefender)
-                    .affected(affected)
-                    .description(text.to_string()),
-            );
-        }
+    // CR 702.3b + CR 611.3a: "<subject> can attack as though <pronoun>
+    // didn't have defender [as long as <condition>]" — conditional or
+    // unconditional grant of CanAttackWithDefender to a subject class.
+    // Handles ~, "this creature", core-type filter subjects ("Creatures
+    // you control", "Modified creatures you control"), and the
+    // "each creature you control with defender" pattern. Enchanted/Equipped
+    // subjects are handled by parse_enchanted_equipped_predicate; this
+    // branch covers non-attached-subject forms.
+    //
+    // The helper returns None when the phrase is absent or when the subject
+    // cannot be resolved to a known filter — both cases fall through to
+    // subsequent dispatch branches.
+    if let Some(def) = parse_can_attack_despite_defender(&tp, &text) {
+        return Some(def);
     }
 
     // --- "Each creature you control [with condition] assigns combat damage equal to its toughness" ---
@@ -4608,6 +4606,77 @@ fn try_parse_thats_a_subtype_list(input: &str) -> Option<(TargetFilter, &str)> {
     Some((filter, predicate))
 }
 
+/// CR 702.3b + CR 611.3a: parse "<subject> can attack as though <pronoun>
+/// didn't have defender [as long as <condition>]" into a StaticMode::
+/// CanAttackWithDefender on `affected` with an optional condition.
+///
+/// Uses `scan_split_at_phrase(tag("can attack as though"))` to locate the
+/// phrase at a word boundary (unlike the old ` can attack` form which
+/// required a leading space and silently failed when the subject was `~`).
+/// Fails gracefully (returns `None`) when the phrase is missing, the tail
+/// doesn't match either pronoun form, or the subject cannot be resolved
+/// to a known filter — letting subsequent dispatch branches try.
+fn parse_can_attack_despite_defender(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    // Split trailing " as long as <condition>" first so the subject-prefix
+    // extraction sees only "<subject> can attack as though <pronoun>
+    // didn't have defender".
+    let (body_tp, condition_tp) = match tp.split_around(" as long as ") {
+        Some((before, after)) => (before, Some(after)),
+        None => (*tp, None),
+    };
+
+    let (subject_prefix, _) = nom_primitives::scan_split_at_phrase(body_tp.lower, |i| {
+        tag::<_, _, nom_language::error::VerboseError<&str>>("can attack as though").parse(i)
+    })?;
+
+    // Verify the rest of the phrase: " it didn't have defender" or
+    // " they didn't have defender". Guards against "can attack as though
+    // it had haste" reaching subject dispatch.
+    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    let after_phrase = &body_tp.lower[subject_prefix.len() + "can attack as though".len()..];
+    let tail_ok = alt((
+        tag::<_, _, VE>(" it didn't have defender"),
+        tag::<_, _, VE>(" they didn't have defender"),
+    ))
+    .parse(after_phrase)
+    .is_ok();
+    if !tail_ok {
+        return None;
+    }
+
+    // Subject text = original slice for correct case preservation.
+    let subject_original = body_tp.original[..subject_prefix.len()].trim();
+    let subject_lower = body_tp.lower[..subject_prefix.len()].trim();
+
+    // Dispatch subject: SelfRef for ~/this creature (and other self-ref
+    // phrases); parse_continuous_subject_filter for filter subjects
+    // (handles "each", "other", modified-creature, subtype, and
+    // core-type subjects with consistent semantics). Defer to other
+    // branches when the subject is not recognized.
+    // structural: not dispatch — slice-contains over a finite constant list
+    let affected = if subject_original == "~" || SELF_REF_TYPE_PHRASES.contains(&subject_lower) {
+        TargetFilter::SelfRef
+    } else {
+        parse_continuous_subject_filter(subject_original)?
+    };
+
+    let mut def = StaticDefinition::new(StaticMode::CanAttackWithDefender)
+        .affected(affected)
+        .description(description.to_string());
+    if let Some(cond_tp) = condition_tp {
+        let cond_text = cond_tp.original.trim().trim_end_matches('.');
+        let condition =
+            parse_static_condition(cond_text).unwrap_or(StaticCondition::Unrecognized {
+                text: cond_text.to_string(),
+            });
+        def = def.condition(condition);
+    }
+    Some(def)
+}
+
 /// Parse the predicate of an enchanted/equipped grant, handling:
 /// - Non-standard keyword phrasings: "can attack as though it had haste", "can't be blocked"
 /// - Conditional grants: "gets +1/+1 as long as you control a Wizard"
@@ -4635,8 +4704,18 @@ fn parse_enchanted_equipped_predicate(
         );
     }
 
-    // CR 702.3b: "can attack as though it didn't have defender" → CanAttackWithDefender
-    if nom_primitives::scan_contains(&pred_lower, "can attack as though it didn't have defender") {
+    // CR 702.3b: "can attack as though <pronoun> didn't have defender" →
+    // CanAttackWithDefender. Accepts both pronoun forms so plural subjects
+    // ("Creatures you control …they didn't…") routed through the
+    // creatures-you-control prefix handler (line ~620) land here.
+    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    if alt((
+        tag::<_, _, VE>("can attack as though it didn't have defender"),
+        tag::<_, _, VE>("can attack as though they didn't have defender"),
+    ))
+    .parse(pred_lower.as_str())
+    .is_ok()
+    {
         return Some(
             StaticDefinition::new(StaticMode::CanAttackWithDefender)
                 .affected(affected)
@@ -6955,6 +7034,64 @@ mod tests {
             }]
         );
         assert!(def.condition.is_some(), "condition must be extracted");
+    }
+
+    #[test]
+    fn static_can_attack_despite_defender_self_unconditional() {
+        // CR 702.3b: bare ~ subject, no condition.
+        let def = parse_static_line("~ can attack as though it didn't have defender.").unwrap();
+        assert_eq!(def.mode, StaticMode::CanAttackWithDefender);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert!(def.condition.is_none());
+    }
+
+    #[test]
+    fn static_can_attack_despite_defender_self_conditional() {
+        // CR 702.3b + CR 611.3a: ~ subject + "as long as" condition
+        // (Bristlepack Sentry pattern).
+        let def = parse_static_line(
+            "As long as you control a creature with power 4 or greater, ~ can attack as though it didn't have defender.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::CanAttackWithDefender);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert!(def.condition.is_some(), "condition must be attached");
+        assert!(
+            !matches!(def.condition, Some(StaticCondition::Unrecognized { .. })),
+            "condition must be typed, not Unrecognized"
+        );
+    }
+
+    #[test]
+    fn static_can_attack_despite_defender_creatures_you_control_they() {
+        // CR 702.3b: plural subject + "they" pronoun (High Alert pattern).
+        let def = parse_static_line(
+            "Creatures you control can attack as though they didn't have defender.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::CanAttackWithDefender);
+        assert!(matches!(def.affected, Some(TargetFilter::Typed(_))));
+    }
+
+    #[test]
+    fn static_can_attack_despite_defender_modified_creatures_they() {
+        // Subtype-filter subject + "they" pronoun (Guardians of Oboro pattern).
+        let def = parse_static_line(
+            "Modified creatures you control can attack as though they didn't have defender.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::CanAttackWithDefender);
+        assert!(matches!(def.affected, Some(TargetFilter::Typed(_))));
+    }
+
+    #[test]
+    fn static_can_attack_despite_defender_enchanted_creature() {
+        // Enchanted-creature subject (Animate Wall pattern) — routed through
+        // parse_enchanted_equipped_predicate which now accepts both pronouns.
+        let def =
+            parse_static_line("Enchanted creature can attack as though it didn't have defender.")
+                .unwrap();
+        assert_eq!(def.mode, StaticMode::CanAttackWithDefender);
     }
 
     #[test]

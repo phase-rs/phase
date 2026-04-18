@@ -806,7 +806,12 @@ fn run_decks(remaining_args: &[String]) {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("decks-skipped.json");
-        skipped.sort_by(|a, b| a.unsupported.len().cmp(&b.unsupported.len()).then_with(|| a.code.cmp(&b.code)));
+        skipped.sort_by(|a, b| {
+            a.unsupported
+                .len()
+                .cmp(&b.unsupported.len())
+                .then_with(|| a.code.cmp(&b.code))
+        });
         let skipped_json =
             serde_json::to_string_pretty(&skipped).expect("SkippedDeck serialization cannot fail");
         std::fs::write(&skipped_path, &skipped_json)
