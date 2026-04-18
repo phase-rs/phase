@@ -61,6 +61,163 @@ fn nom_tag_tp<'a>(tp: &TextPair<'a>, prefix: &str) -> Option<TextPair<'a>> {
         })
 }
 
+/// Recognizes the first token/phrase of an effect clause that follows the
+/// condition-vs-effect comma in an inverted `"As long as <cond>, <effect>"` line.
+///
+/// Every alternative ends on a word boundary (trailing space or apostrophe) so
+/// `tag("it ")` does not accept `"its "`. The set is derived from the 134-row
+/// corpus of currently-affected cards in `client/public/card-data.json` and is
+/// intentionally conservative: bare nouns/verbs that commonly appear inside
+/// condition clauses (e.g. `"creatures "`, `"lands "`, `"a "`) are omitted.
+fn parse_effect_subject_prefix(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        // Self-reference pronouns ("it …", "it's …").
+        value(
+            (),
+            alt((
+                tag("it "),
+                tag("it's "),
+                tag("it has "),
+                tag("it gets "),
+                tag("it can "),
+                tag("it assigns "),
+                tag("it deals "),
+                tag("it doesn't "),
+            )),
+        ),
+        // Self-reference tilde token.
+        value(
+            (),
+            alt((
+                tag("~ "),
+                tag("~'s "),
+                tag("~ is "),
+                tag("~ has "),
+                tag("~ gets "),
+                tag("~ can "),
+                tag("~ and "),
+            )),
+        ),
+        // Anaphoric subjects for paired/attached/enchanted interactions.
+        value(
+            (),
+            alt((
+                tag("that creature "),
+                tag("those creatures "),
+                tag("both creatures "),
+                tag("each of those "),
+                tag("that permanent "),
+                tag("that card "),
+            )),
+        ),
+        // Typed bulk subjects.
+        value(
+            (),
+            alt((
+                tag("each "),
+                tag("all "),
+                tag("other "),
+                tag("enchanted "),
+                tag("equipped "),
+                tag("creatures you control "),
+                tag("lands you control "),
+                tag("permanents you control "),
+                tag("cards in your hand "),
+                tag("cards in your graveyard "),
+                tag("the top card "),
+                tag("the turn order "),
+                tag("the first time "),
+            )),
+        ),
+        // Player-directed and global subjects.
+        value(
+            (),
+            alt((
+                tag("you may "),
+                tag("you can't "),
+                tag("you control "),
+                tag("you "),
+                tag("players "),
+                tag("no more than "),
+                tag("defending player "),
+                tag("each opponent "),
+                tag("each player "),
+            )),
+        ),
+        // Effect-starter verbs/nouns (when no explicit subject).
+        value(
+            (),
+            alt((
+                tag("if "),
+                tag("prevent "),
+                tag("damage "),
+                tag("untap all "),
+                tag("they "),
+            )),
+        ),
+    ))
+    .parse(input)
+    .map(|(rest, _)| (rest, ()))
+}
+
+/// Scan `tp.lower` for the first `", "` whose tail begins with a recognized
+/// effect-subject prefix (see `parse_effect_subject_prefix`). Returns the
+/// `(condition, effect)` halves, each as a `TextPair` aligned with the source.
+///
+/// Uses `match_indices(", ")` for structural iteration over candidate split
+/// points (not for parsing dispatch); the dispatch itself is a nom combinator.
+/// This mirrors the word-boundary-scan pattern used by `scan_timing_restrictions`
+/// in `oracle_casting.rs`.
+fn split_on_effect_subject_comma<'a>(tp: &TextPair<'a>) -> Option<(TextPair<'a>, TextPair<'a>)> {
+    for (pos, sep) in tp.lower.match_indices(", ") {
+        let after = pos + sep.len();
+        let tail_lower = &tp.lower[after..];
+        if parse_effect_subject_prefix(tail_lower).is_ok() {
+            let (condition, _) = tp.split_at(pos);
+            let (_, effect) = tp.split_at(after);
+            return Some((condition, effect));
+        }
+    }
+    None
+}
+
+/// Result of splitting an inverted `"As long as <cond>, <effect>"` line.
+struct InvertedSplit {
+    /// Canonical-form rewrite `"<effect> as long as <condition>"` ready for
+    /// re-dispatch through `parse_static_line_inner`.
+    canonical: String,
+    /// The condition clause in original case, suitable for
+    /// `StaticCondition::Unrecognized { text }` when the recursed parse fails.
+    condition_text: String,
+}
+
+/// Detect inverted static form `"As long as <condition>, <effect>"` and split
+/// it into a canonical rewrite plus the isolated condition text. Returns
+/// `None` when the line does not start with `"as long as "` or when no comma
+/// boundary has a recognized effect-subject tail (in which case the caller
+/// falls through to the existing generic fallback, preserving today's
+/// behavior).
+///
+/// CR 611.3a: Continuous effects from static abilities apply when their stated
+/// condition is true; orientation of the condition clause in the printed text
+/// is irrelevant to rules semantics.
+fn try_split_inverted_as_long_as(tp: &TextPair<'_>) -> Option<InvertedSplit> {
+    let rest = nom_tag_tp(tp, "as long as ")?;
+    // Trim a trailing period from both sides before splitting so the canonical
+    // form does not carry a stray `.` at the condition boundary.
+    let trimmed_original = rest.original.trim_end_matches('.');
+    let trimmed_lower = rest.lower.trim_end_matches('.');
+    let body = TextPair::new(trimmed_original, trimmed_lower);
+    let (condition, effect) = split_on_effect_subject_comma(&body)?;
+    let condition_text = condition.original.trim().to_string();
+    let effect_text = effect.original.trim();
+    let canonical = format!("{effect_text} as long as {condition_text}");
+    Some(InvertedSplit {
+        canonical,
+        condition_text,
+    })
+}
+
 fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(tf) => {
@@ -142,14 +299,59 @@ pub(crate) fn try_parse_graveyard_keyword_grant_clause(
     Some((filter, kind))
 }
 
+/// Whether the inverted `"As long as <cond>, <effect>"` detector may fire.
+///
+/// Used as a one-way recursion gate: the outer call runs with `Allow`; when the
+/// detector rewrites the line into canonical form `"<effect> as long as <cond>"`
+/// and re-invokes `parse_static_line_inner`, it passes `Skip` so the detector
+/// cannot re-enter. Any call path that does not originate from the inverted-form
+/// rewrite uses `Allow`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InvertedAsLongAs {
+    Allow,
+    Skip,
+}
+
 /// Parse a static/continuous ability line into a StaticDefinition.
 /// Handles: "Enchanted creature gets +N/+M", "has {keyword}",
 /// "Creatures you control get +N/+M", etc.
 #[tracing::instrument(level = "debug")]
 pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
+    parse_static_line_inner(text, InvertedAsLongAs::Allow)
+}
+
+fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<StaticDefinition> {
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
     let tp = TextPair::new(&text, &lower);
+
+    // CR 611.3a: An inverted static of the form "As long as <condition>, <effect>"
+    // is semantically equivalent to the canonical "<effect> as long as <condition>".
+    // Rewrite to canonical form and re-dispatch so the existing conditional-continuous
+    // pipeline (parse_enchanted_equipped_predicate → parse_continuous_gets_has at the
+    // " as long as " splitter, plus parse_static_condition) handles both orientations
+    // uniformly. The `Allow`/`Skip` gate makes recursion re-entry architecturally
+    // impossible: the rewrite target cannot begin with "as long as ".
+    if matches!(inverted, InvertedAsLongAs::Allow) {
+        if let Some(split) = try_split_inverted_as_long_as(&tp) {
+            if let Some(def) = parse_static_line_inner(&split.canonical, InvertedAsLongAs::Skip) {
+                return Some(def.description(text.to_string()));
+            }
+            // Rewrite succeeded (we cleanly separated condition from effect), but the
+            // recursed parser could not model the effect clause. Produce a generic
+            // Continuous Unrecognized static whose condition text is the correctly
+            // separated condition — NOT the whole remainder with effect-clause
+            // bleed-through. This is strictly better than the old fallback.
+            return Some(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .condition(StaticCondition::Unrecognized {
+                        text: split.condition_text,
+                    })
+                    .description(text.to_string()),
+            );
+        }
+    }
 
     if tp.lower == "your speed can increase beyond 4."
         || tp.lower == "your speed can increase beyond 4"
@@ -10814,6 +11016,185 @@ mod tests {
                 );
             }
             other => panic!("expected SuppressTriggers, got {other:?}"),
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // Inverted "As long as <cond>, <effect>" rewrite tests (CR 611.3a)
+    // ------------------------------------------------------------------------
+
+    fn rewrite(text: &str) -> Option<String> {
+        let stripped = strip_reminder_text(text);
+        let lower = stripped.to_lowercase();
+        let tp = TextPair::new(&stripped, &lower);
+        try_split_inverted_as_long_as(&tp).map(|s| s.canonical)
+    }
+
+    fn split_condition(text: &str) -> Option<String> {
+        let stripped = strip_reminder_text(text);
+        let lower = stripped.to_lowercase();
+        let tp = TextPair::new(&stripped, &lower);
+        try_split_inverted_as_long_as(&tp).map(|s| s.condition_text)
+    }
+
+    #[test]
+    fn inverted_rewrites_auriok_shape() {
+        let got = rewrite(
+            "As long as ~ is equipped, each creature you control that's a Soldier or a Knight gets +1/+1.",
+        )
+        .expect("auriok shape must rewrite");
+        assert_eq!(
+            got,
+            "each creature you control that's a Soldier or a Knight gets +1/+1 as long as ~ is equipped"
+        );
+    }
+
+    #[test]
+    fn inverted_rewrites_watchdog_shape() {
+        let got = rewrite("As long as ~ is untapped, all creatures attacking you get -1/-0.")
+            .expect("watchdog shape must rewrite");
+        assert_eq!(
+            got,
+            "all creatures attacking you get -1/-0 as long as ~ is untapped"
+        );
+    }
+
+    #[test]
+    fn inverted_preserves_original_case() {
+        let got = rewrite("As long as ~ is attacking, defending player can't cast spells.")
+            .expect("should rewrite");
+        assert!(got.contains("defending player can't cast spells"));
+        assert!(got.ends_with("as long as ~ is attacking"));
+    }
+
+    #[test]
+    fn inverted_returns_none_without_commas() {
+        let got = rewrite("As long as ~ is red with no trailing clause at all without commas");
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn inverted_liu_bei_internal_commas_without_effect_subject() {
+        // Liu Bei, Lord of Shu: "you control a permanent named Guan Yu, Sainted Warrior or a
+        // permanent named Zhang Fei, Fierce Warrior" — commas are inside the condition and
+        // no trailing effect clause starts with a recognized subject, so the scanner must
+        // not split (returns None).
+        let got = rewrite(
+            "As long as you control a permanent named Guan Yu, Sainted Warrior or a permanent named Zhang Fei, Fierce Warrior",
+        );
+        assert!(
+            got.is_none(),
+            "must not split on condition-internal commas without effect subject; got {got:?}"
+        );
+    }
+
+    #[test]
+    fn inverted_handles_trailing_period() {
+        let got = rewrite("As long as ~ is equipped, it gets +1/+1.").expect("must rewrite");
+        assert!(!got.ends_with('.'));
+        assert_eq!(got, "it gets +1/+1 as long as ~ is equipped");
+    }
+
+    #[test]
+    fn effect_subject_prefix_word_boundary() {
+        assert!(parse_effect_subject_prefix("it gets +1/+1").is_ok());
+        // Word boundary: "its mana value" must NOT match via "it ".
+        assert!(parse_effect_subject_prefix("its mana value is 4").is_err());
+        assert!(parse_effect_subject_prefix("each creature you control gets +1/+1").is_ok());
+        assert!(parse_effect_subject_prefix("eachother").is_err());
+    }
+
+    #[test]
+    fn inverted_splits_auriok_condition_cleanly() {
+        // The primary success criterion: the condition is separated from the effect clause.
+        // Whether the effect clause parses into modifications depends on downstream
+        // subject-phrase support, which is separate work.
+        let cond = split_condition(
+            "As long as ~ is equipped, each creature you control that's a Soldier or a Knight gets +1/+1.",
+        )
+        .expect("must split");
+        assert_eq!(cond, "~ is equipped");
+    }
+
+    #[test]
+    fn inverted_splits_watchdog_condition_cleanly() {
+        let cond =
+            split_condition("As long as ~ is untapped, all creatures attacking you get -1/-0.")
+                .expect("must split");
+        assert_eq!(cond, "~ is untapped");
+    }
+
+    #[test]
+    fn inverted_end_to_end_auriok_no_effect_bleed() {
+        // End-to-end: the returned StaticDefinition must have a condition text that is
+        // ONLY the condition (no effect-clause bleed-through). Modifications may remain
+        // empty if downstream subject-phrase parsing doesn't yet handle the effect,
+        // but that is a separate issue (and explicitly out-of-scope per task spec).
+        let def = parse_static_line(
+            "As long as ~ is equipped, each creature you control that's a Soldier or a Knight gets +1/+1.",
+        )
+        .expect("must parse");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        match &def.condition {
+            Some(StaticCondition::Unrecognized { text }) => {
+                assert_eq!(text, "~ is equipped", "condition must be cleanly split");
+                assert!(
+                    !text.contains("gets +1/+1"),
+                    "effect clause bled into condition text: {text:?}"
+                );
+            }
+            Some(other) => {
+                // Typed condition recognized — also acceptable, just confirm it's not
+                // the bleed-through fallback.
+                eprintln!("auriok: got typed condition {other:?}");
+            }
+            None => panic!("condition must be set"),
+        }
+        assert_eq!(
+            def.description.as_deref(),
+            Some(
+                "As long as ~ is equipped, each creature you control that's a Soldier or a Knight gets +1/+1."
+            ),
+            "description must equal the original printed oracle text"
+        );
+    }
+
+    #[test]
+    fn inverted_end_to_end_watchdog_no_effect_bleed() {
+        let def =
+            parse_static_line("As long as ~ is untapped, all creatures attacking you get -1/-0.")
+                .expect("must parse");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        match &def.condition {
+            Some(StaticCondition::Unrecognized { text }) => {
+                assert_eq!(text, "~ is untapped");
+                assert!(
+                    !text.contains("get -1/-0"),
+                    "effect clause bled into condition text: {text:?}"
+                );
+            }
+            Some(_) => {}
+            None => panic!("condition must be set"),
+        }
+        assert_eq!(
+            def.description.as_deref(),
+            Some("As long as ~ is untapped, all creatures attacking you get -1/-0.")
+        );
+    }
+
+    #[test]
+    fn inverted_falls_through_when_no_effect_subject_found() {
+        // With no recognized effect-subject prefix after any comma, behavior must equal
+        // today's generic fallback: a Continuous static with Unrecognized condition text
+        // (the old bleed-through behavior is preserved as a strict non-regression baseline).
+        let def = parse_static_line(
+            "As long as you control a permanent named Guan Yu, Sainted Warrior or a permanent named Zhang Fei, Fierce Warrior.",
+        )
+        .expect("fallback must still match");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        match def.condition {
+            Some(StaticCondition::Unrecognized { .. }) => {}
+            other => panic!("expected Unrecognized condition via fallback, got {other:?}"),
         }
     }
 }
