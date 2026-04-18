@@ -46,6 +46,7 @@ pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
         parse_life_conditions,
         parse_zone_conditions,
         parse_there_are_conditions,
+        parse_there_exists_condition,
         parse_entered_this_turn,
         parse_youve_this_turn,
         parse_event_state_conditions,
@@ -980,6 +981,29 @@ fn parse_there_are_conditions(input: &str) -> OracleResult<'_, StaticCondition> 
     ))
 }
 
+/// Parse "there's a X in your Y" / "there is a X in your Y" — singular existence.
+///
+/// Semantic mapping: `"there's a X"` ≡ `count(X) >= 1`. Composes from existing
+/// primitives — the article parser consumes "a"/"an", then `parse_quantity_ref`
+/// matches the same `<filter> in <zone>` shape that `parse_there_are_conditions`
+/// uses for the plural threshold form. Output is a `QuantityComparison` GE 1,
+/// identical in AST shape to the plural form so downstream evaluation is shared.
+///
+/// Unlocks the full class of "has <keyword> as long as there's a <filter> card
+/// in your <zone>" static abilities (e.g. Aang, A Lot to Learn).
+fn parse_there_exists_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((tag("there's "), tag("there is "))).parse(input)?;
+    let (rest, _) = parse_article(rest)?;
+    let (rest, qty) = nom_quantity::parse_quantity_ref.parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            crate::parser::oracle_quantity::canonicalize_quantity_ref(qty),
+            1,
+        ),
+    ))
+}
+
 /// Parse "an opponent controls more [type] than you" → QuantityComparison.
 /// Also handles "an opponent has more life/cards in hand than you".
 ///
@@ -1662,6 +1686,38 @@ mod tests {
                 assert_eq!(card_types, vec![TypeFilter::Subtype("Lesson".to_string())]);
             }
             other => panic!("expected Lesson graveyard count GE 3, got {other:?}"),
+        }
+    }
+
+    /// Singular existence form: "there's a X in your Y" ≡ count(X) >= 1.
+    /// Covers Aang, A Lot to Learn — "has vigilance as long as there's a Lesson
+    /// card in your graveyard." — and every other card with the same grammatical shape.
+    #[test]
+    fn test_there_exists_subtype_card_in_graveyard() {
+        for phrase in [
+            "there's a Lesson card in your graveyard",
+            "there is a Lesson card in your graveyard",
+        ] {
+            let (rest, c) = parse_inner_condition(phrase).unwrap();
+            assert_eq!(rest, "", "unconsumed input for {phrase:?}");
+            match c {
+                StaticCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty:
+                                QuantityRef::ZoneCardCount {
+                                    zone: crate::types::ability::ZoneRef::Graveyard,
+                                    card_types,
+                                    scope: crate::types::ability::CountScope::Controller,
+                                },
+                        },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                } => {
+                    assert_eq!(card_types, vec![TypeFilter::Subtype("Lesson".to_string())]);
+                }
+                other => panic!("expected Lesson graveyard count GE 1, got {other:?}"),
+            }
         }
     }
 
