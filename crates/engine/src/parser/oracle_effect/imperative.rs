@@ -2851,6 +2851,13 @@ fn try_parse_exchange_control_targets(span: &str) -> Option<(TargetFilter, Targe
     // `take_until` (a combinator, not string-dispatch), then delegate each side
     // to `parse_exchange_slot`. `take_until` is structural — it splits the
     // span; all dispatch decisions happen inside `parse_exchange_slot` via nom.
+    //
+    // ASSUMPTION: Exchange-control slots do NOT contain an internal " and "
+    // (e.g. no "creature with flying and first strike and target creature" in
+    // printed Oracle text for this effect). `take_until` is first-occurrence
+    // greedy, so a slot with internal " and " would misfire. No current card
+    // triggers this; if such text appears, switch to a right-anchored split
+    // or recognise per-slot terminators.
     let (right, (left, _)) = nom::sequence::pair(
         take_until::<_, _, VerboseError<&str>>(" and "),
         tag(" and "),

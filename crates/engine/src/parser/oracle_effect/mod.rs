@@ -11123,15 +11123,43 @@ mod tests {
     #[test]
     fn effect_exchange_control_compound_distinct_filters() {
         // Compound shape with per-slot legality (Political Trickery / Trade the Helm shape):
-        // each slot carries its own controller-relative filter.
+        // each slot carries its own controller-relative filter. Assert on the
+        // actual ControllerRef and TypeFilter rather than mere inequality so
+        // that a parser regression (e.g. dropping the controller binding, or
+        // swapping slot order) fails loudly.
+        use crate::types::ability::{ControllerRef, TypeFilter};
         let e = parse_effect(
             "exchange control of target land you control and target land an opponent controls",
         );
         match e {
             Effect::ExchangeControl { target_a, target_b } => {
-                assert_ne!(
-                    target_a, target_b,
-                    "per-slot filters should differ (you-control vs opponent-controls)"
+                let tf_a = match &target_a {
+                    TargetFilter::Typed(tf) => tf,
+                    _ => panic!("target_a should be Typed, got {target_a:?}"),
+                };
+                assert_eq!(
+                    tf_a.type_filters,
+                    vec![TypeFilter::Land],
+                    "target_a should be a Land filter"
+                );
+                assert_eq!(
+                    tf_a.controller,
+                    Some(ControllerRef::You),
+                    "target_a should bind ControllerRef::You"
+                );
+                let tf_b = match &target_b {
+                    TargetFilter::Typed(tf) => tf,
+                    _ => panic!("target_b should be Typed, got {target_b:?}"),
+                };
+                assert_eq!(
+                    tf_b.type_filters,
+                    vec![TypeFilter::Land],
+                    "target_b should be a Land filter"
+                );
+                assert_eq!(
+                    tf_b.controller,
+                    Some(ControllerRef::Opponent),
+                    "target_b should bind ControllerRef::Opponent"
                 );
             }
             other => panic!("Expected ExchangeControl, got {other:?}"),
@@ -11141,7 +11169,10 @@ mod tests {
     #[test]
     fn effect_exchange_control_self_ref_slot() {
         // "this artifact and target nonland permanent" (Avarice Totem shape).
-        // The "this <type>" slot resolves to SelfRef and is auto-filled at resolution.
+        // The "this <type>" slot resolves to SelfRef and is auto-filled at
+        // resolution. target_b must be a Permanent filter with Nonland so the
+        // targeting UI enforces Oracle legality rather than accepting "Any".
+        use crate::types::ability::TypeFilter;
         let e = parse_effect("exchange control of this artifact and target nonland permanent");
         match e {
             Effect::ExchangeControl { target_a, target_b } => {
@@ -11149,9 +11180,24 @@ mod tests {
                     matches!(target_a, TargetFilter::SelfRef),
                     "target_a (this artifact) should be SelfRef, got {target_a:?}"
                 );
+                let tf_b = match &target_b {
+                    TargetFilter::Typed(tf) => tf,
+                    _ => panic!("target_b should be Typed, got {target_b:?}"),
+                };
+                // "nonland permanent" → Permanent type with a Non(Land) filter.
                 assert!(
-                    !matches!(target_b, TargetFilter::Any | TargetFilter::SelfRef),
-                    "target_b should be a typed permanent filter, got {target_b:?}"
+                    tf_b.type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Permanent)),
+                    "target_b should include TypeFilter::Permanent, got {:?}",
+                    tf_b.type_filters
+                );
+                assert!(
+                    tf_b.type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Land))),
+                    "target_b should carry Non(Land) for 'nonland', got {:?}",
+                    tf_b.type_filters
                 );
             }
             other => panic!("Expected ExchangeControl, got {other:?}"),

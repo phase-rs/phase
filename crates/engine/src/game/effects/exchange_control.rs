@@ -32,6 +32,19 @@ pub fn resolve(
         return Ok(());
     };
 
+    // Diagnostic: both slot filters being `Any` indicates either an
+    // old-format `card-data.json` row that deserialised via the serde default,
+    // or a parser gap. A bare `Any/Any` slot set plus a slot-less
+    // `ability.targets` produces a silent no-op — flag it so regressions are
+    // visible in logs rather than disappearing into the CR 701.12a
+    // all-or-nothing branch.
+    if matches!(target_a, TargetFilter::Any) && matches!(target_b, TargetFilter::Any) {
+        tracing::warn!(
+            source_id = ?ability.source_id,
+            "ExchangeControl resolved with both target filters = Any — likely legacy data or parser gap"
+        );
+    }
+
     // Each non-SelfRef slot consumes one TargetRef::Object from ability.targets,
     // in declaration order. SelfRef slots are filled with ability.source_id.
     let mut object_targets = ability.targets.iter().filter_map(|t| match t {
@@ -99,11 +112,14 @@ pub fn resolve(
     }
 
     // CR 701.12a: Bidirectional control exchange via two transient continuous effects.
-    // Object A gets controller_b, object B gets controller_a.
+    // Object A gets controller_b, object B gets controller_a. Duration honours
+    // the resolved ability (e.g. "until end of turn") with `Permanent` as the
+    // default — mirrors `gain_control::resolve`.
+    let duration = ability.duration.clone().unwrap_or(Duration::Permanent);
     state.add_transient_continuous_effect(
         ability.source_id,
         controller_b,
-        Duration::Permanent,
+        duration.clone(),
         TargetFilter::SpecificObject { id: id_a },
         vec![ContinuousModification::ChangeController],
         None,
@@ -111,7 +127,7 @@ pub fn resolve(
     state.add_transient_continuous_effect(
         ability.source_id,
         controller_a,
-        Duration::Permanent,
+        duration,
         TargetFilter::SpecificObject { id: id_b },
         vec![ContinuousModification::ChangeController],
         None,

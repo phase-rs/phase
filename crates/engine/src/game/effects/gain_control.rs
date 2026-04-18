@@ -189,6 +189,57 @@ mod tests {
         );
     }
 
+    /// CR 110.2 + CR 613.1b: End-to-end layer pipeline test for
+    /// `resolve_give` (Donate-style "give target permanent to target player").
+    /// The recipient differs from both the caster and the source's controller,
+    /// so this specifically exercises the post-Bug-B invariant that
+    /// `effect.controller` is the single authority. Pre-fix, the layer read
+    /// `source.controller` and ignored the resolver's recipient choice,
+    /// silently giving the permanent to the caster instead of the recipient.
+    #[test]
+    fn give_control_layer_pipeline_transfers_to_recipient() {
+        let mut state = GameState::new_two_player(42);
+        // Target: the permanent to be donated. Initially controlled by the caster.
+        let target_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Gift".to_string(),
+            Zone::Battlefield,
+        );
+        // Source (e.g. Donate on the stack) — controlled by the caster.
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Donate".to_string(),
+            Zone::Stack,
+        );
+        // Recipient is the OPPONENT (PlayerId(1)), distinct from both caster
+        // and source.controller. Pre-fix, layer pipeline would read
+        // source.controller (= caster) and leave target with caster.
+        let recipient = PlayerId(1);
+        let ability = ResolvedAbility::new(
+            Effect::GiveControl {
+                target: TargetFilter::Any,
+                recipient: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(target_id), TargetRef::Player(recipient)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_give(&mut state, &ability, &mut events).unwrap();
+
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects.get(&target_id).unwrap().controller,
+            recipient,
+            "target should now be controlled by the recipient, not the caster or source.controller"
+        );
+    }
+
     #[test]
     fn gain_control_nonexistent_target_returns_error() {
         let mut state = GameState::new_two_player(42);
