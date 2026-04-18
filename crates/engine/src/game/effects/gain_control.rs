@@ -145,6 +145,50 @@ mod tests {
         assert!(state.layers_dirty);
     }
 
+    /// CR 613.1b: Non-regression for Bug B (layer fix). After switching the
+    /// ChangeController layer arm to trust `effect.controller` instead of
+    /// `source.controller`, the standard gain-control flow (where caster is
+    /// also source.controller) must still transfer control correctly through
+    /// the full layer pipeline.
+    #[test]
+    fn gain_control_layer_pipeline_transfers_control() {
+        let mut state = GameState::new_two_player(42);
+        let target_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        // Source (the Control Magic aura) is controlled by PlayerId(0) (the caster),
+        // matching the real gain-control shape where source.controller == new controller.
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Control Magic".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::GainControl {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(target_id)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects.get(&target_id).unwrap().controller,
+            PlayerId(0),
+            "target should now be controlled by the caster after gain_control"
+        );
+    }
+
     #[test]
     fn gain_control_nonexistent_target_returns_error() {
         let mut state = GameState::new_two_player(42);

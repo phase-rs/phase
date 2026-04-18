@@ -265,4 +265,65 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
         assert!(state.transient_continuous_effects.is_empty());
     }
+
+    /// CR 613.1b + CR 701.12a: End-to-end layer pipeline test. Resolves an
+    /// exchange-control effect then runs `evaluate_layers` and asserts the two
+    /// targets' `controller` fields are ACTUALLY swapped — not merely that
+    /// transient effects exist. This is the regression guard for Bug B:
+    /// previously both `ChangeController` effects read `source.controller`
+    /// (the caster) and set both objects to the caster instead of swapping.
+    #[test]
+    fn exchange_control_layer_pipeline_actually_swaps_controllers() {
+        let mut state = GameState::new_two_player(42);
+        let obj_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let obj_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Wolf".to_string(),
+            Zone::Battlefield,
+        );
+        // Source is controlled by PlayerId(0) (the caster) — deliberately chosen
+        // to match the old buggy behaviour (source.controller == caster) so the
+        // test would FAIL pre-fix (both objects would end up under PlayerId(0)).
+        let source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Switcheroo".to_string(),
+            Zone::Stack,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::ExchangeControl {
+                target_a: TargetFilter::Any,
+                target_b: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(obj_a), TargetRef::Object(obj_b)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Run the layer pipeline (CR 613).
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects.get(&obj_a).unwrap().controller,
+            PlayerId(1),
+            "obj_a should now be controlled by PlayerId(1) after swap"
+        );
+        assert_eq!(
+            state.objects.get(&obj_b).unwrap().controller,
+            PlayerId(0),
+            "obj_b should now be controlled by PlayerId(0) after swap"
+        );
+    }
 }

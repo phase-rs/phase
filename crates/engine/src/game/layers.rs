@@ -826,15 +826,13 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
         None
     };
 
-    // Pre-read source controller for ChangeController (avoids borrow conflict in the loop)
-    let source_controller = if matches!(
-        effect.modification,
-        ContinuousModification::ChangeController
-    ) {
-        state.objects.get(&effect.source_id).map(|o| o.controller)
-    } else {
-        None
-    };
+    // CR 613.1b: For Layer 2 ChangeController, the new controller is the effect's
+    // own `controller` field — set authoritatively by the effect that queued the
+    // continuous modification (e.g. gain_control passes `ability.controller`,
+    // exchange_control passes the swapped controller per slot). Reading it from
+    // `state.objects.get(effect.source_id).controller` would be wrong for any
+    // case where source ≠ recipient (e.g. Switcheroo: both transient effects
+    // share one source, but each slot needs the opposite controller).
 
     // Pre-compute dynamic P/T values (avoids borrow conflict in the loop)
     let dynamic_pt = match &effect.modification {
@@ -1025,11 +1023,11 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             ContinuousModification::AssignNoCombatDamage => {
                 obj.assigns_no_combat_damage = true;
             }
-            // CR 613.1b: Change controller to the source permanent's controller.
+            // CR 613.1b: Change controller to the effect's own controller field.
+            // See pre-loop comment for why we trust effect.controller (single
+            // authority) rather than re-deriving from the source object.
             ContinuousModification::ChangeController => {
-                if let Some(new_controller) = source_controller {
-                    obj.controller = new_controller;
-                }
+                obj.controller = effect.controller;
             }
             // CR 305.7: Setting a land's subtype removes all old land subtypes
             // (CR 205.3i) and all abilities generated from its rules text. Non-land
