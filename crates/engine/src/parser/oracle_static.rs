@@ -934,11 +934,29 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         }
     }
 
-    // --- "~ isn't a [type]" (type removal) ---
-    // e.g. "Erebos isn't a creature" from god-of-the-dead conditional
+    // --- "~ isn't a [type] [as long as <cond>]" (layer-4 type removal) ---
+    // CR 613.1d: Layer 4 type-changing effects. The clause splitter upstream
+    // (`try_split_inverted_as_long_as`) rewrites "As long as <cond>, ~ isn't
+    // a <type>." into canonical "~ isn't a <type> as long as <cond>"; we
+    // mirror the " as long as " split used by `parse_continuous_gets_has`
+    // (CR 611.3a) so both orientations produce non-empty modifications plus
+    // an attached condition.
     if let Ok((_, (_, type_rest))) = nom_primitives::split_once_on(tp.lower, "isn't a ") {
-        use crate::types::card_type::CoreType;
-        let type_name = type_rest.trim().trim_end_matches('.');
+        // type_rest is a suffix of tp.lower; original/lower have equal byte
+        // lengths, so we can recover the original-case slice by offsetting
+        // from tp.original by the same length.
+        let type_rest_original = &tp.original[tp.original.len() - type_rest.len()..];
+        let type_rest_tp = TextPair::new(type_rest_original, type_rest);
+        let (type_text_tp, condition_tp) = match type_rest_tp.split_around(" as long as ") {
+            Some((before, after)) => (before, Some(after)),
+            None => (type_rest_tp, None),
+        };
+        let type_name = type_text_tp.lower.trim().trim_end_matches('.');
+        // Pre-anchored slice — `split_once_on("isn't a ")` consumed everything
+        // up to and including "isn't a ", and we then stripped a trailing
+        // " as long as …" clause. What remains is the type word plus an
+        // optional trailing period, so a literal `match` on the five core
+        // types is idiomatic enum-conversion (not parsing dispatch).
         let core_type = match type_name {
             "creature" => Some(CoreType::Creature),
             "artifact" => Some(CoreType::Artifact),
@@ -948,12 +966,19 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
             _ => None,
         };
         if let Some(ct) = core_type {
-            return Some(
-                StaticDefinition::continuous()
-                    .affected(TargetFilter::SelfRef)
-                    .modifications(vec![ContinuousModification::RemoveType { core_type: ct }])
-                    .description(text.to_string()),
-            );
+            let mut def = StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::RemoveType { core_type: ct }])
+                .description(text.to_string());
+            if let Some(cond_tp) = condition_tp {
+                let cond_text = cond_tp.original.trim().trim_end_matches('.');
+                let condition =
+                    parse_static_condition(cond_text).unwrap_or(StaticCondition::Unrecognized {
+                        text: cond_text.to_string(),
+                    });
+                def = def.condition(condition);
+            }
+            return Some(def);
         }
     }
 
@@ -6886,6 +6911,50 @@ mod tests {
             def.condition,
             Some(StaticCondition::Unrecognized { .. })
         ));
+    }
+
+    #[test]
+    fn static_erebos_god_of_the_dead_type_removal() {
+        // CR 613.1d: Layer-4 type-removal with an attached devotion condition.
+        // Inverted form — clause splitter rewrites to canonical form and the
+        // "~ isn't a creature" branch now attaches the condition.
+        let def = parse_static_line(
+            "As long as your devotion to black is less than five, ~ isn't a creature.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::RemoveType {
+                core_type: CoreType::Creature,
+            }]
+        );
+        // The condition is "devotion < 5" which the existing static-condition
+        // parser renders as Not{DevotionGE{Black, 5}}.
+        assert!(def.condition.is_some(), "condition must be extracted");
+        assert!(
+            !matches!(def.condition, Some(StaticCondition::Unrecognized { .. })),
+            "condition must be typed, not Unrecognized"
+        );
+    }
+
+    #[test]
+    fn static_type_removal_with_nondevotion_condition() {
+        // The Warring Triad: non-devotion condition path. We don't assert the
+        // condition variant (may or may not type via parse_static_condition),
+        // but modifications MUST be non-empty regardless.
+        let def = parse_static_line(
+            "As long as there are fewer than eight cards in your graveyard, ~ isn't a creature.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::RemoveType {
+                core_type: CoreType::Creature,
+            }]
+        );
+        assert!(def.condition.is_some(), "condition must be extracted");
     }
 
     #[test]
