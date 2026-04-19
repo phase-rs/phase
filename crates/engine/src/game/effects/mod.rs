@@ -1872,7 +1872,9 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let mut ability = ResolvedAbility::new(
             Effect::PayCost {
-                cost: crate::types::ability::PaymentCost::Life { amount: 1 },
+                cost: crate::types::ability::PaymentCost::Life {
+                    amount: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                },
             },
             vec![],
             ObjectId(100),

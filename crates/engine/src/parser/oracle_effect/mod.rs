@@ -9647,9 +9647,51 @@ mod tests {
         assert!(matches!(
             e,
             Effect::PayCost {
-                cost: PaymentCost::Life { amount: 3 }
+                cost: PaymentCost::Life {
+                    amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+                },
             }
         ));
+    }
+
+    /// CR 118.8 + CR 603.2: "pay life equal to its power" resolves against the
+    /// triggering event's source power (Madame Null, Power Broker). The outer
+    /// Effect here is just the PayCost — the "you may" optionality and
+    /// `IfYouDo` sub-ability are wired at the trigger layer.
+    #[test]
+    fn effect_pay_life_equal_to_its_power() {
+        let e = parse_effect("pay life equal to its power");
+        assert!(
+            matches!(
+                &e,
+                Effect::PayCost {
+                    cost: PaymentCost::Life {
+                        amount: crate::types::ability::QuantityExpr::Ref {
+                            qty: crate::types::ability::QuantityRef::EventContextSourcePower,
+                        },
+                    },
+                }
+            ),
+            "expected PayCost(Life = EventContextSourcePower), got {e:?}"
+        );
+    }
+
+    /// CR 118.8: "pay X life" — variable amount resolved from `chosen_x`.
+    #[test]
+    fn effect_pay_x_life() {
+        let e = parse_effect("pay X life");
+        match &e {
+            Effect::PayCost {
+                cost:
+                    PaymentCost::Life {
+                        amount:
+                            crate::types::ability::QuantityExpr::Ref {
+                                qty: crate::types::ability::QuantityRef::Variable { name },
+                            },
+                    },
+            } if name == "X" => {}
+            other => panic!("expected PayCost(Life = Variable(X)), got {other:?}"),
+        }
     }
 
     #[test]

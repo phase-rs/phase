@@ -2178,6 +2178,51 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
     })
 }
 
+/// CR 118.8 + CR 119.4: Parse the amount portion of a "pay <amount> life" cost.
+///
+/// `rest` is the lowercase text after the leading `"pay "` token. Returns the
+/// resolved `QuantityExpr` on success — literal (`"3 life"`), X variable
+/// (`"X life"`), or a dynamic reference (`"life equal to its power"`,
+/// `"life equal to <quantity-ref>"`). All dispatch is nom-combinator based.
+fn parse_pay_life_amount(rest: &str) -> Option<QuantityExpr> {
+    // CR 118.8: "pay life equal to <quantity-ref>" — delegates to the shared
+    // event-context / named-quantity resolvers so every dynamic amount pattern
+    // already recognized for gain/lose life composes here too.
+    if let Ok((tail, _)) = tag::<_, _, VerboseError<&str>>("life equal to ").parse(rest) {
+        let qty_text = tail.trim_end_matches('.').trim();
+        if let Some(expr) = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text) {
+            return Some(expr);
+        }
+        if let Some(qty) = crate::parser::oracle_quantity::parse_quantity_ref(qty_text) {
+            return Some(QuantityExpr::Ref { qty });
+        }
+        return None;
+    }
+
+    // CR 107.1b: "pay X life" — variable amount resolved from `chosen_x`.
+    if let Ok((tail, _)) = tag::<_, _, VerboseError<&str>>("x life").parse(rest) {
+        // structural: not dispatch — word-boundary guard so "x lifelink" etc.
+        // cannot false-match.
+        if tail.is_empty() || tail.starts_with(['.', ',', ' ']) {
+            return Some(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            });
+        }
+    }
+
+    // CR 118.8: "pay N life" — literal amount via `parse_number` (digit words
+    // or numerals, never "X" — handled above).
+    if let Ok((tail, n)) = nom_primitives::parse_number.parse(rest) {
+        if let Ok((_, _)) = tag::<_, _, VerboseError<&str>>(" life").parse(tail) {
+            return Some(QuantityExpr::Fixed { value: n as i32 });
+        }
+    }
+
+    None
+}
+
 pub(super) fn parse_cost_resource_ast(
     text: &str,
     lower: &str,
@@ -2199,13 +2244,13 @@ pub(super) fn parse_cost_resource_ast(
         nom_on_lower(text, lower, |input| value((), tag("pay ")).parse(input))
     {
         let rest = &lower[lower.len() - rest_orig.len()..];
-        // "pay N life" → PaymentCost::Life (CR 118.2)
-        if let Some(life_rest) = rest.strip_suffix(" life") {
-            if let Ok((_, n)) = nom_primitives::parse_number.parse(life_rest) {
-                return Some(CostResourceImperativeAst::Pay {
-                    cost: PaymentCost::Life { amount: n },
-                });
-            }
+        // CR 118.8 + CR 119.4: `pay <amount> life` — literal count, X variable,
+        // or dynamic reference (`pay life equal to its power`). Dispatched with
+        // nom combinators over the post-"pay " remainder.
+        if let Some(amount) = parse_pay_life_amount(rest) {
+            return Some(CostResourceImperativeAst::Pay {
+                cost: PaymentCost::Life { amount },
+            });
         }
         // CR 107.14: "pay any amount of {E}" → variable energy payment
         if let Ok((_, _)) = tag::<_, _, VerboseError<&str>>("any amount of {e}").parse(rest) {

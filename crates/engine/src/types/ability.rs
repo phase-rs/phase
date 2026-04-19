@@ -2132,8 +2132,13 @@ pub enum PaymentCost {
     Mana {
         cost: ManaCost,
     },
+    /// CR 118.8 + CR 119.4: Pay life during effect resolution. Paying life IS losing
+    /// life — the replacement pipeline and `CantLoseLife` locks apply. `amount` is a
+    /// `QuantityExpr` so dynamic references (`"life equal to its power"`, `"X life"`,
+    /// `"life equal to the number of ..."`) compose through the same cost resolver
+    /// as a literal `"pay 2 life"`.
     Life {
-        amount: u32,
+        amount: QuantityExpr,
     },
     /// CR 118.3 + CR 702.179f: Pay speed during effect resolution.
     Speed {

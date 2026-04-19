@@ -40,11 +40,15 @@ pub fn resolve(
             let _ = casting::pay_unless_cost(state, ability.controller, mana_cost, events);
         }
         PaymentCost::Life { amount } => {
-            // CR 118.3b + CR 119.4 + CR 119.8: Paying life as an effect-embedded
+            // CR 118.8 + CR 119.4 + CR 119.8: Paying life as an effect-embedded
             // cost routes through the single-authority helper. Per CR 119.4 this
             // IS a life-loss event, so the replacement pipeline fires and a
-            // CantLoseLife lock blocks the payment (cost unpayable).
-            match pay_life_as_cost(state, ability.controller, *amount, events) {
+            // CantLoseLife lock blocks the payment (cost unpayable). The amount
+            // is a `QuantityExpr` resolved here — dynamic refs like
+            // `EventContextSourcePower` resolve against the triggering event.
+            let amount = resolve_quantity_with_targets(state, amount, ability);
+            let amount = u32::try_from(amount.max(0)).unwrap_or(0);
+            match pay_life_as_cost(state, ability.controller, amount, events) {
                 PayLifeCostResult::Paid { .. } => {}
                 PayLifeCostResult::InsufficientLife | PayLifeCostResult::LockedCantLoseLife => {
                     state.cost_payment_failed_flag = true;
@@ -155,7 +159,9 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.players[0].life = 20;
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::Life { amount: 3 },
+            cost: PaymentCost::Life {
+                amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+            },
         });
         let mut events = Vec::new();
         let result = resolve(&mut state, &ability, &mut events);
@@ -174,7 +180,9 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.players[0].life = 2;
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::Life { amount: 3 },
+            cost: PaymentCost::Life {
+                amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+            },
         });
         let mut events = Vec::new();
         let result = resolve(&mut state, &ability, &mut events);
@@ -245,7 +253,9 @@ mod tests {
         );
 
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::Life { amount: 3 },
+            cost: PaymentCost::Life {
+                amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+            },
         });
         let mut events = Vec::new();
         let result = resolve(&mut state, &ability, &mut events);
