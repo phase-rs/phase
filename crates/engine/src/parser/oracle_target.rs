@@ -1535,9 +1535,16 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
     None
 }
 
-/// Parse "with power N or less" / "with power N or greater" / "with greater power" suffix.
-/// Returns (FilterProp, bytes consumed from the original text).
-/// CR 509.1b: "with greater power" is relative to the source object's power.
+/// Parse "with power [or toughness] N or less/greater", "with toughness N or
+/// less/greater", and "with greater power" suffixes. Returns `(FilterProp,
+/// bytes consumed from the original text)`. CR 208.1 governs P/T comparisons;
+/// CR 509.1b covers the source-relative "greater power" form.
+///
+/// The disjunctive form "with power or toughness N or less" produces
+/// `FilterProp::AnyOf { [PowerLE(N), ToughnessLE(N)] }` so the composite
+/// matches when *either* property is at or below N — matching the natural-
+/// language semantics of "power or toughness". Used by Arnyn Deathbloom
+/// Botanist, Stern Scolding, Leonardo Sewer Samurai, Warping Wail, etc.
 fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
 
@@ -1546,6 +1553,58 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
         tag::<_, _, nom_language::error::VerboseError<&str>>("with greater power").parse(trimmed)
     {
         return Some((FilterProp::PowerGTSource, text.len() - after.len()));
+    }
+
+    // Longest-match first: disjunctive "with power or toughness N or {less,greater}".
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("with power or toughness ")
+            .parse(trimmed)
+    {
+        let (rest, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
+        let after_num = rest.trim_start();
+        if let Ok((after, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>("or less").parse(after_num)
+        {
+            let props = vec![
+                FilterProp::PowerLE {
+                    value: value.clone(),
+                },
+                FilterProp::ToughnessLE { value },
+            ];
+            return Some((FilterProp::AnyOf { props }, text.len() - after.len()));
+        }
+        if let Ok((after, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>("or greater").parse(after_num)
+        {
+            let props = vec![
+                FilterProp::PowerGE {
+                    value: value.clone(),
+                },
+                FilterProp::ToughnessGE { value },
+            ];
+            return Some((FilterProp::AnyOf { props }, text.len() - after.len()));
+        }
+        return None;
+    }
+
+    // "with toughness N or less/greater" — CR 208.1, mirrors the power form.
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("with toughness ").parse(trimmed)
+    {
+        let (rest, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
+        let after_num = rest.trim_start();
+        let (prop, after) = if let Ok((a, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>("or less").parse(after_num)
+        {
+            (FilterProp::ToughnessLE { value }, a)
+        } else if let Ok((a, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>("or greater").parse(after_num)
+        {
+            (FilterProp::ToughnessGE { value }, a)
+        } else {
+            return None;
+        };
+        return Some((prop, text.len() - after.len()));
     }
 
     let (rest, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("with power ")
@@ -2922,6 +2981,62 @@ mod tests {
             TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasColor {
                 color: ManaColor::Red
             }]))
+        );
+    }
+
+    /// CR 208.1: "creature with power or toughness N or less" produces a
+    /// disjunctive `AnyOf { [PowerLE, ToughnessLE] }` property. Used by
+    /// Arnyn Deathbloom Botanist's dies-trigger subject filter, Stern
+    /// Scolding's counter target, Warping Wail mode 1, etc.
+    #[test]
+    fn creature_with_power_or_toughness_1_or_less() {
+        let (f, _) = parse_type_phrase("creature with power or toughness 1 or less");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::AnyOf {
+                props: vec![
+                    FilterProp::PowerLE {
+                        value: QuantityExpr::Fixed { value: 1 },
+                    },
+                    FilterProp::ToughnessLE {
+                        value: QuantityExpr::Fixed { value: 1 },
+                    },
+                ],
+            }]))
+        );
+    }
+
+    /// Disjunctive "or greater" form, mirror of the "or less" case.
+    #[test]
+    fn creature_with_power_or_toughness_3_or_greater() {
+        let (f, _) = parse_type_phrase("creature with power or toughness 3 or greater");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::AnyOf {
+                props: vec![
+                    FilterProp::PowerGE {
+                        value: QuantityExpr::Fixed { value: 3 },
+                    },
+                    FilterProp::ToughnessGE {
+                        value: QuantityExpr::Fixed { value: 3 },
+                    },
+                ],
+            }]))
+        );
+    }
+
+    /// Standalone "with toughness N or less" — new parser branch, mirror of
+    /// the pre-existing "with power N or less" form.
+    #[test]
+    fn creature_with_toughness_2_or_less() {
+        let (f, _) = parse_type_phrase("creature with toughness 2 or less");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::ToughnessLE {
+                    value: QuantityExpr::Fixed { value: 2 },
+                }
+            ]))
         );
     }
 

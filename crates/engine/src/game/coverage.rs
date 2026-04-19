@@ -324,6 +324,16 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Colorless => parts.push("colorless".into()),
             FilterProp::IsChosenColor => parts.push("chosen color".into()),
             FilterProp::PowerGTSource => parts.push("power > source".into()),
+            FilterProp::ToughnessLE { value } => {
+                parts.push(format!("toughness ≤{}", fmt_quantity(value)));
+            }
+            FilterProp::ToughnessGE { value } => {
+                parts.push(format!("toughness ≥{}", fmt_quantity(value)));
+            }
+            FilterProp::AnyOf { props } => {
+                let inner_tf = TypedFilter::default().properties(props.clone());
+                parts.push(format!("any of ({})", fmt_typed_filter(&inner_tf)));
+            }
         }
     }
     if let Some(ctrl) = &tf.controller {

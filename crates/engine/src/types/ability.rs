@@ -1106,6 +1106,25 @@ pub enum FilterProp {
     Suspected,
     /// CR 510.1c: Matches creatures whose toughness is greater than their power.
     ToughnessGTPower,
+    /// CR 208.1: Matches objects with toughness <= N. Mirrors `PowerLE`.
+    /// Used for "creature with toughness N or less" and as a building block
+    /// for disjunctive P/T filters ("power or toughness N or less").
+    ToughnessLE {
+        value: QuantityExpr,
+    },
+    /// CR 208.1: Matches objects with toughness >= N. Mirrors `PowerGE`.
+    ToughnessGE {
+        value: QuantityExpr,
+    },
+    /// Disjunctive composite: the object matches if ANY inner prop matches.
+    /// Used for natural-language OR within a property suffix — e.g.
+    /// "creature with power or toughness N or less" decomposes to
+    /// `AnyOf { [PowerLE(N), ToughnessLE(N)] }` on a `creature` typed filter,
+    /// preserving the single-type constraint while expressing the OR
+    /// semantics at the property layer. Nest by composing with other props.
+    AnyOf {
+        props: Vec<FilterProp>,
+    },
     /// Matches objects whose name differs from all objects matching the inner filter
     /// that the evaluating controller controls on the battlefield.
     /// Used for "with a different name than each [type] you control" (e.g. Light-Paws).

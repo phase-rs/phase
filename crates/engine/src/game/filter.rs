@@ -795,6 +795,10 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
                 false
             }
         },
+        // Disjunctive composite: recurse into inner props under the same snapshot.
+        FilterProp::AnyOf { props } => props
+            .iter()
+            .any(|p| spell_record_matches_property(record, p)),
         // All remaining props require on-battlefield or stack state unavailable from a snapshot.
         FilterProp::Token
         | FilterProp::Attacking
@@ -811,6 +815,8 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Another
         | FilterProp::PowerLE { .. }
         | FilterProp::PowerGE { .. }
+        | FilterProp::ToughnessLE { .. }
+        | FilterProp::ToughnessGE { .. }
         | FilterProp::PowerGTSource
         | FilterProp::IsChosenCreatureType
         | FilterProp::IsChosenColor
@@ -1013,6 +1019,17 @@ fn matches_filter_prop(
         FilterProp::PowerGE { value } => {
             obj.power.unwrap_or(0) >= resolve_filter_threshold(state, value, source)
         }
+        // CR 208.1: Toughness comparison against a dynamic threshold.
+        FilterProp::ToughnessLE { value } => {
+            obj.toughness.unwrap_or(0) <= resolve_filter_threshold(state, value, source)
+        }
+        FilterProp::ToughnessGE { value } => {
+            obj.toughness.unwrap_or(0) >= resolve_filter_threshold(state, value, source)
+        }
+        // Disjunctive composite: any inner prop matches.
+        FilterProp::AnyOf { props } => props
+            .iter()
+            .any(|p| matches_filter_prop(p, state, obj, object_id, source)),
         // CR 509.1b: Object's power is strictly greater than the source object's power.
         FilterProp::PowerGTSource => {
             let source_power = state
@@ -1153,6 +1170,13 @@ fn zone_change_record_matches_property(
         FilterProp::PowerGE { value } => {
             record.power.unwrap_or(0) >= resolve_filter_threshold(state, value, source)
         }
+        // CR 208.1: Toughness threshold on the event-time object.
+        FilterProp::ToughnessLE { value } => {
+            record.toughness.unwrap_or(0) <= resolve_filter_threshold(state, value, source)
+        }
+        FilterProp::ToughnessGE { value } => {
+            record.toughness.unwrap_or(0) >= resolve_filter_threshold(state, value, source)
+        }
         // CR 202.3: Mana value threshold on the event-time object.
         FilterProp::CmcGE { value } => {
             record.mana_value as i32 >= resolve_filter_threshold(state, value, source)
@@ -1237,6 +1261,11 @@ fn zone_change_record_matches_property(
         | FilterProp::FaceDown
         | FilterProp::CountersGE { .. }
         | FilterProp::Token => false,
+
+        // Disjunctive composite: recurse into inner props under the same record.
+        FilterProp::AnyOf { props } => props
+            .iter()
+            .any(|p| zone_change_record_matches_property(p, state, record, source)),
 
         // -------- Group 4: not-yet-supported (known conservative gaps) --------
         // These could be snapshotted (e.g. suspected status, damage-dealt-this-turn)
